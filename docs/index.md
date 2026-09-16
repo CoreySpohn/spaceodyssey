@@ -10,6 +10,4 @@ ensemble repeats a campaign over many simulated worlds and aggregates the
 outcomes. The simulated world and the model used to reason about it are
 separate by construction.
 
-This release reserves the package name. The library succeeds
-[hwosim](https://github.com/CoreySpohn/hwosim), whose code moves here in a
-later release.
+Pre-alpha. The public interface is not yet published.

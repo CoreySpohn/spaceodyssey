@@ -19,9 +19,7 @@ was known at the time.
 
 ## Status
 
-This release reserves the package name. The library succeeds
-[hwosim](https://github.com/CoreySpohn/hwosim), whose code moves here in a
-later release; hwosim remains the working package until then.
+Pre-alpha. The public interface is not yet published.
 
 ## Installation
 
