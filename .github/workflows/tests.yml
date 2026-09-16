@@ -1,0 +1,37 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test py${{ matrix.python-version }} on ${{ matrix.platform }}
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+        platform: [ubuntu-latest]
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        enable-cache: true
+
+    - name: Create venv
+      run: uv venv .venv --python ${{ matrix.python-version }}
+
+    - name: Install package with test dependencies
+      run: uv pip install -e ".[test]"
+      env:
+        VIRTUAL_ENV: ${{ github.workspace }}/.venv
+
+    - name: Run tests
+      run: .venv/bin/pytest tests/ -v --tb=short
