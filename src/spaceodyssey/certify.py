@@ -22,9 +22,11 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import ndtr, ndtri
 
-from spaceodyssey.errors import UnsupportedOperator
+from spaceodyssey.errors import UnsupportedOperator, UnsupportedProfile
 from spaceodyssey.plan import CertificationOutcome, PlanPredictive, PlanSummary
+from spaceodyssey.profile import Profile
 from spaceodyssey.registry import SeamInfo, register
+from spaceodyssey.truth import AbstractTruthModel, check_compatible
 
 
 @final
@@ -104,6 +106,48 @@ class AbstractCertificate(eqx.Module):
         :class:`spaceodyssey.CertificationOutcome`; it never raises for inputs
         outside its validated range, it clears ``in_range`` instead.
         """
+
+
+class AbstractProfileCertificate(AbstractCertificate):
+    """A profile certificate bound to a compatible truth model.
+
+    Implementations store ``profile`` as a static field, declare their
+    supported rules and quantities, and implement ``integrate`` to return
+    an outcome with a claim axis and the profile's content hash. A quantity
+    declaration of None accepts every quantity provided by the model.
+    Construction checks compatibility before evaluating model quantities or
+    observations. Implementations must separately validate any restrictions
+    on the functional form of quantities and on prior distributions.
+    """
+
+    profile: eqx.AbstractVar[Profile]
+    truth_model: eqx.AbstractVar[AbstractTruthModel]
+    SUPPORT_RULES: eqx.AbstractClassVar[frozenset[str]]
+    SUPPORTED_QUANTITIES: eqx.AbstractClassVar[frozenset[str] | None]
+
+    def __check_init__(self):
+        """Reject incompatible models, support rules, and quantities."""
+        check_compatible(self.profile, self.truth_model)
+        if self.profile.support_rule not in self.SUPPORT_RULES:
+            raise UnsupportedProfile(
+                f"unsupported support rule: {self.profile.support_rule!r}"
+            )
+        if self.SUPPORTED_QUANTITIES is not None:
+            missing = self.profile.quantities - self.SUPPORTED_QUANTITIES
+            if missing:
+                raise UnsupportedProfile(f"unsupported quantities: {sorted(missing)}")
+
+    def initial(self) -> CertificateState:
+        """Raise unless the implementation provides a running state."""
+        raise UnsupportedOperator(f"{type(self).__name__} does not support initial")
+
+    def update(self, state: CertificateState, dataset) -> CertificateState:
+        """Raise unless the implementation supports realized data."""
+        raise UnsupportedOperator(f"{type(self).__name__} does not support update")
+
+    def propagate(self, state: CertificateState, moments) -> CertificateState:
+        """Raise unless the implementation supports predictive moments."""
+        raise UnsupportedOperator(f"{type(self).__name__} does not support propagate")
 
 
 @final

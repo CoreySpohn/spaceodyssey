@@ -344,6 +344,11 @@ def run_integrate(
     if certificate is None:
         raise WiringError("the integrate engine needs a certification seam choice")
     outcome = certificate.integrate(predictive)
+    if hasattr(certificate, "profile"):
+        if outcome.profile_hash != certificate.profile.content_hash():
+            raise AssertionError(
+                "outcome profile_hash does not match certificate profile"
+            )
     if strict:
         outcome.raise_if_out_of_range()
     name = mission.config.choice("certification").model_ref.name

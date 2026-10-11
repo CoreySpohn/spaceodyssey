@@ -11,6 +11,7 @@ from spaceodyssey.belief import MissionBelief, TargetBelief
 from spaceodyssey.build import Mission, ModelStack, TruthStack, build
 from spaceodyssey.certify import (
     AbstractCertificate,
+    AbstractProfileCertificate,
     CertificateState,
     SnrThreshold,
     ToyGaussianCertifier,
@@ -78,6 +79,7 @@ __all__ = [
     "AbstractContextProvider",
     "AbstractMeasurement",
     "AbstractPredictive",
+    "AbstractProfileCertificate",
     "AbstractTruthModel",
     "AbstractUniverseSource",
     "AlwaysObservable",
