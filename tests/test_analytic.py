@@ -71,10 +71,18 @@ class TestWeightedYields:
         assert len(report.weights) == 4
 
     def test_report_standard_errors_in_quadrature(self):
-        """Per-planet errors propagate in quadrature, candidates only for Y+."""
-        report = certified_yield(hand_outcome(), WEIGHTS, certificate="hand")
+        """Per-planet errors propagate in quadrature; Y+ uses se(p_pos) + se(p_wrong).
+
+        The correct-certification probability is p_pos - p_wrong, whose error
+        is bounded by the sum of the two channel errors, over all planets.
+        """
+        outcome = hand_outcome()
+        report = certified_yield(outcome, WEIGHTS, certificate="hand")
+        per_planet = np.asarray(WEIGHTS) * (
+            np.asarray(outcome.p_pos_se) + np.asarray(outcome.p_wrong_se)
+        )
         assert report.y_cert_pos_se_independent_lower_bound == pytest.approx(
-            np.hypot(0.01, 2.0 * 0.02)
+            float(np.sqrt(np.sum(per_planet**2)))
         )
         assert report.y_wrong_se_independent_lower_bound == pytest.approx(0.5 * 0.03)
         assert report.y_neg_wrong_se_independent_lower_bound == pytest.approx(
@@ -236,3 +244,33 @@ def test_missing_data_engine_yields_are_finite(n_visits):
     assert report.y_issued == report.y_cert_pos == report.y_wrong == 0.0
     assert report.y_neg == report.y_neg_wrong == 0.0
     json.dumps(json.loads(report.to_json()), allow_nan=False)
+
+
+def test_certified_yield_se_bounds_the_correct_certification_channel():
+    """Y_cert+ SE uses se(p_pos) + se(p_wrong) over all planets.
+
+    The correct-certification probability is p_pos - p_wrong, so its error is
+    bounded by the sum of the two channel errors; non-candidates contribute.
+    """
+    import jax.numpy as jnp
+
+    from spaceodyssey.engines.analytic import certified_yield
+    from spaceodyssey.plan import CertificationOutcome
+
+    outcome = CertificationOutcome(
+        p_pos=jnp.array([0.6, 0.2]),
+        p_neg=jnp.array([0.1, 0.5]),
+        p_wrong=jnp.array([0.1, 0.2]),
+        p_neg_wrong=jnp.array([0.0, 0.1]),
+        p_pos_se=jnp.array([0.03, 0.04]),
+        p_neg_se=jnp.array([0.01, 0.01]),
+        p_wrong_se=jnp.array([0.02, 0.04]),
+        p_neg_wrong_se=jnp.array([0.0, 0.01]),
+        truth_positive=jnp.array([True, False]),
+        in_range=jnp.array([True, True]),
+    )
+    report = certified_yield(outcome, jnp.array([1.0, 2.0]), certificate="toy")
+    expected = float(jnp.sqrt((1.0 * 0.05) ** 2 + (2.0 * 0.08) ** 2))
+    assert report.y_cert_pos_se_independent_lower_bound == pytest.approx(
+        expected, rel=1e-6
+    )

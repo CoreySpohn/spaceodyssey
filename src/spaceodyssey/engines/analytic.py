@@ -188,9 +188,15 @@ def certified_yield(
     _confidence_check(confidence)
     columns = [np.asarray(c, dtype=float) for c in _contributions(outcome, weights)]
     w = np.asarray(weights, dtype=float)
-    candidate = np.asarray(outcome.truth_positive)
+    # The correct-certification probability is p_pos - p_wrong; the outcome
+    # carries no standard error for it, so use the conservative per-planet
+    # bound se(p_pos) + se(p_wrong), since Var(a - b) <= (sd(a) + sd(b))**2.
     errors = (
-        w * np.where(candidate, np.asarray(outcome.p_pos_se, dtype=float), 0.0),
+        w
+        * (
+            np.asarray(outcome.p_pos_se, dtype=float)
+            + np.asarray(outcome.p_wrong_se, dtype=float)
+        ),
         w * np.asarray(outcome.p_wrong_se, dtype=float),
         w * np.asarray(outcome.p_neg_se, dtype=float),
         w * np.asarray(outcome.p_neg_wrong_se, dtype=float),
