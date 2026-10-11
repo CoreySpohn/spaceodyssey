@@ -23,6 +23,7 @@ from spaceodyssey.errors import (
     OutOfRangeError,
     RegistryError,
     UnsupportedOperator,
+    UnsupportedProfile,
     WiringError,
 )
 from spaceodyssey.io import RunManifest, read_manifest, write_run
@@ -57,6 +58,13 @@ from spaceodyssey.spec import (
     spec_from_json,
     to_json,
 )
+from spaceodyssey.truth import (
+    AbstractTruthModel,
+    ObservedData,
+    PriorSet,
+    Truth,
+    check_compatible,
+)
 from spaceodyssey.universe import AbstractUniverseSource, FixedUniverse, Universe
 from spaceodyssey.wiring import WiringFailure, WiringReport
 
@@ -70,6 +78,7 @@ __all__ = [
     "AbstractContextProvider",
     "AbstractMeasurement",
     "AbstractPredictive",
+    "AbstractTruthModel",
     "AbstractUniverseSource",
     "AlwaysObservable",
     "CertificateState",
@@ -89,9 +98,11 @@ __all__ = [
     "MissionState",
     "ModelStack",
     "Observation",
+    "ObservedData",
     "OutOfRangeError",
     "PlanPredictive",
     "PlanSummary",
+    "PriorSet",
     "Profile",
     "Purpose",
     "RegisteredImpl",
@@ -105,15 +116,18 @@ __all__ = [
     "SummaryDataset",
     "TargetBelief",
     "ToyGaussianCertifier",
+    "Truth",
     "TruthStack",
     "Universe",
     "UnsupportedOperator",
+    "UnsupportedProfile",
     "WiringError",
     "WiringFailure",
     "WiringReport",
     "YieldSummary",
     "__version__",
     "build",
+    "check_compatible",
     "config_from_json",
     "content_hash",
     "get_engine",

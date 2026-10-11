@@ -71,6 +71,7 @@ class PlanSummary(eqx.Module):
         spectrum_visit: Integer visit index, (P,); -1 means no spectrum.
             A spectrum at a failed visit is unusable.
         astrometric_precision_mas: One-sigma precision in mas, (P, V).
+        flux_reference: Static name of the reference flux; empty means unspecified.
         rv_precision_ms: Positive RV precision in m/s, (P,); inf means
             no mass measurement.
 
@@ -93,6 +94,8 @@ class PlanSummary(eqx.Module):
     noise_corr_factors: jax.Array | None = eqx.field(
         default=None, converter=_optional_array
     )
+
+    flux_reference: str = eqx.field(default="", static=True)
 
     def __check_init__(self):
         """Validate planet, spectral, and visit axes and concrete values."""

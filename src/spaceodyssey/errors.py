@@ -24,3 +24,7 @@ class OutOfRangeError(ValueError):
     Tiers never raise inside ``jit``; they return an in-range flag, and the
     host-side check that reads it raises this.
     """
+
+
+class UnsupportedProfile(ValueError):
+    """A profile requires quantities, priors, or flux units a model cannot supply."""

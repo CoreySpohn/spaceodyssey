@@ -8,14 +8,18 @@ moments must match declared moments, and outputs must match declared contract
 types. Checks raise plain AssertionError so any test framework can host them.
 """
 
+from typing import ClassVar
+
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
+from photomancy.priors import Uniform
 
 from spaceodyssey.contracts import resolve_contract
 from spaceodyssey.errors import UnsupportedOperator
-from spaceodyssey.plan import CertificationOutcome
+from spaceodyssey.plan import CertificationOutcome, _check_values
+from spaceodyssey.truth import AbstractTruthModel, ObservedData, PriorSet, _plan_masks
 
 
 def check_predictive(pred, *, key, n: int = 4096) -> None:
@@ -194,3 +198,92 @@ def _expect_unsupported(call, name: str) -> None:
     raise AssertionError(
         f"undeclared operator '{name}' did not raise UnsupportedOperator"
     )
+
+
+class LinearGaussianTruth(AbstractTruthModel):
+    """Linear measurements of named parameters with a uniform box prior.
+
+    The default parameters are dimensionless ``x`` and ``y``. Subclasses may
+    declare other parameter names, units, and matching quantity names. The
+    spectrum is ``theta @ spectral_matrix.T``; photometry repeats the first
+    parameter, astrometry repeats the first and last parameters, and RV is
+    the last parameter. A known per-planet ``offset`` is added to every
+    channel in that channel's units. Missing measurements are zero-filled.
+
+    Args:
+        low: Uniform lower bounds (D,), default -10 in every dimension.
+        high: Uniform upper bounds (D,), default 10 in every dimension.
+        spectral_matrix: Linear spectral response (B, D), default identity.
+        prior_set_id: Identifier of the singleton nominal prior set.
+    """
+
+    model_id: ClassVar[str] = "linear-gaussian@1"
+    param_names: ClassVar[tuple[str, ...]] = ("x", "y")
+    param_units: ClassVar[tuple[str, ...]] = ("1", "1")
+    context_names: ClassVar[tuple[str, ...]] = ("offset",)
+    quantity_names: ClassVar[tuple[str, ...]] = param_names
+    flux_reference: ClassVar[str] = "unit_flux"
+    prior: Uniform
+    prior_sets: tuple[PriorSet, ...]
+    spectral_matrix: jax.Array
+
+    def __init__(
+        self, low=None, high=None, spectral_matrix=None, prior_set_id="uniform@1"
+    ):
+        """Build the linear response and its uniform nominal prior."""
+        d = len(self.param_names)
+        low = jnp.full(d, -10.0) if low is None else jnp.asarray(low)
+        high = jnp.full(d, 10.0) if high is None else jnp.asarray(high)
+        if low.shape != (d,) or high.shape != (d,):
+            raise ValueError("uniform bounds must have shape (D,)")
+        _check_values(
+            jnp.isfinite(low) & jnp.isfinite(high) & (low < high),
+            "uniform bounds must be finite and low < high",
+        )
+        self.prior = Uniform(low, high)
+        self.prior_sets = (PriorSet((self.prior,), prior_set_id, ("nominal",), 0),)
+        self.spectral_matrix = (
+            jnp.eye(d) if spectral_matrix is None else jnp.asarray(spectral_matrix)
+        )
+        if self.spectral_matrix.ndim != 2 or self.spectral_matrix.shape[1] != d:
+            raise ValueError("spectral_matrix must have shape (B, D)")
+        _check_values(
+            jnp.isfinite(self.spectral_matrix), "spectral_matrix must be finite"
+        )
+        if self.quantity_names != self.param_names:
+            raise ValueError("quantity_names must equal param_names")
+
+    def quantities(self, theta, context):
+        """Return the parameter columns as named scalar quantities."""
+        if theta.shape[-1] != len(self.param_names):
+            raise ValueError("theta has wrong D")
+        missing = set(self.context_names) - context.keys()
+        if missing:
+            raise ValueError(f"missing context: {sorted(missing)}")
+        return {name: theta[..., i] for i, name in enumerate(self.param_names)}
+
+    def expected_data(self, truth, plan):
+        """Return the linear response with the plan's availability masks."""
+        self.validate_truth(truth, plan)
+        if plan.noise_sigma.shape[1] != self.spectral_matrix.shape[0]:
+            raise ValueError("plan B must match spectral_matrix")
+        theta = truth.theta
+        offset = truth.context["offset"]
+        has, usable = _plan_masks(plan)
+        visits = plan.visit_success.shape
+        phot = jnp.broadcast_to((theta[:, 0] + offset)[:, None], visits)
+        ast = jnp.broadcast_to(
+            (theta[:, (0, -1)] + offset[:, None])[:, None, :], (*visits, 2)
+        )
+        return ObservedData(
+            spectrum=jnp.where(
+                has[:, None], theta @ self.spectral_matrix.T + offset[:, None], 0
+            ),
+            has_spectrum=has,
+            photometry=jnp.where(usable & (plan.visit_photometric_snr > 0), phot, 0),
+            astrometry_mas=jnp.where(usable[..., None], ast, 0),
+            visit_usable=usable,
+            rv_semi_amplitude_ms=jnp.where(
+                plan.mass_measured, theta[:, -1] + offset, 0
+            ),
+        )
