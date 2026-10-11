@@ -439,6 +439,13 @@ def test_infinite_bound_mass_scale_gradient_matches_finite_difference(lower, upp
             np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=0)
 
 
+@pytest.mark.parametrize("lower, upper", [(np.nan, 1.0), (-1.0, np.nan)])
+def test_nan_bound_mass_is_nan(lower, upper):
+    from spaceodyssey.gaussian_profile import _normal_mass
+
+    assert np.isnan(_normal_mass(0.0, 1.0, lower, upper))
+
+
 @pytest.mark.parametrize(
     "edges, channel",
     [

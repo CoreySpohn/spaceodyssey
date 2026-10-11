@@ -537,7 +537,8 @@ def _normal_mass(mean, sd, lower, upper):
     # zero cotangents never multiply infinities in scale derivatives.
     lower = jnp.where(empty, mean, lower)
     upper = jnp.where(empty, mean, upper)
-    finite_lower, finite_upper = jnp.isfinite(lower), jnp.isfinite(upper)
+    # Only -inf lower and +inf upper are open tails; a NaN bound stays NaN.
+    finite_lower, finite_upper = ~jnp.isneginf(lower), ~jnp.isposinf(upper)
     lower = jnp.where(finite_lower, lower, mean)
     upper = jnp.where(finite_upper, upper, mean)
     reflect = lower > mean
