@@ -198,9 +198,9 @@ their stored positive-yield values; their missing issued column is reconstructed
 as `cert_pos + wrong` and cannot recover the former estimand's omitted planets.
 
 
-## PlanSummary v2
+## PlanSummary v3
 
-`spaceodyssey.plan.CONTRACT_VERSION` and `PlanSummary.CONTRACT_VERSION` are 2.
+`spaceodyssey.plan.CONTRACT_VERSION` and `PlanSummary.CONTRACT_VERSION` are 3.
 The contract uses a leading planet axis P, B spectral bins, V visits, and
 Kc correlated-noise factors:
 
@@ -216,7 +216,8 @@ Kc correlated-noise factors:
 | `visit_photometric_snr` | (P, V) | Nonnegative photometric SNR |
 | `spectrum_visit` | (P,) | Integer visit index; -1 means no spectrum |
 | `astrometric_precision_mas` | (P, V) | One-sigma precision, mas |
-| `rv_precision_ms` | (P,) | Positive precision, m/s; infinity means no mass measurement |
+| `k_precision_ms` | (P,) | True one-sigma sampling precision of the semi-amplitude (K) estimate from the plan's RV analysis, including all RV noise, m/s; positive, infinity means no mass measurement |
+| `k_precision_assumed_ms` | (P,), optional | Reported K precision, m/s; None means k_precision_ms |
 
 Spectral measurements are normalized by a fixed reference planet flux in
 each bin. `noise_sigma` is the standard deviation of that normalized
@@ -224,7 +225,18 @@ measurement, in dimensionless fractional planet-flux units, not
 planet-to-star contrast. Signal models and factors use the same normalization;
 the denominator is never a noisy measured flux. Per-planet covariance is
 `diag(noise_sigma**2) + F @ F.T`. Omitting F or using Kc = 0 gives white noise.
-`mass_measured` is a derived boolean property, `isfinite(rv_precision_ms)`.
+`mass_measured` is a derived boolean property, `isfinite(k_precision_ms)`.
+Simulation uses `k_precision_ms`; certifiers use
+`k_precision_for_certification_ms`, which selects `k_precision_assumed_ms`
+when present and otherwise `k_precision_ms`. The assumed precision must be
+positive and infinite exactly where the true precision is infinite. There is
+no ordering check: an analysis that fits jitter can be under-confident.
+
+To migrate version 2, `rv_precision_ms` values that already denote a K
+precision map to `k_precision_ms`. Per-epoch RV precisions do not map directly;
+the producer must convert them to the sampling precision of its K estimate.
+The old name is not an alias. A consumer pinned to version 2 must refuse a
+version-3 plan (fail closed), rather than silently assume matched precision.
 
 The `snr` field has been removed. Each certifier supplies its own signal and
 noise mapping. `ToyGaussianCertifier` assumes unit signal in every bin and

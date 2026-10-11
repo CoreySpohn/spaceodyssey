@@ -28,7 +28,7 @@ def _as_bool(value) -> jax.Array:
     return jnp.asarray(value, dtype=bool)
 
 
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 
 
 def _optional_array(value):
@@ -54,7 +54,9 @@ class PlanSummary(eqx.Module):
     Version 2 removes ``snr``: consumers choose their signal model and SNR
     convention. For the toy's unit signal, migrate positive v1 SNR using
     ``noise_sigma = 1 / snr``. Missing data use ``spectrum_visit = -1``.
-    ``mass_measured`` is now derived from ``rv_precision_ms``.
+    ``mass_measured`` is derived from the mass precision.
+    Version 3 renames ``rv_precision_ms`` to ``k_precision_ms`` and adds
+    ``k_precision_assumed_ms`` to distinguish sampling and reported precision.
 
     Attributes:
         bin_wavelength_nm: Bin centres in nm, (B,) or (P, B).
@@ -72,8 +74,13 @@ class PlanSummary(eqx.Module):
             A spectrum at a failed visit is unusable.
         astrometric_precision_mas: One-sigma precision in mas, (P, V).
         flux_reference: Static name of the reference flux; empty means unspecified.
-        rv_precision_ms: Positive RV precision in m/s, (P,); inf means
-            no mass measurement.
+        k_precision_ms: True one-sigma sampling precision of the
+            semi-amplitude (K) estimate from the plan's RV analysis, including
+            all RV noise, in m/s, (P,). Positive; inf means no mass measurement.
+        k_precision_assumed_ms: Optional reported K precision in m/s, (P,).
+            None means the analysis reports k_precision_ms. Positive, with
+            inf exactly where k_precision_ms is inf. Either precision may
+            exceed the other.
 
     Shapes and index dtype are checked even during tracing. Value checks
     run on concrete construction; validate inputs before passing them to jit.
@@ -90,12 +97,15 @@ class PlanSummary(eqx.Module):
     visit_photometric_snr: jax.Array = eqx.field(converter=jnp.asarray)
     spectrum_visit: jax.Array = eqx.field(converter=jnp.asarray)
     astrometric_precision_mas: jax.Array = eqx.field(converter=jnp.asarray)
-    rv_precision_ms: jax.Array = eqx.field(converter=jnp.asarray)
+    k_precision_ms: jax.Array = eqx.field(converter=jnp.asarray)
     noise_corr_factors: jax.Array | None = eqx.field(
         default=None, converter=_optional_array
     )
 
     flux_reference: str = eqx.field(default="", static=True)
+    k_precision_assumed_ms: jax.Array | None = eqx.field(
+        default=None, converter=_optional_array
+    )
 
     def __check_init__(self):
         """Validate planet, spectral, and visit axes and concrete values."""
@@ -119,13 +129,28 @@ class PlanSummary(eqx.Module):
                 raise ValueError(f"{name} must have shape {visits}, got {shape}")
         for name in (
             "spectral_resolution",
-            "rv_precision_ms",
+            "k_precision_ms",
             "noise_known",
             "spectrum_visit",
         ):
             shape = getattr(self, name).shape
             if shape != (p,):
                 raise ValueError(f"{name} must have shape ({p},), got {shape}")
+        assumed = self.k_precision_assumed_ms
+        if assumed is not None:
+            if assumed.shape != (p,):
+                raise ValueError(
+                    f"k_precision_assumed_ms must have shape ({p},), "
+                    f"got {assumed.shape}"
+                )
+            _check_values(
+                assumed > 0, "k_precision_assumed_ms must be > 0 (inf allowed)"
+            )
+            _check_values(
+                jnp.isinf(assumed) == jnp.isinf(self.k_precision_ms),
+                "k_precision_assumed_ms must be inf exactly where "
+                "k_precision_ms is inf",
+            )
         if not jnp.issubdtype(self.spectrum_visit.dtype, jnp.integer):
             raise ValueError("spectrum_visit must have integer dtype")
         f = self.noise_corr_factors
@@ -138,8 +163,8 @@ class PlanSummary(eqx.Module):
             "noise_sigma must be finite and > 0",
         )
         _check_values(
-            self.rv_precision_ms > 0,
-            "rv_precision_ms must be > 0 (inf allowed)",
+            self.k_precision_ms > 0,
+            "k_precision_ms must be > 0 (inf allowed)",
         )
         _check_values(
             (self.spectrum_visit >= -1) & (self.spectrum_visit < visits[1]),
@@ -152,8 +177,19 @@ class PlanSummary(eqx.Module):
 
     @property
     def mass_measured(self) -> jax.Array:
-        """Whether a finite RV precision supplies a mass measurement, (P,)."""
-        return jnp.isfinite(self.rv_precision_ms)
+        """Whether a finite K sampling precision supplies a mass measurement, (P,)."""
+        return jnp.isfinite(self.k_precision_ms)
+
+    @property
+    def k_precision_for_certification_ms(self) -> jax.Array:
+        """Reported K precision for a certifier, (P,), in m/s.
+
+        Fall back to the true sampling precision when no assumed precision
+        is supplied. Simulation uses k_precision_ms directly.
+        """
+        if self.k_precision_assumed_ms is None:
+            return self.k_precision_ms
+        return self.k_precision_assumed_ms
 
     @property
     def n_planets(self) -> int:

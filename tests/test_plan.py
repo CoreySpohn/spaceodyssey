@@ -24,7 +24,7 @@ def make_plan(n_planets: int = 3, n_bins: int = 2, n_visits: int = 4, **override
         "visit_epochs_d": jnp.tile(jnp.arange(n_visits) * 90.0, (n_planets, 1)),
         "visit_success": jnp.ones((n_planets, n_visits), dtype=bool),
         "astrometric_precision_mas": jnp.full((n_planets, n_visits), 2.0),
-        "rv_precision_ms": jnp.full((n_planets,), jnp.inf),
+        "k_precision_ms": jnp.full((n_planets,), jnp.inf),
     }
     fields.update(overrides)
     return PlanSummary(**fields)
@@ -64,7 +64,7 @@ class TestPlanSummary:
         plan = make_plan(
             visit_success=[[1, 0, 1, 1]] * 3,
             noise_known=[1, 0, 0],
-            rv_precision_ms=[1.0, jnp.inf, jnp.inf],
+            k_precision_ms=[1.0, jnp.inf, jnp.inf],
         )
         assert plan.visit_success.dtype == jnp.bool_
         assert plan.mass_measured.dtype == jnp.bool_
@@ -86,7 +86,9 @@ class TestPlanSummary:
             ("visit_epochs_d", jnp.ones((2, 4))),
             ("visit_success", jnp.ones((3, 3), dtype=bool)),
             ("astrometric_precision_mas", jnp.ones((3, 5))),
-            ("rv_precision_ms", jnp.ones((3, 1))),
+            ("k_precision_ms", jnp.ones((3, 1))),
+            ("k_precision_assumed_ms", jnp.ones((3, 1))),
+            ("k_precision_assumed_ms", jnp.ones(2)),
         ],
     )
     def test_inconsistent_shape_rejected(self, field, value):
@@ -158,9 +160,9 @@ def test_invalid_noise_sigma(value):
 
 
 @pytest.mark.parametrize("value", [0.0, -1.0, -jnp.inf, jnp.nan])
-def test_invalid_rv_precision(value):
-    with pytest.raises(ValueError, match="rv_precision_ms must be > 0"):
-        make_plan(rv_precision_ms=jnp.full(3, value))
+def test_invalid_k_precision(value):
+    with pytest.raises(ValueError, match="k_precision_ms must be > 0"):
+        make_plan(k_precision_ms=jnp.full(3, value))
 
 
 @pytest.mark.parametrize("value", [-2, 4, 1.5])
@@ -184,13 +186,14 @@ def test_version_sentinels_and_pytree():
     from spaceodyssey.plan import CONTRACT_VERSION
 
     plan = make_plan(spectrum_visit=[-1, 0, 3])
-    assert CONTRACT_VERSION == PlanSummary.CONTRACT_VERSION == 2
+    assert CONTRACT_VERSION == PlanSummary.CONTRACT_VERSION == 3
     assert not hasattr(plan, "snr")
     assert not bool(jnp.any(plan.mass_measured))
     leaves, structure = jax.tree_util.tree_flatten(plan)
     restored = jax.tree_util.tree_unflatten(structure, leaves)
     np.testing.assert_array_equal(restored.spectrum_visit, [-1, 0, 3])
     assert restored.noise_corr_factors is None
+    assert restored.k_precision_assumed_ms is None
 
 
 @pytest.mark.parametrize("rank", [0, 1, 3])
@@ -211,3 +214,84 @@ def test_empty_visits_require_sentinel():
 def test_construction_under_jit():
     plan = jax.jit(lambda noise: make_plan(noise_sigma=noise))(jnp.ones((3, 2)))
     np.testing.assert_array_equal(plan.noise_sigma, np.ones((3, 2)))
+
+
+@pytest.mark.parametrize(
+    "assumed", [None, [0.1, jnp.inf, 0.5], [0.2, jnp.inf, 1.0], [0.4, jnp.inf, 2.0]]
+)
+def test_k_precisions_round_trip(assumed):
+    """Both precisions survive construction, pytree round trips and jitted identity.
+
+    Reported precision may be smaller, equal, or larger than sampling precision.
+    """
+    true = [0.2, jnp.inf, 1.0]
+    plan = make_plan(k_precision_ms=true, k_precision_assumed_ms=assumed)
+    np.testing.assert_array_equal(plan.k_precision_ms, jnp.asarray(true))
+    np.testing.assert_array_equal(plan.mass_measured, [True, False, True])
+    reported = true if assumed is None else assumed
+    np.testing.assert_array_equal(
+        plan.k_precision_for_certification_ms, jnp.asarray(reported)
+    )
+    if assumed is None:
+        assert plan.k_precision_assumed_ms is None
+    else:
+        np.testing.assert_array_equal(plan.k_precision_assumed_ms, jnp.asarray(assumed))
+    leaves, structure = jax.tree_util.tree_flatten(plan)
+    restored = jax.tree_util.tree_unflatten(structure, leaves)
+    for result in (restored, jax.jit(lambda value: value)(plan)):
+        result_leaves, result_structure = jax.tree_util.tree_flatten(result)
+        assert result_structure == structure
+        for expected, actual in zip(leaves, result_leaves, strict=True):
+            np.testing.assert_array_equal(actual, expected)
+        assert (result.k_precision_assumed_ms is None) == (assumed is None)
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, -jnp.inf, jnp.nan])
+def test_invalid_k_precision_assumed(value):
+    """Reported precision rejects nonpositive and NaN values."""
+    with pytest.raises(ValueError, match="k_precision_assumed_ms must be > 0"):
+        make_plan(k_precision_ms=jnp.ones(3), k_precision_assumed_ms=jnp.full(3, value))
+
+
+@pytest.mark.parametrize("assumed", [[0.1, 0.2, 0.3], [jnp.inf, jnp.inf, 0.3]])
+def test_k_precision_inf_pattern_mismatch(assumed):
+    """Missing and spurious infinite reported precisions are both rejected."""
+    with pytest.raises(ValueError, match="inf exactly where"):
+        make_plan(k_precision_ms=[0.2, jnp.inf, 1.0], k_precision_assumed_ms=assumed)
+
+
+@pytest.mark.parametrize("field", ["k_precision_ms", "k_precision_assumed_ms"])
+def test_k_precision_shape_checked_under_jit(field):
+    """Tracing retains static shape validation for both precision fields."""
+    with pytest.raises(ValueError, match=field + " must have shape"):
+        jax.jit(lambda value: make_plan(**{field: value}))(jnp.ones((3, 1)))
+
+
+def test_k_precisions_construct_under_jit():
+    """Both precision leaves can be supplied during traced construction."""
+    true = jnp.array([0.2, jnp.inf, 1.0])
+    assumed = jnp.array([0.4, jnp.inf, 0.5])
+    plan = jax.jit(
+        lambda k, reported: make_plan(k_precision_ms=k, k_precision_assumed_ms=reported)
+    )(true, assumed)
+    np.testing.assert_array_equal(plan.k_precision_ms, true)
+    np.testing.assert_array_equal(plan.k_precision_assumed_ms, assumed)
+
+
+def test_version_2_consumer_refuses_version_3():
+    """A version-pinned consumer fails closed after the contract upgrade."""
+
+    def require_pinned_version(pinned):
+        if PlanSummary.CONTRACT_VERSION != pinned:
+            raise ValueError(f"Unsupported plan contract; expected {pinned}")
+
+    with pytest.raises(ValueError, match="expected 2"):
+        require_pinned_version(2)
+    require_pinned_version(3)
+
+
+def test_old_precision_name_refused():
+    """The retired field is neither a constructor argument nor a property."""
+    assert not hasattr(make_plan(), "rv_precision_ms")
+    with pytest.raises(TypeError, match="rv_precision_ms"):
+        make_plan(rv_precision_ms=jnp.ones(3))

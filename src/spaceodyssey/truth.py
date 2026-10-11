@@ -210,7 +210,7 @@ class AbstractTruthModel(eqx.Module):
         phot_mask = usable & (snr > 0)
         phot_sigma = jnp.abs(mean.photometry) / jnp.where(phot_mask, snr, 1)
         ast_sigma = jnp.where(usable, plan.astrometric_precision_mas, 0)
-        rv_sigma = jnp.where(plan.mass_measured, plan.rv_precision_ms, 0)
+        rv_sigma = jnp.where(plan.mass_measured, plan.k_precision_ms, 0)
         return ObservedData(
             spectrum=jnp.where(has[:, None], mean.spectrum + spectral_noise, 0),
             has_spectrum=has,

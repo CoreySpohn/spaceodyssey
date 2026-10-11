@@ -100,7 +100,7 @@ def test_compatible_and_optional_flux_metadata(reference):
     plan = make_plan(flux_reference=reference)
     check_compatible(make_profile(), model)
     check_compatible(make_profile(), model, plan)
-    assert plan.CONTRACT_VERSION == 2
+    assert plan.CONTRACT_VERSION == 3
     assert reference not in [
         x for x in jax.tree_util.tree_leaves(plan) if isinstance(x, str)
     ]
@@ -128,7 +128,8 @@ def test_20000_simulated_draws_match_expected_data_and_plan_covariance_within_5_
         n_visits=2,
         noise_sigma=[[0.2, 0.4], [0.3, 0.5]],
         noise_corr_factors=factors,
-        rv_precision_ms=[0.8, 1.2],
+        k_precision_ms=[0.8, 1.2],
+        k_precision_assumed_ms=[0.4, 2.4],
         astrometric_precision_mas=[[0.7, 0.9], [1.1, 1.3]],
         visit_photometric_snr=[[4.0, 6.0], [3.0, 5.0]],
     )
@@ -172,7 +173,7 @@ def test_20000_simulated_draws_match_expected_data_and_plan_covariance_within_5_
                 np.repeat(
                     np.asarray(plan.astrometric_precision_mas).reshape(-1) ** 2, 2
                 ),
-                np.asarray(plan.rv_precision_ms) ** 2,
+                np.asarray(plan.k_precision_ms) ** 2,
             ]
         )
     )
