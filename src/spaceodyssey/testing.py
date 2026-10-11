@@ -19,6 +19,7 @@ from photomancy.priors import Uniform
 from spaceodyssey.contracts import resolve_contract
 from spaceodyssey.errors import UnsupportedOperator
 from spaceodyssey.plan import CertificationOutcome, _check_values
+from spaceodyssey.profile import Profile
 from spaceodyssey.truth import AbstractTruthModel, ObservedData, PriorSet, _plan_masks
 
 
@@ -114,7 +115,9 @@ def check_certificate(cert, info, datasets, *, moments=None, predictive=None):
     return state
 
 
-def check_outcome(outcome: CertificationOutcome) -> None:
+def check_outcome(
+    outcome: CertificationOutcome, profile: Profile | None = None
+) -> None:
     """Check a certification outcome against its value contract.
 
     Over the in-range planets: every probability lies in [0, 1], the
@@ -123,14 +126,30 @@ def check_outcome(outcome: CertificationOutcome) -> None:
     (p_wrong <= p_pos), a wrong negative is a negative one
     (p_neg_wrong <= p_neg), and standard errors are non-negative. All flags must
     be boolean and at least one planet must be in range, so the check is
-    never vacuous.
+    never vacuous. When a profile is supplied, its hash and ordered claim
+    names must match, and the profile positive probability cannot exceed
+    any positive-counted claim probability or either-direction claim sum.
+    Claim bounds use planets in range for both the profile and the claim.
 
     Args:
         outcome: The outcome to check.
+        profile: Optional profile whose identity and claim bounds are checked.
 
     Raises:
         AssertionError: On any contract violation.
     """
+    if profile is not None:
+        if outcome.profile_hash != profile.content_hash():
+            raise AssertionError("profile_hash does not match profile")
+        if outcome.claim_names != profile.claim_names:
+            raise AssertionError("claim_names do not match profile")
+        for k, claim in enumerate(profile.claims):
+            bound = np.asarray(outcome.claim_p_pos[:, k])
+            if claim.counted == "either":
+                bound = bound + np.asarray(outcome.claim_p_neg[:, k])
+            keep_claim = np.asarray(outcome.in_range & outcome.claim_in_range[:, k])
+            if np.any(np.asarray(outcome.p_pos)[keep_claim] > bound[keep_claim] + 1e-6):
+                raise AssertionError(f"p_pos exceeds claim bound for {claim.name}")
     if outcome.in_range.dtype != jnp.bool_:
         raise AssertionError("in_range must be boolean")
     if outcome.truth_positive.dtype != jnp.bool_:

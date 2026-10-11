@@ -226,6 +226,14 @@ class CertificationOutcome(eqx.Module):
         p_neg_wrong_rep: Wrong negative probability replicates, shape (R, P).
         replicate_kind: Static batch or bootstrap label. All four replicate
             arrays and both metadata fields must be supplied together.
+        claim_p_pos: Stand-alone claim positive probabilities, shape (P, K).
+        claim_p_neg: Stand-alone claim negative probabilities, shape (P, K).
+        claim_p_wrong: Wrong positive probabilities, shape (P, K).
+        claim_p_neg_wrong: Wrong negative probabilities, shape (P, K).
+        claim_truth_positive: Claim truth flags, shape (P, K), boolean.
+        claim_in_range: Claim validity flags, shape (P, K), boolean.
+        claim_names: Ordered names; supplied with all six claim arrays.
+        profile_hash: Optional 64-character hexadecimal profile content hash.
         replicate_key: Static identifier of the replicate stream. Batch main
             probabilities must match replicate means to rtol 1e-10.
     """
@@ -250,8 +258,23 @@ class CertificationOutcome(eqx.Module):
     replicate_kind: str | None = eqx.field(default=None, static=True)
     replicate_key: str | None = eqx.field(default=None, static=True)
 
+    claim_p_pos: jax.Array | None = eqx.field(default=None, converter=_optional_array)
+    claim_p_neg: jax.Array | None = eqx.field(default=None, converter=_optional_array)
+    claim_p_wrong: jax.Array | None = eqx.field(default=None, converter=_optional_array)
+    claim_p_neg_wrong: jax.Array | None = eqx.field(
+        default=None, converter=_optional_array
+    )
+    claim_truth_positive: jax.Array | None = eqx.field(
+        default=None, converter=_optional_array
+    )
+    claim_in_range: jax.Array | None = eqx.field(
+        default=None, converter=_optional_array
+    )
+    claim_names: tuple[str, ...] | None = eqx.field(default=None, static=True)
+    profile_hash: str | None = eqx.field(default=None, static=True)
+
     def __check_init__(self):
-        """Validate planet axes and optional (R, P) probability replicates."""
+        """Validate planet axes, optional claims, hash, and replicates."""
         shape = self.p_pos.shape
         if len(shape) != 1:
             raise ValueError(f"p_pos must have shape (P,), got {shape}")
@@ -269,6 +292,59 @@ class CertificationOutcome(eqx.Module):
             other = getattr(self, name).shape
             if other != shape:
                 raise ValueError(f"{name} must have shape {shape}, got {other}")
+
+        if self.profile_hash is not None:
+            if (
+                not isinstance(self.profile_hash, str)
+                or len(self.profile_hash) != 64
+                or any(c not in "0123456789abcdefABCDEF" for c in self.profile_hash)
+            ):
+                raise ValueError("profile_hash must be 64 hexadecimal characters")
+        claim_fields = (
+            "claim_p_pos",
+            "claim_p_neg",
+            "claim_p_wrong",
+            "claim_p_neg_wrong",
+            "claim_truth_positive",
+            "claim_in_range",
+        )
+        present_claims = [getattr(self, name) is not None for name in claim_fields]
+        present_claims.append(self.claim_names is not None)
+        if any(present_claims):
+            if not all(present_claims):
+                raise ValueError("claim fields must be all or none")
+            if (
+                not isinstance(self.claim_names, tuple)
+                or not self.claim_names
+                or any(not isinstance(n, str) or not n for n in self.claim_names)
+                or len(set(self.claim_names)) != len(self.claim_names)
+            ):
+                raise ValueError("claim_names must be a nonempty tuple of unique names")
+            claim_shape = (shape[0], len(self.claim_names))
+            for name in claim_fields:
+                value = getattr(self, name)
+                if value.shape != claim_shape:
+                    raise ValueError(f"{name} must have shape {claim_shape}")
+                if name in ("claim_truth_positive", "claim_in_range"):
+                    if value.dtype != jnp.bool_:
+                        raise ValueError(f"{name} must be boolean")
+                else:
+                    _check_values(
+                        jnp.isfinite(value) & (value >= 0) & (value <= 1),
+                        f"{name} probabilities must be finite and in [0, 1]",
+                    )
+            _check_values(
+                self.claim_p_pos + self.claim_p_neg <= 1,
+                "claim positive and negative probabilities must sum to at most one",
+            )
+            _check_values(
+                self.claim_p_wrong <= self.claim_p_pos,
+                "claim_p_wrong exceeds claim_p_pos",
+            )
+            _check_values(
+                self.claim_p_neg_wrong <= self.claim_p_neg,
+                "claim_p_neg_wrong exceeds claim_p_neg",
+            )
 
         names = ("p_pos", "p_neg", "p_wrong", "p_neg_wrong")
         reps = [getattr(self, name + "_rep") for name in names]

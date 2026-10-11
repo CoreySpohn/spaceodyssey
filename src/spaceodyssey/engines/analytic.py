@@ -249,7 +249,28 @@ def certified_yield(
             lo + sum(b[0] for b in numerical),
             hi + sum(b[1] for b in numerical),
         )
+    claim_yields = {}
+    if outcome.claim_names is not None:
+        claim_values = (
+            outcome.claim_p_pos,
+            outcome.claim_p_pos - outcome.claim_p_wrong,
+            outcome.claim_p_wrong,
+            outcome.claim_p_neg,
+            outcome.claim_p_neg_wrong,
+            outcome.claim_p_neg - outcome.claim_p_neg_wrong,
+        )
+        sums = [
+            np.asarray(weights[:, None] * v, dtype=float).sum(axis=0)
+            for v in claim_values
+        ]
+        for k, name in enumerate(outcome.claim_names):
+            claim_yields[name] = {
+                channel: float(values[k])
+                for channel, values in zip((*CHANNELS, "y_cert_neg"), sums, strict=True)
+            }
     return CertifiedYield(
+        profile_hash=outcome.profile_hash,
+        claim_yields=claim_yields,
         y_issued_se_independent_lower_bound=independent[0],
         interval_kind=kind,
         confidence=confidence,

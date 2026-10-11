@@ -166,6 +166,9 @@ class CertifiedYield:
     sample SD, with percentile intervals. Systematic bounds remain explicit.
 
     Attributes:
+        profile_hash: Optional profile content hash copied from the outcome.
+        claim_yields: Claim-name-to-channel weighted sums, including y_cert_neg
+            (correct negatives). Empty when no claim axis is present.
         operator: The outcome operator the run evaluated.
         certificate: Name of the certificate that defines "certified".
         y_issued: Expected count of all issued positive certifications.
@@ -244,6 +247,8 @@ class CertifiedYield:
     wrong_issued_ratio_interval: tuple[float, float] | None = None
     systematic: dict[str, dict[str, tuple[float, float]]] = field(default_factory=dict)
     total_intervals: dict[str, tuple[float, float]] = field(default_factory=dict)
+    profile_hash: str | None = None
+    claim_yields: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @property
     def all_in_range(self) -> bool:
