@@ -1,5 +1,8 @@
 """Tests for the public package surface."""
 
+import importlib
+import inspect
+
 import spaceodyssey
 
 
@@ -7,6 +10,23 @@ def test_all_names_importable():
     """Every advertised name resolves on the top-level package."""
     for name in spaceodyssey.__all__:
         assert getattr(spaceodyssey, name) is not None
+
+
+def test_all_names_are_public_objects():
+    """No advertised name resolves to a submodule."""
+    for name in spaceodyssey.__all__:
+        assert not inspect.ismodule(getattr(spaceodyssey, name)), name
+
+
+def test_observe_is_loop_function():
+    """The public observe entry point is the loop function."""
+    assert spaceodyssey.observe is spaceodyssey.loop.observe
+
+
+def test_observe_submodule_remains_importable():
+    """The measurement interface remains available through its module path."""
+    module = importlib.import_module("spaceodyssey.observe")
+    assert module.AbstractMeasurement is spaceodyssey.AbstractMeasurement
 
 
 def test_default_registry_entries_available():

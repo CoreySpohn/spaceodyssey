@@ -5,6 +5,7 @@ fits existing observations, a campaign chooses and executes new visits against
 a private simulated world, and an ensemble repeats a campaign over many worlds.
 """
 
+from spaceodyssey import loop as _loop
 from spaceodyssey._version import __version__
 from spaceodyssey.account import ConstantOverheads, Ledger
 from spaceodyssey.belief import MissionBelief, TargetBelief
@@ -32,7 +33,6 @@ from spaceodyssey.io import RunManifest, read_manifest, write_run
 from spaceodyssey.loop import (
     DETECTION_CERTIFICATE,
     MissionState,
-    observe,
     run_mission,
     step,
 )
@@ -69,6 +69,9 @@ from spaceodyssey.truth import (
 )
 from spaceodyssey.universe import AbstractUniverseSource, FixedUniverse, Universe
 from spaceodyssey.wiring import WiringFailure, WiringReport
+
+# Loading the observe submodule overwrites the package's function binding.
+observe = _loop.observe
 
 __all__ = [
     "DATA_PLANE_EDGES",
