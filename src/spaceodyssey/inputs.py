@@ -77,11 +77,15 @@ def _kind(value: _Any, path: str) -> tuple[int, _Any]:
 
 def _entries(value: dict, path: str) -> list[tuple[bytes, str, _Any]]:
     entries = []
+    keys = set()
     for key, child in value.items():
         if not isinstance(key, str):
             raise TypeError(f"{path}: map keys must be strings")
         key = _kind(key, path)[1]
         key_path = f"{path}[{key!r}]"
+        if key in keys:
+            raise TypeError(f"{key_path}: duplicate canonical map key")
+        keys.add(key)
         entries.append((_utf8(key, key_path), key, child))
     return sorted(entries, key=lambda entry: entry[0])
 
@@ -209,7 +213,10 @@ def _node(value: _Any, path: str, active: set[int]) -> bytes:
         for field in _dataclasses.fields(_PlanSummary):
             child = getattr(value, field.name)
             field_path = f"{path}.{field.name}"
-            expected = (4,) if field.name == "flux_reference" else (0, 7)
+            if field.name == "flux_reference":
+                expected = (4,)
+            else:
+                expected = (0, 7) if field.default is None else (7,)
             if _kind(child, field_path)[0] not in expected:
                 raise TypeError(f"{field_path}: invalid PlanSummary field type")
             fields[field.name] = child
@@ -361,6 +368,9 @@ def _from_json(obj: object, path: str, active: set[int]) -> _Any:
 
 def from_json_value(obj: object, codec: str, name: str = "value") -> _Any:
     """Decode a tagged JSON value using the declared codec identifier."""
+    if not isinstance(codec, str):
+        raise TypeError(f"{name}.codec: input codec must be a string")
+    codec = str.__str__(codec)
     if codec != CODEC:
         raise TypeError(f"{name}.codec: unknown input codec {codec!r}")
     return _from_json(obj, name)

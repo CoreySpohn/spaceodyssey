@@ -415,6 +415,14 @@ def test_unknown_codec_refused():
 
 
 @pytest.mark.parametrize(
+    "codec", [None, 1, b"spaceodyssey.inputs/1", np.array(["x", "y"])]
+)
+def test_non_string_codec_refused_with_path(codec):
+    with pytest.raises(TypeError, match=re.escape("record.codec")):
+        from_json_value({"t": "none"}, codec, name="record")
+
+
+@pytest.mark.parametrize(
     "value",
     [
         None,
@@ -527,6 +535,33 @@ def test_plan_invalid_field_nodes_refused(containers, operation, field):
         operation(altered, name="data")
 
 
+@pytest.mark.parametrize("operation", [encode, digest, snapshot])
+@pytest.mark.parametrize(
+    "field",
+    [
+        field.name
+        for field in dataclasses.fields(PlanSummary)
+        if field.name != "flux_reference" and field.default is not None
+    ],
+)
+def test_plan_required_arrays_refuse_none(containers, operation, field):
+    plan, _ = containers
+    altered = eqx.tree_at(lambda p: getattr(p, field), plan, None)
+    with pytest.raises(TypeError, match=re.escape(f"data.{field}")):
+        operation(altered, name="data")
+
+
+@pytest.mark.parametrize("field", ["noise_corr_factors", "k_precision_assumed_ms"])
+def test_plan_optional_arrays_allow_none(containers, field):
+    plan, _ = containers
+    altered = eqx.tree_at(lambda p: getattr(p, field), plan, None)
+    assert encode(altered).startswith(MAGIC)
+    assert digest(altered) != digest(plan)
+    copied = snapshot(altered)
+    assert getattr(copied, field) is None
+    assert digest(copied) == digest(altered)
+
+
 @pytest.mark.parametrize("value", [True, "3", 3.0, None, np.array(3)])
 @pytest.mark.parametrize("operation", [encode, digest, snapshot])
 def test_plan_non_integer_contract_version_refused(
@@ -549,6 +584,28 @@ class LyingString(str):
 
     def __getitem__(self, key):
         return self.replacement[key]
+
+
+@pytest.mark.parametrize("codec", [CODEC, "spaceodyssey.inputs/2"])
+def test_codec_string_subclass_uses_underlying_value(codec):
+    class LyingCodec(LyingString):
+        def __eq__(self, other):
+            return self.replacement == other
+
+        def __ne__(self, other):
+            return self.replacement != other
+
+    value = LyingCodec(codec)
+    value.replacement = "spaceodyssey.inputs/2" if codec == CODEC else CODEC
+    if codec == CODEC:
+        assert from_json_value({"t": "none"}, value, name="record") is None
+    else:
+        with pytest.raises(TypeError, match=re.escape("record.codec")):
+            from_json_value({"t": "none"}, value, name="record")
+
+
+def test_numpy_string_codec_accepted():
+    assert from_json_value({"t": "none"}, np.str_(CODEC)) is None
 
 
 class LyingInteger(int):
@@ -608,6 +665,23 @@ def test_string_subclass_map_keys_normalized():
     assert all(type(key) is str for key in copied)
     key.replacement = "changed"
     assert digest(copied) == digest(expected)
+
+
+@pytest.mark.parametrize("operation", [encode, digest, snapshot, to_json_value])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("plain_key", [False, True])
+def test_canonical_map_key_collisions_refused(operation, reverse, plain_key):
+    class IdentityString(LyingString):
+        __eq__ = object.__eq__
+        __hash__ = object.__hash__
+
+    entries = [(IdentityString("a"), 1), ("a" if plain_key else IdentityString("a"), 2)]
+    value = dict(reversed(entries) if reverse else entries)
+    assert len(value) == 2
+    with pytest.raises(
+        TypeError, match=re.escape("data[0]['a']: duplicate canonical map key")
+    ):
+        operation([value], name="data")
 
 
 def test_snapshot_plan_normalizes_static_string(containers):
@@ -754,3 +828,8 @@ def test_snapshot_ndarray_subclass_ignores_copy_override():
 )
 def test_complete_stream_bytes(value, stream):
     assert encode(value) == stream
+
+
+def test_scalar_bool_bytes():
+    assert encode(True) == b"spaceodyssey.inputs/1\x00\x01\x01"
+    assert encode(False) == b"spaceodyssey.inputs/1\x00\x01\x00"
