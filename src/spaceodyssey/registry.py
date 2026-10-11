@@ -240,7 +240,7 @@ def register(seam: str, name: str, info: SeamInfo):
 
 
 _DEFAULT_ADAPTER_MODULES: dict[str, tuple[str, ...]] = {
-    "certification": ("spaceodyssey.certify",),
+    "certification": ("spaceodyssey.certify", "spaceodyssey.gaussian_profile"),
     "context": ("spaceodyssey.context",),
     "cost": ("spaceodyssey.account",),
 }

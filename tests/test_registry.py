@@ -1,12 +1,14 @@
 """Tests for the per-seam implementation registry."""
 
+import ast
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 
 from spaceodyssey.errors import RegistryError
-from spaceodyssey.registry import REGISTRY, Registry, SeamInfo
+from spaceodyssey.registry import _DEFAULT_ADAPTER_MODULES, REGISTRY, Registry, SeamInfo
 
 
 class SummaryOut:
@@ -96,6 +98,33 @@ class TestAvailability:
 
 class TestLazyModules:
     """Adapter modules load on first lookup, not at registration."""
+
+    def test_every_builtin_registration_has_a_lazy_module(self):
+        """Every module applying register is listed under its declared seam."""
+        package_dir = Path(__file__).parents[1] / "src" / "spaceodyssey"
+        registrations = []
+        for source in sorted(package_dir.rglob("*.py")):
+            parts = source.relative_to(package_dir).with_suffix("").parts
+            if parts[-1] == "__init__":
+                parts = parts[:-1]
+            module = ".".join(("spaceodyssey", *parts))
+            tree = ast.parse(source.read_text(), filename=str(source))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                for decorator in node.decorator_list:
+                    if (
+                        isinstance(decorator, ast.Call)
+                        and isinstance(decorator.func, ast.Name)
+                        and decorator.func.id == "register"
+                    ):
+                        seam = ast.literal_eval(decorator.args[0])
+                        registrations.append((seam, module))
+        assert registrations, "expected built-in seam registrations"
+        for seam, module in registrations:
+            assert module in _DEFAULT_ADAPTER_MODULES.get(seam, ()), (
+                f"{module} must be listed as a lazy adapter for {seam}"
+            )
 
     def test_add_module_defers_import(self, tmp_path, monkeypatch):
         """The module is imported only when its seam is first queried."""
