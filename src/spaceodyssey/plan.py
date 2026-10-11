@@ -76,8 +76,9 @@ class PlanSummary(eqx.Module):
         flux_reference: Static name of the reference flux; empty means unspecified.
         k_precision_ms: True one-sigma sampling precision of the
             semi-amplitude (K) estimate from the plan's RV analysis, including
-            all RV noise, in m/s, (P,). Positive; inf means no mass measurement.
-        k_precision_assumed_ms: Optional reported K precision in m/s, (P,).
+            all RV noise, in m/s, (P,). Real and positive; inf means no mass
+            measurement.
+        k_precision_assumed_ms: Optional real reported K precision in m/s, (P,).
             None means the analysis reports k_precision_ms. Positive, with
             inf exactly where k_precision_ms is inf. Either precision may
             exceed the other.
@@ -136,6 +137,10 @@ class PlanSummary(eqx.Module):
             shape = getattr(self, name).shape
             if shape != (p,):
                 raise ValueError(f"{name} must have shape ({p},), got {shape}")
+        for name in ("k_precision_ms", "k_precision_assumed_ms"):
+            value = getattr(self, name)
+            if value is not None and jnp.issubdtype(value.dtype, jnp.complexfloating):
+                raise ValueError(f"{name} must have a real dtype")
         assumed = self.k_precision_assumed_ms
         if assumed is not None:
             if assumed.shape != (p,):

@@ -295,3 +295,16 @@ def test_old_precision_name_refused():
     assert not hasattr(make_plan(), "rv_precision_ms")
     with pytest.raises(TypeError, match="rv_precision_ms"):
         make_plan(rv_precision_ms=jnp.ones(3))
+
+
+@pytest.mark.parametrize("field", ["k_precision_ms", "k_precision_assumed_ms"])
+@pytest.mark.parametrize("traced", [False, True], ids=["concrete", "jit"])
+def test_complex_k_precision_rejected(field, traced):
+    """Complex precision dtypes are invalid on the host and during tracing."""
+
+    def construct(value):
+        fields = {"k_precision_ms": jnp.ones(3), field: value}
+        return make_plan(**fields)
+
+    with pytest.raises(ValueError, match=field + " must have a real dtype"):
+        (jax.jit(construct) if traced else construct)(jnp.full(3, 1 + 2j))
