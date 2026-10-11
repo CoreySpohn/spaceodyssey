@@ -69,7 +69,8 @@ def _interval_radius(width, sd, alpha, *, positive=True):
 
     def tangent_solve(linear, tangent):
         # The Jacobian is diagonal for batched, independent scalar roots.
-        slope = jnp.where(feasible, linear(jnp.ones_like(high)), 1.0)
+        slope = linear(jnp.ones_like(high))
+        slope = jnp.where(feasible & (slope != 0), slope, 1.0)
         return jnp.where(feasible, tangent, 0.0) / slope
 
     radius = jax.lax.custom_root(residual, jnp.zeros_like(high), solve, tangent_solve)
@@ -160,7 +161,7 @@ def _posterior_moments(precision, prior_precision, rows, rhs):
         consumes=("spaceodyssey.PlanPredictive",),
         produces=("spaceodyssey.CertificationOutcome",),
         version="1",
-        fidelity="",
+        fidelity="",  # Fidelity is recorded per outcome.
         cost_hint="low",
     ),
 )
@@ -171,6 +172,8 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
     over noisy data at fixed truth. The model declares a full-column-rank
     ``spectral_matrix`` with response ``A @ theta`` plus a known offset, and
     explicitly opts in with ``LINEAR_GAUSSIAN_SPECTRUM = True``.
+    Truth model subclasses that change this contract must set
+    ``LINEAR_GAUSSIAN_SPECTRUM = False``.
     Only spectral data are used. Noise is known, with covariance
     ``diag(noise_sigma**2) + F @ F.T``. A singleton independent Normal prior
     gives a Gaussian posterior. Explicit ``flat_prior=True`` instead uses
@@ -257,19 +260,30 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
         context = {
             name: jax.ShapeDtypeStruct((), float) for name in model.context_names
         }
+        context_dependent = False
         for name in self.profile.quantities:
             program = jax.make_jaxpr(
                 lambda theta, ctx, name=name: model.quantities(theta, ctx)[name]
             )(jax.ShapeDtypeStruct((d,), float), context)
             _assert_affine(program.jaxpr, [True] + [False] * len(context))
+            needed = {v for v in program.jaxpr.outvars if not isinstance(v, Literal)}
+            for equation in reversed(program.jaxpr.eqns):
+                if any(v in needed for v in equation.outvars):
+                    needed.update(
+                        v for v in equation.invars if not isinstance(v, Literal)
+                    )
+            context_dependent |= any(v in needed for v in program.jaxpr.invars[1:])
         a = np.asarray(model.spectral_matrix)
         if a.ndim != 2 or a.shape[1] != d or not np.all(np.isfinite(a)):
             raise ValueError("spectral_matrix must be finite with shape (B, D)")
         if np.linalg.matrix_rank(a) != d:
             raise UnsupportedProfile("spectral_matrix must have full column rank")
-        # Check claim independence before computing any posterior. Geometry is
-        # also checked at each planet's actual context during integration.
-        self._claim_geometry({name: jnp.asarray(0.0) for name in model.context_names})
+        # Context-dependent geometry needs each planet's actual context.
+        # Context-free dependencies can still be rejected before integration.
+        if not context_dependent:
+            self._claim_geometry(
+                {name: jnp.asarray(0.0) for name in model.context_names}
+            )
         if not self.flat_prior:
             prior = model.prior
             if not np.all(np.isfinite(prior.loc)) or not np.all(
@@ -378,12 +392,14 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
                 & jnp.all(jnp.isfinite(sd) & (sd > 0))
                 & jnp.all(jnp.diag(covariance) > 0)
             )
-            scale = np.sqrt(np.diag(np.asarray(covariance)))
-            correlation = np.asarray(covariance) / (scale[:, None] * scale[None, :])
-            off_diagonal = correlation - np.eye(len(correlation))
-            is_diagonal = np.all(
-                np.abs(off_diagonal) <= 100 * np.finfo(correlation.dtype).eps
-            )
+            is_diagonal = False
+            if valid:
+                scale = np.sqrt(np.diag(np.asarray(covariance)))
+                correlation = np.asarray(covariance) / (scale[:, None] * scale[None, :])
+                off_diagonal = correlation - np.eye(len(correlation))
+                is_diagonal = np.all(
+                    np.abs(off_diagonal) <= 100 * np.finfo(correlation.dtype).eps
+                )
             diagonal = diagonal and is_diagonal
             if self.flat_prior:
                 evidence_pos = evidence_neg = jnp.ones(
@@ -510,10 +526,14 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
 
 def _normal_mass(mean, sd, lower, upper):
     """Return univariate Gaussian interval mass, reflecting upper tails."""
+    empty = lower >= upper
+    # Finite empty bounds prevent zero cotangents from multiplying infinities.
+    lower = jnp.where(empty, mean, lower)
+    upper = jnp.where(empty, mean, upper)
     reflect = lower > mean
     low = jnp.where(reflect, mean - upper, lower - mean) / sd
     high = jnp.where(reflect, mean - lower, upper - mean) / sd
-    return jnp.maximum(ndtr(high) - ndtr(low), 0.0)
+    return jnp.where(empty, 0.0, jnp.maximum(ndtr(high) - ndtr(low), 0.0))
 
 
 def _regions(lower, upper, sd, alpha, evidence_pos, evidence_neg):

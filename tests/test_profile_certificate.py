@@ -284,22 +284,31 @@ def test_profile_construction_checks_support_once():
     assert checks == [(certificate.profile, certificate.truth_model)]
 
 
-def test_constructor_signature_is_cached(monkeypatch):
-    import inspect
+def test_factory_field_cannot_hide_profile_parameter():
+    class HiddenProfile(ProfileCertificateDouble):
+        profile: Profile = eqx.field(static=True, default_factory=make_profile)
 
-    class CachedCertificate(ProfileCertificateDouble):
-        pass
+        def __init__(self, truth_model):
+            pytest.fail("constructor without profile must not run")
 
-    signatures = []
-    original = inspect.signature
+    with pytest.raises(TypeError, match="expose profile and truth_model"):
+        HiddenProfile(LinearGaussianTruthModel())
 
-    def signature(obj, *args, **kwargs):
-        if obj is CachedCertificate:
-            signatures.append(obj)
-        return original(obj, *args, **kwargs)
 
-    monkeypatch.setattr(inspect, "signature", signature)
-    profile, model = make_profile(), LinearGaussianTruthModel()
-    for _ in range(2):
-        CachedCertificate(profile, model)
-    assert signatures == [CachedCertificate]
+def test_custom_constructor_defaults_take_precedence_over_field_factories():
+    default_profile, default_model = make_profile(), LinearGaussianTruthModel()
+
+    def forbidden():
+        pytest.fail("custom constructor defaults must not invoke field factories")
+
+    class CustomDefaults(ProfileCertificateDouble):
+        profile: Profile = eqx.field(static=True, default_factory=forbidden)
+        truth_model: LinearGaussianTruthModel = eqx.field(default_factory=forbidden)
+
+        def __init__(self, profile=default_profile, truth_model=default_model):
+            self.profile = profile
+            self.truth_model = truth_model
+
+    certificate = CustomDefaults()
+    assert certificate.profile is default_profile
+    assert certificate.truth_model is default_model

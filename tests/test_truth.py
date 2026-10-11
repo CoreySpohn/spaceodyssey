@@ -309,7 +309,14 @@ def test_simulate_rejects_non_threefry_keys(implementation):
 
 
 @pytest.mark.parametrize("key_factory", [jax.random.key, jax.random.PRNGKey])
-def test_simulate_accepts_typed_and_raw_threefry_keys(key_factory):
+def test_simulate_accepts_typed_and_raw_threefry_keys(key_factory, monkeypatch):
+    class KeyImplementation:
+        def __str__(self):
+            return "threefry2x32"
+
+    implementation = KeyImplementation()
+    assert implementation != "threefry2x32"
+    monkeypatch.setattr(jax.random, "key_impl", lambda key: implementation)
     model = LinearGaussianTruthModel()
     data = model.simulate(key_factory(0), make_truth(), make_plan())
     assert data.spectrum.shape == (3, 2)

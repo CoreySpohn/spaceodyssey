@@ -31,6 +31,18 @@ from spaceodyssey.profile import Profile
 from spaceodyssey.registry import SeamInfo, register
 from spaceodyssey.truth import AbstractTruthModel, check_compatible
 
+# Obtain the factory placeholder through public dataclass APIs.
+_DEFAULT_FACTORY_SENTINEL = (
+    inspect.signature(
+        dataclasses.make_dataclass(
+            "_FactoryDefault",
+            [("value", object, dataclasses.field(default_factory=object))],
+        )
+    )
+    .parameters["value"]
+    .default
+)
+
 
 @final
 class CertificateState(eqx.Module):
@@ -132,7 +144,12 @@ class _ProfileCertificateMeta(type(AbstractCertificate)):
     def __call__(cls, *args, **kwargs):
         # Bind the generated or custom constructor before Equinox invokes any
         # subclass initialization, converters, or __check_init__ hooks.
-        bound = _constructor_signature(cls).bind(*args, **kwargs)
+        signature = _constructor_signature(cls)
+        if not {"profile", "truth_model"} <= signature.parameters.keys():
+            raise TypeError(
+                "profile certificate constructors must expose profile and truth_model"
+            )
+        bound = signature.bind(*args, **kwargs)
         fields = {field.name: field for field in dataclasses.fields(cls)}
         for name in ("profile", "truth_model"):
             field = fields.get(name)
@@ -141,6 +158,11 @@ class _ProfileCertificateMeta(type(AbstractCertificate)):
                     raise TypeError(f"converters on {name} are unsupported")
                 if (
                     name not in bound.arguments
+                    and (
+                        signature.parameters[name].default is _DEFAULT_FACTORY_SENTINEL
+                        or signature.parameters[name].default is field.default
+                    )
+                    and field.default is dataclasses.MISSING
                     and field.default_factory is not dataclasses.MISSING
                 ):
                     bound.arguments[name] = field.default_factory()

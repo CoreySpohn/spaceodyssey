@@ -74,4 +74,4 @@ packages = ["src/spaceodyssey"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: Monte Carlo checks (included in the default test run)"]
+markers = ["slow: Monte Carlo checks; skip with -m 'not slow'"]

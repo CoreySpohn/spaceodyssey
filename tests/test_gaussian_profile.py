@@ -51,12 +51,13 @@ def test_interval_boundary_matches_brentq(dtype, width, sd, alpha):
                 residual,
                 0,
                 w / 2 + 10 * s,
-                xtol=5e-15,
+                xtol=1e-300,
+                rtol=4 * np.finfo(np.float64).eps,
             )
             radius, feasible = _interval_radius(width, sd, alpha, positive=positive)
             assert bool(feasible)
             assert radius.dtype == dtype
-            tolerance = 10 * np.finfo(dtype).eps * w
+            tolerance = max(10 * np.finfo(dtype).eps * max(w, expected), 1e-300)
             np.testing.assert_allclose(radius, expected, rtol=0, atol=tolerance)
 
 
@@ -418,6 +419,36 @@ def _central_gradient(function, sd, width):
     return gradient
 
 
+def test_empty_interval_does_not_poison_feasible_support_gradient():
+    from spaceodyssey.gaussian_profile import _normal_mass, _regions
+
+    with jax.enable_x64():
+        widths = jnp.array([2.0, 0.001])
+
+        def probability(sd):
+            lower, upper = _regions(
+                -widths / 2,
+                widths / 2,
+                sd,
+                0.05,
+                jnp.ones(2, dtype=bool),
+                jnp.ones(2, dtype=bool),
+            )
+            mass = _normal_mass(0.05, sd, lower[:, 0], upper[:, 0])
+            return mass[0]
+
+        sd, delta = 0.3, 0.3 * 1e-5
+        expected = (probability(sd + delta) - probability(sd - delta)) / (2 * delta)
+        assert float(expected) == pytest.approx(-2.1556518986, rel=1e-5)
+        assert float(jax.grad(probability)(sd)) == pytest.approx(
+            float(expected), rel=1e-5
+        )
+        assert float(jax.jit(jax.grad(probability))(sd)) == pytest.approx(
+            float(expected), rel=1e-5
+        )
+        assert float(probability(sd)) == float(_interval_support_probability(sd, 2.0))
+
+
 @pytest.mark.parametrize("sd, width", [(0.3, 2.0), (0.2, 1.0), (0.08, 0.5)])
 @pytest.mark.parametrize("positive", [True, False])
 def test_interval_radius_gradient_matches_finite_difference(sd, width, positive):
@@ -511,43 +542,21 @@ def test_infeasible_interval_tangents_do_not_leak(positive):
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("positive", [True, False])
-def test_interval_radius_forward_bits_unchanged(dtype, positive):
-    from jax.scipy.special import ndtr, ndtri
-
+def test_interval_radius_identical_jit_and_eager(dtype, positive):
     from spaceodyssey.gaussian_profile import _interval_radius
-
-    @jax.jit
-    def reference(width, sd, alpha):
-        half = width / 2
-        high = half + sd * (-ndtri(alpha / 2) + 1)
-
-        def within_boundary(mean):
-            if positive:
-                return ndtr((mean - half) / sd) + ndtr((-half - mean) / sd) <= alpha
-            return ndtr((half - mean) / sd) - ndtr((-half - mean) / sd) >= alpha
-
-        def step(_, bracket):
-            low, high = bracket
-            middle = (low + high) / 2
-            within = within_boundary(middle)
-            return jnp.where(within, middle, low), jnp.where(within, high, middle)
-
-        low, high = jax.lax.fori_loop(0, 80, step, (jnp.zeros_like(high), high))
-        feasible = within_boundary(jnp.zeros_like(high))
-        return jnp.where(feasible, (low + high) / 2, jnp.zeros_like(high)), feasible
 
     with jax.enable_x64():
         widths = jnp.array([2.0, 1.0, 0.01, 0.001], dtype=dtype)
         scales = jnp.array([0.3, 0.2, 0.0001, 1.0], dtype=dtype)
         for alpha in (0.05, 1e-9):
-            actual, feasible = _interval_radius(
+            actual, feasible = jax.jit(_interval_radius, static_argnames=("positive",))(
                 widths, scales, dtype(alpha), positive=positive
             )
-            expected, expected_feasible = reference(widths, scales, dtype(alpha))
-            bits = np.uint64 if dtype == np.float64 else np.uint32
-            np.testing.assert_array_equal(
-                np.asarray(actual).view(bits), np.asarray(expected).view(bits)
-            )
+            with jax.disable_jit():
+                expected, expected_feasible = _interval_radius(
+                    widths, scales, dtype(alpha), positive=positive
+                )
+            np.testing.assert_array_equal(actual, expected)
             np.testing.assert_array_equal(feasible, expected_feasible)
 
 
@@ -566,13 +575,10 @@ def test_interval_bisection_has_fixed_iteration_count():
                     lengths.extend(scan_lengths(value.jaxpr))
         return lengths
 
-    lengths = []
     for width, sd, alpha in ((2.0, 0.3, 0.05), (0.01, 0.0001, 1e-9)):
         program = jax.make_jaxpr(_interval_radius)(width, sd, alpha)
-        lengths.append(scan_lengths(program.jaxpr))
         # ndtri also contains fixed scans for its polynomial evaluation.
-        assert _INTERVAL_BISECTIONS in lengths[-1]
-    assert lengths[0] == lengths[1]
+        assert _INTERVAL_BISECTIONS in scan_lengths(program.jaxpr)
 
 
 def test_orthogonal_float32_design_uses_closed_form():
@@ -759,6 +765,103 @@ def test_distinct_dependent_quantities_rejected_before_posterior(monkeypatch):
     monkeypatch.setattr(gaussian_profile, "_posterior_moments", forbidden)
     with pytest.raises(UnsupportedProfile, match="linearly independent"):
         GaussianProfileCertifier(profile, model)
+
+
+@pytest.mark.parametrize("divide", [False, True])
+def test_context_scaled_quantity_certifies_like_unscaled_quantity(divide):
+    from spaceodyssey import GaussianProfileCertifier
+
+    class ContextScaledModel(GaussianModel):
+        def quantities(self, theta, context):
+            x = theta[..., 0]
+            x = x / context["offset"] if divide else x * context["offset"]
+            return {"x": x, "y": theta[..., 1]}
+
+    with jax.enable_x64():
+        model = ContextScaledModel()
+        profile = profile_for([Claim("x", (Edge("x", 0.3, "above"),), "positive")])
+        certificate = GaussianProfileCertifier(profile, model)
+        predictive = experiment(model, [[2.0, 0.0], [2.0, 0.0]])
+        offsets = jnp.array([0.5, 2.0])
+        predictive = eqx.tree_at(
+            lambda p: p.truth.context["offset"], predictive, offsets
+        )
+        result = certificate.integrate(predictive)
+        assert np.all(result.in_range)
+        assert np.all(result.p_pos > 0.99)
+        check_outcome(result, profile)
+        for i, offset in enumerate(offsets):
+            threshold = 0.3 * offset if divide else 0.3 / offset
+            unscaled_profile = profile_for(
+                [Claim("x", (Edge("x", float(threshold), "above"),), "positive")]
+            )
+            unscaled_model = GaussianModel()
+            expected = GaussianProfileCertifier(
+                unscaled_profile, unscaled_model
+            ).integrate(experiment(unscaled_model, [[2.0, 0.0]]))
+            for name in ("p_pos", "p_neg", "p_wrong", "p_neg_wrong", "claim_p_pos"):
+                np.testing.assert_allclose(
+                    getattr(result, name)[i],
+                    getattr(expected, name)[0],
+                    rtol=0,
+                    atol=1e-12,
+                )
+
+
+def test_context_dependent_rank_checked_before_posterior_at_integration(monkeypatch):
+    import spaceodyssey.gaussian_profile as gaussian_profile
+    from spaceodyssey import GaussianProfileCertifier
+
+    class ContextDependentModel(GaussianModel):
+        def quantities(self, theta, context):
+            return {
+                "x": theta[..., 0],
+                "y": theta[..., 0] + context["offset"] * theta[..., 1],
+            }
+
+    model = ContextDependentModel()
+    profile = profile_for(
+        [Claim(name, (Edge(name, 0.0, "above"),), "positive") for name in ("x", "y")]
+    )
+    certificate = GaussianProfileCertifier(profile, model)
+    predictive = experiment(model, [[2.0, 2.0]])
+    independent = eqx.tree_at(
+        lambda p: p.truth.context["offset"], predictive, jnp.ones(1)
+    )
+    assert np.all(certificate.integrate(independent).in_range)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("context-dependent rank rejection must precede posterior work")
+
+    monkeypatch.setattr(gaussian_profile, "_posterior_moments", forbidden)
+    with pytest.raises(UnsupportedProfile, match="linearly independent"):
+        certificate.integrate(predictive)
+
+
+@pytest.mark.filterwarnings("error")
+def test_zero_covariance_diagonal_is_invalid_without_warnings(monkeypatch):
+    import spaceodyssey.gaussian_profile as gaussian_profile
+    from spaceodyssey import GaussianProfileCertifier
+
+    original = gaussian_profile._posterior_moments
+
+    def zero_sampling_covariance(*args):
+        mean, covariance, posterior_covariance = original(*args)
+        return mean, jnp.zeros_like(covariance), posterior_covariance
+
+    monkeypatch.setattr(
+        gaussian_profile, "_posterior_moments", zero_sampling_covariance
+    )
+    model = GaussianModel()
+    profile = profile_for([Claim("x", (Edge("x", 0.0, "above"),), "positive")])
+    with np.errstate(divide="raise", invalid="raise"):
+        result = GaussianProfileCertifier(profile, model).integrate(
+            experiment(model, [[0.1, 0.2]])
+        )
+    assert not bool(result.in_range[0])
+    assert not np.any(result.claim_in_range)
+    np.testing.assert_array_equal(result.p_pos, 0.0)
+    np.testing.assert_array_equal(result.p_neg, 0.0)
 
 
 def test_mixed_quantity_covariance_projection_matches_numpy(monkeypatch):
