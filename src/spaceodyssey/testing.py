@@ -229,6 +229,9 @@ class LinearGaussianTruthModel(AbstractTruthModel):
     parameter, astrometry repeats the first and last parameters, and RV is
     the last parameter. A known per-planet ``offset`` is added to every
     channel in that channel's units. Missing measurements are zero-filled.
+    ``LINEAR_GAUSSIAN_SPECTRUM`` explicitly opts into Gaussian certification:
+    the spectral response is affine in theta with the declared matrix, and
+    the offset is known. Subclasses changing this contract must disable it.
 
     Args:
         low: Uniform lower bounds (D,), default -10 in every dimension.
@@ -243,6 +246,7 @@ class LinearGaussianTruthModel(AbstractTruthModel):
     context_names: ClassVar[tuple[str, ...]] = ("offset",)
     quantity_names: ClassVar[tuple[str, ...]] = param_names
     flux_reference: ClassVar[str] = "unit_flux"
+    LINEAR_GAUSSIAN_SPECTRUM: ClassVar[bool] = True
     prior: Uniform
     prior_sets: tuple[PriorSet, ...]
     spectral_matrix: jax.Array
@@ -313,7 +317,8 @@ def __getattr__(name):
     """Resolve the deprecated truth-model name for existing callers."""
     if name == "LinearGaussianTruth":
         warnings.warn(
-            "LinearGaussianTruth is deprecated; use LinearGaussianTruthModel",
+            "LinearGaussianTruth is deprecated; use LinearGaussianTruthModel; "
+            "will be removed in 0.1.0",
             DeprecationWarning,
             stacklevel=2,
         )

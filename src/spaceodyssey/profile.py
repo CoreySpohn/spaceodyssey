@@ -18,23 +18,26 @@ SupportRule = Literal["separate", "joint", "split"]
 EvidenceRule = Literal["every_claim"]
 
 
-def _nonempty_string(value: object, field: str) -> None:
+def _nonempty_string(value: object, name: str) -> None:
     if type(value) is not str or not value:
-        raise ValueError(f"{field} must be a nonempty string")
+        raise ValueError(f"{name} must be a nonempty string")
 
 
-def _finite_number(value: object, field: str) -> None:
+def _finite_number(value: object, name: str) -> None:
     if (
         isinstance(value, bool)
         or not isinstance(value, Real)
         or not math.isfinite(value)
     ):
-        raise ValueError(f"{field} must be a finite real number")
+        raise ValueError(f"{name} must be a finite real number")
 
 
 @dataclass(frozen=True)
 class Edge:
     """An inclusive threshold on a named quantity.
+
+    Real scalars are widened to Python floats without decimal rounding; a
+    float32 threshold can therefore hash differently from a Python float.
 
     Args:
         quantity: Name of the scalar quantity supplied by a truth model.
@@ -100,6 +103,9 @@ class Claim:
 @dataclass(frozen=True)
 class Profile:
     """A hashable certification configuration with a fixed claim axis.
+
+    Real scalars are widened to Python floats without decimal rounding; a
+    float32 alpha can therefore hash differently from a Python float.
 
     Args:
         name: Display label, excluded from the content digest.

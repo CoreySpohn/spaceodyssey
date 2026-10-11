@@ -39,11 +39,13 @@ def test_unsupported_profile_raises_before_any_computation(monkeypatch, cause, s
             self.profile = profile
             self.truth_model = truth_model
             if stage == "init":
-                truth_model.quantities(make_truth().theta, make_truth().context)
+                truth = make_truth()
+                truth_model.quantities(truth.theta, truth.context)
 
         def __check_init__(self):
             if stage == "check_init":
-                self.truth_model.quantities(make_truth().theta, make_truth().context)
+                truth = make_truth()
+                self.truth_model.quantities(truth.theta, truth.context)
 
     model = LinearGaussianTruthModel()
 
@@ -143,6 +145,7 @@ def test_engine_validates_predictive_before_integrating(cause):
     certificate = ComputingCertificate(make_profile(), LinearGaussianTruthModel())
     mission = build(make_spec(), _TestIntegrateEngine.config())
     mission = eqx.tree_at(lambda m: m.model.certification, mission, certificate)
+    # Bypass constructor validation to exercise the engine's validation layer.
     predictive = PlanPredictive(plan, make_truth())
     predictive = eqx.tree_at(lambda p: p.truth, predictive, truth)
     with pytest.raises(error, match=message):
@@ -248,3 +251,55 @@ def test_constructor_resolves_factories_once_before_validation(supported):
     else:
         with pytest.raises(UnsupportedProfile, match=r"prior set.*missing@1"):
             FactoryCertificate()
+
+
+@pytest.mark.parametrize("name", ["profile", "truth_model"])
+def test_profile_input_converters_are_unsupported(name):
+    def forbidden(value):
+        pytest.fail("unsupported converters must not run")
+
+    if name == "profile":
+
+        class ConvertedCertificate(ProfileCertificateDouble):
+            profile: Profile = eqx.field(static=True, converter=forbidden)
+
+    else:
+
+        class ConvertedCertificate(ProfileCertificateDouble):
+            truth_model: LinearGaussianTruthModel = eqx.field(converter=forbidden)
+
+    with pytest.raises(TypeError, match=f"converters on {name} are unsupported"):
+        ConvertedCertificate(make_profile(), LinearGaussianTruthModel())
+
+
+def test_profile_construction_checks_support_once():
+    checks = []
+
+    class CountedCertificate(ProfileCertificateDouble):
+        @classmethod
+        def check_profile_support(cls, profile, truth_model):
+            checks.append((profile, truth_model))
+
+    certificate = CountedCertificate(make_profile(), LinearGaussianTruthModel())
+    assert checks == [(certificate.profile, certificate.truth_model)]
+
+
+def test_constructor_signature_is_cached(monkeypatch):
+    import inspect
+
+    class CachedCertificate(ProfileCertificateDouble):
+        pass
+
+    signatures = []
+    original = inspect.signature
+
+    def signature(obj, *args, **kwargs):
+        if obj is CachedCertificate:
+            signatures.append(obj)
+        return original(obj, *args, **kwargs)
+
+    monkeypatch.setattr(inspect, "signature", signature)
+    profile, model = make_profile(), LinearGaussianTruthModel()
+    for _ in range(2):
+        CachedCertificate(profile, model)
+    assert signatures == [CachedCertificate]

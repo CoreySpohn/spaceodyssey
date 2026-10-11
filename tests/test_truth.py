@@ -308,9 +308,17 @@ def test_simulate_rejects_non_threefry_keys(implementation):
         )
 
 
+@pytest.mark.parametrize("key_factory", [jax.random.key, jax.random.PRNGKey])
+def test_simulate_accepts_typed_and_raw_threefry_keys(key_factory):
+    model = LinearGaussianTruthModel()
+    data = model.simulate(key_factory(0), make_truth(), make_plan())
+    assert data.spectrum.shape == (3, 2)
+    assert bool(jnp.all(jnp.isfinite(data.spectrum)))
+
+
 def test_deprecated_truth_model_alias():
     import spaceodyssey.testing as testing
 
-    with pytest.warns(DeprecationWarning, match="LinearGaussianTruthModel"):
+    with pytest.warns(DeprecationWarning, match=r"LinearGaussianTruthModel.*0\.1\.0"):
         old = testing.LinearGaussianTruth
     assert old is testing.LinearGaussianTruthModel

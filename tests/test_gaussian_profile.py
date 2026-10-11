@@ -19,32 +19,54 @@ from tests.test_plan import make_plan
 
 
 @pytest.mark.parametrize(
-    "width, sd, alpha", [(2.0, 0.3, 0.05), (1.0, 0.15, 0.01), (0.01, 0.001, 0.1)]
+    "dtype, width, sd, alpha",
+    [
+        (np.float64, 2.0, 0.3, 0.05),
+        (np.float64, 1.0, 0.15, 0.01),
+        (np.float64, 0.01, 0.001, 0.1),
+        (np.float32, 2.0, 0.1, 1e-6),
+        (np.float32, 2.0, 0.1, 1e-9),
+    ],
 )
-def test_interval_boundary_matches_brentq(width, sd, alpha):
+def test_interval_boundary_matches_brentq(dtype, width, sd, alpha):
     from spaceodyssey.gaussian_profile import _interval_radius
 
     with jax.enable_x64():
-        for probability in (alpha, 1 - alpha):
+        width, sd, alpha = map(dtype, (width, sd, alpha))
+        w, s, a = map(float, (width, sd, alpha))
+        for positive in (True, False):
+            # Evaluate the reference in float64, including the tiny tails.
+            def residual(radius, positive=positive):
+                if positive:
+                    return (
+                        norm.cdf((radius - w / 2) / s)
+                        + norm.cdf((-w / 2 - radius) / s)
+                        - a
+                    )
+                return (
+                    norm.cdf((w / 2 - radius) / s) - norm.cdf((-w / 2 - radius) / s) - a
+                )
+
             expected = brentq(
-                lambda radius, probability=probability: (
-                    norm.cdf((width / 2 - radius) / sd)
-                    - norm.cdf((-width / 2 - radius) / sd)
-                    - probability
-                ),
+                residual,
                 0,
-                width / 2 + 10 * sd,
+                w / 2 + 10 * s,
                 xtol=5e-15,
             )
-            radius = jax.jit(_interval_radius)(width, sd, probability)
-            np.testing.assert_allclose(radius, expected, rtol=0, atol=1e-12)
+            radius, feasible = _interval_radius(width, sd, alpha, positive=positive)
+            assert bool(feasible)
+            assert radius.dtype == dtype
+            tolerance = 10 * np.finfo(dtype).eps * w
+            np.testing.assert_allclose(radius, expected, rtol=0, atol=tolerance)
 
 
 def test_interval_too_narrow_is_empty():
     from spaceodyssey.gaussian_profile import _interval_radius
 
     with jax.enable_x64():
-        assert float(_interval_radius(0.1, 1.0, 0.95)) < 0
+        radius, feasible = _interval_radius(0.1, 1.0, 0.05)
+        assert not bool(feasible)
+        assert float(radius) == 0
 
 
 def test_public_registered_certifier():
@@ -56,6 +78,7 @@ def test_public_registered_certifier():
         REGISTRY.get("certification", "gaussian_profile").cls
         is spaceodyssey.GaussianProfileCertifier
     )
+    assert REGISTRY.get("certification", "gaussian_profile").info.fidelity == ""
 
 
 class GaussianModel(LinearGaussianTruthModel):
@@ -87,12 +110,12 @@ class ReferenceModel(GaussianModel):
         return result
 
 
-def profile_for(claims, **kwargs):
+def profile_for(claims, *, rule="separate"):
     return Profile(
         "experiment",
         tuple(claims),
         0.05,
-        support_rule=kwargs.get("rule", "separate"),
+        support_rule=rule,
         prior_set_id="normal@1",
     )
 
@@ -158,6 +181,7 @@ def test_joint_rejected_before_model_work(monkeypatch):
 
 @pytest.mark.parametrize("interval", [False, True])
 @pytest.mark.parametrize("correlated", [False, True])
+@pytest.mark.slow
 def test_separate_matches_data_monte_carlo(interval, correlated):
     from spaceodyssey import GaussianProfileCertifier
 
@@ -281,12 +305,16 @@ def test_general_linear_quantity_and_nonlinear_rejection(monkeypatch):
         def forbidden(*args, **kwargs):
             pytest.fail("posterior computation must not run for nonlinear quantities")
 
+        import spaceodyssey.gaussian_profile as gaussian_profile
+
+        monkeypatch.setattr(gaussian_profile, "cho_solve", forbidden)
         monkeypatch.setattr(Nonlinear, "expected_data", forbidden)
         with pytest.raises(UnsupportedProfile, match=r"nonlinear.*quantity"):
             GaussianProfileCertifier(profile, Nonlinear())
 
 
 @pytest.mark.parametrize("rule", ["separate", "split"])
+@pytest.mark.slow
 def test_negative_union_and_wrong_either_reports(rule):
     from spaceodyssey import GaussianProfileCertifier
 
@@ -365,3 +393,289 @@ def test_threshold_boundary_uses_inclusive_profile_truth():
         np.testing.assert_allclose(result.p_pos, 0.05, atol=1e-12)
         np.testing.assert_allclose(result.p_neg_wrong, 0.05, atol=1e-12)
         assert float(result.p_wrong[0]) == 0
+
+
+def test_interval_radius_has_no_gradient():
+    from spaceodyssey.gaussian_profile import _interval_radius
+
+    with jax.enable_x64():
+        gradient = jax.grad(lambda sd: _interval_radius(2.0, sd, 0.05)[0])(0.2)
+        assert float(gradient) == 0.0
+
+
+def test_interval_bisection_has_fixed_iteration_count():
+    from spaceodyssey.gaussian_profile import _INTERVAL_BISECTIONS, _interval_radius
+
+    assert _INTERVAL_BISECTIONS == 80
+
+    def scan_lengths(jaxpr):
+        lengths = []
+        for equation in jaxpr.eqns:
+            if equation.primitive.name == "scan":
+                lengths.append(equation.params["length"])
+            for value in equation.params.values():
+                if hasattr(value, "jaxpr"):
+                    lengths.extend(scan_lengths(value.jaxpr))
+        return lengths
+
+    lengths = []
+    for width, sd, alpha in ((2.0, 0.3, 0.05), (0.01, 0.0001, 1e-9)):
+        program = jax.make_jaxpr(_interval_radius)(width, sd, alpha)
+        lengths.append(scan_lengths(program.jaxpr))
+        # ndtri also contains fixed scans for its polynomial evaluation.
+        assert _INTERVAL_BISECTIONS in lengths[-1]
+    assert lengths[0] == lengths[1]
+
+
+def test_orthogonal_float32_design_uses_closed_form():
+    from spaceodyssey import GaussianProfileCertifier
+
+    with jax.enable_x64(False):
+        matrix = np.array([[0.6, -0.8], [0.8, 0.6]], dtype=np.float32)
+        assert (matrix.T @ matrix)[0, 1] != 0  # Rounding breaks exact diagonality.
+        model = GaussianModel(matrix)
+        profile = profile_for(
+            [
+                Claim(name, (Edge(name, 0.0, "above"),), "positive")
+                for name in ("x", "y")
+            ]
+        )
+        result = GaussianProfileCertifier(profile, model).integrate(
+            experiment(model, [[0.1, 0.2]])
+        )
+        assert result.fidelity == "closed_form"
+        assert bool(result.in_range[0])
+        check_outcome(result, profile)
+
+
+def test_nearly_collinear_flat_prior_never_returns_nan():
+    from spaceodyssey import GaussianProfileCertifier
+
+    with jax.enable_x64(False):
+        model = GaussianModel(jnp.array([[1.0, 1.0], [1.0, 1.0001]]))
+        profile = profile_for(
+            [
+                Claim(name, (Edge(name, 0.0, "above"),), "positive")
+                for name in ("x", "y")
+            ]
+        )
+        result = GaussianProfileCertifier(profile, model, flat_prior=True).integrate(
+            experiment(model, [[0.1, 0.2]])
+        )
+        for name in (
+            "p_pos",
+            "p_neg",
+            "p_wrong",
+            "p_neg_wrong",
+            "claim_p_pos",
+            "claim_p_neg",
+        ):
+            assert np.all(np.isfinite(getattr(result, name)))
+        if bool(result.in_range[0]):
+            check_outcome(result, profile)
+        else:
+            assert not np.any(result.claim_in_range)
+            np.testing.assert_array_equal(result.p_pos, 0.0)
+            np.testing.assert_array_equal(result.p_neg, 0.0)
+
+
+def test_nan_rectangle_probability_clears_in_range(monkeypatch):
+    import spaceodyssey.gaussian_profile as gaussian_profile
+    from spaceodyssey import GaussianProfileCertifier
+
+    class EagerProbabilities(GaussianProfileCertifier):
+        _probabilities = GaussianProfileCertifier._probabilities.__wrapped__
+
+    monkeypatch.setattr(
+        gaussian_profile,
+        "normal_rectangle_probability",
+        lambda *args, **kwargs: jnp.nan,
+    )
+    model = GaussianModel(jnp.array([[1.0, 0.5], [0.0, 1.0]]))
+    profile = profile_for(
+        [Claim(name, (Edge(name, 0.0, "above"),), "positive") for name in ("x", "y")]
+    )
+    result = EagerProbabilities(profile, model).integrate(
+        experiment(model, [[0.1, 0.2]])
+    )
+    assert not bool(result.in_range[0])
+    for name in (
+        "p_pos",
+        "p_neg",
+        "p_wrong",
+        "p_neg_wrong",
+        "claim_p_pos",
+        "claim_p_neg",
+    ):
+        np.testing.assert_array_equal(getattr(result, name), 0.0)
+
+
+def test_proportional_float32_quantity_coefficients_are_accepted():
+    from spaceodyssey import GaussianProfileCertifier
+
+    class Proportional(GaussianModel):
+        def quantities(self, theta, context):
+            row = jnp.array([0.7, -0.3], dtype=theta.dtype)
+            scaled = jnp.array([0.7 * 1.3, -0.3 * 1.3], dtype=theta.dtype)
+            return {"x": theta @ row, "y": theta @ scaled}
+
+    with jax.enable_x64(False):
+        model = Proportional()
+        profile = profile_for(
+            [
+                Claim(
+                    "band",
+                    (Edge("x", -1.0, "above"), Edge("y", 1.3, "below")),
+                    "positive",
+                )
+            ]
+        )
+        result = GaussianProfileCertifier(profile, model).integrate(
+            experiment(model, [[0.1, 0.2]])
+        )
+        assert bool(result.in_range[0])
+        check_outcome(result, profile)
+
+
+@pytest.mark.parametrize("opt_in", [False, True])
+def test_linear_spectrum_requires_explicit_opt_in(opt_in, monkeypatch):
+    from spaceodyssey import GaussianProfileCertifier
+
+    class DeclaredModel(GaussianModel):
+        LINEAR_GAUSSIAN_SPECTRUM: ClassVar[bool] = opt_in
+
+    model = DeclaredModel()
+    assert hasattr(model, "spectral_matrix")
+    profile = profile_for([Claim("x", (Edge("x", 0.0, "above"),), "positive")])
+    if opt_in:
+        result = GaussianProfileCertifier(profile, model).integrate(
+            experiment(model, [[0.1, 0.2]])
+        )
+        assert bool(result.in_range[0])
+    else:
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("missing opt-in must be rejected before model work")
+
+        monkeypatch.setattr(DeclaredModel, "quantities", forbidden)
+        with pytest.raises(UnsupportedProfile, match="explicitly opt in"):
+            GaussianProfileCertifier(profile, model)
+
+
+@pytest.mark.parametrize("restriction", ["five_claims", "dependent_claims"])
+def test_claim_scope_rejected_before_posterior_work(restriction, monkeypatch):
+    import spaceodyssey.gaussian_profile as gaussian_profile
+    from spaceodyssey import GaussianProfileCertifier
+
+    model = GaussianModel()
+    count = 5 if restriction == "five_claims" else 2
+    profile = profile_for(
+        [
+            Claim(f"claim_{i}", (Edge("x", float(i), "above"),), "positive")
+            for i in range(count)
+        ]
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("scope rejection must precede posterior or observation work")
+
+    monkeypatch.setattr(gaussian_profile, "cho_solve", forbidden)
+    monkeypatch.setattr(GaussianModel, "expected_data", forbidden)
+    monkeypatch.setattr(GaussianModel, "simulate", forbidden)
+    monkeypatch.setattr(GaussianModel, "quantities", forbidden)
+    message = (
+        "at most four claims"
+        if restriction == "five_claims"
+        else "linearly independent"
+    )
+    with pytest.raises(UnsupportedProfile, match=message):
+        GaussianProfileCertifier(profile, model)
+
+
+def test_distinct_dependent_quantities_rejected_before_posterior(monkeypatch):
+    import spaceodyssey.gaussian_profile as gaussian_profile
+    from spaceodyssey import GaussianProfileCertifier
+
+    class DependentModel(GaussianModel):
+        def quantities(self, theta, context):
+            return {"x": theta[..., 0], "y": 2 * theta[..., 0]}
+
+    model = DependentModel()
+    profile = profile_for(
+        [Claim(name, (Edge(name, 0.0, "above"),), "positive") for name in ("x", "y")]
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("dependent quantities must be rejected before posterior work")
+
+    monkeypatch.setattr(gaussian_profile, "_posterior_moments", forbidden)
+    with pytest.raises(UnsupportedProfile, match="linearly independent"):
+        GaussianProfileCertifier(profile, model)
+
+
+def test_mixed_quantity_covariance_projection_matches_numpy(monkeypatch):
+    import spaceodyssey.gaussian_profile as gaussian_profile
+    from spaceodyssey import GaussianProfileCertifier
+
+    matrix = np.array(
+        [[1.0, 0.4, -0.2], [0.2, 1.0, 0.3], [0.3, -0.2, 1.0], [0.5, 0.4, 0.2]]
+    )
+    q = np.array([[1.2, -0.4, 0.3], [0.2, 0.8, -0.5], [-0.3, 0.4, 1.1]])
+    captured = []
+
+    class MixedModel(GaussianModel):
+        param_names: ClassVar = ("x", "y", "z")
+        param_units: ClassVar = ("1", "1", "1")
+        quantity_names: ClassVar = param_names
+
+        def __init__(self):
+            super().__init__(matrix)
+            self.prior = Normal(jnp.array([0.1, -0.2, 0.3]), jnp.array([1.5, 0.8, 2.0]))
+            self.prior_sets = (PriorSet((self.prior,), "normal@1", ("nominal",), 0),)
+
+        def quantities(self, theta, context):
+            values = theta @ jnp.asarray(q).T
+            return {name: values[..., i] for i, name in enumerate(self.quantity_names)}
+
+    original = gaussian_profile._posterior_moments
+
+    def capture(*args):
+        moments = original(*args)
+        captured.append(tuple(np.asarray(value) for value in moments))
+        return moments
+
+    monkeypatch.setattr(gaussian_profile, "_posterior_moments", capture)
+    with jax.enable_x64():
+        model = MixedModel()
+        profile = profile_for(
+            [
+                Claim(name, (Edge(name, 0.0, "above"),), "positive")
+                for name in model.quantity_names
+            ]
+        )
+        theta = np.array([[0.15, -0.1, 0.2]])
+        noise_sigma = np.array([[0.2, 0.3, 0.25, 0.4]])
+        factors = np.array([[[0.05], [-0.08], [0.1], [0.04]]])
+        predictive = experiment(
+            model, theta, noise_sigma=noise_sigma, noise_corr_factors=factors
+        )
+        result = GaussianProfileCertifier(profile, model).integrate(predictive)
+        noise = np.diag(noise_sigma[0] ** 2) + factors[0] @ factors[0].T
+        g = matrix.T @ np.linalg.solve(noise, matrix)
+        prior_precision = np.diag(1 / np.asarray(model.prior.scale) ** 2)
+        s = np.linalg.inv(g + prior_precision)
+        mean, covariance, posterior_covariance = captured[0]
+        np.testing.assert_allclose(
+            covariance, q @ s @ g @ s.T @ q.T, rtol=1e-12, atol=1e-14
+        )
+        np.testing.assert_allclose(
+            posterior_covariance, q @ s @ q.T, rtol=1e-12, atol=1e-14
+        )
+        np.testing.assert_allclose(
+            mean,
+            q @ s @ (g @ theta[0] + prior_precision @ np.asarray(model.prior.loc)),
+            rtol=1e-12,
+            atol=1e-14,
+        )
+        assert result.fidelity == "quadrature"
+        check_outcome(result, profile)

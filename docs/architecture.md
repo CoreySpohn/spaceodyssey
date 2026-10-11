@@ -50,9 +50,10 @@ A strict firewall separates truth from belief. The simulator holds both the draw
 universe and the agent's belief about it, and the only bridge between them is
 `observe(truth, action, key) -> data`. The truth container is never an argument to
 the policy, the belief update, or realized-data certification. Analytic integration
-uses truth to evaluate certification probabilities and score wrong verdicts. Observations expose `to_likelihood()`
-factories, so heterogeneous data (detection outcomes, astrometry, spectra, frames)
-flow into one belief without spaceodyssey interpreting any physics itself.
+uses truth to evaluate certification probabilities and score wrong verdicts.
+Observations expose `to_likelihood()` factories, so heterogeneous data (detection
+outcomes, astrometry, spectra, frames) flow into one belief without spaceodyssey
+interpreting any physics itself.
 
 ![The mission loop](diagrams/mc-loop.svg)
 
@@ -263,11 +264,14 @@ edge order within a claim and the sign of zero do not change identity.
 
 `AbstractProfileCertificate` checks compatibility before subclass construction
 runs, including custom `__init__` and `__check_init__` methods. Constructors must
-expose named `profile` and `truth_model` parameters; hiding them in variadic
-arguments is rejected. The integrate engine calls `validate_predictive` to check
-truth identity, parameter dimensions, required context, the planet axis, and
-plan flux references before integrating. It raises `WiringError` if the resulting
-profile hash differs from the certificate's hash.
+expose named `profile` and `truth_model` parameters; field converters on these
+parameters and hiding them in variadic arguments are rejected. The integrate
+engine calls `validate_predictive` to check truth identity, parameter dimensions,
+required context, the planet axis, and plan flux references before integrating.
+The engine raises `WiringError` if the resulting profile hash differs from the
+certificate's hash.
+The base `integrate` contract assumes validated inputs; direct callers must
+validate unless their concrete integrator does so itself.
 
 `CertificationOutcome` can carry six `(P, K)` claim arrays and ordered
 `claim_names`, all present together. Each column describes that claim as a
@@ -280,9 +284,11 @@ same-profile comparisons and comparisons between different profiles.
 `GaussianProfileCertifier` (registry key `gaussian_profile`) is a toy for
 interface tests. The exact tier is the reference for production comparisons.
 The toy uses a declared full-column-rank `spectral_matrix`, known spectral
-noise, and a singleton independent Normal prior. Other observation channels
-are unused. Explicit `flat_prior=True` selects a support-only improper-flat-prior
-experiment, ignoring the nominal prior and bypassing prior evidence; that mode
+noise, and a singleton independent Normal prior. The truth model explicitly
+opts in with `LINEAR_GAUSSIAN_SPECTRUM = True`, as the testing model does.
+Other observation channels are unused. Explicit `flat_prior=True` selects a
+support-only improper-flat-prior experiment, ignoring the nominal prior and
+bypassing prior evidence; that mode
 has no robustness interpretation. A bounded uniform posterior is not Gaussian.
 
 Certification is a condition on the posterior, and certification probability
@@ -291,14 +297,16 @@ those realizations. For any linear quantity, a one-sided posterior risk bound
 shifts its threshold by a normal critical value times its posterior standard
 deviation. An interval claim uses a deterministic, JIT-compatible, 80-step
 scalar bisection to find the interval of certifying posterior means; intervals
-that are too narrow have no positive support region.
+that are too narrow have no positive support region. The solver evaluates tail
+probabilities directly at small alpha. Interval radii carry no gradient.
 
 The toy accepts `separate` and `split` for up to four linearly independent claim
 scalars. Quantities may be affine combinations of parameters; two edges within
 one claim must reduce to a single scalar interval. Its host-side integration
-wrapper validates this geometry. Nonlinear quantities are rejected before
-posterior computation. Stand-alone claim columns use the profile alpha even
-when the combined event uses `split`. Prior evidence is required for each
+wrapper runs eagerly on the host, validates inputs and this geometry, and cannot
+be jitted, vmapped, or differentiated in any argument. Nonlinear quantities are
+rejected before posterior computation. Stand-alone claim columns use the profile
+alpha even when the combined event uses `split`. Prior evidence is required for each
 report in the proper Gaussian experiment. Negative profile events are unions
 of negative reports for positive-counted claims; wrong counted events include
 wrong reports of either-counted claims.
@@ -310,8 +318,11 @@ including the full sampling covariance. Zero standard errors indicate the
 absence of Monte Carlo, not a bound on quadrature error.
 
 Multi-claim `joint` profiles raise `UnsupportedProfile` through the base profile
-check before any computation. Although joint support regions are convex for
-interval claims, counting certification in either direction creates a union
-of such regions. A library point estimate needs a tabulated or approximate
+check before any computation. More than four claims and linearly dependent
+claim scalars (singular claim covariance) also raise `UnsupportedProfile`, before
+posterior computation. These are deliberate limits of rectangle quadrature.
+Although joint support regions are convex for interval claims, counting
+certification in either direction creates a union of such regions. A library point
+estimate needs a tabulated or approximate
 tier validated against the exact tier. The reference profiles retain `joint`;
 an explicit `separate` variant can exercise this toy with a compatible model.

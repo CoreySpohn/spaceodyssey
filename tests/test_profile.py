@@ -262,6 +262,9 @@ def test_reference_variants_and_exports():
 def test_real_scalars_are_normalized(scalar):
     edge = Edge("x", scalar(1), "above")
     assert type(edge.threshold) is float
+
+
+def test_alpha_scalar_is_normalized():
     profile = dataclasses.replace(REFERENCE, alpha=np.float64(0.05))
     assert type(profile.alpha) is float
     assert profile == REFERENCE
@@ -292,9 +295,20 @@ def test_profile_requires_explicit_keyword_configuration(missing):
 
 
 def test_profile_configuration_is_keyword_only():
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="positional"):
         Profile("label", REFERENCE.claims, 0.05, "joint", "example@1")
 
 
 def test_reference_prior_identity():
     assert REFERENCE.prior_set_id == "exoearth-reference@1"
+
+
+def test_float32_rounding_is_preserved_in_content_hash():
+    single = dataclasses.replace(REFERENCE, alpha=np.float32(0.1))
+    double = dataclasses.replace(REFERENCE, alpha=0.1)
+    assert single.content_hash() != double.content_hash()
+    claim = Claim("x", (Edge("x", np.float32(0.1), "above"),), "positive")
+    rounded = dataclasses.replace(claim, edges=(Edge("x", 0.1, "above"),))
+    assert dataclasses.replace(REFERENCE, claims=(claim,)).content_hash() != (
+        dataclasses.replace(REFERENCE, claims=(rounded,)).content_hash()
+    )

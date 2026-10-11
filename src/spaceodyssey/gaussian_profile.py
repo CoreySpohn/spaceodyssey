@@ -1,12 +1,15 @@
 """Posterior support regions for linear Gaussian profile experiments."""
 
 import itertools
+from functools import partial
 from typing import ClassVar
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.extend.core import Literal
+from jax.scipy.linalg import cho_solve
 from jax.scipy.special import ndtr, ndtri
 from photomancy.priors import Normal
 
@@ -18,34 +21,44 @@ from spaceodyssey.profile import Profile
 from spaceodyssey.registry import SeamInfo, register
 from spaceodyssey.truth import AbstractTruthModel, _plan_masks
 
+_INTERVAL_BISECTIONS = 80
 
-@jax.jit
-def _interval_radius(width, sd, probability):
-    """Return the half-width of means with interval mass >= probability.
 
-    A negative result denotes an empty region. The 80 fixed bisections are
-    deterministic and JIT compatible, including for batched scales.
+@partial(jax.jit, static_argnames=("positive",))
+def _interval_radius(width, sd, alpha, *, positive=True):
+    """Return a support radius and feasibility flag for an interval claim.
+
+    Positive support requires outside mass <= alpha, evaluated directly on
+    both tails without forming 1 - alpha. Negative support requires inside
+    mass <= alpha beyond the returned radius. An infeasible positive region
+    is empty; an infeasible negative boundary means all means qualify.
+    The 80 fixed bisections are deterministic and JIT compatible, including
+    for batched scales. The interval radius carries no gradient.
     """
     half = width / 2
-    high = half + sd * (-ndtri(probability / 2) + 1)
+    high = half + sd * (-ndtri(alpha / 2) + 1)
+
+    def within_boundary(mean):
+        if positive:
+            return ndtr((mean - half) / sd) + ndtr((-half - mean) / sd) <= alpha
+        return ndtr((half - mean) / sd) - ndtr((-half - mean) / sd) >= alpha
 
     def step(_, bracket):
         low, high = bracket
         middle = (low + high) / 2
-        mass = ndtr((half - middle) / sd) - ndtr((-half - middle) / sd)
-        return jnp.where(mass >= probability, middle, low), jnp.where(
-            mass >= probability, high, middle
-        )
+        within = within_boundary(middle)
+        return jnp.where(within, middle, low), jnp.where(within, high, middle)
 
-    low, high = jax.lax.fori_loop(0, 80, step, (jnp.zeros_like(high), high))
-    feasible = 2 * ndtr(half / sd) - 1 >= probability
-    return jnp.where(feasible, (low + high) / 2, -jnp.ones_like(high))
+    low, high = jax.lax.fori_loop(
+        0, _INTERVAL_BISECTIONS, step, (jnp.zeros_like(high), high)
+    )
+    feasible = within_boundary(jnp.zeros_like(high))
+    radius = jnp.where(feasible, (low + high) / 2, jnp.zeros_like(high))
+    return jax.lax.stop_gradient(radius), feasible
 
 
 def _assert_affine(jaxpr, dependent):
     """Reject nonlinear parameter dependence from a traced quantity program."""
-    from jax.extend.core import Literal
-
     dependencies = dict(zip(jaxpr.invars, dependent, strict=True))
     needed = set(v for v in jaxpr.outvars if not isinstance(v, Literal))
     live = []
@@ -103,6 +116,23 @@ def _assert_affine(jaxpr, dependent):
     ]
 
 
+def _posterior_moments(precision, prior_precision, rows, rhs):
+    """Return claim means, sampling covariance, and posterior covariance.
+
+    For parameter posterior covariance S and data precision G, the two claim
+    covariances are Q S G S.T Q.T and Q S Q.T, respectively. Cholesky solves
+    avoid forming the inverse of the posterior precision.
+    """
+    cholesky = jnp.linalg.cholesky(precision + prior_precision)
+    projected = cho_solve((cholesky, True), rows.T)
+    mean = rows @ cho_solve((cholesky, True), rhs)
+    covariance = projected.T @ precision @ projected
+    covariance = (covariance + covariance.T) / 2
+    posterior_covariance = rows @ projected
+    posterior_covariance = (posterior_covariance + posterior_covariance.T) / 2
+    return mean, covariance, posterior_covariance
+
+
 @register(
     "certification",
     "gaussian_profile",
@@ -111,7 +141,7 @@ def _assert_affine(jaxpr, dependent):
         consumes=("spaceodyssey.PlanPredictive",),
         produces=("spaceodyssey.CertificationOutcome",),
         version="1",
-        fidelity="closed_form",
+        fidelity="",
         cost_hint="low",
     ),
 )
@@ -120,7 +150,8 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
 
     Certification is a posterior-risk condition; its probability is taken
     over noisy data at fixed truth. The model declares a full-column-rank
-    ``spectral_matrix`` with response ``A @ theta`` plus a known offset.
+    ``spectral_matrix`` with response ``A @ theta`` plus a known offset, and
+    explicitly opts in with ``LINEAR_GAUSSIAN_SPECTRUM = True``.
     Only spectral data are used. Noise is known, with covariance
     ``diag(noise_sigma**2) + F @ F.T``. A singleton independent Normal prior
     gives a Gaussian posterior. Explicit ``flat_prior=True`` instead uses
@@ -132,7 +163,8 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
     JAX programs are checked structurally before posterior computation.
     Each claim must reduce to an interval or half-line on one scalar;
     two quantities in one claim must have proportional coefficient vectors.
-    Up to four linearly independent claim scalars are supported.
+    More than four claims and linearly dependent claim scalars (singular
+    claim covariance) raise ``UnsupportedProfile`` before posterior computation.
 
     Single thresholds and independent claim means have outcome fidelity
     ``closed_form``. Interval boundaries use 80 fixed bisections. Correlated
@@ -147,11 +179,19 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
     A library point estimate for joint support needs a tabulated or approximate
     tier validated against the exact tier. This toy is not a production tier.
 
+    ``integrate`` runs eagerly on the host with per-planet Python iteration.
+    It cannot be jitted, vmapped, or differentiated with respect to the plan,
+    truth, or model; no public integration argument supports differentiation.
+    The numerical helpers can be traced separately, but interval radii carry
+    no gradient.
+
     Args:
         profile: Claims, support rule, and risk tolerance.
         truth_model: Linear spectral model supplying named quantities.
         flat_prior: Explicitly select the support-only flat-prior experiment.
-        nodes: Fixed quadrature nodes per integration dimension.
+        nodes: Fixed quadrature nodes per integration dimension. Each rectangle
+            costs nodes**(D - 1) evaluations for D claims, with up to 81 counted
+            rectangles plus one for the negative event per planet.
     """
 
     profile: Profile = eqx.field(static=True)
@@ -171,8 +211,16 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
             )
         if len(profile.claims) > 4:
             raise UnsupportedProfile("Gaussian rectangles support at most four claims")
-        if not hasattr(truth_model, "spectral_matrix"):
-            raise UnsupportedProfile("linear spectral_matrix declaration is required")
+        scalar_names = [claim.edges[0].quantity for claim in profile.claims]
+        if len(set(scalar_names)) != len(scalar_names):
+            raise UnsupportedProfile(
+                "claim scalars must be linearly independent for rectangle quadrature"
+            )
+        if getattr(truth_model, "LINEAR_GAUSSIAN_SPECTRUM", False) is not True:
+            raise UnsupportedProfile(
+                "linear Gaussian spectral model must explicitly opt in with "
+                "LINEAR_GAUSSIAN_SPECTRUM = True"
+            )
         if len(truth_model.prior_set(profile.prior_set_id).members) != 1:
             raise UnsupportedProfile("Gaussian toy requires a singleton prior set")
 
@@ -199,6 +247,9 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
             raise ValueError("spectral_matrix must be finite with shape (B, D)")
         if np.linalg.matrix_rank(a) != d:
             raise UnsupportedProfile("spectral_matrix must have full column rank")
+        # Check claim independence before computing any posterior. Geometry is
+        # also checked at each planet's actual context during integration.
+        self._claim_geometry({name: jnp.asarray(0.0) for name in model.context_names})
         if not self.flat_prior:
             prior = model.prior
             if not np.all(np.isfinite(prior.loc)) or not np.all(
@@ -209,8 +260,11 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
                 )
 
     def _claim_geometry(self, context):
+        """Return coefficient rows and bounds for independent affine claims."""
         model = self.truth_model
-        zero = jnp.zeros(len(model.param_names))
+        zero = jnp.zeros(
+            len(model.param_names), dtype=jnp.result_type(model.spectral_matrix, 0.0)
+        )
         values = model.quantities(zero, context)
         gradients = jax.jacfwd(model.quantities)(zero, context)
         rows, lows, highs = [], [], []
@@ -224,14 +278,15 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
             for edge in claim.edges:
                 coefficient = gradients[edge.quantity]
                 factor = jnp.dot(coefficient, row) / norm2
+                rtol = 100 * jnp.finfo(row.dtype).eps
+                atol = rtol * float(jnp.linalg.norm(row))
                 if (
-                    not np.allclose(coefficient, factor * row, rtol=1e-12, atol=1e-14)
+                    not np.allclose(coefficient, factor * row, rtol=rtol, atol=atol)
                     or float(factor) == 0
                 ):
                     raise UnsupportedProfile(
                         f"claim {claim.name!r} needs a multidimensional posterior "
-                        "region; "
-                        "its edges must reduce to one linear scalar"
+                        "region; its edges must reduce to one linear scalar"
                     )
                 boundary = (edge.threshold - values[edge.quantity]) / factor
                 above = (edge.side == "above") == (float(factor) > 0)
@@ -252,8 +307,11 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
     def integrate(self, predictive):
         """Return Gaussian probabilities with claim columns and profile identity.
 
-        This host-side wrapper validates geometry and records fidelity; the
-        scalar root solver and rectangle integrator are JIT compatible.
+        Runs eagerly on the host, validates inputs and geometry, and records
+        fidelity. It cannot be jitted, vmapped, or differentiated in the plan,
+        truth, or model; no argument supports differentiation through this
+        method. Numerical helpers are JIT compatible when called separately;
+        the interval radius has no gradient.
         """
         self.validate_predictive(predictive)
         model, plan, truth = self.truth_model, predictive.plan, predictive.truth
@@ -286,15 +344,24 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
                 if self.flat_prior
                 else jnp.diag(1 / model.prior.scale**2)
             )
-            posterior = jnp.linalg.inv(precision + prior_precision)
             rhs = precision @ jnp.nan_to_num(truth.theta[i])
             if not self.flat_prior:
                 rhs = rhs + prior_precision @ model.prior.loc
-            mean = c @ posterior @ rhs
-            covariance = c @ posterior @ precision @ posterior @ c.T
-            sd = jnp.sqrt(jnp.diag(c @ posterior @ c.T))
+            mean, covariance, posterior_covariance = _posterior_moments(
+                precision, prior_precision, c, rhs
+            )
+            sd = jnp.sqrt(jnp.diag(posterior_covariance))
+            valid = valid and bool(
+                jnp.all(jnp.isfinite(mean))
+                & jnp.all(jnp.isfinite(covariance))
+                & jnp.all(jnp.isfinite(sd) & (sd > 0))
+                & jnp.all(jnp.diag(covariance) > 0)
+            )
+            scale = np.sqrt(np.diag(np.asarray(covariance)))
+            correlation = np.asarray(covariance) / (scale[:, None] * scale[None, :])
+            off_diagonal = correlation - np.eye(len(correlation))
             is_diagonal = np.all(
-                np.asarray(covariance) == np.diag(np.diag(np.asarray(covariance)))
+                np.abs(off_diagonal) <= 100 * np.finfo(correlation.dtype).eps
             )
             diagonal = diagonal and is_diagonal
             if self.flat_prior:
@@ -321,6 +388,7 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
                 truth.theta[i],
                 context,
             )
+            valid = valid and all(bool(jnp.all(jnp.isfinite(value))) for value in row)
             active = bool(available[i]) and valid
             results.append(
                 (
@@ -420,6 +488,7 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
 
 
 def _normal_mass(mean, sd, lower, upper):
+    """Return univariate Gaussian interval mass, reflecting upper tails."""
     reflect = lower > mean
     low = jnp.where(reflect, mean - upper, lower - mean) / sd
     high = jnp.where(reflect, mean - lower, upper - mean) / sd
@@ -427,6 +496,7 @@ def _normal_mass(mean, sd, lower, upper):
 
 
 def _regions(lower, upper, sd, alpha, evidence_pos, evidence_neg):
+    """Return positive, left-negative, and right-negative support bounds."""
     z = -ndtri(alpha)
     finite_low, finite_high = jnp.isfinite(lower), jnp.isfinite(upper)
     interval = finite_low & finite_high
@@ -434,8 +504,8 @@ def _regions(lower, upper, sd, alpha, evidence_pos, evidence_neg):
     center = (
         jnp.where(finite_low, lower, 0.0) + jnp.where(finite_high, upper, 0.0)
     ) / 2
-    radius_pos = _interval_radius(width, sd, 1 - alpha)
-    radius_neg = _interval_radius(width, sd, alpha)
+    radius_pos, feasible_pos = _interval_radius(width, sd, alpha)
+    radius_neg, _ = _interval_radius(width, sd, alpha, positive=False)
     pos_low = jnp.where(interval, center - radius_pos, lower + z * sd)
     pos_high = jnp.where(interval, center + radius_pos, upper - z * sd)
     neg_left = jnp.where(
@@ -444,8 +514,9 @@ def _regions(lower, upper, sd, alpha, evidence_pos, evidence_neg):
     neg_right = jnp.where(
         interval, center + jnp.maximum(radius_neg, 0.0), upper + z * sd
     )
-    pos_low = jnp.where(evidence_pos, pos_low, jnp.inf)
-    pos_high = jnp.where(evidence_pos, pos_high, -jnp.inf)
+    feasible = ~interval | feasible_pos
+    pos_low = jnp.where(evidence_pos & feasible, pos_low, jnp.inf)
+    pos_high = jnp.where(evidence_pos & feasible, pos_high, -jnp.inf)
     neg_left = jnp.where(evidence_neg, neg_left, -jnp.inf)
     neg_right = jnp.where(evidence_neg, neg_right, jnp.inf)
     return (

@@ -17,6 +17,7 @@ without erasing the announcement.
 import abc
 import dataclasses
 import inspect
+from functools import cache
 from typing import ClassVar, final
 
 import equinox as eqx
@@ -122,22 +123,32 @@ def _check_profile(profile, truth_model, certificate_type):
     certificate_type.check_profile_support(profile, truth_model)
 
 
+@cache
+def _constructor_signature(cls):
+    return inspect.signature(cls)
+
+
 class _ProfileCertificateMeta(type(AbstractCertificate)):
     def __call__(cls, *args, **kwargs):
         # Bind the generated or custom constructor before Equinox invokes any
         # subclass initialization, converters, or __check_init__ hooks.
-        bound = inspect.signature(cls).bind(*args, **kwargs)
+        bound = _constructor_signature(cls).bind(*args, **kwargs)
+        fields = {field.name: field for field in dataclasses.fields(cls)}
+        for name in ("profile", "truth_model"):
+            field = fields.get(name)
+            if field is not None:
+                if field.metadata.get("converter") is not None:
+                    raise TypeError(f"converters on {name} are unsupported")
+                if (
+                    name not in bound.arguments
+                    and field.default_factory is not dataclasses.MISSING
+                ):
+                    bound.arguments[name] = field.default_factory()
         bound.apply_defaults()
         if "profile" not in bound.arguments or "truth_model" not in bound.arguments:
             raise TypeError(
                 "profile certificate constructors must expose profile and truth_model"
             )
-        fields = {field.name: field for field in dataclasses.fields(cls)}
-        for name in ("profile", "truth_model"):
-            # Generated dataclass initializers expose a sentinel for factories.
-            # Resolve it once and forward the checked object to initialization.
-            if bound.arguments[name] is dataclasses._HAS_DEFAULT_FACTORY:
-                bound.arguments[name] = fields[name].default_factory()
         _check_profile(bound.arguments["profile"], bound.arguments["truth_model"], cls)
         return super().__call__(*bound.args, **bound.kwargs)
 
@@ -152,9 +163,16 @@ class AbstractProfileCertificate(
     an outcome with a claim axis and the profile's content hash. A quantity
     declaration of None accepts every quantity provided by the model.
     Constructors must expose named ``profile`` and ``truth_model`` parameters.
+    Field converters on these two fields are unsupported: the construction
+    guard validates their values before initialization. Compatibility is checked
+    once by the metaclass, without a repeated ``__check_init__`` hook.
     A construction guard checks compatibility before any subclass initialization
     or validation hook runs. Implementations must separately validate any restrictions
     on the functional form of quantities and on prior distributions.
+
+    ``integrate`` assumes validated inputs. The engine calls
+    ``validate_predictive`` first; direct callers must do so too unless the
+    implementation explicitly validates in its own ``integrate`` method.
     """
 
     profile: eqx.AbstractVar[Profile]
@@ -170,10 +188,6 @@ class AbstractProfileCertificate(
         This hook must inspect declarations only, without model computation.
         Raise UnsupportedProfile with the unsupported feature and reason.
         """
-
-    def __check_init__(self):
-        """Reject incompatible models, support rules, and quantities."""
-        _check_profile(self.profile, self.truth_model, type(self))
 
     def validate_predictive(self, predictive: PlanPredictive) -> None:
         """Check plan flux units and truth identity, dimensions, and context.

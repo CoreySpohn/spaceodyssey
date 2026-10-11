@@ -184,7 +184,7 @@ class AbstractTruthModel(eqx.Module):
             Photometric sigma is abs(expected flux) / SNR; zero SNR contributes
             zero photometry. RV with infinite precision contributes zero.
         """
-        if jr.key_impl(key) != "threefry2x32":
+        if str(jr.key_impl(key)) != "threefry2x32":
             raise ValueError("simulate requires threefry2x32 PRNG keys")
         self.validate_truth(truth, plan)
         mean = self.expected_data(truth, plan)
