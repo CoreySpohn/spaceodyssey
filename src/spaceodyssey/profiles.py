@@ -1,8 +1,13 @@
 """Reference claims and profile variants for exoEarth candidates.
 
-The conservative zone and radius boundaries follow Stark (2019) and
-Kopparapu (2018); the optimistic zone follows Kopparapu (2013). Distances
-are in Earth-equivalent insolation distance and radii in Earth radii.
+The conservative zone (0.95 to 1.67 Earth-equivalent insolation distance)
+is the band of Kasting et al. (1993) as adopted for exoEarth candidates by
+Stark et al. (2019). The radius bounds follow Kopparapu et al. (2018). The
+optimistic zone (0.75 to 1.77) is the recent-Venus and early-Mars limits of
+Kopparapu et al. (2013). Zone edges scale with stellar luminosity only; the
+host-temperature dependence of the edges (Kopparapu et al. 2013) is not
+modeled. Distances are in Earth-equivalent insolation distance and radii in
+Earth radii.
 The water claim uses a log10 volume mixing ratio threshold of -4.
 Compatible truth models must declare a prior set with id
 ``exoearth-reference@1``. Profile names are free-text display labels.
