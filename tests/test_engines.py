@@ -61,6 +61,29 @@ class TestEndToEnd:
         assert summary.false_certified_targets == (2,)
         assert summary.false_certifications == 1
 
+    def test_wrong_claims_scored_apart_from_absent_sources(self):
+        """Claim-level scoring counts real targets only, never absent ones."""
+        summary = engines.run(
+            make_spec(duration_d=6.0),
+            make_config(snr_absent=9.0),
+            seed=0,
+            registry=build_test_registry(),
+            is_wrong=lambda scene: scene == "planet",
+        )
+        assert summary.false_certified_targets == (2,)
+        assert summary.wrong_certified_targets == (1, 3)
+        assert summary.wrong_certifications == 2
+
+    def test_claim_scoring_off_by_default(self):
+        """Without a claim test no certification is scored wrong."""
+        summary = engines.run(
+            make_spec(duration_d=6.0),
+            make_config(),
+            seed=0,
+            registry=build_test_registry(),
+        )
+        assert summary.wrong_certified_targets == ()
+
     def test_validation_runs_before_the_engine(self):
         """An incoherent config is rejected before anything executes."""
         from spaceodyssey.errors import WiringError
@@ -88,3 +111,12 @@ class TestYieldSummary:
         )
         assert YieldSummary.from_json(summary.to_json()) == summary
         assert summary.false_certifications == 1
+
+    def test_reads_reports_without_claim_scoring(self):
+        """Reports written before claim-level scoring still load."""
+        text = (
+            '{"certificate":"detection","certified_targets":[1],"epochs":1,'
+            '"false_certified_targets":[],"operator":"sample",'
+            '"resources_spent":[["time_d",1.0]]}'
+        )
+        assert YieldSummary.from_json(text).wrong_certified_targets == ()

@@ -17,6 +17,7 @@ def run_sample(
     *,
     seed: int = 0,
     is_real=bool,
+    is_wrong=None,
     max_epochs: int = 10_000,
 ) -> YieldSummary:
     """Draw one universe, play the mission against it, score the outcome.
@@ -28,6 +29,8 @@ def run_sample(
             from it by meaning, so paired runs stay aligned.
         is_real: Maps a target's truth scene to whether a real source is
             present, for false-certification accounting.
+        is_wrong: Maps a real target's truth scene to whether the certified
+            claim is false about it; None skips claim-level scoring.
         max_epochs: Hard cap on loop steps.
 
     Returns:
@@ -41,4 +44,5 @@ def run_sample(
         operator="sample",
         certificate=DETECTION_CERTIFICATE,
         is_real=is_real,
+        is_wrong=is_wrong,
     )

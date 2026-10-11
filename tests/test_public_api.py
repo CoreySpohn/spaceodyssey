@@ -13,6 +13,7 @@ def test_default_registry_entries_available():
     """The in-tree reference implementations are discoverable and usable."""
     for seam, name in (
         ("certification", "snr_threshold"),
+        ("certification", "toy_gaussian"),
         ("context", "always_observable"),
         ("cost", "constant_overheads"),
     ):
@@ -23,3 +24,8 @@ def test_default_registry_entries_available():
 def test_sample_engine_available():
     """The sampling engine resolves through the public entry point."""
     assert callable(spaceodyssey.get_engine("sample"))
+
+
+def test_integrate_engine_available():
+    """The analytic integrate engine resolves through the public entry point."""
+    assert callable(spaceodyssey.get_engine("integrate"))

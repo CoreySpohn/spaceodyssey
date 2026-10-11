@@ -3,8 +3,12 @@
 A certified yield is never reported as a bare count: the summary carries the
 false-certification accounting next to it, because a mission certifying
 thirty targets with three false is not better than one certifying
-twenty-seven clean. Engines of every operator emit this same schema, so
-cross-engine comparisons are table joins rather than bespoke glue.
+twenty-seven clean. Two kinds of false certification are kept apart: a
+certified target with no real source behind it, and a certified claim that
+is wrong about a real planet. Engines of every operator emit the same
+schemas, so cross-engine comparisons are table joins rather than bespoke
+glue: :class:`YieldSummary` for realized runs, :class:`CertifiedYield` for
+expected yields from per-planet certification probabilities.
 
 This module is declarative: stdlib only, no JAX.
 """
@@ -25,6 +29,9 @@ class YieldSummary:
             source; only truth-holding engines can fill this.
         epochs: Number of executed loop steps (zero for closed-form runs).
         resources_spent: Final ledger totals as (resource, amount) pairs.
+        wrong_certified_targets: Certified ids with a real source whose
+            certified claim is false about it; only truth-holding engines
+            can fill this.
     """
 
     operator: str
@@ -33,6 +40,7 @@ class YieldSummary:
     false_certified_targets: tuple[int, ...]
     epochs: int
     resources_spent: tuple[tuple[str, float], ...]
+    wrong_certified_targets: tuple[int, ...] = ()
 
     @property
     def certified(self) -> int:
@@ -44,6 +52,11 @@ class YieldSummary:
         """The false-certification count."""
         return len(self.false_certified_targets)
 
+    @property
+    def wrong_certifications(self) -> int:
+        """The count of certified claims that are wrong about a real planet."""
+        return len(self.wrong_certified_targets)
+
     def to_json(self) -> str:
         """Serialize canonically (sorted keys)."""
         return json.dumps(
@@ -54,6 +67,7 @@ class YieldSummary:
                 "false_certified_targets": list(self.false_certified_targets),
                 "epochs": self.epochs,
                 "resources_spent": [[k, v] for k, v in self.resources_spent],
+                "wrong_certified_targets": list(self.wrong_certified_targets),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -70,6 +84,7 @@ class YieldSummary:
             false_certified_targets=tuple(data["false_certified_targets"]),
             epochs=data["epochs"],
             resources_spent=tuple((k, v) for k, v in data["resources_spent"]),
+            wrong_certified_targets=tuple(data.get("wrong_certified_targets", ())),
         )
 
 
@@ -80,6 +95,7 @@ def summarize(
     operator: str,
     certificate: str = "detection",
     is_real=bool,
+    is_wrong=None,
 ) -> YieldSummary:
     """Score a finished run against its drawn truth.
 
@@ -91,6 +107,9 @@ def summarize(
         is_real: Maps a target's truth scene to whether a real source is
             present. The default truthiness test suits simple containers;
             scene-aware implementations supply their own.
+        is_wrong: Maps a real target's truth scene to whether the certified
+            claim is false about it. None skips claim-level scoring, which
+            suits a detection certificate whose claim is presence itself.
 
     Returns:
         The run's YieldSummary.
@@ -101,6 +120,14 @@ def summarize(
         for target_id in certified
         if not is_real(universe.systems.get(target_id))
     )
+    wrong_certified = ()
+    if is_wrong is not None:
+        wrong_certified = tuple(
+            target_id
+            for target_id in certified
+            if target_id not in false_certified
+            and is_wrong(universe.systems.get(target_id))
+        )
     return YieldSummary(
         operator=operator,
         certificate=certificate,
@@ -108,4 +135,90 @@ def summarize(
         false_certified_targets=false_certified,
         epochs=state.epoch_index,
         resources_spent=tuple(sorted(state.ledger.spent.items())),
+        wrong_certified_targets=wrong_certified,
     )
+
+
+@dataclass(frozen=True)
+class CertifiedYield:
+    """Expected certified yields from per-planet certification probabilities.
+
+    With w_p the planet weights, p_pos, p_neg, p_wrong and p_neg_wrong the
+    per-planet probabilities and the truth-candidate mask from the
+    certificate,
+
+        y_cert_pos  = sum over truth candidates of w_p p_pos
+        y_wrong     = sum over all planets of w_p p_wrong
+        y_neg       = sum over all planets of w_p p_neg
+        y_neg_wrong = sum over all planets of w_p p_neg_wrong
+
+    They are always reported together. The per-planet columns hold each
+    planet's weighted contribution, so every yield is the sum of its column
+    and a bootstrap over planets resamples rows and re-sums. Standard errors
+    propagate the per-planet Monte Carlo errors in quadrature, treating the
+    planets' estimates as independent; they are zero for closed-form tiers.
+
+    Attributes:
+        operator: The outcome operator the run evaluated.
+        certificate: Name of the certificate that defines "certified".
+        y_cert_pos: Expected count of certified truth candidates.
+        y_wrong: Expected count of counted-direction certifications that are
+            wrong.
+        y_neg: Expected count of certified negative verdicts.
+        y_neg_wrong: Expected count of certified negative verdicts that are
+            wrong.
+        y_cert_pos_se: Monte Carlo standard error of ``y_cert_pos``.
+        y_wrong_se: Monte Carlo standard error of ``y_wrong``.
+        y_neg_se: Monte Carlo standard error of ``y_neg``.
+        y_neg_wrong_se: Monte Carlo standard error of ``y_neg_wrong``.
+        weights: Per-planet weights w_p.
+        cert_pos: Per-planet contributions to ``y_cert_pos``.
+        wrong: Per-planet contributions to ``y_wrong``.
+        neg: Per-planet contributions to ``y_neg``.
+        neg_wrong: Per-planet contributions to ``y_neg_wrong``.
+        in_range: Per-planet in-range flags of the evaluating tier.
+    """
+
+    operator: str
+    certificate: str
+    y_cert_pos: float
+    y_wrong: float
+    y_neg: float
+    y_neg_wrong: float
+    y_cert_pos_se: float
+    y_wrong_se: float
+    y_neg_se: float
+    y_neg_wrong_se: float
+    weights: tuple[float, ...]
+    cert_pos: tuple[float, ...]
+    wrong: tuple[float, ...]
+    neg: tuple[float, ...]
+    neg_wrong: tuple[float, ...]
+    in_range: tuple[bool, ...]
+
+    @property
+    def all_in_range(self) -> bool:
+        """Whether every planet was evaluated inside the validated range."""
+        return all(self.in_range)
+
+    def to_json(self) -> str:
+        """Serialize canonically (sorted keys)."""
+        return json.dumps(
+            {
+                name: list(value) if isinstance(value, tuple) else value
+                for name, value in self.__dict__.items()
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def from_json(cls, text: str) -> "CertifiedYield":
+        """Deserialize from :meth:`to_json` output."""
+        data = json.loads(text)
+        return cls(
+            **{
+                name: tuple(value) if isinstance(value, list) else value
+                for name, value in data.items()
+            }
+        )

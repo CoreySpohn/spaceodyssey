@@ -15,6 +15,7 @@ import numpy as np
 
 from spaceodyssey.contracts import resolve_contract
 from spaceodyssey.errors import UnsupportedOperator
+from spaceodyssey.plan import CertificationOutcome
 
 
 def check_predictive(pred, *, key, n: int = 4096) -> None:
@@ -62,13 +63,16 @@ def check_certificate(cert, info, datasets, *, moments=None, predictive=None):
         datasets: Realized datasets to fold in when "sample" is declared.
         moments: Predictive moments to propagate when "propagate" is declared.
         predictive: Predictive to integrate when "integrate" is declared.
+            When the certificate returns a CertificationOutcome, the outcome
+            contract is checked with :func:`check_outcome`.
 
     Returns:
         The final certificate state after any declared-sample updates.
 
     Raises:
-        AssertionError: When a declared operator raises UnsupportedOperator
-            or an undeclared one fails to.
+        AssertionError: When a declared operator raises UnsupportedOperator,
+            an undeclared one fails to, or an integrated outcome breaks its
+            contract.
     """
     state = cert.initial()
     if "sample" in info.operators:
@@ -94,14 +98,65 @@ def check_certificate(cert, info, datasets, *, moments=None, predictive=None):
         )
     if "integrate" in info.operators:
         try:
-            cert.integrate(predictive)
+            result = cert.integrate(predictive)
         except UnsupportedOperator as err:
             raise AssertionError(
                 "certificate declares 'integrate' but integrate() raised"
             ) from err
+        if isinstance(result, CertificationOutcome):
+            check_outcome(result)
     else:
         _expect_unsupported(lambda: cert.integrate(predictive), "integrate")
     return state
+
+
+def check_outcome(outcome: CertificationOutcome) -> None:
+    """Check a certification outcome against its value contract.
+
+    Over the in-range planets: every probability lies in [0, 1], the
+    positive and negative verdicts are exclusive (p_pos + p_neg <= 1), a
+    wrong counted-direction certification is a positive one
+    (p_wrong <= p_pos), a wrong negative is a negative one
+    (p_neg_wrong <= p_neg), and standard errors are non-negative. All flags must
+    be boolean and at least one planet must be in range, so the check is
+    never vacuous.
+
+    Args:
+        outcome: The outcome to check.
+
+    Raises:
+        AssertionError: On any contract violation.
+    """
+    if outcome.in_range.dtype != jnp.bool_:
+        raise AssertionError("in_range must be boolean")
+    if outcome.truth_positive.dtype != jnp.bool_:
+        raise AssertionError("truth_positive must be boolean")
+    keep = np.asarray(outcome.in_range)
+    if not keep.any():
+        raise AssertionError("no planet is in range; the outcome checks nothing")
+    p_pos = np.asarray(outcome.p_pos)[keep]
+    p_neg = np.asarray(outcome.p_neg)[keep]
+    p_wrong = np.asarray(outcome.p_wrong)[keep]
+    p_neg_wrong = np.asarray(outcome.p_neg_wrong)[keep]
+    slack = 1e-6
+    for name, value in (
+        ("p_pos", p_pos),
+        ("p_neg", p_neg),
+        ("p_wrong", p_wrong),
+        ("p_neg_wrong", p_neg_wrong),
+    ):
+        if not np.all((value >= 0.0) & (value <= 1.0)):
+            raise AssertionError(f"{name} leaves [0, 1]: {value}")
+    if not np.all(p_pos + p_neg <= 1.0 + slack):
+        raise AssertionError("p_pos + p_neg exceeds one")
+    if not np.all(p_wrong <= p_pos + slack):
+        raise AssertionError("p_wrong exceeds p_pos")
+    if not np.all(p_neg_wrong <= p_neg + slack):
+        raise AssertionError("p_neg_wrong exceeds p_neg")
+    for name in ("p_pos_se", "p_neg_se", "p_wrong_se", "p_neg_wrong_se"):
+        value = np.asarray(getattr(outcome, name))[keep]
+        if not np.all(value >= 0.0):
+            raise AssertionError(f"{name} is negative: {value}")
 
 
 def check_ports(instance_output, info) -> None:

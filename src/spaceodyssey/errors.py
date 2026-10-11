@@ -16,3 +16,11 @@ class WiringError(RuntimeError):
 
 class RegistryError(RuntimeError):
     """A seam registry lookup or registration failed."""
+
+
+class OutOfRangeError(ValueError):
+    """A certificate tier was evaluated outside its validated range.
+
+    Tiers never raise inside ``jit``; they return an in-range flag, and the
+    host-side check that reads it raises this.
+    """

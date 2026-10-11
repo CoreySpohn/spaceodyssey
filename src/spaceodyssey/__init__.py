@@ -9,12 +9,22 @@ from spaceodyssey._version import __version__
 from spaceodyssey.account import ConstantOverheads, Ledger
 from spaceodyssey.belief import MissionBelief, TargetBelief
 from spaceodyssey.build import Mission, ModelStack, TruthStack, build
-from spaceodyssey.certify import AbstractCertificate, CertificateState, SnrThreshold
+from spaceodyssey.certify import (
+    AbstractCertificate,
+    CertificateState,
+    SnrThreshold,
+    ToyGaussianCertifier,
+)
 from spaceodyssey.context import AbstractContextProvider, AlwaysObservable
 from spaceodyssey.data import Observation, SummaryDataset
 from spaceodyssey.dist import AbstractPredictive, GaussianSummary
 from spaceodyssey.engines import get_engine, register_engine, run
-from spaceodyssey.errors import RegistryError, UnsupportedOperator, WiringError
+from spaceodyssey.errors import (
+    OutOfRangeError,
+    RegistryError,
+    UnsupportedOperator,
+    WiringError,
+)
 from spaceodyssey.io import RunManifest, read_manifest, write_run
 from spaceodyssey.loop import (
     DETECTION_CERTIFICATE,
@@ -23,8 +33,9 @@ from spaceodyssey.loop import (
     run_mission,
     step,
 )
-from spaceodyssey.metrics import YieldSummary, summarize
+from spaceodyssey.metrics import CertifiedYield, YieldSummary, summarize
 from spaceodyssey.observe import AbstractMeasurement
+from spaceodyssey.plan import CertificationOutcome, PlanPredictive, PlanSummary
 from spaceodyssey.registry import (
     REGISTRY,
     RegisteredImpl,
@@ -61,6 +72,8 @@ __all__ = [
     "AbstractUniverseSource",
     "AlwaysObservable",
     "CertificateState",
+    "CertificationOutcome",
+    "CertifiedYield",
     "ConstantOverheads",
     "FidelityConfig",
     "FileRef",
@@ -73,6 +86,9 @@ __all__ = [
     "MissionState",
     "ModelStack",
     "Observation",
+    "OutOfRangeError",
+    "PlanPredictive",
+    "PlanSummary",
     "Purpose",
     "RegisteredImpl",
     "Registry",
@@ -84,6 +100,7 @@ __all__ = [
     "SnrThreshold",
     "SummaryDataset",
     "TargetBelief",
+    "ToyGaussianCertifier",
     "TruthStack",
     "Universe",
     "UnsupportedOperator",

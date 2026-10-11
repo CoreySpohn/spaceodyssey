@@ -1,8 +1,9 @@
 """Engines: one run callable per outcome operator.
 
 The operator vocabulary is open, and this registry is where it lives: an
-engine is a callable ``(mission, *, seed, **options) -> YieldSummary``, keyed
-by the operator name a configuration requests. There is no engine class
+engine is a callable ``(mission, *, seed, **options) -> report``, keyed by
+the operator name a configuration requests, where the report is one of the
+schemas in :mod:`spaceodyssey.metrics`. There is no engine class
 hierarchy because operators genuinely differ in control flow (a stochastic
 event loop, a deterministic belief recursion, a vectorized closed-form
 integral cannot stand in for one another behind a shared signature); the
@@ -18,13 +19,16 @@ from collections.abc import Callable
 from spaceodyssey.aliases import resolve_qualname_alias
 from spaceodyssey.build import build
 from spaceodyssey.errors import RegistryError
-from spaceodyssey.metrics import YieldSummary
+from spaceodyssey.metrics import CertifiedYield, YieldSummary
 from spaceodyssey.registry import REGISTRY, Registry
 from spaceodyssey.spec import FidelityConfig, MissionSpec
 
 ENGINES: dict[str, Callable] = {}
 
-_DEFAULT_ENGINE_MODULES: tuple[str, ...] = ("spaceodyssey.engines.mc",)
+_DEFAULT_ENGINE_MODULES: tuple[str, ...] = (
+    "spaceodyssey.engines.mc",
+    "spaceodyssey.engines.analytic",
+)
 _defaults_loaded = False
 
 
@@ -75,7 +79,7 @@ def run(
     seed: int = 0,
     registry: Registry = REGISTRY,
     **options,
-) -> YieldSummary:
+) -> YieldSummary | CertifiedYield:
     """Validate, compile, and run one configuration end to end.
 
     Args:
@@ -86,7 +90,7 @@ def run(
         **options: Forwarded to the engine.
 
     Returns:
-        The run's YieldSummary.
+        The run's report.
     """
     config.validate(registry).raise_if_failed()
     engine = get_engine(config.operator)

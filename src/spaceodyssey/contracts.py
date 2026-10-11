@@ -13,10 +13,14 @@ from planit_py.vocabulary import Action, ObservingContext
 
 from spaceodyssey.aliases import resolve_qualname_alias
 from spaceodyssey.errors import WiringError
+from spaceodyssey.plan import CertificationOutcome, PlanPredictive, PlanSummary
 
 __all__ = [
     "Action",
+    "CertificationOutcome",
     "ObservingContext",
+    "PlanPredictive",
+    "PlanSummary",
     "compatible",
     "resolve_contract",
 ]
