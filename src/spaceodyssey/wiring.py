@@ -24,8 +24,8 @@ class WiringFailure:
     """One reason a configuration cannot run.
 
     Attributes:
-        kind: Failure family: "unknown_impl", "unavailable", "operator",
-            "ports", or "contract".
+        kind: Failure family: "seam_mismatch", "unknown_impl", "unavailable",
+            "operator", "ports", or "contract".
         stack: Which side failed, "truth" or "model".
         edge: The (producer, consumer) seam pair for edge failures, else None.
         seam: The seam the failure is reported against.
@@ -105,6 +105,21 @@ def _check_stack(config, registry, stack: str, failures, uncalibrated) -> None:
     refs = _stack_refs(config, stack)
     infos = {}
     for seam, ref in sorted(refs.items()):
+        if ref.seam != seam:
+            failures.append(
+                WiringFailure(
+                    kind="seam_mismatch",
+                    stack=stack,
+                    edge=None,
+                    seam=seam,
+                    impl=ref.name,
+                    message=(
+                        f"slot '{seam}' references {ref.seam}={ref.name}; "
+                        "reference seam must match the slot"
+                    ),
+                )
+            )
+            continue
         try:
             entry = registry.get(seam, ref.name)
         except RegistryError as err:

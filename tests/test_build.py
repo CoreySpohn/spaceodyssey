@@ -4,8 +4,9 @@ import pytest
 
 from spaceodyssey.build import Mission, ModelStack, TruthStack, build
 from spaceodyssey.errors import WiringError
+from spaceodyssey.registry import SeamInfo
 from spaceodyssey.spec import FidelityConfig, SeamChoice, SeamRef
-from tests.doubles import build_test_registry, make_config, make_spec
+from tests.doubles import ThreeTargetSource, build_test_registry, make_config, make_spec
 
 
 class TestBuild:
@@ -63,3 +64,20 @@ class TestBuild:
         )
         with pytest.raises(WiringError, match="observation=presence"):
             build(make_spec(), config, build_test_registry(), check=False)
+
+    @pytest.mark.parametrize("check", [True, False])
+    @pytest.mark.parametrize("stack", ["truth", "model"])
+    def test_ref_seam_mismatch_refused(self, check, stack):
+        """Construction rejects mismatched ref seams even without validation."""
+        registry = build_test_registry()
+        registry.register("certification", "presence", SeamInfo(operators={"sample"}))(
+            ThreeTargetSource
+        )
+        ref = SeamRef.make("certification", "presence")
+        choice = SeamChoice(
+            truth=ref if stack == "truth" else SeamRef.make("observation", ref.name),
+            model=ref if stack == "model" else None,
+        )
+        config = FidelityConfig.make("sample", observation=choice)
+        with pytest.raises(WiringError, match=r"observation.*certification"):
+            build(make_spec(), config, registry, check=check)

@@ -103,6 +103,12 @@ def build(
     truth_impls: dict[str, Any] = {}
     model_impls: dict[str, Any] = {}
     for seam, choice in config.choices:
+        for ref in (choice.truth, choice.model_ref):
+            if ref.seam != seam:
+                raise WiringError(
+                    f"slot '{seam}' references {ref.seam}={ref.name}; "
+                    "reference seam must match the slot"
+                )
         truth_impls[seam] = _instantiate(registry, choice.truth)
         if choice.model is None:
             model_impls[seam] = truth_impls[seam]

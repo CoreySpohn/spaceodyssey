@@ -138,6 +138,30 @@ class TestValidation:
         assert report.failures[0].kind == "unknown_impl"
         assert "summary_rates" in report.failures[0].message
 
+    @pytest.mark.parametrize("stack", ["truth", "model"])
+    def test_ref_seam_must_match_slot(self, registry, stack):
+        """A shared implementation name cannot hide a mismatched ref seam."""
+        registry.register(
+            "post_processing", "summary_rates", SeamInfo(operators={"sample"})
+        )(Impl)
+        ref = SeamRef.make("post_processing", "summary_rates")
+        choice = SeamChoice(
+            truth=ref if stack == "truth" else SeamRef.make("observation", ref.name),
+            model=ref if stack == "model" else None,
+        )
+        config = FidelityConfig.make("sample", observation=choice)
+        report = config.validate(registry)
+        assert not report.ok
+        assert len(report.failures) == 1
+        failure = report.failures[0]
+        assert failure.kind == "seam_mismatch"
+        assert failure.stack == stack
+        assert failure.seam == "observation"
+        assert failure.impl == "summary_rates"
+        assert failure.edge is None
+        assert "observation" in failure.message
+        assert "post_processing" in failure.message
+
     def test_unavailable_impl(self, registry):
         """A missing optional dependency reports the entry as unavailable."""
         registry.register(
