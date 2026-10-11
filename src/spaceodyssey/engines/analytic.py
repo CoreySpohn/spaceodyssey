@@ -21,9 +21,9 @@ from spaceodyssey.plan import CertificationOutcome, PlanPredictive
 
 def _contributions(outcome: CertificationOutcome, weights):
     weights = jnp.asarray(weights)
-    candidate = outcome.truth_positive
     return (
-        weights * jnp.where(candidate, outcome.p_pos, 0.0),
+        weights * outcome.p_pos,
+        weights * (outcome.p_pos - outcome.p_wrong),
         weights * outcome.p_wrong,
         weights * outcome.p_neg,
         weights * outcome.p_neg_wrong,
@@ -32,15 +32,16 @@ def _contributions(outcome: CertificationOutcome, weights):
 
 def weighted_yields(
     outcome: CertificationOutcome, weights
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Return (y_cert_pos, y_wrong, y_neg, y_neg_wrong) summed over planets.
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Return (y_issued, y_cert_pos, y_wrong, y_neg, y_neg_wrong) over all planets.
 
     Args:
         outcome: Per-planet certification probabilities, shape (P,) each.
         weights: Per-planet population weights, shape (P,).
 
     Returns:
-        The four expected yields as scalars: certified truth candidates,
+        The five expected yields as scalars: all issued positive certifications,
+        correct counted-direction certifications,
         wrong counted-direction certifications, certified negatives, and
         wrong certified negatives.
     """
@@ -63,7 +64,9 @@ def certified_yield(
         operator: The operator label to record.
 
     Returns:
-        The CertifiedYield report.
+        The CertifiedYield report. Its independent-planet standard errors
+        are LOWER BOUNDS: shared table and common-random-number errors
+        are not included.
     """
     weights = jnp.asarray(weights)
     if weights.shape != outcome.p_pos.shape:
@@ -84,19 +87,21 @@ def certified_yield(
     return CertifiedYield(
         operator=operator,
         certificate=certificate,
-        y_cert_pos=yields[0],
-        y_wrong=yields[1],
-        y_neg=yields[2],
-        y_neg_wrong=yields[3],
-        y_cert_pos_se=standard_errors[0],
-        y_wrong_se=standard_errors[1],
-        y_neg_se=standard_errors[2],
-        y_neg_wrong_se=standard_errors[3],
+        y_issued=yields[0],
+        y_cert_pos=yields[1],
+        y_wrong=yields[2],
+        y_neg=yields[3],
+        y_neg_wrong=yields[4],
+        y_cert_pos_se_independent_lower_bound=standard_errors[0],
+        y_wrong_se_independent_lower_bound=standard_errors[1],
+        y_neg_se_independent_lower_bound=standard_errors[2],
+        y_neg_wrong_se_independent_lower_bound=standard_errors[3],
         weights=tuple(w.tolist()),
-        cert_pos=tuple(columns[0].tolist()),
-        wrong=tuple(columns[1].tolist()),
-        neg=tuple(columns[2].tolist()),
-        neg_wrong=tuple(columns[3].tolist()),
+        issued=tuple(columns[0].tolist()),
+        cert_pos=tuple(columns[1].tolist()),
+        wrong=tuple(columns[2].tolist()),
+        neg=tuple(columns[3].tolist()),
+        neg_wrong=tuple(columns[4].tolist()),
         in_range=tuple(np.asarray(outcome.in_range).tolist()),
     )
 
@@ -122,7 +127,9 @@ def run_integrate(
             validated range; when False the report carries the flags.
 
     Returns:
-        The CertifiedYield report.
+        The CertifiedYield report. Its independent-planet standard errors
+        are LOWER BOUNDS: shared table and common-random-number errors
+        are not included.
 
     Raises:
         WiringError: When no certificate is configured.

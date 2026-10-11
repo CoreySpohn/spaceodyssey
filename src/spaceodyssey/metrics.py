@@ -144,10 +144,10 @@ class CertifiedYield:
     """Expected certified yields from per-planet certification probabilities.
 
     With w_p the planet weights, p_pos, p_neg, p_wrong and p_neg_wrong the
-    per-planet probabilities and the truth-candidate mask from the
-    certificate,
+    per-planet probabilities from the certificate,
 
-        y_cert_pos  = sum over truth candidates of w_p p_pos
+        y_issued    = sum over all planets of w_p p_pos
+        y_cert_pos  = sum over all planets of w_p (p_pos - p_wrong)
         y_wrong     = sum over all planets of w_p p_wrong
         y_neg       = sum over all planets of w_p p_neg
         y_neg_wrong = sum over all planets of w_p p_neg_wrong
@@ -157,21 +157,31 @@ class CertifiedYield:
     and a bootstrap over planets resamples rows and re-sums. Standard errors
     propagate the per-planet Monte Carlo errors in quadrature, treating the
     planets' estimates as independent; they are zero for closed-form tiers.
+    These are independent-planet LOWER BOUNDS: shared table or
+    common-random-number errors are not included. The positive-yield error
+    retains the candidate-masked p_pos_se approximation; covariance between
+    p_pos and p_wrong is unavailable in the outcome contract.
 
     Attributes:
         operator: The outcome operator the run evaluated.
         certificate: Name of the certificate that defines "certified".
-        y_cert_pos: Expected count of certified truth candidates.
+        y_issued: Expected count of all issued positive certifications.
+        y_cert_pos: Expected count of correct counted-direction certifications.
         y_wrong: Expected count of counted-direction certifications that are
             wrong.
         y_neg: Expected count of certified negative verdicts.
         y_neg_wrong: Expected count of certified negative verdicts that are
             wrong.
-        y_cert_pos_se: Monte Carlo standard error of ``y_cert_pos``.
-        y_wrong_se: Monte Carlo standard error of ``y_wrong``.
-        y_neg_se: Monte Carlo standard error of ``y_neg``.
-        y_neg_wrong_se: Monte Carlo standard error of ``y_neg_wrong``.
+        y_cert_pos_se_independent_lower_bound: Independent-planet LOWER BOUND
+            for the Monte Carlo standard error of ``y_cert_pos``.
+        y_wrong_se_independent_lower_bound: Independent-planet LOWER BOUND
+            for the Monte Carlo standard error of ``y_wrong``.
+        y_neg_se_independent_lower_bound: Independent-planet LOWER BOUND
+            for the Monte Carlo standard error of ``y_neg``.
+        y_neg_wrong_se_independent_lower_bound: Independent-planet LOWER BOUND
+            for the Monte Carlo standard error of ``y_neg_wrong``.
         weights: Per-planet weights w_p.
+        issued: Per-planet contributions to ``y_issued``.
         cert_pos: Per-planet contributions to ``y_cert_pos``.
         wrong: Per-planet contributions to ``y_wrong``.
         neg: Per-planet contributions to ``y_neg``.
@@ -181,15 +191,17 @@ class CertifiedYield:
 
     operator: str
     certificate: str
+    y_issued: float
     y_cert_pos: float
     y_wrong: float
     y_neg: float
     y_neg_wrong: float
-    y_cert_pos_se: float
-    y_wrong_se: float
-    y_neg_se: float
-    y_neg_wrong_se: float
+    y_cert_pos_se_independent_lower_bound: float
+    y_wrong_se_independent_lower_bound: float
+    y_neg_se_independent_lower_bound: float
+    y_neg_wrong_se_independent_lower_bound: float
     weights: tuple[float, ...]
+    issued: tuple[float, ...]
     cert_pos: tuple[float, ...]
     wrong: tuple[float, ...]
     neg: tuple[float, ...]
@@ -216,6 +228,17 @@ class CertifiedYield:
     def from_json(cls, text: str) -> "CertifiedYield":
         """Deserialize from :meth:`to_json` output."""
         data = json.loads(text)
+        for name in ("cert_pos", "wrong", "neg", "neg_wrong"):
+            old = f"y_{name}_se"
+            if old in data:
+                data.setdefault(f"{old}_independent_lower_bound", data.pop(old))
+        # Older reports have no issued column; recover it from correct + wrong.
+        if "issued" not in data:
+            data["issued"] = [
+                correct + wrong
+                for correct, wrong in zip(data["cert_pos"], data["wrong"], strict=True)
+            ]
+        data.setdefault("y_issued", sum(data["issued"]))
         return cls(
             **{
                 name: tuple(value) if isinstance(value, list) else value

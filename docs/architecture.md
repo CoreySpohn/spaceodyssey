@@ -179,3 +179,19 @@ Aliases are applied only during resolution. Reading or rebuilding an older
 manifest preserves its original identifiers, library versions, configuration
 hashes, run identity, and scientific identifiers. To replay a run, retain its
 original manifest instead of replacing qualified names with their new spellings.
+
+The analytic integrate engine reports five weighted yields over all planets:
+`y_issued = sum(w * p_pos)`, `y_cert_pos = sum(w * (p_pos - p_wrong))`,
+`y_wrong = sum(w * p_wrong)`, `y_neg = sum(w * p_neg)`, and
+`y_neg_wrong = sum(w * p_neg_wrong)`. Correct positive yield excludes every
+wrong claim, including a wrong water verdict on a true candidate. Each total
+has a per-planet contribution column (`issued`, `cert_pos`, `wrong`, `neg`,
+`neg_wrong`). `weighted_yields` returns the totals in that order.
+
+Report fields ending in `_se_independent_lower_bound` retain quadrature over
+independent planets and are **LOWER BOUNDS**: shared table and common-random-number
+errors are not included. The positive-yield error retains the candidate-masked
+`p_pos_se` approximation because the outcome provides no positive/wrong
+covariance. JSON readers accept the previous `_se` names. Legacy reports retain
+their stored positive-yield values; their missing issued column is reconstructed
+as `cert_pos + wrong` and cannot recover the former estimand's omitted planets.
