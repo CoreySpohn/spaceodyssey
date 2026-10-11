@@ -36,6 +36,7 @@ from spaceodyssey.loop import (
 from spaceodyssey.metrics import CertifiedYield, YieldSummary, summarize
 from spaceodyssey.observe import AbstractMeasurement
 from spaceodyssey.plan import CertificationOutcome, PlanPredictive, PlanSummary
+from spaceodyssey.profile import Claim, Edge, Profile
 from spaceodyssey.registry import (
     REGISTRY,
     RegisteredImpl,
@@ -74,7 +75,9 @@ __all__ = [
     "CertificateState",
     "CertificationOutcome",
     "CertifiedYield",
+    "Claim",
     "ConstantOverheads",
+    "Edge",
     "FidelityConfig",
     "FileRef",
     "FixedUniverse",
@@ -89,6 +92,7 @@ __all__ = [
     "OutOfRangeError",
     "PlanPredictive",
     "PlanSummary",
+    "Profile",
     "Purpose",
     "RegisteredImpl",
     "Registry",
