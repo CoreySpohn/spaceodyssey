@@ -31,7 +31,8 @@ from spaceodyssey.profile import Profile
 from spaceodyssey.registry import SeamInfo, register
 from spaceodyssey.truth import AbstractTruthModel, check_compatible
 
-# Obtain the factory placeholder through public dataclass APIs.
+# Discover the generated constructor's private factory placeholder without
+# importing a private dataclasses attribute.
 _DEFAULT_FACTORY_SENTINEL = (
     inspect.signature(
         dataclasses.make_dataclass(
@@ -42,6 +43,8 @@ _DEFAULT_FACTORY_SENTINEL = (
     .parameters["value"]
     .default
 )
+assert _DEFAULT_FACTORY_SENTINEL is not inspect.Parameter.empty
+assert _DEFAULT_FACTORY_SENTINEL is not dataclasses.MISSING
 
 
 @final
@@ -158,19 +161,12 @@ class _ProfileCertificateMeta(type(AbstractCertificate)):
                     raise TypeError(f"converters on {name} are unsupported")
                 if (
                     name not in bound.arguments
-                    and (
-                        signature.parameters[name].default is _DEFAULT_FACTORY_SENTINEL
-                        or signature.parameters[name].default is field.default
-                    )
+                    and signature.parameters[name].default is _DEFAULT_FACTORY_SENTINEL
                     and field.default is dataclasses.MISSING
                     and field.default_factory is not dataclasses.MISSING
                 ):
                     bound.arguments[name] = field.default_factory()
         bound.apply_defaults()
-        if "profile" not in bound.arguments or "truth_model" not in bound.arguments:
-            raise TypeError(
-                "profile certificate constructors must expose profile and truth_model"
-            )
         _check_profile(bound.arguments["profile"], bound.arguments["truth_model"], cls)
         return super().__call__(*bound.args, **bound.kwargs)
 

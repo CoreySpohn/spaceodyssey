@@ -70,22 +70,28 @@ def _interval_radius(width, sd, alpha, *, positive=True):
     def tangent_solve(linear, tangent):
         # The Jacobian is diagonal for batched, independent scalar roots.
         slope = linear(jnp.ones_like(high))
-        slope = jnp.where(feasible & (slope != 0), slope, 1.0)
+        slope = jnp.where(feasible & jnp.isfinite(slope) & (slope != 0), slope, 1.0)
         return jnp.where(feasible, tangent, 0.0) / slope
 
     radius = jax.lax.custom_root(residual, jnp.zeros_like(high), solve, tangent_solve)
     return radius, feasible
 
 
-def _assert_affine(jaxpr, dependent):
-    """Reject nonlinear parameter dependence from a traced quantity program."""
-    dependencies = dict(zip(jaxpr.invars, dependent, strict=True))
+def _live_inputs(jaxpr):
+    """Return needed variables and live equations in execution order."""
     needed = set(v for v in jaxpr.outvars if not isinstance(v, Literal))
     live = []
     for equation in reversed(jaxpr.eqns):
         if any(v in needed for v in equation.outvars):
             live.append(equation)
             needed.update(v for v in equation.invars if not isinstance(v, Literal))
+    return needed, list(reversed(live))
+
+
+def _assert_affine(jaxpr, dependent):
+    """Reject nonlinear parameter dependence from a traced quantity program."""
+    dependencies = dict(zip(jaxpr.invars, dependent, strict=True))
+    _, live = _live_inputs(jaxpr)
     linear = {
         "add",
         "sub",
@@ -101,7 +107,7 @@ def _assert_affine(jaxpr, dependent):
         "rev",
         "split",
     }
-    for equation in reversed(live):
+    for equation in live:
         inputs = [
             False if isinstance(v, Literal) else dependencies.get(v, False)
             for v in equation.invars
@@ -266,12 +272,7 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
                 lambda theta, ctx, name=name: model.quantities(theta, ctx)[name]
             )(jax.ShapeDtypeStruct((d,), float), context)
             _assert_affine(program.jaxpr, [True] + [False] * len(context))
-            needed = {v for v in program.jaxpr.outvars if not isinstance(v, Literal)}
-            for equation in reversed(program.jaxpr.eqns):
-                if any(v in needed for v in equation.outvars):
-                    needed.update(
-                        v for v in equation.invars if not isinstance(v, Literal)
-                    )
+            needed, _ = _live_inputs(program.jaxpr)
             context_dependent |= any(v in needed for v in program.jaxpr.invars[1:])
         a = np.asarray(model.spectral_matrix)
         if a.ndim != 2 or a.shape[1] != d or not np.all(np.isfinite(a)):
@@ -347,6 +348,11 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
         method. Numerical helpers are JIT compatible when called separately;
         interval radii use implicit-function derivatives away from the
         feasibility boundary.
+
+        Raises:
+            UnsupportedProfile: A planet's context makes the claim geometry
+                degenerate. This rejects the whole batch; other inputs outside
+                the validated range clear ``in_range`` under the base contract.
         """
         self.validate_predictive(predictive)
         model, plan, truth = self.truth_model, predictive.plan, predictive.truth
@@ -527,13 +533,21 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
 def _normal_mass(mean, sd, lower, upper):
     """Return univariate Gaussian interval mass, reflecting upper tails."""
     empty = lower >= upper
-    # Finite empty bounds prevent zero cotangents from multiplying infinities.
+    # Sanitize empty and infinite bounds before dividing by the scale, so
+    # zero cotangents never multiply infinities in scale derivatives.
     lower = jnp.where(empty, mean, lower)
     upper = jnp.where(empty, mean, upper)
+    finite_lower, finite_upper = jnp.isfinite(lower), jnp.isfinite(upper)
+    lower = jnp.where(finite_lower, lower, mean)
+    upper = jnp.where(finite_upper, upper, mean)
     reflect = lower > mean
     low = jnp.where(reflect, mean - upper, lower - mean) / sd
     high = jnp.where(reflect, mean - lower, upper - mean) / sd
-    return jnp.where(empty, 0.0, jnp.maximum(ndtr(high) - ndtr(low), 0.0))
+    low_mass = jnp.where(jnp.where(reflect, finite_upper, finite_lower), ndtr(low), 0.0)
+    high_mass = jnp.where(
+        jnp.where(reflect, finite_lower, finite_upper), ndtr(high), 1.0
+    )
+    return jnp.where(empty, 0.0, jnp.maximum(high_mass - low_mass, 0.0))
 
 
 def _regions(lower, upper, sd, alpha, evidence_pos, evidence_neg):

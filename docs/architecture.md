@@ -300,6 +300,7 @@ scalar bisection to find the interval of certifying posterior means; intervals
 that are too narrow have no positive support region. The solver evaluates tail
 probabilities directly at small alpha. Interval radii use implicit-function
 gradients through `jax.lax.custom_root` away from the feasibility boundary.
+Infeasible radii are zero and have zero tangents.
 
 The toy accepts `separate` and `split` for up to four linearly independent claim
 scalars. Quantities may be affine combinations of parameters; two edges within

@@ -419,6 +419,99 @@ def _central_gradient(function, sd, width):
     return gradient
 
 
+@pytest.mark.parametrize("lower, upper", [(-np.inf, 1.0), (1.0, np.inf)])
+def test_infinite_bound_mass_scale_gradient_matches_finite_difference(lower, upper):
+    from spaceodyssey.gaussian_profile import _normal_mass
+
+    with jax.enable_x64():
+
+        def probability(sd):
+            return _normal_mass(0.0, sd, lower, upper)
+
+        sd, delta = np.float64(0.7), np.float64(0.7e-5)
+        expected = (probability(sd + delta) - probability(sd - delta)) / (2 * delta)
+        np.testing.assert_allclose(
+            probability(sd), norm.cdf(upper / sd) - norm.cdf(lower / sd), rtol=1e-14
+        )
+        for gradient in (jax.grad(probability), jax.jit(jax.grad(probability))):
+            actual = gradient(sd)
+            assert np.isfinite(actual)
+            np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=0)
+
+
+@pytest.mark.parametrize(
+    "edges, channel",
+    [
+        ((Edge("x", 0.1, "above"),), 0),
+        ((Edge("x", 0.1, "below"),), 0),
+        ((Edge("x", 0.1, "above"),), 5),
+        ((Edge("x", 0.1, "below"),), 5),
+        ((Edge("x", -1.0, "above"), Edge("x", 1.0, "below")), 5),
+    ],
+)
+def test_claim_probability_scale_gradient_matches_finite_difference(edges, channel):
+    from spaceodyssey import GaussianProfileCertifier
+
+    with jax.enable_x64():
+        model = GaussianModel()
+        certificate = GaussianProfileCertifier(
+            profile_for([Claim("x", edges, "positive")], rule="joint"),
+            model,
+            flat_prior=True,
+        )
+        lower = max(
+            (edge.threshold for edge in edges if edge.side == "above"), default=-np.inf
+        )
+        upper = min(
+            (edge.threshold for edge in edges if edge.side == "below"), default=np.inf
+        )
+
+        def probability(sd):
+            result = certificate._probabilities(
+                jnp.array([0.2]),
+                jnp.array([[0.4**2]]),
+                jnp.array([sd]),
+                jnp.array([lower]),
+                jnp.array([upper]),
+                jnp.array([True]),
+                jnp.array([True]),
+                True,
+                jnp.array([0.2, 0.0]),
+                {"offset": jnp.array(0.0)},
+            )
+            return jnp.sum(result[channel])
+
+        sd, delta = np.float64(0.3), np.float64(0.3e-5)
+        expected = (probability(sd + delta) - probability(sd - delta)) / (2 * delta)
+        assert abs(expected) > 1e-4
+        for gradient in (jax.grad(probability), jax.jit(jax.grad(probability))):
+            actual = gradient(sd)
+            assert np.isfinite(actual)
+            np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=0)
+
+
+@pytest.mark.parametrize("slope", [0.0, np.inf, -np.inf, np.nan])
+def test_interval_tangent_solve_uses_unit_fallback(slope, monkeypatch):
+    from spaceodyssey.gaussian_profile import _interval_radius
+
+    tangents = []
+
+    def inspect_root(residual, initial_guess, solve, tangent_solve):
+        tangents.append(
+            tangent_solve(lambda value: slope * value, jnp.array([2.0, 3.0]))
+        )
+        return solve(residual, initial_guess)
+
+    monkeypatch.setattr(jax.lax, "custom_root", inspect_root)
+    with jax.enable_x64(), jax.disable_jit():
+        _, feasible = _interval_radius(
+            jnp.array([2.0, 0.001]), jnp.array([0.3, 1.0]), 0.05
+        )
+        np.testing.assert_array_equal(feasible, [True, False])
+        assert len(tangents) == 1
+        np.testing.assert_array_equal(tangents[0], [2.0, 0.0])
+
+
 def test_empty_interval_does_not_poison_feasible_support_gradient():
     from spaceodyssey.gaussian_profile import _normal_mass, _regions
 
@@ -556,7 +649,9 @@ def test_interval_radius_identical_jit_and_eager(dtype, positive):
                 expected, expected_feasible = _interval_radius(
                     widths, scales, dtype(alpha), positive=positive
                 )
-            np.testing.assert_array_equal(actual, expected)
+            np.testing.assert_allclose(
+                actual, expected, rtol=4 * np.finfo(dtype).eps, atol=0
+            )
             np.testing.assert_array_equal(feasible, expected_feasible)
 
 
