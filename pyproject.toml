@@ -42,8 +42,9 @@ Documentation = "https://spaceodyssey.readthedocs.io"
 [project.optional-dependencies]
 retrieval = ["exojax"]
 optics = ["physicaloptix"]
+viz = ["eyepiece>=0.9.0"]
 dev = ["pre-commit"]
-test = ["pytest", "nox", "hypothesis", "pytest-cov", "ineedvalidation>=1.1"]
+test = ["pytest", "nox", "hypothesis", "pytest-cov", "ineedvalidation>=1.1", "spaceodyssey[viz]"]
 docs = [
     "myst-nb",
     "sphinx-autoapi",
@@ -52,6 +53,7 @@ docs = [
     "sphinx_autodoc_typehints",
     "ipython",
     "matplotlib",
+    "spaceodyssey[viz]",
 ]
 
 [tool.ruff.lint]
@@ -96,4 +98,7 @@ library = "spaceodyssey"
 "tests/test_build.py" = { case = "firewall", evidence = "code-verification" }
 "tests/test_io.py" = { case = "run-manifest", evidence = "code-verification" }
 "tests/test_loop.py" = { case = "mission-loop", evidence = "code-verification" }
+"tests/test_viz_package.py" = { case = "visualization", evidence = "code-verification" }
+"tests/test_viz_extract.py" = { case = "visualization", evidence = "code-verification" }
+"tests/test_viz_plots.py" = { case = "visualization", evidence = "code-verification" }
 "tests/" = { case = "mission-loop", evidence = "code-verification" }
