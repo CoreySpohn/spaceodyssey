@@ -395,12 +395,160 @@ def test_threshold_boundary_uses_inclusive_profile_truth():
         assert float(result.p_wrong[0]) == 0
 
 
-def test_interval_radius_has_no_gradient():
+def _interval_support_probability(sd, width):
+    """Positive support probability for a centered two-edge flat-prior claim."""
+    from spaceodyssey.gaussian_profile import _normal_mass, _regions
+
+    lower, upper = _regions(
+        -width / 2, width / 2, sd, 0.05, jnp.asarray(True), jnp.asarray(True)
+    )
+    return _normal_mass(0.05, sd, lower[0], upper[0])
+
+
+def _central_gradient(function, sd, width):
+    values = np.array([sd, width], dtype=np.float64)
+    gradient = []
+    for i in range(2):
+        delta = np.zeros(2)
+        delta[i] = values[i] * 1e-5
+        gradient.append(
+            (float(function(*(values + delta))) - float(function(*(values - delta))))
+            / (2 * delta[i])
+        )
+    return gradient
+
+
+@pytest.mark.parametrize("sd, width", [(0.3, 2.0), (0.2, 1.0), (0.08, 0.5)])
+@pytest.mark.parametrize("positive", [True, False])
+def test_interval_radius_gradient_matches_finite_difference(sd, width, positive):
     from spaceodyssey.gaussian_profile import _interval_radius
 
     with jax.enable_x64():
-        gradient = jax.grad(lambda sd: _interval_radius(2.0, sd, 0.05)[0])(0.2)
-        assert float(gradient) == 0.0
+
+        def radius(sd, width):
+            return _interval_radius(width, sd, 0.05, positive=positive)[0]
+
+        gradient = jax.grad(radius, argnums=(0, 1))(sd, width)
+        np.testing.assert_allclose(
+            gradient, _central_gradient(radius, sd, width), rtol=1e-5, atol=0
+        )
+
+
+@pytest.mark.parametrize("sd, width", [(0.3, 2.0), (0.2, 1.0), (0.08, 0.5)])
+def test_interval_support_gradient_matches_finite_difference(sd, width):
+    with jax.enable_x64():
+        gradient = jax.grad(_interval_support_probability, argnums=(0, 1))(sd, width)
+        np.testing.assert_allclose(
+            gradient,
+            _central_gradient(_interval_support_probability, sd, width),
+            rtol=1e-5,
+            atol=0,
+        )
+
+
+@pytest.mark.parametrize("positive", [True, False])
+def test_interval_gradients_jit_and_vmap(positive):
+    from spaceodyssey.gaussian_profile import _interval_radius
+
+    with jax.enable_x64():
+        scales = jnp.array([0.3, 0.2, 0.08])
+        widths = jnp.array([2.0, 1.0, 0.5])
+
+        def radius(sd, width):
+            return _interval_radius(width, sd, 0.05, positive=positive)[0]
+
+        for function in (radius, _interval_support_probability):
+            gradient = jax.grad(function, argnums=(0, 1))
+            expected = np.array(
+                [
+                    _central_gradient(function, float(sd), float(width))
+                    for sd, width in zip(scales, widths, strict=True)
+                ]
+            ).T
+            np.testing.assert_allclose(
+                jax.jit(gradient)(scales[0], widths[0]),
+                expected[:, 0],
+                rtol=1e-5,
+                atol=0,
+            )
+            for batched in (jax.vmap(gradient), jax.jit(jax.vmap(gradient))):
+                np.testing.assert_allclose(
+                    batched(scales, widths), expected, rtol=1e-5, atol=0
+                )
+
+
+@pytest.mark.parametrize("positive", [True, False])
+def test_infeasible_interval_tangents_do_not_leak(positive):
+    from spaceodyssey.gaussian_profile import _interval_radius
+
+    with jax.enable_x64():
+        scales = jnp.array([0.3, 1.0, 0.2])
+        widths = jnp.array([2.0, 0.001, 1.0])
+
+        def radius(sd, width):
+            return _interval_radius(width, sd, 0.05, positive=positive)[0]
+
+        gradient = jax.grad(radius, argnums=(0, 1))
+        batched = jax.jit(jax.vmap(gradient))(scales, widths)
+        assert np.all(np.isfinite(batched))
+        np.testing.assert_array_equal(np.asarray(batched)[:, 1], 0.0)
+        for i in (0, 2):
+            np.testing.assert_allclose(
+                np.asarray(batched)[:, i], gradient(scales[i], widths[i]), rtol=1e-12
+            )
+
+        # Exercise the array-valued root and its reverse-mode tangent solve too.
+        array_gradient = jax.jit(
+            jax.grad(
+                lambda sd, width: jnp.sum(
+                    _interval_radius(width, sd, 0.05, positive=positive)[0]
+                ),
+                argnums=(0, 1),
+            )
+        )(scales, widths)
+        np.testing.assert_allclose(array_gradient, batched, rtol=1e-12, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("positive", [True, False])
+def test_interval_radius_forward_bits_unchanged(dtype, positive):
+    from jax.scipy.special import ndtr, ndtri
+
+    from spaceodyssey.gaussian_profile import _interval_radius
+
+    @jax.jit
+    def reference(width, sd, alpha):
+        half = width / 2
+        high = half + sd * (-ndtri(alpha / 2) + 1)
+
+        def within_boundary(mean):
+            if positive:
+                return ndtr((mean - half) / sd) + ndtr((-half - mean) / sd) <= alpha
+            return ndtr((half - mean) / sd) - ndtr((-half - mean) / sd) >= alpha
+
+        def step(_, bracket):
+            low, high = bracket
+            middle = (low + high) / 2
+            within = within_boundary(middle)
+            return jnp.where(within, middle, low), jnp.where(within, high, middle)
+
+        low, high = jax.lax.fori_loop(0, 80, step, (jnp.zeros_like(high), high))
+        feasible = within_boundary(jnp.zeros_like(high))
+        return jnp.where(feasible, (low + high) / 2, jnp.zeros_like(high)), feasible
+
+    with jax.enable_x64():
+        widths = jnp.array([2.0, 1.0, 0.01, 0.001], dtype=dtype)
+        scales = jnp.array([0.3, 0.2, 0.0001, 1.0], dtype=dtype)
+        for alpha in (0.05, 1e-9):
+            actual, feasible = _interval_radius(
+                widths, scales, dtype(alpha), positive=positive
+            )
+            expected, expected_feasible = reference(widths, scales, dtype(alpha))
+            bits = np.uint64 if dtype == np.float64 else np.uint32
+            np.testing.assert_array_equal(
+                np.asarray(actual).view(bits), np.asarray(expected).view(bits)
+            )
+            np.testing.assert_array_equal(feasible, expected_feasible)
 
 
 def test_interval_bisection_has_fixed_iteration_count():

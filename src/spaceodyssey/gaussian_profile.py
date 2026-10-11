@@ -33,7 +33,9 @@ def _interval_radius(width, sd, alpha, *, positive=True):
     mass <= alpha beyond the returned radius. An infeasible positive region
     is empty; an infeasible negative boundary means all means qualify.
     The 80 fixed bisections are deterministic and JIT compatible, including
-    for batched scales. The interval radius carries no gradient.
+    for batched scales. The radius is differentiable through the implicit
+    function theorem away from the feasibility boundary. Infeasible radii
+    are constant zero, with finite zero tangents.
     """
     half = width / 2
     high = half + sd * (-ndtri(alpha / 2) + 1)
@@ -49,12 +51,29 @@ def _interval_radius(width, sd, alpha, *, positive=True):
         within = within_boundary(middle)
         return jnp.where(within, middle, low), jnp.where(within, high, middle)
 
-    low, high = jax.lax.fori_loop(
-        0, _INTERVAL_BISECTIONS, step, (jnp.zeros_like(high), high)
-    )
     feasible = within_boundary(jnp.zeros_like(high))
-    radius = jnp.where(feasible, (low + high) / 2, jnp.zeros_like(high))
-    return jax.lax.stop_gradient(radius), feasible
+
+    def residual(radius):
+        if positive:
+            mass = ndtr((radius - half) / sd) + ndtr((-half - radius) / sd)
+        else:
+            mass = ndtr((half - radius) / sd) - ndtr((-half - radius) / sd)
+        # The zero sentinel for an empty interval solves r = 0 instead.
+        return jnp.where(feasible, mass - alpha, radius)
+
+    def solve(_, initial_guess):
+        low, upper = jax.lax.fori_loop(
+            0, _INTERVAL_BISECTIONS, step, (initial_guess, high)
+        )
+        return jnp.where(feasible, (low + upper) / 2, jnp.zeros_like(high))
+
+    def tangent_solve(linear, tangent):
+        # The Jacobian is diagonal for batched, independent scalar roots.
+        slope = jnp.where(feasible, linear(jnp.ones_like(high)), 1.0)
+        return jnp.where(feasible, tangent, 0.0) / slope
+
+    radius = jax.lax.custom_root(residual, jnp.zeros_like(high), solve, tangent_solve)
+    return radius, feasible
 
 
 def _assert_affine(jaxpr, dependent):
@@ -182,8 +201,9 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
     ``integrate`` runs eagerly on the host with per-planet Python iteration.
     It cannot be jitted, vmapped, or differentiated with respect to the plan,
     truth, or model; no public integration argument supports differentiation.
-    The numerical helpers can be traced separately, but interval radii carry
-    no gradient.
+    The numerical helpers can be traced separately; interval radii are
+    differentiable through the implicit function theorem away from the
+    feasibility boundary.
 
     Args:
         profile: Claims, support rule, and risk tolerance.
@@ -311,7 +331,8 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
         fidelity. It cannot be jitted, vmapped, or differentiated in the plan,
         truth, or model; no argument supports differentiation through this
         method. Numerical helpers are JIT compatible when called separately;
-        the interval radius has no gradient.
+        interval radii use implicit-function derivatives away from the
+        feasibility boundary.
         """
         self.validate_predictive(predictive)
         model, plan, truth = self.truth_model, predictive.plan, predictive.truth
