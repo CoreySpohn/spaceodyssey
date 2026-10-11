@@ -13,7 +13,8 @@ from spaceodyssey.engines.analytic import run_integrate
 from spaceodyssey.errors import UnsupportedOperator, UnsupportedProfile, WiringError
 from spaceodyssey.plan import PlanPredictive
 from spaceodyssey.profile import Profile
-from spaceodyssey.testing import LinearGaussianTruthModel
+from spaceodyssey.registry import SeamInfo
+from spaceodyssey.testing import LinearGaussianTruthModel, check_certificate
 from tests.doubles import make_spec
 from tests.test_analytic import TestIntegrateEngine as _TestIntegrateEngine
 from tests.test_claim_outcome import claim_fields
@@ -78,6 +79,18 @@ def test_default_state_operators_raise(operator):
     args = () if operator == "initial" else (None, None)
     with pytest.raises(UnsupportedOperator, match=operator):
         getattr(certificate, operator)(*args)
+
+
+def test_integrate_only_certificate_passes_conformance():
+    """Conformance checks an integrate-only certificate without a state."""
+    certificate = ProfileCertificateDouble(make_profile(), LinearGaussianTruthModel())
+    state = check_certificate(
+        certificate,
+        SeamInfo(operators={"integrate"}),
+        [None],
+        predictive=PlanPredictive(make_plan(), make_truth()),
+    )
+    assert state is None
 
 
 def test_unrestricted_quantities_and_public_export():

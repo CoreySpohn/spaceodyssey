@@ -15,7 +15,7 @@ from hypothesis import given, settings
 from hypothesis.strategies import floats
 from scipy.stats import norm
 
-from spaceodyssey.certify import CertificateState, SnrThreshold, ToyGaussianCertifier
+from spaceodyssey.certify import SnrThreshold, ToyGaussianCertifier
 from spaceodyssey.errors import UnsupportedOperator
 from spaceodyssey.plan import CertificationOutcome, PlanPredictive
 from spaceodyssey.registry import REGISTRY
@@ -241,14 +241,16 @@ class TestSeamConformance:
         info = REGISTRY.get("certification", "toy_gaussian").info
         predictive = predictive_for([0.1, 0.6], [3.0, 9.0])
         state = check_certificate(toy, info, [make_dataset()], predictive=predictive)
-        assert isinstance(state, CertificateState)
+        assert state is None
         check_ports(toy.integrate(predictive), info)
 
-    def test_sample_operator_unsupported(self):
-        """The toy evaluates the integrate operator only."""
+    @pytest.mark.parametrize("operator", ["initial", "update", "propagate"])
+    def test_state_operators_unsupported(self, operator):
+        """The integrate-only toy rejects every state operator directly."""
         toy = make_toy()
+        args = () if operator == "initial" else (None, None)
         with pytest.raises(UnsupportedOperator):
-            toy.update(toy.initial(), make_dataset())
+            getattr(toy, operator)(*args)
 
     def test_outcome_check_catches_overlapping_verdicts(self):
         """p_pos + p_neg > 1 breaks the outcome contract."""

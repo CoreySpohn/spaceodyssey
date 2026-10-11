@@ -380,8 +380,8 @@ class ToyGaussianCertifier(AbstractCertificate):
         return score >= z, score <= -z
 
     def initial(self) -> CertificateState:
-        """Return an uncrossed state with a zero statistic."""
-        return CertificateState(statistic=0.0, crossed=False, epoch_d=0.0)
+        """Raise: this certificate evaluates the integrate operator only."""
+        raise UnsupportedOperator("toy_gaussian supports only the integrate operator")
 
     def update(self, state: CertificateState, dataset) -> CertificateState:
         """Raise: this certificate evaluates the integrate operator only."""

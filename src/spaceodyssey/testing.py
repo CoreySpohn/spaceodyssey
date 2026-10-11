@@ -73,14 +73,19 @@ def check_certificate(cert, info, datasets, *, moments=None, predictive=None):
             contract is checked with :func:`check_outcome`.
 
     Returns:
-        The final certificate state after any declared-sample updates.
+        The certificate state after any declared-sample updates, or None for
+        integrate-only certificates.
 
     Raises:
         AssertionError: When a declared operator raises UnsupportedOperator,
             an undeclared one fails to, or an integrated outcome breaks its
             contract.
     """
-    state = cert.initial()
+    if info.operators & {"sample", "propagate"}:
+        state = cert.initial()
+    else:
+        _expect_unsupported(cert.initial, "initial")
+        state = None
     if "sample" in info.operators:
         for dataset in datasets:
             try:
@@ -99,9 +104,7 @@ def check_certificate(cert, info, datasets, *, moments=None, predictive=None):
                 "certificate declares 'propagate' but propagate() raised"
             ) from err
     else:
-        _expect_unsupported(
-            lambda: cert.propagate(cert.initial(), moments), "propagate"
-        )
+        _expect_unsupported(lambda: cert.propagate(state, moments), "propagate")
     if "integrate" in info.operators:
         try:
             result = cert.integrate(predictive)
