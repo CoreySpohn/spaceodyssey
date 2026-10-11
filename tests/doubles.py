@@ -6,6 +6,7 @@ scene holds a planet, a round-robin policy, and a fixed three-target
 universe (planets at targets 1 and 3, nothing at target 2).
 """
 
+from dataclasses import replace
 from typing import final
 
 import jax.numpy as jnp
@@ -29,6 +30,37 @@ from spaceodyssey.universe import AbstractUniverseSource, Universe
 
 TARGET_IDS = (1, 2, 3)
 PLANET_TARGETS = (1, 3)
+
+
+class FirstImplementation:
+    """A simple implementation whose class identity can be checked."""
+
+    def __init__(self, value=0):
+        """Retain a constructor parameter."""
+        self.value = value
+
+
+class SecondImplementation(FirstImplementation):
+    """An alternative class with the same constructor signature."""
+
+
+class ChangingRegistry(Registry):
+    """Return alternating classes to expose repeated reference resolution."""
+
+    def __init__(self):
+        """Register a simple scene implementation and count lookups."""
+        super().__init__()
+        self.calls = []
+        self.register("scene", "changing", SeamInfo(operators={"sample"}))(
+            FirstImplementation
+        )
+
+    def get(self, seam, name):
+        """Return a different implementation class on each lookup."""
+        self.calls.append((seam, name))
+        entry = super().get(seam, name)
+        cls = FirstImplementation if len(self.calls) % 2 else SecondImplementation
+        return replace(entry, cls=cls)
 
 
 @final

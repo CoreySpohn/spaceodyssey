@@ -222,3 +222,101 @@ class TestValidation:
         report = config_for(post_processing="matched_filter").validate(registry)
         with pytest.raises(WiringError, match="matched_filter"):
             report.raise_if_failed()
+
+
+class TestReferenceValidation:
+    """Version pins and constructor signatures are checked without constructing."""
+
+    @pytest.mark.parametrize("entrypoint", ["validate", "build"])
+    @pytest.mark.parametrize("failure_side", [None, "truth", "model"])
+    def test_operator_error_keeps_legacy_message(self, entrypoint, failure_side):
+        """Missing parameters never add diagnostics to a legacy operator failure."""
+        from spaceodyssey.build import build
+        from tests.doubles import make_spec
+
+        calls = []
+
+        class Required:
+            def __init__(self, required):
+                calls.append(self)
+
+        registry = Registry()
+        registry.register("scene", "required", SeamInfo(operators={"sample"}))(Required)
+        registry.register("scene", "integrating", SeamInfo(operators={"integrate"}))(
+            Required
+        )
+        ref = SeamRef.make("scene", "required")
+        integrating = SeamRef.make("scene", "integrating")
+        if failure_side is None:
+            choice = ref
+        elif failure_side == "truth":
+            choice = SeamChoice(ref, integrating)
+        else:
+            choice = SeamChoice(integrating, ref)
+        config = FidelityConfig.make("integrate", scene=choice)
+        with pytest.raises(WiringError) as caught:
+            if entrypoint == "validate":
+                config.validate(registry).raise_if_failed()
+            else:
+                build(make_spec(), config, registry)
+        assert str(caught.value) == (
+            "configuration failed validation:\n"
+            "- scene=required supports operators sample; the run requires 'integrate'"
+        )
+        assert calls == []
+
+    def test_version_failure_kind(self, registry):
+        """A nonmatching pin has a distinct report failure family."""
+        from dataclasses import replace
+
+        ref = replace(SeamRef.make("observation", "summary_rates"), version="2")
+        config = FidelityConfig.make("sample", observation=ref)
+        report = config.validate(registry)
+        assert [failure.kind for failure in report.failures] == ["version"]
+        assert "requires version '2'" in report.failures[0].message
+
+    @pytest.mark.parametrize(
+        "params",
+        [dict(bogus=1), {}, dict(required=1, positional=2)],
+    )
+    def test_parameter_binding_failure_kind(self, params):
+        """Unknown, missing, and positional-only parameters fail before a call."""
+        calls = []
+
+        class Required:
+            def __init__(self, positional=0, /, *, required):
+                calls.append(self)
+
+        registry = Registry()
+        registry.register("scene", "required", SeamInfo(operators={"sample"}))(Required)
+        config = FidelityConfig.make(
+            "sample", scene=SeamRef.make("scene", "required", **params)
+        )
+        report = config.validate(registry)
+        assert [failure.kind for failure in report.failures] == ["params"]
+        assert "scene=required" in report.failures[0].message
+        assert calls == []
+
+    @pytest.mark.parametrize("error_type", [TypeError, ValueError])
+    def test_unavailable_signature_is_skipped(self, monkeypatch, registry, error_type):
+        """An uninspectable class does not cause a new validation rejection."""
+        import inspect
+
+        def unavailable(cls, *, follow_wrapped):
+            assert follow_wrapped is False
+            raise error_type("signature unavailable")
+
+        monkeypatch.setattr(inspect, "signature", unavailable)
+        assert config_for().validate(registry).ok
+
+    def test_ports_error_matches_prepared_preflight(self, registry):
+        """Prepared validation retains the complete alternatives diagnostic."""
+        from spaceodyssey.build import prepare
+        from tests.doubles import make_spec
+
+        config = config_for(post_processing="matched_filter")
+        with pytest.raises(WiringError) as expected:
+            config.validate(registry).raise_if_failed()
+        with pytest.raises(WiringError) as actual:
+            prepare(make_spec(), config, registry)
+        assert str(actual.value) == str(expected.value)

@@ -137,3 +137,76 @@ class TestYieldSummary:
             '"resources_spent":[["time_d",1.0]]}'
         )
         assert YieldSummary.from_json(text).wrong_certified_targets == ()
+
+
+class TestPreparedRun:
+    """The end-to-end entry point constructs its single checked plan."""
+
+    def test_run_uses_one_resolution_and_consumes_files(self, monkeypatch):
+        """The engine sees the preflighted class and ordinary options only."""
+        from spaceodyssey.spec import FidelityConfig, SeamRef
+        from tests.doubles import ChangingRegistry, FirstImplementation
+
+        def capture(mission, *, seed, marker):
+            assert seed == 13
+            assert marker == "forwarded"
+            return mission
+
+        monkeypatch.setitem(engines.ENGINES, "sample", capture)
+        registry = ChangingRegistry()
+        config = FidelityConfig.make("sample", scene=SeamRef.make("scene", "changing"))
+        mission = engines.run(
+            make_spec(),
+            config,
+            seed=13,
+            registry=registry,
+            files=object(),
+            marker="forwarded",
+        )
+        assert type(mission.truth.scene) is FirstImplementation
+        assert mission.truth.scene is mission.model.scene
+        assert registry.calls == [("scene", "changing")]
+
+    def test_run_refuses_nonmatching_pin(self):
+        """The run entry point enforces the prepared implementation's version."""
+        from dataclasses import replace
+
+        from spaceodyssey.errors import WiringError
+        from spaceodyssey.spec import FidelityConfig, SeamRef
+
+        ref = replace(SeamRef.make("observation", "presence"), version="2")
+        config = FidelityConfig.make("sample", observation=ref)
+        with pytest.raises(WiringError, match="requires version '2'"):
+            engines.run(make_spec(), config, registry=build_test_registry())
+
+    @pytest.mark.parametrize("operator", ["sample", "teleport"])
+    def test_run_preserves_validation_error_message(self, operator):
+        """Validation failures take priority over engine selection."""
+        from spaceodyssey.errors import WiringError
+        from spaceodyssey.spec import FidelityConfig, SeamRef
+
+        config = FidelityConfig.make(operator, scene=SeamRef.make("scene", "missing"))
+        registry = build_test_registry()
+        with pytest.raises(WiringError) as expected:
+            config.validate(registry).raise_if_failed()
+        with pytest.raises(type(expected.value)) as actual:
+            engines.run(make_spec(), config, registry=registry)
+        assert str(actual.value) == str(expected.value)
+
+    def test_unknown_engine_precedes_construction(self):
+        """A supported but unregistered operator fails before constructors run."""
+        from spaceodyssey.registry import Registry, SeamInfo
+        from spaceodyssey.spec import FidelityConfig, SeamRef
+
+        constructed = []
+
+        class Tracked:
+            def __init__(self):
+                constructed.append(self)
+
+        registry = Registry()
+        registry.register("scene", "tracked", SeamInfo(operators={"teleport"}))(Tracked)
+        config = FidelityConfig.make("teleport", scene=SeamRef.make("scene", "tracked"))
+        with pytest.raises(RegistryError, match="no engine registered"):
+            engines.run(make_spec(), config, registry=registry)
+        assert constructed == []

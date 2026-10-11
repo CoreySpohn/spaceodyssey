@@ -12,6 +12,14 @@ def test_all_names_importable():
         assert getattr(spaceodyssey, name) is not None
 
 
+def test_prepared_build_exports():
+    """Prepared construction objects are exported alongside build."""
+    module = importlib.import_module("spaceodyssey.build")
+    for name in ("BuildPlan", "ResolvedImpl", "prepare", "construct"):
+        assert name in spaceodyssey.__all__
+        assert getattr(spaceodyssey, name) is getattr(module, name)
+
+
 def test_all_names_are_public_objects():
     """No advertised name resolves to a submodule."""
     for name in spaceodyssey.__all__:
