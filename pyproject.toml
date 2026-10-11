@@ -43,7 +43,7 @@ Documentation = "https://spaceodyssey.readthedocs.io"
 retrieval = ["exojax"]
 optics = ["physicaloptix"]
 dev = ["pre-commit"]
-test = ["pytest", "nox", "hypothesis", "pytest-cov"]
+test = ["pytest", "nox", "hypothesis", "pytest-cov", "ineedvalidation>=1.1"]
 docs = [
     "myst-nb",
     "sphinx-autoapi",
@@ -75,3 +75,25 @@ packages = ["src/spaceodyssey"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["slow: Monte Carlo checks; skip with -m 'not slow'"]
+
+[tool.ineedvalidation]
+library = "spaceodyssey"
+
+[tool.ineedvalidation.defaults]
+"tests/test_analytic.py" = { case = "yield-estimator", evidence = "code-verification" }
+"tests/test_replicates.py" = { case = "yield-estimator", evidence = "code-verification" }
+"tests/test_engines.py" = { case = "yield-estimator", evidence = "code-verification" }
+"tests/test_rng.py" = { case = "yield-estimator", evidence = "code-verification" }
+"tests/test_dist.py" = { case = "yield-estimator", evidence = "code-verification" }
+"tests/test_certify.py" = { case = "certification-seam", evidence = "code-verification" }
+"tests/test_toy_certifier.py" = { case = "certification-seam", evidence = "code-verification" }
+"tests/test_profile_certificate.py" = { case = "certification-seam", evidence = "code-verification" }
+"tests/test_profile.py" = { case = "claim-profile", evidence = "code-verification" }
+"tests/test_claim_outcome.py" = { case = "claim-profile", evidence = "code-verification" }
+"tests/test_truth.py" = { case = "truth-model", evidence = "code-verification" }
+"tests/test_plan.py" = { case = "plan-summary", evidence = "code-verification" }
+"tests/test_contracts.py" = { case = "plan-summary", evidence = "code-verification" }
+"tests/test_build.py" = { case = "firewall", evidence = "code-verification" }
+"tests/test_io.py" = { case = "run-manifest", evidence = "code-verification" }
+"tests/test_loop.py" = { case = "mission-loop", evidence = "code-verification" }
+"tests/" = { case = "mission-loop", evidence = "code-verification" }

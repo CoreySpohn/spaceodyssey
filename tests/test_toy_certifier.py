@@ -5,6 +5,7 @@ distribution, the declared SNR mapping typed once here), never from the
 certifier's own helpers.
 """
 
+import ineedvalidation as vv
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -158,6 +159,7 @@ class TestClosedForm:
         assert float(outcome.p_pos[1]) >= float(outcome.p_pos[0])
 
 
+@vv.case("parity-limit", "code-verification", srq="snr-count")
 class TestParityLimit:
     """Support only, known noise, one prior: the SNR-threshold indicator."""
 

@@ -2,6 +2,7 @@
 
 import json
 
+import ineedvalidation as vv
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -107,6 +108,11 @@ class TestWeightedYields:
                 data[name.removesuffix("_independent_lower_bound")] = data.pop(name)
         assert CertifiedYield.from_json(json.dumps(data)) == report
 
+    @vv.case(
+        "certification-calibration",
+        "code-verification",
+        srq="calibration-excess",
+    )
     def test_matched_flat_prior_wrong_yield_bound(self):
         """A proper wide-window approximation to the toy's improper flat prior.
 
