@@ -132,20 +132,32 @@ class RunManifest:
         )
 
 
-def write_run(run_dir, manifest: RunManifest, summary) -> Path:
+def write_run(
+    run_dir, manifest: RunManifest, summary, *, overwrite: bool = False
+) -> Path:
     """Write one run's manifest and report into a directory.
 
     Args:
         run_dir: Directory to create (parents included).
         manifest: The run's manifest, written as ``manifest.json``.
         summary: The run's YieldSummary, written as ``report.json``.
+        overwrite: Replace an existing run's files when True. Defaults to False;
+            use a distinct tag to preserve deliberate re-runs separately.
 
     Returns:
         The run directory path.
+
+    Raises:
+        FileExistsError: When manifest.json already exists and overwrite is False.
     """
     run_dir = Path(run_dir)
+    manifest_path = run_dir / "manifest.json"
+    if manifest_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"{manifest_path} already exists; use a distinct tag for deliberate re-runs"
+        )
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "manifest.json").write_text(manifest.to_json() + "\n")
+    manifest_path.write_text(manifest.to_json() + "\n")
     (run_dir / "report.json").write_text(summary.to_json() + "\n")
     return run_dir
 
