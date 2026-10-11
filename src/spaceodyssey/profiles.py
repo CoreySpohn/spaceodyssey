@@ -4,8 +4,18 @@ The conservative zone (0.95 to 1.67 Earth-equivalent insolation distance)
 is the exoEarth-candidate zone of Stark et al. (2019), numerically the
 conservative band of Kasting et al. (1993). The radius bounds are those of
 Stark et al. (2019): the lower edge 0.8 a^(-1/2) Earth radii with a in
-Earth-equivalent insolation distance (an insolation scaling after Zahnle and
-Catling 2017) and the upper edge 1.4 Earth radii (Kopparapu et al. 2018). The
+Earth-equivalent insolation distance, equivalently 0.8 S^(1/4) with S the
+insolation relative to Earth, and the upper edge 1.4 Earth radii (Kopparapu
+et al. 2018). The lower edge takes only its slope from Zahnle and Catling
+(2017), whose cosmic shoreline is an empirical boundary, insolation
+proportional to escape velocity to the fourth power, drawn by eye in present-day
+bolometric insolation relative to Earth, with no stated coefficient and no
+radius form. The coefficient 0.8 and the radius form come from Kopparapu et
+al. (2018) and Stark et al. (2019), who assume a common bulk density, so that
+escape velocity is proportional to radius. A rocky mass-radius relation
+(mass proportional to radius^3.7) would give S^0.185 instead, and a shoreline
+in cumulative XUV insolation would raise the edge around low-luminosity hosts;
+the community definition is kept unchanged. The
 optimistic zone (0.75 to 1.77) is the recent-Venus and early-Mars limits of
 Kopparapu et al. (2013). Zone edges scale with stellar luminosity only; the
 host-temperature dependence of the edges (Kopparapu et al. 2013) is not
