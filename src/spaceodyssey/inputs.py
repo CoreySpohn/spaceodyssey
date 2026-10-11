@@ -1,6 +1,8 @@
 """Deterministic typed encoding and snapshots of execution inputs."""
 
+import copy as _copy
 import dataclasses as _dataclasses
+import functools as _functools
 import hashlib as _hashlib
 import math as _math
 import struct as _struct
@@ -29,7 +31,7 @@ _ARRAY_CODES = {("b", 1): 1, ("i", 4): 2, ("i", 8): 3, ("f", 4): 4, ("f", 8): 5}
 
 def _utf8(value: str, path: str) -> bytes:
     try:
-        return value.encode("utf-8", errors="strict")
+        return str.encode(value, "utf-8", "strict")
     except UnicodeEncodeError as error:
         raise ValueError(f"{path}: invalid UTF-8 string") from error
 
@@ -39,18 +41,26 @@ def _kind(value: _Any, path: str) -> tuple[int, _Any]:
         return 0, None
     if isinstance(value, (bool, _np.bool_)):
         return 1, bool(value)
-    if isinstance(value, (int, _np.integer)):
-        return 2, int(value)
+    if isinstance(value, int):
+        # Unbound base methods bypass subclass conversions and preserve huge ints.
+        return 2, int.__int__(value)
+    if isinstance(value, _np.integer):
+        return 2, _np.integer.__int__(value)
     if isinstance(value, (float, _np.float16, _np.float32, _np.float64)) or (
         isinstance(value, _np.longdouble) and value.dtype == _np.dtype("f8")
     ):
-        value = float(value) + 0.0
+        value = (
+            float.__float__(value)
+            if isinstance(value, float)
+            else _np.floating.__float__(value)
+        ) + 0.0
         if _math.isnan(value):
             raise ValueError(f"{path}: NaN scalar is unsupported")
         return 3, value
     if isinstance(value, str):
-        value = str(value)
-        _utf8(value, path)
+        encoded = _utf8(value, path)
+        if type(value) is not str:
+            value = encoded.decode("utf-8")
         return 4, value
     if type(value) is _PlanSummary:
         return 16, value
@@ -70,7 +80,7 @@ def _entries(value: dict, path: str) -> list[tuple[bytes, str, _Any]]:
     for key, child in value.items():
         if not isinstance(key, str):
             raise TypeError(f"{path}: map keys must be strings")
-        key = str(key)
+        key = _kind(key, path)[1]
         key_path = f"{path}[{key!r}]"
         entries.append((_utf8(key, key_path), key, child))
     return sorted(entries, key=lambda entry: entry[0])
@@ -133,20 +143,45 @@ def _array(value: _Any, path: str) -> bytes:
     )
 
 
-def _map(value: dict, path: str, attributes: bool = False) -> bytes:
+def _traversal(operation: _Any) -> _Any:
+    @_functools.wraps(operation)
+    def guarded(value: _Any, path: str, active: set[int] | None = None) -> _Any:
+        if active is None:
+            active = set()
+        tracked = type(value) in (list, tuple, dict)
+        identity = id(value)
+        if tracked:
+            if identity in active:
+                raise TypeError(f"{path}: cyclic input")
+            active.add(identity)
+        try:
+            return operation(value, path, active)
+        except RecursionError as error:
+            raise TypeError(f"{path}: input nesting is too deep") from error
+        finally:
+            if tracked:
+                active.remove(identity)
+
+    return guarded
+
+
+def _map(value: dict, path: str, active: set[int], attributes: bool = False) -> bytes:
     entries = _entries(value, path)
     return (
         b"\x06"
         + _u64(len(entries))
         + b"".join(
             _blob(key_bytes)
-            + _node(child, f"{path}.{key}" if attributes else f"{path}[{key!r}]")
+            + _node(
+                child, f"{path}.{key}" if attributes else f"{path}[{key!r}]", active
+            )
             for key_bytes, key, child in entries
         )
     )
 
 
-def _node(value: _Any, path: str) -> bytes:
+@_traversal
+def _node(value: _Any, path: str, active: set[int]) -> bytes:
     tag, value = _kind(value, path)
     if tag == 0:
         body = b""
@@ -160,22 +195,26 @@ def _node(value: _Any, path: str) -> bytes:
         body = _blob(_utf8(value, path))
     elif tag == 5:
         body = _u64(len(value)) + b"".join(
-            _node(child, f"{path}[{i}]") for i, child in enumerate(value)
+            _node(child, f"{path}[{i}]", active) for i, child in enumerate(value)
         )
     elif tag == 6:
-        return _map(value, path)
+        return _map(value, path, active)
     elif tag == 7:
         body = _array(value, path)
     elif tag == 16:
-        body = _node(_PlanSummary.CONTRACT_VERSION, f"{path}.CONTRACT_VERSION")
-        body += _map(
-            {
-                field.name: getattr(value, field.name)
-                for field in _dataclasses.fields(_PlanSummary)
-            },
-            path,
-            attributes=True,
-        )
+        version_path = f"{path}.CONTRACT_VERSION"
+        if _kind(_PlanSummary.CONTRACT_VERSION, version_path)[0] != 2:
+            raise TypeError(f"{version_path}: PlanSummary version must be an int")
+        fields = {}
+        for field in _dataclasses.fields(_PlanSummary):
+            child = getattr(value, field.name)
+            field_path = f"{path}.{field.name}"
+            expected = (4,) if field.name == "flux_reference" else (0, 7)
+            if _kind(child, field_path)[0] not in expected:
+                raise TypeError(f"{field_path}: invalid PlanSummary field type")
+            fields[field.name] = child
+        body = _node(_PlanSummary.CONTRACT_VERSION, version_path, active)
+        body += _map(fields, path, active, attributes=True)
     else:
         for field, expected in (("model_id", 4), ("theta", 7), ("context", 6)):
             field_path = f"{path}.{field}"
@@ -186,9 +225,9 @@ def _node(value: _Any, path: str) -> bytes:
             if _kind(child, child_path)[0] != 7:
                 raise TypeError(f"{child_path}: Truth context values must be arrays")
         body = (
-            _node(value.model_id, f"{path}.model_id")
-            + _node(value.theta, f"{path}.theta")
-            + _map(value.context, f"{path}.context")
+            _node(value.model_id, f"{path}.model_id", active)
+            + _node(value.theta, f"{path}.theta", active)
+            + _node(value.context, f"{path}.context", active)
         )
     return bytes([tag]) + body
 
@@ -203,28 +242,53 @@ def digest(value: _Any, name: str = "value") -> str:
     return _hashlib.sha256(encode(value, name)).hexdigest()
 
 
-def _snapshot(value: _Any) -> _Any:
+@_traversal
+def _snapshot(value: _Any, path: str, active: set[int]) -> _Any:
+    tag, value = _kind(value, path)
+    if tag < 5:
+        return value
     if isinstance(value, _np.ndarray):
-        copied = value.copy()
+        copied = _np.array(value, copy=True, subok=False)
         copied.flags.writeable = False
         return copied
     if type(value) in (tuple, list):
-        return tuple(_snapshot(child) for child in value)
+        return tuple(
+            _snapshot(child, f"{path}[{i}]", active) for i, child in enumerate(value)
+        )
     if type(value) is dict:
-        return {key: _snapshot(child) for key, child in value.items()}
-    if type(value) is _Truth:
-        return _jax.tree_util.tree_map(_snapshot, value)
+        return {
+            key: _snapshot(child, f"{path}[{key!r}]", active)
+            for _, key, child in _entries(value, path)
+        }
+    if tag in (16, 17):
+        fields = {
+            field.name: _snapshot(
+                getattr(value, field.name), f"{path}.{field.name}", active
+            )
+            for field in _dataclasses.fields(value)
+        }
+        if all(child is getattr(value, key) for key, child in fields.items()):
+            return value
+        copied = _copy.copy(value)
+        for key, child in fields.items():
+            object.__setattr__(copied, key, child)
+        return copied
     return value
 
 
 def snapshot(value: _Any, name: str = "value") -> _Any:
     """Validate and copy mutable inputs while retaining immutable JAX arrays."""
     _node(value, name)
-    return _snapshot(value)
+    return _snapshot(value, name)
 
 
 def to_json_value(value: _Any, name: str = "value") -> object:
     """Return a tagged JSON value for an array-free input."""
+    return _to_json(value, name)
+
+
+@_traversal
+def _to_json(value: _Any, name: str, active: set[int]) -> object:
     tag, value = _kind(value, name)
     if tag == 0:
         return {"t": "none"}
@@ -239,21 +303,22 @@ def to_json_value(value: _Any, name: str = "value") -> object:
         return {
             "t": "seq",
             "v": [
-                to_json_value(child, f"{name}[{i}]") for i, child in enumerate(value)
+                _to_json(child, f"{name}[{i}]", active) for i, child in enumerate(value)
             ],
         }
     if tag == 6:
         return {
             "t": "map",
             "v": [
-                [key, to_json_value(child, f"{name}[{key!r}]")]
+                [key, _to_json(child, f"{name}[{key!r}]", active)]
                 for _, key, child in _entries(value, name)
             ],
         }
     raise TypeError(f"{name}: arrays and science containers cannot be stored inline")
 
 
-def _from_json(obj: object, path: str) -> _Any:
+@_traversal
+def _from_json(obj: object, path: str, active: set[int]) -> _Any:
     if type(obj) is not dict or type(obj.get("t")) is not str:
         raise TypeError(f"{path}: expected a tagged JSON value")
     tag = obj["t"]
@@ -276,7 +341,9 @@ def _from_json(obj: object, path: str) -> _Any:
             raise TypeError(f"{path}: invalid {tag} string") from error
         return _kind(parsed, path)[1]
     if tag == "seq" and type(value) is list:
-        return tuple(_from_json(child, f"{path}[{i}]") for i, child in enumerate(value))
+        return tuple(
+            _from_json(child, f"{path}[{i}]", active) for i, child in enumerate(value)
+        )
     if tag == "map" and type(value) is list:
         result = {}
         for i, entry in enumerate(value):
@@ -287,7 +354,7 @@ def _from_json(obj: object, path: str) -> _Any:
             _utf8(key, key_path)
             if key in result:
                 raise TypeError(f"{key_path}: duplicate map key")
-            result[key] = _from_json(child, key_path)
+            result[key] = _from_json(child, key_path, active)
         return result
     raise TypeError(f"{path}: invalid JSON tag or value for {tag!r}")
 

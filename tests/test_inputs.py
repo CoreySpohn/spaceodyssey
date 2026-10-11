@@ -511,3 +511,246 @@ def test_snapshot_truth_numpy_context_preserves_dtype(containers):
     assert copied is not empty
     assert copied.context is not empty.context
     assert digest(copied) == digest(empty)
+
+
+@pytest.mark.parametrize("operation", [encode, digest, snapshot])
+@pytest.mark.parametrize(
+    "field", [field.name for field in dataclasses.fields(PlanSummary)]
+)
+def test_plan_invalid_field_nodes_refused(containers, operation, field):
+    plan, _ = containers
+    if field == "flux_reference":
+        altered = dataclasses.replace(plan, flux_reference={"x": 1})
+    else:
+        altered = eqx.tree_at(lambda p: getattr(p, field), plan, {"x": 1})
+    with pytest.raises(TypeError, match=re.escape(f"data.{field}")):
+        operation(altered, name="data")
+
+
+@pytest.mark.parametrize("value", [True, "3", 3.0, None, np.array(3)])
+@pytest.mark.parametrize("operation", [encode, digest, snapshot])
+def test_plan_non_integer_contract_version_refused(
+    containers, monkeypatch, value, operation
+):
+    plan, _ = containers
+    monkeypatch.setattr(PlanSummary, "CONTRACT_VERSION", value)
+    with pytest.raises(TypeError, match=re.escape("data.CONTRACT_VERSION")):
+        operation(plan, name="data")
+
+
+class LyingString(str):
+    replacement = "b"
+
+    def __str__(self):
+        return self.replacement
+
+    def encode(self, *args, **kwargs):
+        return self.replacement.encode(*args, **kwargs)
+
+    def __getitem__(self, key):
+        return self.replacement[key]
+
+
+class LyingInteger(int):
+    replacement = 99
+
+    def __int__(self):
+        return self.replacement
+
+    def __index__(self):
+        return self.replacement
+
+    def __repr__(self):
+        return str(self.replacement)
+
+
+class LyingFloat(float):
+    replacement = 99.0
+
+    def __float__(self):
+        return self.replacement
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(LyingString("a"), "a"), (LyingInteger(7), 7), (LyingFloat(0.5), 0.5)],
+)
+def test_scalar_subclasses_use_underlying_values(value, expected):
+    assert encode(value) == encode(expected)
+    assert to_json_value(value) == to_json_value(expected)
+    copied = snapshot(value)
+    assert type(copied) is type(expected)
+    assert copied == expected
+    original_digest = digest(copied)
+    value.replacement = "changed" if isinstance(value, str) else 42
+    assert digest(copied) == original_digest
+    assert digest(value) == digest(expected)
+
+
+@pytest.mark.parametrize("value", [np.bool_(True), np.int64(7), np.float32(0.5)])
+def test_snapshot_numpy_scalars_are_builtins(value):
+    copied = snapshot(value)
+    assert type(copied) is type(value.item())
+    assert copied == value.item()
+
+
+def test_string_subclass_map_keys_normalized():
+    key = LyingString("a")
+    value = {key: 1, "b": 2}
+    expected = {"a": 1, "b": 2}
+    assert encode(value) == encode(expected)
+    assert digest(dict(reversed(list(value.items())))) == digest(expected)
+    tagged = to_json_value(value)
+    assert tagged == to_json_value(expected)
+    assert all(type(entry[0]) is str for entry in tagged["v"])
+    assert digest(from_json_value(tagged, CODEC)) == digest(expected)
+    copied = snapshot(value)
+    assert all(type(key) is str for key in copied)
+    key.replacement = "changed"
+    assert digest(copied) == digest(expected)
+
+
+def test_snapshot_plan_normalizes_static_string(containers):
+    plan, _ = containers
+    reference = LyingString("unit-flux")
+    altered = dataclasses.replace(plan, flux_reference=reference)
+    copied = snapshot(altered)
+    assert type(copied.flux_reference) is str
+    assert copied.flux_reference == "unit-flux"
+    reference.replacement = "changed"
+    assert digest(copied) == digest(plan)
+
+
+def test_snapshot_plan_copies_numpy_field(containers):
+    plan, _ = containers
+    array = np.array([[0.25, 0.5]], dtype="f4")
+    altered = eqx.tree_at(lambda p: p.noise_sigma, plan, array)
+    copied = snapshot(altered)
+    assert type(copied.noise_sigma) is np.ndarray
+    assert not np.shares_memory(copied.noise_sigma, array)
+    assert not copied.noise_sigma.flags.writeable
+    expected = digest(altered)
+    array[0, 0] = 100
+    assert digest(copied) == expected
+
+
+def test_snapshot_truth_normalizes_static_string(containers):
+    _, truth = containers
+    model_id = LyingString("toy/1")
+    altered = Truth(truth.theta, truth.context, model_id)
+    copied = snapshot(altered)
+    assert type(copied.model_id) is str
+    assert copied.model_id == "toy/1"
+    model_id.replacement = "changed"
+    assert digest(copied) == digest(truth)
+
+
+def test_integer_subclass_beyond_decimal_conversion_limit():
+    value = LyingInteger(10**5000)
+    assert encode(value) == encode(10**5000)
+    assert type(snapshot(value)) is int
+    assert to_json_value(value) == {"t": "int", "v": "1" + "0" * 5000}
+
+
+@pytest.mark.parametrize("operation", [encode, digest, snapshot, to_json_value])
+@pytest.mark.parametrize("container_type", [list, dict])
+def test_container_cycles_refused_with_path(operation, container_type):
+    value = container_type()
+    if container_type is list:
+        value.append(value)
+        path = "data[0]"
+    else:
+        value["self"] = value
+        path = "data['self']"
+    with pytest.raises(TypeError, match=re.escape(path)):
+        operation(value, name="data")
+
+
+@pytest.mark.parametrize("operation", [encode, digest, snapshot, to_json_value])
+def test_shared_containers_are_not_cycles(operation):
+    child = {"x": [1]}
+    assert operation([child, child]) == operation([{"x": [1]}, {"x": [1]}])
+
+
+@pytest.mark.parametrize("operation", [encode, digest, snapshot, to_json_value])
+def test_deep_nesting_refused_as_type_error(operation):
+    value = None
+    for _ in range(3000):
+        value = [value]
+    with pytest.raises(TypeError, match="data"):
+        operation(value, name="data")
+
+
+@pytest.mark.parametrize("tag", ["seq", "map"])
+def test_cyclic_tagged_json_refused(tag):
+    value = {"t": tag, "v": []}
+    value["v"].append(value if tag == "seq" else ["self", value])
+    with pytest.raises(TypeError, match="record"):
+        from_json_value(value, CODEC, name="record")
+
+
+def test_deep_tagged_json_refused_as_type_error():
+    value = {"t": "none"}
+    for _ in range(3000):
+        value = {"t": "seq", "v": [value]}
+    with pytest.raises(TypeError, match="record"):
+        from_json_value(value, CODEC, name="record")
+
+
+def test_snapshot_ndarray_subclass_ignores_copy_override():
+    class ReturnsSelf(np.ndarray):
+        def copy(self, *args, **kwargs):
+            return self
+
+    value = np.array([1], dtype="i4").view(ReturnsSelf)
+    copied = snapshot(value)
+    assert type(copied) is np.ndarray
+    assert not np.shares_memory(copied, value)
+    assert not copied.flags.writeable
+    assert value.flags.writeable
+    original_digest = digest(copied)
+    value.base[0] = 2
+    assert digest(copied) == original_digest
+    np.testing.assert_array_equal(copied, [1])
+
+
+@pytest.mark.parametrize(
+    ("value", "stream"),
+    [
+        (None, b"spaceodyssey.inputs/1\x00\x00"),
+        (
+            np.array([1, -2], dtype="i8"),
+            b"spaceodyssey.inputs/1\x00"
+            b"\x07\x03\x01\x00\x00\x00\x00\x00\x00\x00"
+            b"\x02\x00\x00\x00\x00\x00\x00\x00"
+            b"\x10\x00\x00\x00\x00\x00\x00\x00"
+            b"\x01\x00\x00\x00\x00\x00\x00\x00"
+            b"\xfe\xff\xff\xff\xff\xff\xff\xff",
+        ),
+        (
+            np.array([1, -2], dtype="i4"),
+            b"spaceodyssey.inputs/1\x00"
+            b"\x07\x02\x01\x00\x00\x00\x00\x00\x00\x00"
+            b"\x02\x00\x00\x00\x00\x00\x00\x00"
+            b"\x08\x00\x00\x00\x00\x00\x00\x00"
+            b"\x01\x00\x00\x00\xfe\xff\xff\xff",
+        ),
+        (
+            np.array([True, False]),
+            b"spaceodyssey.inputs/1\x00"
+            b"\x07\x01\x01\x00\x00\x00\x00\x00\x00\x00"
+            b"\x02\x00\x00\x00\x00\x00\x00\x00"
+            b"\x02\x00\x00\x00\x00\x00\x00\x00\x01\x00",
+        ),
+        (
+            np.array([1.5, -2.0], dtype="f4"),
+            b"spaceodyssey.inputs/1\x00"
+            b"\x07\x04\x01\x00\x00\x00\x00\x00\x00\x00"
+            b"\x02\x00\x00\x00\x00\x00\x00\x00"
+            b"\x08\x00\x00\x00\x00\x00\x00\x00"
+            b"\x00\x00\xc0\x3f\x00\x00\x00\xc0",
+        ),
+    ],
+)
+def test_complete_stream_bytes(value, stream):
+    assert encode(value) == stream
