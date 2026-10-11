@@ -7,7 +7,7 @@ fidelity: "FidelityConfig\none (truth, model) SeamRef pair per seam\n+ the run's
 registry: "seam registry (AXIS 2)\n10 seams x N implementations each\nSeamInfo metadata: supported operators,\nrequires/provides kinds, cost hint, calibratables" {shape: cylinder}
 store: "calibration store" {shape: cylinder}
 
-build: "build(spec, config)\nvalidate (kinds DAG, operator intersection,\ncalibration presence), then resolve refs\ninto live eqx modules" {shape: hexagon}
+build: "build(spec, config)\nprepare: resolve once, check pins/params,\nvalidate ports, operators, calibration;\nconstruct the recorded classes" {shape: hexagon}
 
 mission: "compiled Mission (PyTree)\nTruthStack + ModelStack (the firewall)\ncontinuous params = differentiable leaves"
 

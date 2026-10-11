@@ -17,7 +17,7 @@ import importlib
 from collections.abc import Callable
 
 from spaceodyssey.aliases import resolve_qualname_alias
-from spaceodyssey.build import build
+from spaceodyssey.build import construct, prepare
 from spaceodyssey.errors import RegistryError
 from spaceodyssey.metrics import CertifiedYield, YieldSummary
 from spaceodyssey.registry import REGISTRY, Registry
@@ -78,6 +78,7 @@ def run(
     *,
     seed: int = 0,
     registry: Registry = REGISTRY,
+    files=None,
     **options,
 ) -> YieldSummary | CertifiedYield:
     """Validate, compile, and run one configuration end to end.
@@ -87,12 +88,12 @@ def run(
         config: The implementation selection; its operator picks the engine.
         seed: The run's root seed.
         registry: The implementation registry to resolve against.
+        files: Reserved file context, consumed without being read.
         **options: Forwarded to the engine.
 
     Returns:
         The run's report.
     """
-    config.validate(registry).raise_if_failed()
+    plan = prepare(spec, config, registry, files=files)
     engine = get_engine(config.operator)
-    mission = build(spec, config, registry, check=False)
-    return engine(mission, seed=seed, **options)
+    return engine(construct(plan), seed=seed, **options)

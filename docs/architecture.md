@@ -99,6 +99,16 @@ expressed. Named profiles cover the standard configurations, and an ablation
 harness runs paired-seed A/B comparisons that differ in exactly one stage, with
 realized false-alarm rates equalized across arms before yield deltas are reported.
 
+`prepare(spec, config)` resolves each reference once and checks the resulting
+entries before any implementation constructor runs. Its frozen `BuildPlan`
+retains the classes and parameters, plus a `ResolvedImpl` record for each slot
+and side with the written name, registered name, class qualname, and version.
+Nonempty implementation version pins must match even when validation is disabled.
+`construct(plan)` builds those recorded classes without consulting the registry;
+slots without a model override share one instance. `build` combines these two
+steps, and `engines.run` prepares once before selecting the engine and constructing
+the mission. The optional `files` keyword is carried without reading files.
+
 ![Two configuration axes](diagrams/two-axes.svg)
 
 ### Compatibility: typed wiring contracts

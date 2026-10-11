@@ -1,7 +1,8 @@
-"""Configuration validation: typed ports, operator support, calibration flags.
+"""Configuration validation: references, parameters, ports, and operators.
 
 A configuration is checked in three independent families before anything
-runs: every chosen implementation must exist and be available, must support
+runs: every chosen implementation must exist and be available, have matching
+version pins and bindable constructor parameters, must support
 the run's outcome operator, and every data-plane edge between chosen seams
 must be type-compatible (some produced contract type a subclass of some
 consumed one). Failures name both sides and the registered alternatives that
@@ -12,6 +13,7 @@ deliberately mismatches them; a clean configuration with no model overrides
 is checked once.
 """
 
+import inspect
 from dataclasses import dataclass
 
 from spaceodyssey.contracts import compatible
@@ -25,7 +27,10 @@ class WiringFailure:
 
     Attributes:
         kind: Failure family: "seam_mismatch", "unknown_impl", "unavailable",
-            "operator", "ports", or "contract".
+            "version", "params", "operator", "ports", or "contract".
+            "version" reports a nonmatching implementation pin; "params"
+            reports parameter names or arity that cannot bind to the class's
+            constructor signature.
         stack: Which side failed, "truth" or "model".
         edge: The (producer, consumer) seam pair for edge failures, else None.
         seam: The seam the failure is reported against.
@@ -80,7 +85,45 @@ def _stack_refs(config, stack: str) -> dict:
     }
 
 
-def _compatible_alternatives(registry, seam: str, against, direction: str):
+def _seam_mismatch(seam, ref) -> str | None:
+    """Explain a reference whose seam differs from its configuration slot."""
+    if ref.seam != seam:
+        return (
+            f"slot '{seam}' references {ref.seam}={ref.name}; "
+            "reference seam must match the slot"
+        )
+    return None
+
+
+def _version_mismatch(ref, entry) -> str | None:
+    """Explain an implementation pin that differs from the resolved version."""
+    if ref.version and ref.version != entry.info.version:
+        return (
+            f"{ref.seam}={ref.name} requires version '{ref.version}'; "
+            f"registered version is '{entry.info.version}'"
+        )
+    return None
+
+
+def _params_mismatch(ref, entry) -> str | None:
+    """Explain parameters that cannot bind to an available class signature."""
+    try:
+        signature = inspect.signature(entry.cls, follow_wrapped=False)
+    except (TypeError, ValueError):
+        return None
+    try:
+        signature.bind(**ref.params_dict)
+    except TypeError as err:
+        return (
+            f"could not construct {ref.seam}={ref.name} with parameters "
+            f"{ref.params_dict}: {err}"
+        )
+    return None
+
+
+def _compatible_alternatives(
+    registry, seam: str, against, direction: str, entries=None
+):
     """Names registered for a seam whose ports fit the given counterpart."""
     try:
         candidates = registry.names(seam)
@@ -89,7 +132,20 @@ def _compatible_alternatives(registry, seam: str, against, direction: str):
     names = []
     for candidate in candidates:
         try:
-            info = registry.get(seam, candidate).info
+            recorded = next(
+                (
+                    entry
+                    for (slot, _), entry in (entries or {}).items()
+                    if slot == seam
+                    and entry is not None
+                    and not isinstance(entry, RegistryError)
+                    and entry.name == candidate
+                ),
+                None,
+            )
+            info = (
+                recorded if recorded is not None else registry.get(seam, candidate)
+            ).info
             if direction == "producer":
                 ok = compatible(info.produces, against.consumes)
             else:
@@ -101,11 +157,14 @@ def _compatible_alternatives(registry, seam: str, against, direction: str):
     return tuple(names)
 
 
-def _check_stack(config, registry, stack: str, failures, uncalibrated) -> None:
+def _check_stack(
+    config, registry, stack: str, failures, params_failures, uncalibrated, entries=None
+) -> None:
     refs = _stack_refs(config, stack)
     infos = {}
     for seam, ref in sorted(refs.items()):
-        if ref.seam != seam:
+        mismatch = _seam_mismatch(seam, ref)
+        if mismatch:
             failures.append(
                 WiringFailure(
                     kind="seam_mismatch",
@@ -113,15 +172,18 @@ def _check_stack(config, registry, stack: str, failures, uncalibrated) -> None:
                     edge=None,
                     seam=seam,
                     impl=ref.name,
-                    message=(
-                        f"slot '{seam}' references {ref.seam}={ref.name}; "
-                        "reference seam must match the slot"
-                    ),
+                    message=mismatch,
                 )
             )
             continue
         try:
-            entry = registry.get(seam, ref.name)
+            entry = (
+                registry.get(seam, ref.name)
+                if entries is None
+                else entries[seam, stack]
+            )
+            if isinstance(entry, RegistryError):
+                raise entry
         except RegistryError as err:
             failures.append(
                 WiringFailure(
@@ -149,6 +211,21 @@ def _check_stack(config, registry, stack: str, failures, uncalibrated) -> None:
                 )
             )
             continue
+        for kind, message, target in (
+            ("version", _version_mismatch(ref, entry), failures),
+            ("params", _params_mismatch(ref, entry), params_failures),
+        ):
+            if message:
+                target.append(
+                    WiringFailure(
+                        kind=kind,
+                        stack=stack,
+                        edge=None,
+                        seam=seam,
+                        impl=ref.name,
+                        message=message,
+                    )
+                )
         if config.operator not in entry.info.operators:
             supported = ", ".join(sorted(entry.info.operators)) or "(none)"
             failures.append(
@@ -193,10 +270,10 @@ def _check_stack(config, registry, stack: str, failures, uncalibrated) -> None:
         if ok:
             continue
         alt_consumers = _compatible_alternatives(
-            registry, consumer_seam, producer_info, "consumer"
+            registry, consumer_seam, producer_info, "consumer", entries
         )
         alt_producers = _compatible_alternatives(
-            registry, producer_seam, consumer_info, "producer"
+            registry, producer_seam, consumer_info, "producer", entries
         )
         consumed = ", ".join(consumer_info.consumes) or "(nothing)"
         produced = ", ".join(producer_info.produces) or "(nothing)"
@@ -226,17 +303,19 @@ def _check_stack(config, registry, stack: str, failures, uncalibrated) -> None:
         )
 
 
-def validate_config(config, registry) -> WiringReport:
+def validate_config(config, registry, *, entries=None) -> WiringReport:
     """Validate a FidelityConfig against a registry.
 
     Args:
         config: The configuration to check (operator + seam choices).
         registry: The implementation registry to resolve against.
+        entries: Already resolved entries keyed by slot and side, if supplied.
 
     Returns:
         A WiringReport; call raise_if_failed() to enforce it.
     """
     failures: list[WiringFailure] = []
+    params_failures: list[WiringFailure] = []
     uncalibrated: set[str] = set()
     chosen = {seam for seam, _ in config.choices}
     skipped = tuple(
@@ -247,7 +326,12 @@ def validate_config(config, registry) -> WiringReport:
     has_override = any(choice.model is not None for _, choice in config.choices)
     stacks = ("truth", "model") if has_override else ("truth",)
     for stack in stacks:
-        _check_stack(config, registry, stack, failures, uncalibrated)
+        _check_stack(
+            config, registry, stack, failures, params_failures, uncalibrated, entries
+        )
+    # Preserve existing diagnostics whenever either stack has another failure.
+    if not failures:
+        failures.extend(params_failures)
     return WiringReport(
         ok=not failures,
         operator=config.operator,

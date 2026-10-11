@@ -60,7 +60,7 @@ class SeamRef:
         name: The implementation's registered name or qualified class name.
             Historical qualified names are resolved only when building; the
             original spelling remains part of serialized provenance.
-        version: Optional version constraint recorded for provenance.
+        version: Optional pin that must equal the registered version.
         params: Constructor parameters as sorted (key, value) pairs of
             primitives or nested tuples of primitives.
     """
@@ -148,7 +148,8 @@ class FidelityConfig:
         """Check this configuration against a registry.
 
         Verifies that every chosen implementation exists and is available,
-        that it supports the run's operator, and that every data-plane edge
+        that its version pin and constructor parameters match, that it
+        supports the run's operator, and that every data-plane edge
         between chosen seams is type-compatible; unmet calibration needs are
         flagged. See :mod:`spaceodyssey.wiring`.
         """

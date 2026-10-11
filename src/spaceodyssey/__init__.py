@@ -9,7 +9,16 @@ from spaceodyssey import loop as _loop
 from spaceodyssey._version import __version__
 from spaceodyssey.account import ConstantOverheads, Ledger
 from spaceodyssey.belief import MissionBelief, TargetBelief
-from spaceodyssey.build import Mission, ModelStack, TruthStack, build
+from spaceodyssey.build import (
+    BuildPlan,
+    Mission,
+    ModelStack,
+    ResolvedImpl,
+    TruthStack,
+    build,
+    construct,
+    prepare,
+)
 from spaceodyssey.certify import (
     AbstractCertificate,
     AbstractProfileCertificate,
@@ -88,6 +97,7 @@ __all__ = [
     "AbstractTruthModel",
     "AbstractUniverseSource",
     "AlwaysObservable",
+    "BuildPlan",
     "CertificateState",
     "CertificationOutcome",
     "CertifiedYield",
@@ -116,6 +126,7 @@ __all__ = [
     "RegisteredImpl",
     "Registry",
     "RegistryError",
+    "ResolvedImpl",
     "RunManifest",
     "SeamChoice",
     "SeamInfo",
@@ -138,9 +149,11 @@ __all__ = [
     "certified_yield",
     "check_compatible",
     "config_from_json",
+    "construct",
     "content_hash",
     "get_engine",
     "observe",
+    "prepare",
     "read_manifest",
     "register",
     "register_engine",
