@@ -233,6 +233,7 @@ class CertificationOutcome(eqx.Module):
         claim_truth_positive: Claim truth flags, shape (P, K), boolean.
         claim_in_range: Claim validity flags, shape (P, K), boolean.
         claim_names: Ordered names; supplied with all six claim arrays.
+        fidelity: Optional per-outcome method label, such as closed_form or quadrature.
         profile_hash: Optional 64-character lowercase hexadecimal profile content hash.
         replicate_key: Static identifier of the replicate stream. Batch main
             probabilities must match replicate means to rtol 1e-10.
@@ -272,6 +273,7 @@ class CertificationOutcome(eqx.Module):
     )
     claim_names: tuple[str, ...] | None = eqx.field(default=None, static=True)
     profile_hash: str | None = eqx.field(default=None, static=True)
+    fidelity: str | None = eqx.field(default=None, static=True)
 
     def __check_init__(self):
         """Validate planet axes, optional claims, hash, and replicates."""

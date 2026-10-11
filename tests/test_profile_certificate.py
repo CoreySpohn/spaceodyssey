@@ -158,6 +158,22 @@ def test_constructor_cannot_hide_profile_inputs():
         HiddenInputs(profile=make_profile(), truth_model=LinearGaussianTruthModel())
 
 
+def test_profile_specific_restriction_runs_before_constructor():
+    class RestrictedCertificate(ProfileCertificateDouble):
+        @classmethod
+        def check_profile_support(cls, profile, truth_model):
+            if profile.support_rule == "joint":
+                raise UnsupportedProfile("joint requires a different integrator")
+
+        def __init__(self, profile, truth_model):
+            pytest.fail("profile restrictions must run before construction")
+
+    with pytest.raises(UnsupportedProfile, match=r"joint.*integrator"):
+        RestrictedCertificate(
+            replace(make_profile(), support_rule="joint"), LinearGaussianTruthModel()
+        )
+
+
 def test_unrelated_profile_attribute_is_not_a_profile_certificate():
     class UnrelatedCertificate(spaceodyssey.ToyGaussianCertifier):
         profile: str = eqx.field(static=True, default="display label")

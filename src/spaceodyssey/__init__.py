@@ -27,6 +27,7 @@ from spaceodyssey.errors import (
     UnsupportedProfile,
     WiringError,
 )
+from spaceodyssey.gaussian_profile import GaussianProfileCertifier
 from spaceodyssey.io import RunManifest, read_manifest, write_run
 from spaceodyssey.loop import (
     DETECTION_CERTIFICATE,
@@ -92,6 +93,7 @@ __all__ = [
     "FidelityConfig",
     "FileRef",
     "FixedUniverse",
+    "GaussianProfileCertifier",
     "GaussianSummary",
     "Ledger",
     "Mission",

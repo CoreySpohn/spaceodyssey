@@ -119,6 +119,7 @@ def _check_profile(profile, truth_model, certificate_type):
         missing = profile.quantities - supported
         if missing:
             raise UnsupportedProfile(f"unsupported quantities: {sorted(missing)}")
+    certificate_type.check_profile_support(profile, truth_model)
 
 
 class _ProfileCertificateMeta(type(AbstractCertificate)):
@@ -160,6 +161,15 @@ class AbstractProfileCertificate(
     truth_model: eqx.AbstractVar[AbstractTruthModel]
     SUPPORT_RULES: eqx.AbstractClassVar[frozenset[str]]
     SUPPORTED_QUANTITIES: eqx.AbstractClassVar[frozenset[str] | None]
+
+    @classmethod
+    def check_profile_support(cls, profile: Profile, truth_model: AbstractTruthModel):
+        """Check additional restrictions before any subclass initialization.
+
+        Override for restrictions that depend on the profile's structure.
+        This hook must inspect declarations only, without model computation.
+        Raise UnsupportedProfile with the unsupported feature and reason.
+        """
 
     def __check_init__(self):
         """Reject incompatible models, support rules, and quantities."""
