@@ -1,6 +1,7 @@
 """Truth-model validation, compatibility, and Gaussian sampling contracts."""
 
 import dataclasses
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -12,7 +13,7 @@ from photomancy.priors import Uniform
 import spaceodyssey
 from spaceodyssey import Claim, Edge, Profile, Purpose, stream
 from spaceodyssey.errors import UnsupportedProfile
-from spaceodyssey.testing import LinearGaussianTruth
+from spaceodyssey.testing import LinearGaussianTruthModel
 from spaceodyssey.truth import (
     AbstractTruthModel,
     ObservedData,
@@ -27,7 +28,7 @@ def make_truth(n=3, **kwargs):
     fields = dict(
         theta=jnp.tile(jnp.array([2.0, 3.0]), (n, 1)),
         context={"offset": jnp.full(n, 0.5)},
-        model_id=LinearGaussianTruth.model_id,
+        model_id=LinearGaussianTruthModel.model_id,
     )
     fields.update(kwargs)
     return Truth(**fields)
@@ -48,7 +49,7 @@ def make_profile(**kwargs):
 @pytest.mark.parametrize("method", ["expected_data", "simulate", "quantities"])
 @pytest.mark.parametrize("cause", ["D", "context"])
 def test_wrong_d_or_missing_context_raises(method, cause):
-    model = LinearGaussianTruth()
+    model = LinearGaussianTruthModel()
     truth = make_truth(
         **({"theta": jnp.ones((3, 3))} if cause == "D" else {"context": {}})
     )
@@ -76,7 +77,7 @@ def test_truth_shape_and_context_keys(kwargs, cause):
 
 @pytest.mark.parametrize("cause", ["quantity", "prior", "flux"])
 def test_unsupported_profile_names_cause(cause):
-    model, profile, plan = LinearGaussianTruth(), make_profile(), make_plan()
+    model, profile, plan = LinearGaussianTruthModel(), make_profile(), make_plan()
     if cause == "quantity":
         profile = dataclasses.replace(
             profile,
@@ -95,7 +96,7 @@ def test_unsupported_profile_names_cause(cause):
 
 @pytest.mark.parametrize("reference", ["", "unit_flux"])
 def test_compatible_and_optional_flux_metadata(reference):
-    model = LinearGaussianTruth()
+    model = LinearGaussianTruthModel()
     plan = make_plan(flux_reference=reference)
     check_compatible(make_profile(), model)
     check_compatible(make_profile(), model, plan)
@@ -119,7 +120,7 @@ def flatten_data(data):
 
 def test_20000_simulated_draws_match_expected_data_and_plan_covariance_within_5_se():
     n = 20_000
-    model = LinearGaussianTruth(spectral_matrix=[[1.0, 0.2], [-0.3, 0.8]])
+    model = LinearGaussianTruthModel(spectral_matrix=[[1.0, 0.2], [-0.3, 0.8]])
     truth = make_truth(n=2, theta=jnp.array([[2.0, 3.0], [1.0, 4.0]]))
     factors = np.array([[[0.3], [-0.2]], [[0.1], [0.4]]])
     plan = make_plan(
@@ -188,7 +189,7 @@ def test_20000_simulated_draws_match_expected_data_and_plan_covariance_within_5_
 
 
 def test_failed_visits_and_missing_spectra_give_false_masks_and_no_nan():
-    model, truth = LinearGaussianTruth(), make_truth()
+    model, truth = LinearGaussianTruthModel(), make_truth()
     plan = make_plan(
         spectrum_visit=[0, -1, 1],
         visit_success=[
@@ -218,7 +219,7 @@ def test_failed_visits_and_missing_spectra_give_false_masks_and_no_nan():
 
 def test_empty_visits_and_zero_rank_covariance():
     plan = make_plan(n_visits=0, noise_corr_factors=jnp.zeros((3, 2, 0)))
-    model = LinearGaussianTruth()
+    model = LinearGaussianTruthModel()
     data = model.simulate(stream(1, 0, 0, Purpose.MEASUREMENT), make_truth(), plan)
     assert data.photometry.shape == (3, 0)
     assert not np.any(data.has_spectrum)
@@ -226,7 +227,7 @@ def test_empty_visits_and_zero_rank_covariance():
 
 
 def test_per_planet_stream_keys_preserve_draws_when_reordered():
-    model, truth, plan = LinearGaussianTruth(), make_truth(), make_plan()
+    model, truth, plan = LinearGaussianTruthModel(), make_truth(), make_plan()
     keys = jnp.stack([stream(0, i, 7, Purpose.MEASUREMENT) for i in (32, 1, 99)])
     data = model.simulate(keys, truth, plan)
     perm = jnp.array([2, 0, 1])
@@ -262,7 +263,11 @@ def test_prior_set_invariants(field, value, message):
 
 @pytest.mark.parametrize("cause", ["dimension", "nominal", "units"])
 def test_model_prior_invariants(cause):
-    class InvalidModel(LinearGaussianTruth):
+    class InvalidModel(LinearGaussianTruthModel):
+        param_units: ClassVar[tuple[str, ...]] = (
+            ("1",) if cause == "units" else ("1", "1")
+        )
+
         def __init__(self):
             super().__init__()
             if cause == "dimension":
@@ -271,15 +276,18 @@ def test_model_prior_invariants(cause):
             elif cause == "nominal":
                 member = Uniform(jnp.zeros(2), jnp.ones(2))
                 self.prior_sets = (PriorSet((member,), "bad@1", ("nominal",), 0),)
-            else:
-                self.prior = Uniform(jnp.zeros(3), jnp.ones(3))
 
-    with pytest.raises(ValueError, match=r"D|nominal"):
+    message = {
+        "dimension": "prior set.*wrong D",
+        "nominal": "nominal member differs",
+        "units": "param_names, param_units and prior.ndim must agree on D",
+    }[cause]
+    with pytest.raises(ValueError, match=message):
         InvalidModel()
 
 
 def test_uniform_prior_quantities_and_public_exports():
-    model = LinearGaussianTruth(low=[-2, -3], high=[4, 5])
+    model = LinearGaussianTruthModel(low=[-2, -3], high=[4, 5])
     np.testing.assert_array_equal(model.prior.forward(jnp.array([0.0, 1.0])), [-2, 5])
     assert float(model.prior.log_prob(jnp.zeros(2))) == pytest.approx(-np.log(48))
     truth = make_truth()
@@ -290,3 +298,19 @@ def test_uniform_prior_quantities_and_public_exports():
         assert getattr(spaceodyssey, cls.__name__) is cls
     assert spaceodyssey.check_compatible is check_compatible
     assert eqx.tree_equal(model.prior, model.prior_sets[0].members[0])
+
+
+@pytest.mark.parametrize("implementation", ["rbg", "unsafe_rbg"])
+def test_simulate_rejects_non_threefry_keys(implementation):
+    with pytest.raises(ValueError, match="threefry2x32"):
+        LinearGaussianTruthModel().simulate(
+            jax.random.key(0, impl=implementation), make_truth(), make_plan()
+        )
+
+
+def test_deprecated_truth_model_alias():
+    import spaceodyssey.testing as testing
+
+    with pytest.warns(DeprecationWarning, match="LinearGaussianTruthModel"):
+        old = testing.LinearGaussianTruth
+    assert old is testing.LinearGaussianTruthModel

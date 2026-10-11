@@ -16,6 +16,7 @@ import numpy as np
 from scipy.stats import norm, t
 
 from spaceodyssey.build import Mission
+from spaceodyssey.certify import AbstractProfileCertificate
 from spaceodyssey.engines import register_engine
 from spaceodyssey.errors import WiringError
 from spaceodyssey.metrics import CertifiedYield
@@ -100,6 +101,8 @@ class PairedDifference:
     interval_kind: str
     replicate_key: str
     confidence: float
+    profile_hash_a: str | None = None
+    profile_hash_b: str | None = None
 
 
 def paired_difference(a, b, weights=None, *, confidence=0.95) -> PairedDifference:
@@ -131,7 +134,15 @@ def paired_difference(a, b, weights=None, *, confidence=0.95) -> PairedDifferenc
             points[channel], values, a.replicate_kind, confidence
         )
     return PairedDifference(
-        points, reps, errors, intervals, a.interval_kind, a.replicate_key, confidence
+        points,
+        reps,
+        errors,
+        intervals,
+        a.interval_kind,
+        a.replicate_key,
+        confidence,
+        profile_hash_a=a.profile_hash,
+        profile_hash_b=b.profile_hash,
     )
 
 
@@ -343,12 +354,12 @@ def run_integrate(
     certificate = mission.model.certification
     if certificate is None:
         raise WiringError("the integrate engine needs a certification seam choice")
+    if isinstance(certificate, AbstractProfileCertificate):
+        certificate.validate_predictive(predictive)
     outcome = certificate.integrate(predictive)
-    if hasattr(certificate, "profile"):
+    if isinstance(certificate, AbstractProfileCertificate):
         if outcome.profile_hash != certificate.profile.content_hash():
-            raise AssertionError(
-                "outcome profile_hash does not match certificate profile"
-            )
+            raise WiringError("outcome profile_hash does not match certificate profile")
     if strict:
         outcome.raise_if_out_of_range()
     name = mission.config.choice("certification").model_ref.name

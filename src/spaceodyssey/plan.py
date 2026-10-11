@@ -233,7 +233,7 @@ class CertificationOutcome(eqx.Module):
         claim_truth_positive: Claim truth flags, shape (P, K), boolean.
         claim_in_range: Claim validity flags, shape (P, K), boolean.
         claim_names: Ordered names; supplied with all six claim arrays.
-        profile_hash: Optional 64-character hexadecimal profile content hash.
+        profile_hash: Optional 64-character lowercase hexadecimal profile content hash.
         replicate_key: Static identifier of the replicate stream. Batch main
             probabilities must match replicate means to rtol 1e-10.
     """
@@ -297,9 +297,11 @@ class CertificationOutcome(eqx.Module):
             if (
                 not isinstance(self.profile_hash, str)
                 or len(self.profile_hash) != 64
-                or any(c not in "0123456789abcdefABCDEF" for c in self.profile_hash)
+                or any(c not in "0123456789abcdef" for c in self.profile_hash)
             ):
-                raise ValueError("profile_hash must be 64 hexadecimal characters")
+                raise ValueError(
+                    "profile_hash must be 64 lowercase hexadecimal characters"
+                )
         claim_fields = (
             "claim_p_pos",
             "claim_p_neg",

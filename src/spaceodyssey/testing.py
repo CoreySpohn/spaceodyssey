@@ -8,6 +8,7 @@ moments must match declared moments, and outputs must match declared contract
 types. Checks raise plain AssertionError so any test framework can host them.
 """
 
+import warnings
 from typing import ClassVar
 
 import jax
@@ -219,7 +220,7 @@ def _expect_unsupported(call, name: str) -> None:
     )
 
 
-class LinearGaussianTruth(AbstractTruthModel):
+class LinearGaussianTruthModel(AbstractTruthModel):
     """Linear measurements of named parameters with a uniform box prior.
 
     The default parameters are dimensionless ``x`` and ``y``. Subclasses may
@@ -306,3 +307,15 @@ class LinearGaussianTruth(AbstractTruthModel):
                 plan.mass_measured, theta[:, -1] + offset, 0
             ),
         )
+
+
+def __getattr__(name):
+    """Resolve the deprecated truth-model name for existing callers."""
+    if name == "LinearGaussianTruth":
+        warnings.warn(
+            "LinearGaussianTruth is deprecated; use LinearGaussianTruthModel",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return LinearGaussianTruthModel
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

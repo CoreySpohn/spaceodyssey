@@ -49,8 +49,8 @@ photomancy is the belief update both share.
 A strict firewall separates truth from belief. The simulator holds both the drawn
 universe and the agent's belief about it, and the only bridge between them is
 `observe(truth, action, key) -> data`. The truth container is never an argument to
-the policy, the belief update, or the certification layer; the split is enforced at
-the type level rather than by convention. Observations expose `to_likelihood()`
+the policy, the belief update, or realized-data certification. Analytic integration
+uses truth to evaluate certification probabilities and score wrong verdicts. Observations expose `to_likelihood()`
 factories, so heterogeneous data (detection outcomes, astrometry, spectra, frames)
 flow into one belief without spaceodyssey interpreting any physics itself.
 
@@ -240,3 +240,39 @@ zero-yield plans, including in the strict analytic engine. Unknown noise is
 outside the toy's validated range and is flagged through `in_range`.
 Shapes and spectrum index dtype are checked during tracing; value validation
 runs during concrete construction. Validate inputs before passing them to JIT.
+
+## Profiles, truth models, and the claim axis
+
+A `Profile` is an immutable configuration of named `Claim` objects. Each claim
+combines one or two inclusive `Edge` thresholds on scalar quantities supplied by
+an `AbstractTruthModel`. `Truth` holds parameters and known context for a batch of
+planets; the model defines their quantities, prior sets, and expected observations.
+`LinearGaussianTruthModel` in `spaceodyssey.testing` supplies a simple reference
+model. Its former name, `LinearGaussianTruth`, is a deprecated alias.
+
+Profiles require explicit keyword arguments for `support_rule` and `prior_set_id`.
+The reference profiles use `joint` support, bounding the probability that any
+reported claim is wrong. `separate` and `split` remain available for per-claim
+risk and equally divided familywise risk. The reference profiles declare the
+neutral prior-set identifier `exoearth-reference@1`: a compatible truth model must
+provide a `PriorSet` with that exact id. Profile names are free-text display labels.
+
+The profile content hash includes the claims, risk, support and evidence rules,
+and prior-set id. It excludes the display label. Claim order fixes the output axis;
+edge order within a claim and the sign of zero do not change identity.
+
+`AbstractProfileCertificate` checks compatibility before subclass construction
+runs, including custom `__init__` and `__check_init__` methods. Constructors must
+expose named `profile` and `truth_model` parameters; hiding them in variadic
+arguments is rejected. The integrate engine calls `validate_predictive` to check
+truth identity, parameter dimensions, required context, the planet axis, and
+plan flux references before integrating. It raises `WiringError` if the resulting
+profile hash differs from the certificate's hash.
+
+`CertificationOutcome` can carry six `(P, K)` claim arrays and ordered
+`claim_names`, all present together. Each column describes that claim as a
+stand-alone one-claim profile. Profile probabilities describe the combined
+certification event. The lowercase hexadecimal `profile_hash` identifies the
+configuration. `certified_yield` preserves it and reports weighted `claim_yields`;
+`paired_difference` records `profile_hash_a` and `profile_hash_b`, allowing both
+same-profile comparisons and comparisons between different profiles.

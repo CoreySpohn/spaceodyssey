@@ -76,6 +76,7 @@ def test_name_is_label_and_canonical_hash():
         "label",
         (Claim("c", (Edge("x", 1.5, "above"),), "either"),),
         0.05,
+        support_rule="joint",
         prior_set_id="example@1",
     )
     renamed = dataclasses.replace(profile, name="another label")
@@ -255,3 +256,45 @@ def test_reference_variants_and_exports():
     assert len({p.content_hash() for p in profiles.ALPHA_BAND}) == 3
     with pytest.raises(dataclasses.FrozenInstanceError):
         REFERENCE.alpha = 0.2
+
+
+@pytest.mark.parametrize("scalar", [np.float64, np.float32, np.int64])
+def test_real_scalars_are_normalized(scalar):
+    edge = Edge("x", scalar(1), "above")
+    assert type(edge.threshold) is float
+    profile = dataclasses.replace(REFERENCE, alpha=np.float64(0.05))
+    assert type(profile.alpha) is float
+    assert profile == REFERENCE
+    assert profile.content_hash() == REFERENCE.content_hash()
+
+
+def test_signed_zero_and_edge_order_are_canonical():
+    def profile(zero, reverse):
+        edges = (Edge("x", zero, "above"), Edge("x", 1, "below"))
+        claim = Claim("interval", edges[::-1] if reverse else edges, "positive")
+        return dataclasses.replace(REFERENCE, claims=(claim,))
+
+    baseline = profile(0.0, False)
+    for other in (profile(-0.0, False), profile(0.0, True)):
+        assert baseline == other
+        assert hash(baseline) == hash(other)
+        assert baseline.content_hash() == other.content_hash()
+        assert other.claims[0].edges[0].threshold.hex() == (0.0).hex()
+
+
+@pytest.mark.parametrize("missing", ["support_rule", "prior_set_id"])
+def test_profile_requires_explicit_keyword_configuration(missing):
+    fields = dataclasses.asdict(REFERENCE)
+    fields["claims"] = REFERENCE.claims
+    del fields[missing]
+    with pytest.raises(TypeError, match=missing):
+        Profile(**fields)
+
+
+def test_profile_configuration_is_keyword_only():
+    with pytest.raises(TypeError):
+        Profile("label", REFERENCE.claims, 0.05, "joint", "example@1")
+
+
+def test_reference_prior_identity():
+    assert REFERENCE.prior_set_id == "exoearth-reference@1"

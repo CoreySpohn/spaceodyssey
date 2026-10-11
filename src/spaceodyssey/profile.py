@@ -4,7 +4,8 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from numbers import Real
 from statistics import NormalDist
 from typing import Literal
 
@@ -23,7 +24,11 @@ def _nonempty_string(value: object, field: str) -> None:
 
 
 def _finite_number(value: object, field: str) -> None:
-    if type(value) not in (int, float) or not math.isfinite(value):
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not math.isfinite(value)
+    ):
         raise ValueError(f"{field} must be a finite real number")
 
 
@@ -48,7 +53,7 @@ class Edge:
         _nonempty_string(self.side, "side")
         if self.side not in ("above", "below"):
             raise ValueError("side must be 'above' or 'below'")
-        object.__setattr__(self, "threshold", float(self.threshold))
+        object.__setattr__(self, "threshold", float(self.threshold) + 0.0)
 
 
 @dataclass(frozen=True)
@@ -72,6 +77,11 @@ class Claim:
             raise ValueError("edges must be a tuple of one or two Edge objects")
         if any(type(edge) is not Edge for edge in self.edges):
             raise ValueError("edges must contain Edge objects")
+        object.__setattr__(
+            self,
+            "edges",
+            tuple(sorted(self.edges, key=lambda e: (e.quantity, e.threshold, e.side))),
+        )
         _nonempty_string(self.counted, "counted")
         if self.counted not in ("positive", "either"):
             raise ValueError("counted must be 'positive' or 'either'")
@@ -96,8 +106,9 @@ class Profile:
         claims: Nonempty tuple of uniquely named claims, in output-axis order.
         alpha: Risk tolerance strictly between zero and one half.
         support_rule: Joint familywise risk, separate claim risks, or an equal
-            split of alpha across claims. Joint is the default.
-        prior_set_id: Nonempty identifier of the robustness prior set.
+            split of alpha across claims. Required keyword argument.
+        prior_set_id: Nonempty identifier of the robustness prior set, required
+            as a keyword argument.
         evidence_rule: Require prior-only risk to exceed alpha for every claim.
 
     Raises:
@@ -107,8 +118,8 @@ class Profile:
     name: str
     claims: tuple[Claim, ...]
     alpha: float
-    support_rule: SupportRule = "joint"
-    prior_set_id: str = ""
+    support_rule: SupportRule = field(kw_only=True)
+    prior_set_id: str = field(kw_only=True)
     evidence_rule: EvidenceRule = "every_claim"
 
     def __post_init__(self) -> None:
@@ -118,7 +129,7 @@ class Profile:
         _finite_number(self.alpha, "alpha")
         if not 0 < self.alpha < 0.5:
             raise ValueError("alpha must be strictly between 0 and 0.5")
-        object.__setattr__(self, "alpha", float(self.alpha))
+        object.__setattr__(self, "alpha", float(self.alpha) + 0.0)
         if type(self.claims) is not tuple or not self.claims:
             raise ValueError("claims must be a nonempty tuple of Claim objects")
         if any(type(claim) is not Claim for claim in self.claims):
@@ -193,7 +204,8 @@ class Profile:
     def content_hash(self) -> str:
         """Return the SHA-256 digest of canonical, versioned configuration JSON.
 
-        Floats use hexadecimal strings. Claim order and claim names are content;
+        Floats use hexadecimal strings with signed zero normalized. Edges within
+        a claim are sorted; claim order and claim names are content;
         the profile's display name is excluded. The digest is independent of
         Python's randomized in-process hash.
         """

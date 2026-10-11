@@ -4,6 +4,8 @@ The conservative zone and radius boundaries follow Stark (2019) and
 Kopparapu (2018); the optimistic zone follows Kopparapu (2013). Distances
 are in Earth-equivalent insolation distance and radii in Earth radii.
 The water claim uses a log10 volume mixing ratio threshold of -4.
+Compatible truth models must declare a prior set with id
+``exoearth-reference@1``. Profile names are free-text display labels.
 """
 
 import math
@@ -34,7 +36,7 @@ EXOEARTH_CANDIDATE = Profile(
     claims=(HABITABLE_ZONE, RADIUS_CLASS, WATER),
     alpha=0.05,
     support_rule="joint",
-    prior_set_id="rlspec-wp1-16@1",
+    prior_set_id="exoearth-reference@1",
 )
 HABITABLE_ZONE_ONLY = replace(
     EXOEARTH_CANDIDATE, name="habitable_zone_only", claims=(HABITABLE_ZONE,)

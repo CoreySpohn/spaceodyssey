@@ -264,3 +264,17 @@ def test_construction_with_replicates_under_jit():
     assert value.replicate_kind == "batch"
     assert value.replicate_key == "stream"
     np.testing.assert_allclose(value.p_pos, [0.5])
+
+
+@pytest.mark.parametrize(
+    "hashes", [(None, None), ("a" * 64, "a" * 64), ("a" * 64, "b" * 64)]
+)
+@pytest.mark.parametrize("as_reports", [False, True])
+def test_paired_difference_records_both_profile_hashes(hashes, as_reports):
+    a, b = (outcome(profile_hash=h) for h in hashes)
+    comparison = (
+        paired_difference(report(a), report(b))
+        if as_reports
+        else paired_difference(a, b, weights=[1])
+    )
+    assert (comparison.profile_hash_a, comparison.profile_hash_b) == hashes

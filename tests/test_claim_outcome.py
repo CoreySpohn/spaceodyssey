@@ -150,3 +150,8 @@ def test_legacy_outcome_has_no_claim_yields():
     report = certified_yield(make_outcome(), [1, 2, 3], certificate="example")
     assert report.profile_hash is None
     assert report.claim_yields == {}
+
+
+def test_profile_hash_requires_lowercase():
+    with pytest.raises(ValueError, match="lowercase"):
+        make_outcome(profile_hash="A" * 64)

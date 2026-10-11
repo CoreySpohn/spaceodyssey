@@ -15,6 +15,8 @@ without erasing the announcement.
 """
 
 import abc
+import dataclasses
+import inspect
 from typing import ClassVar, final
 
 import equinox as eqx
@@ -108,15 +110,49 @@ class AbstractCertificate(eqx.Module):
         """
 
 
-class AbstractProfileCertificate(AbstractCertificate):
+def _check_profile(profile, truth_model, certificate_type):
+    check_compatible(profile, truth_model)
+    if profile.support_rule not in certificate_type.SUPPORT_RULES:
+        raise UnsupportedProfile(f"unsupported support rule: {profile.support_rule!r}")
+    supported = certificate_type.SUPPORTED_QUANTITIES
+    if supported is not None:
+        missing = profile.quantities - supported
+        if missing:
+            raise UnsupportedProfile(f"unsupported quantities: {sorted(missing)}")
+
+
+class _ProfileCertificateMeta(type(AbstractCertificate)):
+    def __call__(cls, *args, **kwargs):
+        # Bind the generated or custom constructor before Equinox invokes any
+        # subclass initialization, converters, or __check_init__ hooks.
+        bound = inspect.signature(cls).bind(*args, **kwargs)
+        bound.apply_defaults()
+        if "profile" not in bound.arguments or "truth_model" not in bound.arguments:
+            raise TypeError(
+                "profile certificate constructors must expose profile and truth_model"
+            )
+        fields = {field.name: field for field in dataclasses.fields(cls)}
+        for name in ("profile", "truth_model"):
+            # Generated dataclass initializers expose a sentinel for factories.
+            # Resolve it once and forward the checked object to initialization.
+            if bound.arguments[name] is dataclasses._HAS_DEFAULT_FACTORY:
+                bound.arguments[name] = fields[name].default_factory()
+        _check_profile(bound.arguments["profile"], bound.arguments["truth_model"], cls)
+        return super().__call__(*bound.args, **bound.kwargs)
+
+
+class AbstractProfileCertificate(
+    AbstractCertificate, metaclass=_ProfileCertificateMeta
+):
     """A profile certificate bound to a compatible truth model.
 
     Implementations store ``profile`` as a static field, declare their
     supported rules and quantities, and implement ``integrate`` to return
     an outcome with a claim axis and the profile's content hash. A quantity
     declaration of None accepts every quantity provided by the model.
-    Construction checks compatibility before evaluating model quantities or
-    observations. Implementations must separately validate any restrictions
+    Constructors must expose named ``profile`` and ``truth_model`` parameters.
+    A construction guard checks compatibility before any subclass initialization
+    or validation hook runs. Implementations must separately validate any restrictions
     on the functional form of quantities and on prior distributions.
     """
 
@@ -127,15 +163,16 @@ class AbstractProfileCertificate(AbstractCertificate):
 
     def __check_init__(self):
         """Reject incompatible models, support rules, and quantities."""
-        check_compatible(self.profile, self.truth_model)
-        if self.profile.support_rule not in self.SUPPORT_RULES:
-            raise UnsupportedProfile(
-                f"unsupported support rule: {self.profile.support_rule!r}"
-            )
-        if self.SUPPORTED_QUANTITIES is not None:
-            missing = self.profile.quantities - self.SUPPORTED_QUANTITIES
-            if missing:
-                raise UnsupportedProfile(f"unsupported quantities: {sorted(missing)}")
+        _check_profile(self.profile, self.truth_model, type(self))
+
+    def validate_predictive(self, predictive: PlanPredictive) -> None:
+        """Check plan flux units and truth identity, dimensions, and context.
+
+        The integrate engine calls this before invoking the concrete integrator.
+        Direct callers should also validate before integrating or tracing.
+        """
+        check_compatible(self.profile, self.truth_model, predictive.plan)
+        self.truth_model.validate_truth(predictive.truth, predictive.plan)
 
     def initial(self) -> CertificateState:
         """Raise unless the implementation provides a running state."""
