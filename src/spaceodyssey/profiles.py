@@ -1,8 +1,11 @@
 """Reference claims and profile variants for exoEarth candidates.
 
 The conservative zone (0.95 to 1.67 Earth-equivalent insolation distance)
-is the band of Kasting et al. (1993) as adopted for exoEarth candidates by
-Stark et al. (2019). The radius bounds follow Kopparapu et al. (2018). The
+is the exoEarth-candidate zone of Stark et al. (2019), numerically the
+conservative band of Kasting et al. (1993). The radius bounds are those of
+Stark et al. (2019): the lower edge 0.8 a^(-1/2) Earth radii with a in
+Earth-equivalent insolation distance (an insolation scaling after Zahnle and
+Catling 2017) and the upper edge 1.4 Earth radii (Kopparapu et al. 2018). The
 optimistic zone (0.75 to 1.77) is the recent-Venus and early-Mars limits of
 Kopparapu et al. (2013). Zone edges scale with stellar luminosity only; the
 host-temperature dependence of the edges (Kopparapu et al. 2013) is not
