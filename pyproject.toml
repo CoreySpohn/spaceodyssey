@@ -21,6 +21,7 @@ dependencies = [
     "equinox",
     "jax",
     "jaxlib",
+    "scipy",
     "hwoutils",
     "optixstuff",
     "yippy",

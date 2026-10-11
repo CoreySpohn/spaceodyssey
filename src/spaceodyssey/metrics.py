@@ -14,7 +14,7 @@ This module is declarative: stdlib only, no JAX.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -159,8 +159,11 @@ class CertifiedYield:
     planets' estimates as independent; they are zero for closed-form tiers.
     These are independent-planet LOWER BOUNDS: shared table or
     common-random-number errors are not included. The positive-yield error
-    retains the candidate-masked p_pos_se approximation; covariance between
-    p_pos and p_wrong is unavailable in the outcome contract.
+    retains the candidate-masked p_pos_se approximation. With replicates,
+    the random interval uses all planets' paired probability estimates,
+    including covariance between positive and wrong certifications. Batch
+    SEs are sample SD / sqrt(R), with Student t intervals; bootstrap SEs are
+    sample SD, with percentile intervals. Systematic bounds remain explicit.
 
     Attributes:
         operator: The outcome operator the run evaluated.
@@ -187,6 +190,24 @@ class CertifiedYield:
         neg: Per-planet contributions to ``y_neg``.
         neg_wrong: Per-planet contributions to ``y_neg_wrong``.
         in_range: Per-planet in-range flags of the evaluating tier.
+        y_issued_se_independent_lower_bound: Independent quadrature for issued.
+        interval_kind: replicate-batch, replicate-bootstrap, or
+            independent-lower-bound.
+        confidence: Random interval coverage probability.
+        replicate_kind: Batch or bootstrap scheme, when available.
+        replicate_key: Identifier shared by paired streams.
+        replicate_yields: Per-channel weighted sums for each replicate.
+        standard_errors: Replicate SEs, or independent lower bounds.
+        intervals: Random intervals, without systematic bounds.
+        design_effects: Replicate variance divided by independent variance;
+            None when the independent variance is zero.
+        wrong_issued_ratio: Wrong yield divided by issued yield, or None.
+        wrong_issued_ratio_rep: Paired replicate ratios, or None if undefined.
+        wrong_issued_ratio_se: Replicate ratio SE, when defined.
+        wrong_issued_ratio_interval: Replicate ratio interval, when defined.
+        systematic: Component-to-channel signed bounds in yield units.
+        total_intervals: Random intervals plus numerical systematic bounds;
+            the component fm is excluded and remains in systematic.
     """
 
     operator: str
@@ -208,6 +229,22 @@ class CertifiedYield:
     neg_wrong: tuple[float, ...]
     in_range: tuple[bool, ...]
 
+    y_issued_se_independent_lower_bound: float = 0.0
+    interval_kind: str = "independent-lower-bound"
+    confidence: float = 0.95
+    replicate_kind: str | None = None
+    replicate_key: str | None = None
+    replicate_yields: dict[str, tuple[float, ...]] = field(default_factory=dict)
+    standard_errors: dict[str, float] = field(default_factory=dict)
+    intervals: dict[str, tuple[float, float]] = field(default_factory=dict)
+    design_effects: dict[str, float | None] = field(default_factory=dict)
+    wrong_issued_ratio: float | None = None
+    wrong_issued_ratio_rep: tuple[float, ...] | None = None
+    wrong_issued_ratio_se: float | None = None
+    wrong_issued_ratio_interval: tuple[float, float] | None = None
+    systematic: dict[str, dict[str, tuple[float, float]]] = field(default_factory=dict)
+    total_intervals: dict[str, tuple[float, float]] = field(default_factory=dict)
+
     @property
     def all_in_range(self) -> bool:
         """Whether every planet was evaluated inside the validated range."""
@@ -228,7 +265,7 @@ class CertifiedYield:
     def from_json(cls, text: str) -> "CertifiedYield":
         """Deserialize from :meth:`to_json` output."""
         data = json.loads(text)
-        for name in ("cert_pos", "wrong", "neg", "neg_wrong"):
+        for name in ("issued", "cert_pos", "wrong", "neg", "neg_wrong"):
             old = f"y_{name}_se"
             if old in data:
                 data.setdefault(f"{old}_independent_lower_bound", data.pop(old))
@@ -239,6 +276,14 @@ class CertifiedYield:
                 for correct, wrong in zip(data["cert_pos"], data["wrong"], strict=True)
             ]
         data.setdefault("y_issued", sum(data["issued"]))
+        for name in ("replicate_yields", "intervals", "total_intervals"):
+            if name in data:
+                data[name] = {key: tuple(value) for key, value in data[name].items()}
+        if "systematic" in data:
+            data["systematic"] = {
+                component: {key: tuple(bound) for key, bound in channels.items()}
+                for component, channels in data["systematic"].items()
+            }
         return cls(
             **{
                 name: tuple(value) if isinstance(value, list) else value

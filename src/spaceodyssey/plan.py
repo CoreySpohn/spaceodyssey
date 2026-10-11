@@ -217,6 +217,14 @@ class CertificationOutcome(eqx.Module):
             claims (a truth candidate), shape (P,).
         in_range: True where the evaluating tier is inside its validated
             range; values outside it are returned but not trusted, shape (P,).
+        p_pos_rep: Optional probability estimates, shape (R, P), R >= 2.
+        p_neg_rep: Negative probability replicates, shape (R, P).
+        p_wrong_rep: Wrong positive probability replicates, shape (R, P).
+        p_neg_wrong_rep: Wrong negative probability replicates, shape (R, P).
+        replicate_kind: Static batch or bootstrap label. All four replicate
+            arrays and both metadata fields must be supplied together.
+        replicate_key: Static identifier of the replicate stream. Batch main
+            probabilities must match replicate means to rtol 1e-10.
     """
 
     p_pos: jax.Array = eqx.field(converter=jnp.asarray)
@@ -230,8 +238,17 @@ class CertificationOutcome(eqx.Module):
     truth_positive: jax.Array = eqx.field(converter=_as_bool)
     in_range: jax.Array = eqx.field(converter=_as_bool)
 
+    p_pos_rep: jax.Array | None = eqx.field(default=None, converter=_optional_array)
+    p_neg_rep: jax.Array | None = eqx.field(default=None, converter=_optional_array)
+    p_wrong_rep: jax.Array | None = eqx.field(default=None, converter=_optional_array)
+    p_neg_wrong_rep: jax.Array | None = eqx.field(
+        default=None, converter=_optional_array
+    )
+    replicate_kind: str | None = eqx.field(default=None, static=True)
+    replicate_key: str | None = eqx.field(default=None, static=True)
+
     def __check_init__(self):
-        """Validate that every field is one value per planet."""
+        """Validate planet axes and optional (R, P) probability replicates."""
         shape = self.p_pos.shape
         if len(shape) != 1:
             raise ValueError(f"p_pos must have shape (P,), got {shape}")
@@ -249,6 +266,37 @@ class CertificationOutcome(eqx.Module):
             other = getattr(self, name).shape
             if other != shape:
                 raise ValueError(f"{name} must have shape {shape}, got {other}")
+
+        names = ("p_pos", "p_neg", "p_wrong", "p_neg_wrong")
+        reps = [getattr(self, name + "_rep") for name in names]
+        present = [rep is not None for rep in reps]
+        if not any(present):
+            if self.replicate_kind is not None or self.replicate_key is not None:
+                raise ValueError("replicate metadata requires all four arrays")
+            return
+        if not all(present):
+            raise ValueError("replicate arrays must be all four or none")
+        if self.replicate_kind not in ("batch", "bootstrap"):
+            raise ValueError("replicate_kind must be batch or bootstrap")
+        if not isinstance(self.replicate_key, str) or not self.replicate_key:
+            raise ValueError("replicate_key must be a nonempty string")
+        rep_shape = reps[0].shape
+        if len(rep_shape) != 2 or rep_shape[0] < 2 or rep_shape[1:] != shape:
+            raise ValueError("replicate arrays must have shape (R, P) with R >= 2")
+        for name, rep in zip(names, reps, strict=True):
+            if rep.shape != rep_shape:
+                raise ValueError(f"{name}_rep must have shape {rep_shape}")
+            _check_values(
+                jnp.isfinite(rep) & (rep >= 0) & (rep <= 1),
+                f"{name}_rep probabilities must be finite and in [0, 1]",
+            )
+            if self.replicate_kind == "batch":
+                _check_values(
+                    jnp.isclose(
+                        getattr(self, name), rep.mean(axis=0), rtol=1e-10, atol=0
+                    ),
+                    f"{name} must equal its batch replicate mean",
+                )
 
     def raise_if_out_of_range(self) -> None:
         """Raise when any planet lies outside the tier's validated range.
