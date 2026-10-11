@@ -1,10 +1,11 @@
 """Tests for the engine registry and the end-to-end sampling path."""
 
+import subprocess
+import sys
+
 import pytest
 
-import spaceodyssey
 from spaceodyssey import engines
-from spaceodyssey.engines import analytic
 from spaceodyssey.errors import RegistryError
 from spaceodyssey.metrics import YieldSummary
 from tests.doubles import PLANET_TARGETS, build_test_registry, make_config, make_spec
@@ -18,11 +19,18 @@ class TestEngineRegistry:
         assert callable(engines.get_engine("sample"))
 
     def test_integrate_engine_registered_once(self):
-        """Default loading shares the integrate callable and default registry."""
-        assert engines.get_engine("integrate") is analytic.run_integrate
-        assert engines.get_engine("integrate") is analytic.run_integrate
-        assert list(engines.ENGINES.values()).count(analytic.run_integrate) == 1
-        assert engines.REGISTRY is spaceodyssey.REGISTRY
+        """A fresh process finds integrate by default loading, registered once."""
+        code = (
+            "import sys, spaceodyssey; "
+            "from spaceodyssey import engines; "
+            "assert 'spaceodyssey.engines.analytic' not in sys.modules; "
+            "fn = engines.get_engine('integrate'); "
+            "from spaceodyssey.engines import analytic; "
+            "assert fn is analytic.run_integrate; "
+            "assert list(engines.ENGINES.values()).count(fn) == 1; "
+            "assert engines.REGISTRY is spaceodyssey.REGISTRY"
+        )
+        subprocess.run([sys.executable, "-c", code], check=True)
 
     def test_unknown_operator_lists_known(self):
         """An unknown operator error names the registered ones."""
