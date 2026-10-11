@@ -47,6 +47,7 @@ from spaceodyssey.registry import (
     SeamInfo,
     register,
 )
+from spaceodyssey.reporting import certified_yield
 from spaceodyssey.rng import Purpose, stream
 from spaceodyssey.seams import DATA_PLANE_EDGES, KNOWN_OPERATORS, SEAMS
 from spaceodyssey.spec import (
@@ -134,6 +135,7 @@ __all__ = [
     "YieldSummary",
     "__version__",
     "build",
+    "certified_yield",
     "check_compatible",
     "config_from_json",
     "content_hash",

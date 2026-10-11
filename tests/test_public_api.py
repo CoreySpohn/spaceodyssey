@@ -18,6 +18,11 @@ def test_all_names_are_public_objects():
         assert not inspect.ismodule(getattr(spaceodyssey, name)), name
 
 
+def test_certified_yield_is_reporting_function():
+    """The root entry point shares the reporting implementation."""
+    assert spaceodyssey.certified_yield is spaceodyssey.reporting.certified_yield
+
+
 def test_observe_is_loop_function():
     """The public observe entry point is the loop function."""
     assert spaceodyssey.observe is spaceodyssey.loop.observe

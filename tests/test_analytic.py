@@ -9,8 +9,9 @@ import numpy as np
 import pytest
 from jax.test_util import check_grads
 
-from spaceodyssey import engines
+from spaceodyssey import engines, reporting
 from spaceodyssey.build import build
+from spaceodyssey.engines import analytic
 from spaceodyssey.engines.analytic import certified_yield, weighted_yields
 from spaceodyssey.errors import OutOfRangeError, WiringError
 from spaceodyssey.metrics import CertifiedYield
@@ -19,6 +20,26 @@ from spaceodyssey.spec import FidelityConfig, SeamRef
 from tests.doubles import make_spec
 from tests.test_plan import make_outcome, make_plan
 from tests.test_toy_certifier import make_toy, predictive_for
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "certified_yield",
+        "weighted_yields",
+        "CHANNELS",
+        "replicate_yields",
+        "PairedDifference",
+        "paired_difference",
+        "_contributions",
+        "_replicate_interval",
+        "_confidence_check",
+        "_systematic_bounds",
+    ],
+)
+def test_reporting_imports_are_identical(name):
+    """Historical imports share every moved object, including private helpers."""
+    assert getattr(analytic, name) is getattr(reporting, name)
 
 
 def hand_outcome():

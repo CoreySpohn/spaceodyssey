@@ -2,7 +2,9 @@
 
 import pytest
 
+import spaceodyssey
 from spaceodyssey import engines
+from spaceodyssey.engines import analytic
 from spaceodyssey.errors import RegistryError
 from spaceodyssey.metrics import YieldSummary
 from tests.doubles import PLANET_TARGETS, build_test_registry, make_config, make_spec
@@ -14,6 +16,13 @@ class TestEngineRegistry:
     def test_sample_engine_registered(self):
         """The sampling engine loads on first lookup."""
         assert callable(engines.get_engine("sample"))
+
+    def test_integrate_engine_registered_once(self):
+        """Default loading shares the integrate callable and default registry."""
+        assert engines.get_engine("integrate") is analytic.run_integrate
+        assert engines.get_engine("integrate") is analytic.run_integrate
+        assert list(engines.ENGINES.values()).count(analytic.run_integrate) == 1
+        assert engines.REGISTRY is spaceodyssey.REGISTRY
 
     def test_unknown_operator_lists_known(self):
         """An unknown operator error names the registered ones."""

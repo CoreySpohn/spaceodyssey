@@ -7,6 +7,7 @@ import pytest
 import spaceodyssey
 from spaceodyssey.contracts import compatible, resolve_contract
 from spaceodyssey.errors import RegistryError
+from spaceodyssey.reporting import PairedDifference
 from spaceodyssey.spec import from_json
 
 
@@ -39,6 +40,19 @@ def test_contract_alias_resolves_identical_class(name):
 def test_mixed_contract_names_are_compatible():
     assert compatible(("hwosim.SummaryDataset",), ("spaceodyssey.SummaryDataset",))
     assert compatible(("spaceodyssey.SummaryDataset",), ("hwosim.SummaryDataset",))
+
+
+@pytest.mark.parametrize(
+    "qualname",
+    [
+        "spaceodyssey.engines.analytic.PairedDifference",
+        "spaceodyssey.reporting.PairedDifference",
+        "hwosim.engines.analytic.PairedDifference",
+        "hwosim.reporting.PairedDifference",
+    ],
+)
+def test_paired_difference_contract_resolves_identical_class(qualname):
+    assert resolve_contract(qualname) is PairedDifference
 
 
 @pytest.mark.parametrize("name", ["SnrThreshold", "certify.SnrThreshold"])
