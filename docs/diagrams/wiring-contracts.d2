@@ -1,0 +1,37 @@
+# Typed wiring contracts (SD-15): what is compatible with what, and why. Render: d2 --layout elk wiring-contracts.d2 wiring-contracts.svg
+direction: down
+
+note: |md
+  **Typed wiring contracts.** The seam graph is fixed; implementations only narrow the contract types on its edges.
+
+  validate() = subtyping over ports + operator support + calibration presence; failures name the compatible alternatives.
+| {near: top-center}
+
+data: "the data plane (narrow types live here)" {
+  obs: "observation seam\nsummary-level (count rates) -> SummaryDataset\nimage-level -> FrameSet\nIFS extraction -> SpectrumDataset"
+  pp: "post-processing seam\nppfact scalar: consumes SummaryDataset\nmatched filter / speckle fitting: consumes FrameSet\nall produce DetectionStats"
+  ch: "characterization seam\nconsumes SpectrumDataset\nproduces SpectrumPosteriorSummary"
+  ct: "certification seam\nconsumes DetectionStats\n(+ a null calibrated per post-processing impl)\nproduces CertificateState"
+  obs -> pp: "dataset (typed)"
+  obs -> ch: SpectrumDataset
+  pp -> ct: DetectionStats
+}
+
+belief: "the belief plane (kind-agnostic by construction)" {
+  waist: "every dataset exposes to_likelihood() ->\na logdensity term photomancy accepts;\nbelief update, policy, population,\ncontext, and cost need NO per-kind wiring"
+}
+
+checks: "validate(config) -> WiringReport (per edge, explainable)" {
+  c1: "1. ports\nissubclass(produced, consumed)\nover the fixed seam graph"
+  c2: "2. operators\nrun operator is in the intersection\nof all chosen impls' declared sets"
+  c3: "3. calibration\nneeds-recalibrated-null edges backed by\ncontext-keyed artifacts (else the run\nis flagged uncalibrated)"
+}
+
+matrix: "discoverability\nregistry.matrix(seam_a, seam_b) renders the pairwise\ncompatibility table straight from metadata;\nnamed profiles are its tested rows; contract tests\nverify declared ports, so metadata cannot lie"
+
+reject: "the canonical rejection:\nobservation = summary-level rates (produces SummaryDataset)\n+ post-processing = matched filter (consumes FrameSet)\nfails check 1 under the sample operator; under integrate\nthe matched filter fails check 2 regardless (it declares\noperators = {sample}). validate() points at ppfact, or at\nan image-level observation, as the compatible alternatives." {shape: callout}
+
+data -> checks
+belief -> checks: exempt {style.stroke-dash: 3}
+checks -> matrix
+reject -> checks: "" {style.stroke-dash: 3}

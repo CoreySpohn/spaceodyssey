@@ -1,0 +1,35 @@
+# spaceodyssey's two configuration axes. Render: d2 --layout elk two-axes.d2 two-axes.svg
+direction: down
+
+profiles: "named profiles (YAML)\nayo-parity | survey-default | image-realism" {shape: page}
+spec: "MissionSpec (declarative)\ncatalog, population prior, action space,\ncost, certificate definitions, QoI" {shape: document}
+fidelity: "FidelityConfig\none (truth, model) SeamRef pair per seam\n+ the run's operator name" {shape: document}
+registry: "seam registry (AXIS 2)\n10 seams x N implementations each\nSeamInfo metadata: supported operators,\nrequires/provides kinds, cost hint, calibratables" {shape: cylinder}
+store: "calibration store" {shape: cylinder}
+
+build: "build(spec, config)\nvalidate (kinds DAG, operator intersection,\ncalibration presence), then resolve refs\ninto live eqx modules" {shape: hexagon}
+
+mission: "compiled Mission (PyTree)\nTruthStack + ModelStack (the firewall)\ncontinuous params = differentiable leaves"
+
+waist: "the waist: every measurement seam returns an\nAbstractPredictive -- sample() | moments() | integrate()\nthe engine is the operator applied to it" {shape: callout}
+
+engines: "engine registry (AXIS 1) -- keyed by an OPEN operator vocabulary" {
+  analytic: "spaceodyssey.analytic\noperator: integrate\nclosed-form completeness\nintegrals; exact autodiff"
+  expected: "spaceodyssey.expected\noperator: propagate\ndeterministic belief recursion\n(deferred)" {style.stroke-dash: 3}
+  mc: "spaceodyssey.mc\noperator: sample\nevent-driven adaptive loop\ntruth/belief firewall"
+  fourth: "(future operator)\ne.g. bound:\ncertified worst-case yield" {style.stroke-dash: 5}
+}
+
+report: "Report with one YieldSummary core\nyield distribution/expectation +\nfalse-certification accounting +\ntime ledger + calibration curves"
+gates: "cross-engine gates\nanalytic-vs-mc = realism correction\nfixed-vs-adaptive mc = value of adaptivity"
+
+profiles -> fidelity
+spec -> build
+fidelity -> build
+registry -> build: resolves
+store -> build: "context-keyed\ncalibrations"
+build -> mission
+mission -> engines
+waist -> engines: "" {style.stroke-dash: 3}
+engines -> report
+report -> gates

@@ -10,4 +10,20 @@ ensemble repeats a campaign over many simulated worlds and aggregates the
 outcomes. The simulated world and the model used to reason about it are
 separate by construction.
 
-Pre-alpha. The public interface is not yet published.
+Pre-alpha. The campaign core provides a declarative vocabulary, registries,
+and execution engines; physics and inference enter through adapters.
+
+## Getting Started
+
+```{toctree}
+:maxdepth: 2
+
+architecture
+```
+
+## API Reference
+
+```{toctree}
+:maxdepth: 1
+autoapi/index
+```

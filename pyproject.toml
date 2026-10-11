@@ -17,16 +17,41 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
-dependencies = []
+dependencies = [
+    "equinox",
+    "jax",
+    "jaxlib",
+    "hwoutils",
+    "optixstuff",
+    "yippy",
+    "orbix",
+    "skyscapes",
+    "jaxedith",
+    "photomancy",
+    "planit-py",
+    "coronagraphoto",
+    "coronachrome",
+    "coronalyze",
+]
 
 [project.urls]
 Repository = "https://github.com/CoreySpohn/spaceodyssey"
 Documentation = "https://spaceodyssey.readthedocs.io"
 
 [project.optional-dependencies]
+retrieval = ["exojax"]
+optics = ["physicaloptix"]
 dev = ["pre-commit"]
-test = ["pytest"]
-docs = ["myst-nb", "sphinx-autoapi", "sphinx-book-theme"]
+test = ["pytest", "nox", "hypothesis", "pytest-cov"]
+docs = [
+    "myst-nb",
+    "sphinx-autoapi",
+    "sphinx-book-theme",
+    "sphinx",
+    "sphinx_autodoc_typehints",
+    "ipython",
+    "matplotlib",
+]
 
 [tool.ruff.lint]
 select = ["B", "D", "E", "F", "I", "UP", "RUF"]

@@ -24,11 +24,16 @@ PATTERNS = [
     # Research-workspace paths and project homes.
     r"mission-control",
     r"research-brain",
+    r"physicaloptix-setup",
     r"hwosim-(?:paper|build)",
     r"\bbrain/",
     r"deep-thoughts",
     # Underscored ALL-CAPS markdown names are internal working documents.
     r"\b[A-Z0-9]+(?:_[A-Z0-9]+)+\.md\b",
+    # Project spike/script homes and decision-history vocabulary.
+    r"eac1_dlux",
+    r"Tier-G",
+    r"(?i)\bgreenfield\b",
 ]
 
 COMPILED = [(pattern, re.compile(pattern)) for pattern in PATTERNS]

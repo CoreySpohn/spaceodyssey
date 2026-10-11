@@ -1,0 +1,33 @@
+# The sample-engine mission loop (POMDP env/agent/belief split). Render: d2 --layout elk mc-loop.d2 mc-loop.svg
+direction: down
+
+truth: "TRUTH SIDE (only spaceodyssey.mc holds this)" {
+  universe: "Universe (frozen per run)\nsystems drawn from the population prior\n+ exozodi draws + instrument truth"
+  truthstack: "TruthStack\ncompiled truth-side seam impls"
+  universe -> truthstack
+}
+
+observe: "observe(truth, action, key)\nruns the action's integration policy\n(fixed-t | stop-on-certificate | EIG-rate floor)\nreturns dataset + REALIZED duration" {shape: hexagon}
+
+agent: "BELIEF SIDE (all the agent ever sees)" {
+  mbelief: "MissionBelief\nper-target posteriors, class posteriors,\ncertificate states (photomancy components)"
+  update: "update(belief, data)\nvia dataset.to_likelihood()\n(photomancy; v1 refit-from-scratch)"
+  certify: "certify(belief, data)\npluggable AbstractCertificate\n(SNR -> log-BF -> e-process)"
+  state: "MissionState\nclock, named-resource budget ledger,\nobservation log, accounting"
+  update -> mbelief
+  mbelief -> certify
+  certify -> state
+}
+
+context: "AbstractContextProvider (tenth seam)\norbix keepout, windows, slew costs;\nlater: thermal / comm / ops entries"
+policy: "planit policy.propose(belief, ctx, cost)\nstateless agent\nreplay | greedy | EUR"
+
+firewall: "the firewall: Universe and TruthStack are never\narguments to policy, update, or certify --\nobserve() is the ONLY truth-to-belief bridge\n(enforced at the type level)" {shape: callout}
+
+context -> policy: ObservingContext
+agent.mbelief -> policy: belief
+policy -> observe: "Action (target, mode,\nbands, integration policy)"
+truth.truthstack -> observe
+observe -> agent.update: dataset
+agent.state -> context: "clock += t_real + overheads"
+firewall -> observe: "" {style.stroke-dash: 3}

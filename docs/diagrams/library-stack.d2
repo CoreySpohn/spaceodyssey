@@ -1,0 +1,51 @@
+# HWO simulation suite -- dependency direction. Render: d2 --layout elk library-stack.d2 library-stack.svg
+direction: down
+
+note: |md
+  **HWO simulation suite -- dependency direction.**
+  An arrow means "imports" (load-bearing subset shown;
+  hwoutils is imported by everything). spaceodyssey sits at the
+  top and composes; nothing imports spaceodyssey. Dashed = extras.
+| {near: top-center}
+
+foundation: Foundation {
+  hwoutils: "hwoutils\nshared math, constants"
+  optixstuff: "optixstuff\nhardware primitives"
+}
+
+orbix: "orbix\npropagation, keepout, L2, zodi"
+yippy: "yippy\ncoronagraph YIP data"
+skyscapes: "skyscapes\nscenes as PyTrees, populations"
+
+sim: "Simulation / ETC / Analysis" {
+  coronagraphoto: "coronagraphoto\nimage simulation"
+  coronachrome: "coronachrome\nIFS forward + extraction\n(AbstractCharacterization home)"
+  jaxedith: "jaxedith\ncount rates, integration times"
+  coronalyze: "coronalyze\npost-processing + detection\n(AbstractPostProcessing home)"
+}
+
+photomancy: "photomancy\nposteriors, evidence, EIG\n(belief components)"
+planit: "planit-py\npolicies + decision vocabulary\n(the agent)"
+spaceodyssey: "spaceodyssey\nMissionSpec, seam + engine registries,\nMissionState, calibration store"
+
+physicaloptix: "physicaloptix\nlive-propagation speckles" {style.stroke-dash: 3}
+retrieval: "ExoJAX-grade retrieval" {style.stroke-dash: 3}
+
+skyscapes -> orbix
+sim.coronagraphoto -> skyscapes
+sim.coronagraphoto -> foundation.optixstuff
+sim.coronagraphoto -> yippy
+sim.coronachrome -> foundation.optixstuff
+sim.jaxedith -> foundation.optixstuff
+sim.jaxedith -> skyscapes
+photomancy -> orbix
+photomancy -> skyscapes
+planit -> photomancy
+spaceodyssey -> planit
+spaceodyssey -> photomancy
+spaceodyssey -> sim
+spaceodyssey -> skyscapes
+spaceodyssey -> orbix
+physicaloptix -> foundation.optixstuff
+spaceodyssey -> physicaloptix: "extra: optics" {style.stroke-dash: 3}
+spaceodyssey -> retrieval: "extra: retrieval" {style.stroke-dash: 3}
