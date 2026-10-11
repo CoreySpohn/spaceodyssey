@@ -125,7 +125,7 @@ class TestWeightedYields:
             certified_yield(hand_outcome(), jnp.ones(3), certificate="hand")
 
     def test_differentiable_in_snr(self):
-        """Y_cert+ from the toy is differentiable in the plan's SNR.
+        """Y_cert+ from the toy is differentiable in the toy adapter's SNR.
 
         Tolerance: floating-point; float32 central differences at eps 1e-2
         carry O(eps**2) truncation and round-off, so check_grads uses 2e-2.
@@ -134,7 +134,7 @@ class TestWeightedYields:
         theta = jnp.array([0.5, 0.9, 0.2])
 
         def y_pos(snr):
-            plan = make_plan(n_planets=3, n_bins=2, snr=snr)
+            plan = make_plan(n_planets=3, n_bins=2, noise_sigma=1.0 / snr)
             outcome = toy.integrate(PlanPredictive(plan=plan, truth=theta))
             return weighted_yields(outcome, jnp.ones(3))[1]
 
@@ -181,7 +181,10 @@ class TestIntegrateEngine:
 
     def test_out_of_range_raises_on_host(self):
         """The engine is the Python wrapper that turns the flag into an error."""
-        predictive = predictive_for([0.5, 0.5], [0.0, 4.0])
+        predictive = PlanPredictive(
+            plan=make_plan(n_planets=2, noise_known=[False, True]),
+            truth=jnp.array([0.5, 0.5]),
+        )
         with pytest.raises(OutOfRangeError, match=r"\[0\]"):
             engines.run(
                 make_spec(), self.config(), predictive=predictive, weights=jnp.ones(2)
@@ -189,7 +192,10 @@ class TestIntegrateEngine:
 
     def test_out_of_range_reported_when_not_strict(self):
         """With strict off, the report carries the flags instead."""
-        predictive = predictive_for([0.5, 0.5], [0.0, 4.0])
+        predictive = PlanPredictive(
+            plan=make_plan(n_planets=2, noise_known=[False, True]),
+            truth=jnp.array([0.5, 0.5]),
+        )
         report = engines.run(
             make_spec(),
             self.config(),
@@ -207,3 +213,26 @@ class TestIntegrateEngine:
             engines.get_engine("integrate")(
                 mission, predictive=predictive_for([0.5], [4.0]), weights=jnp.ones(1)
             )
+
+
+@pytest.mark.parametrize("n_visits", [0, 4])
+def test_missing_data_engine_yields_are_finite(n_visits):
+    plan = make_plan(
+        n_visits=n_visits,
+        spectrum_visit=jnp.full(3, -1) if not n_visits else jnp.array([-1, 0, 0]),
+        visit_success=jnp.zeros((3, n_visits), dtype=bool),
+    )
+    predictive = PlanPredictive(plan=plan, truth=jnp.array([0.1, 0.5, 1.0]))
+    outcome = make_toy().integrate(predictive)
+    yields = jax.jit(weighted_yields)(outcome, jnp.ones(3))
+    np.testing.assert_array_equal(yields, np.zeros(5))
+    report = engines.run(
+        make_spec(),
+        TestIntegrateEngine.config(),
+        predictive=predictive,
+        weights=jnp.ones(3),
+    )
+    assert report.all_in_range
+    assert report.y_issued == report.y_cert_pos == report.y_wrong == 0.0
+    assert report.y_neg == report.y_neg_wrong == 0.0
+    json.dumps(json.loads(report.to_json()), allow_nan=False)

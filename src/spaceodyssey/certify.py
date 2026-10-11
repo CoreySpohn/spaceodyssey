@@ -23,7 +23,7 @@ import jax.numpy as jnp
 from jax.scipy.special import ndtr, ndtri
 
 from spaceodyssey.errors import UnsupportedOperator
-from spaceodyssey.plan import CertificationOutcome, PlanPredictive
+from spaceodyssey.plan import CertificationOutcome, PlanPredictive, PlanSummary
 from spaceodyssey.registry import SeamInfo, register
 
 
@@ -173,8 +173,10 @@ class ToyGaussianCertifier(AbstractCertificate):
     carries one scalar claim parameter theta (the truth passed in the
     predictive, shape (P,)) and the claim is "theta > boundary".
 
-    Declared SNR mapping: the plan's combined SNR is the quadrature sum over
-    spectral bins, S = sqrt(sum_b snr_b**2), and the posterior standard
+    Declared signal model: each bin has unit reference planet flux. For
+    covariance C = diag(noise_sigma**2) + F F^T, the effective SNR is
+    S = sqrt(1^T C^-1 1). White noise gives S = sqrt(sum_b noise_sigma_b^-2),
+    reproducing v1 with snr_b = 1 / noise_sigma_b. The posterior standard
     deviation of theta is sigma = sigma_unit_snr / S. With a flat prior and
     known noise the posterior is N(m, sigma**2) with m = theta + e and
     e ~ N(0, sigma**2). The certificate is positive when
@@ -194,8 +196,11 @@ class ToyGaussianCertifier(AbstractCertificate):
     :class:`SnrThreshold` with ``threshold = Phi^-1(1 - alpha)``.
 
     A planet is in range when its combined SNR is positive and finite and
-    its theta is finite. Out-of-range planets get the zero-information
-    limit d = 0 (both verdicts at probability alpha), flagged untrusted.
+    its theta is finite, and noise_known is true. Missing spectra, failed
+    spectrum visits, and zero visits give both verdict probabilities zero
+    and are in range (a known absence of data). Other out-of-range planets
+    get the zero-information limit d = 0 (both verdicts at probability
+    alpha), flagged untrusted.
 
     Attributes:
         boundary: The claim's decision boundary, in the units of theta.
@@ -217,17 +222,25 @@ class ToyGaussianCertifier(AbstractCertificate):
                 f"sigma_unit_snr must be positive, got {self.sigma_unit_snr}"
             )
 
-    def posterior_sd(self, snr) -> jax.Array:
-        """Return the posterior standard deviation of theta per planet.
+    def _combined_snr(self, plan: PlanSummary) -> jax.Array:
+        signal = jnp.ones_like(plan.noise_sigma) / plan.noise_sigma
+        factors = plan.noise_corr_factors
+        if factors is None or factors.shape[-1] == 0:
+            return jnp.sqrt(jnp.sum(jnp.square(signal), axis=-1))
+        whitened = factors / plan.noise_sigma[..., None]
+        covariance = jnp.eye(signal.shape[-1]) + whitened @ jnp.swapaxes(
+            whitened, -1, -2
+        )
+        solved = jnp.linalg.solve(covariance, signal[..., None])[..., 0]
+        return jnp.sqrt(jnp.maximum(jnp.sum(signal * solved, axis=-1), 0.0))
 
-        Args:
-            snr: Per-bin SNR, shape (P, B).
+    def posterior_sd(self, plan: PlanSummary) -> jax.Array:
+        """Return theta's posterior sigma for the toy's unit spectral signal.
 
-        Returns:
-            sigma_unit_snr divided by the quadrature-combined SNR, shape (P,).
+        This noise mapping ignores visit availability; integrate gates the
+        verdicts on usable spectra. The result has shape (P,).
         """
-        combined = jnp.sqrt(jnp.sum(jnp.square(snr), axis=-1))
-        return self.sigma_unit_snr / combined
+        return self.sigma_unit_snr / self._combined_snr(plan)
 
     def verdict(self, posterior_mean, posterior_sd) -> tuple[jax.Array, jax.Array]:
         """Return the (positive, negative) certified verdicts for realized data.
@@ -265,16 +278,28 @@ class ToyGaussianCertifier(AbstractCertificate):
             The closed-form outcome, with zero standard errors.
         """
         theta = jnp.asarray(predictive.truth)
-        snr = predictive.plan.snr
-        combined = jnp.sqrt(jnp.sum(jnp.square(snr), axis=-1))
-        in_range = (combined > 0) & jnp.isfinite(combined) & jnp.isfinite(theta)
+        plan = predictive.plan
+        combined = self._combined_snr(plan)
+        if plan.visit_success.shape[1] == 0:
+            available = jnp.zeros((plan.n_planets,), dtype=bool)
+        else:
+            index = jnp.maximum(plan.spectrum_visit, 0)
+            available = (plan.spectrum_visit >= 0) & jnp.take_along_axis(
+                plan.visit_success, index[:, None], axis=1
+            )[:, 0]
+        in_range = (
+            (combined > 0)
+            & jnp.isfinite(combined)
+            & jnp.isfinite(theta)
+            & plan.noise_known
+        )
         safe_combined = jnp.where(in_range, combined, 1.0)
         safe_theta = jnp.where(in_range, theta, self.boundary)
         sigma = self.sigma_unit_snr / safe_combined
         d = jnp.where(in_range, (safe_theta - self.boundary) / sigma, 0.0)
         z = ndtri(1.0 - self.alpha)
-        p_pos = ndtr(d - z)
-        p_neg = ndtr(-d - z)
+        p_pos = jnp.where(available, ndtr(d - z), 0.0)
+        p_neg = jnp.where(available, ndtr(-d - z), 0.0)
         truth_positive = theta > self.boundary
         zeros = jnp.zeros_like(p_pos)
         return CertificationOutcome(
@@ -287,5 +312,5 @@ class ToyGaussianCertifier(AbstractCertificate):
             p_wrong_se=zeros,
             p_neg_wrong_se=zeros,
             truth_positive=truth_positive,
-            in_range=in_range,
+            in_range=~available | in_range,
         )

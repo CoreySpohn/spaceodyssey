@@ -195,3 +195,48 @@ errors are not included. The positive-yield error retains the candidate-masked
 covariance. JSON readers accept the previous `_se` names. Legacy reports retain
 their stored positive-yield values; their missing issued column is reconstructed
 as `cert_pos + wrong` and cannot recover the former estimand's omitted planets.
+
+
+## PlanSummary v2
+
+`spaceodyssey.plan.CONTRACT_VERSION` and `PlanSummary.CONTRACT_VERSION` are 2.
+The contract uses a leading planet axis P, B spectral bins, V visits, and
+Kc correlated-noise factors:
+
+| Field | Shape | Units or meaning |
+| --- | --- | --- |
+| `bin_wavelength_nm` | (B,) or (P, B) | Spectral bin centres, nm |
+| `noise_sigma` | (P, B) | Positive finite independent noise sigma, fractional planet flux |
+| `noise_corr_factors` | (P, B, Kc), optional | Correlated factors F, fractional planet flux |
+| `noise_known` | (P,) | Boolean: covariance known |
+| `spectral_resolution` | (P,) | Resolving power, wavelength / bin width |
+| `visit_epochs_d` | (P, V) | Days of mission time |
+| `visit_success` | (P, V) | Boolean usable-data mask |
+| `visit_photometric_snr` | (P, V) | Nonnegative photometric SNR |
+| `spectrum_visit` | (P,) | Integer visit index; -1 means no spectrum |
+| `astrometric_precision_mas` | (P, V) | One-sigma precision, mas |
+| `rv_precision_ms` | (P,) | Positive precision, m/s; infinity means no mass measurement |
+
+Spectral measurements are normalized by a fixed reference planet flux in
+each bin. `noise_sigma` is the standard deviation of that normalized
+measurement, in dimensionless fractional planet-flux units, not
+planet-to-star contrast. Signal models and factors use the same normalization;
+the denominator is never a noisy measured flux. Per-planet covariance is
+`diag(noise_sigma**2) + F @ F.T`. Omitting F or using Kc = 0 gives white noise.
+`mass_measured` is a derived boolean property, `isfinite(rv_precision_ms)`.
+
+The `snr` field has been removed. Each certifier supplies its own signal and
+noise mapping. `ToyGaussianCertifier` assumes unit signal in every bin and
+uses `S = sqrt(1.T @ inverse(covariance) @ 1)`, then a posterior standard
+deviation `sigma_unit_snr / S`. For white noise, migrate positive v1 SNRs with
+`noise_sigma = 1 / snr`; the closed-form probabilities are unchanged. There is
+no derived contract SNR because the contract supplies no signal model.
+`ToyGaussianCertifier.posterior_sd` now takes a `PlanSummary`.
+
+Missing spectra use `spectrum_visit = -1`, not infinite noise. The toy returns
+zero positive and negative certification probabilities if no spectrum is
+available, its selected visit failed, or there are no visits. These are valid
+zero-yield plans, including in the strict analytic engine. Unknown noise is
+outside the toy's validated range and is flagged through `in_range`.
+Shapes and spectrum index dtype are checked during tracing; value validation
+runs during concrete construction. Validate inputs before passing them to JIT.

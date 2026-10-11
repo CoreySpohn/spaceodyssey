@@ -5,15 +5,16 @@ planet by planet, without drawing a mission. Its input is a
 :class:`PlanSummary` (what the plan delivers for each planet) paired with the
 truth planets in a :class:`PlanPredictive`; its output is a
 :class:`CertificationOutcome` (per-planet certification probabilities). Every
-array carries one canonical leading batch axis P of planets.
+per-planet array carries one canonical leading batch axis P of planets;
+wavelengths may also be shared across planets.
 
-Nothing here raises inside ``jit``: shape checks run at construction on
-static shapes, and a tier asked outside its validated range reports it
+Shape and dtype checks run at construction, including during tracing;
+value checks run on concrete inputs. A tier outside its validated range reports it
 through :attr:`CertificationOutcome.in_range`, which the host-side
 :meth:`CertificationOutcome.raise_if_out_of_range` turns into an exception.
 """
 
-from typing import Any, final
+from typing import Any, ClassVar, final
 
 import equinox as eqx
 import jax
@@ -27,61 +28,134 @@ def _as_bool(value) -> jax.Array:
     return jnp.asarray(value, dtype=bool)
 
 
+CONTRACT_VERSION = 2
+
+
+def _optional_array(value):
+    return None if value is None else jnp.asarray(value)
+
+
+def _check_values(valid, message):
+    # Value checks are host-side only; static shape/dtype checks also run in jit.
+    if not isinstance(valid, jax.core.Tracer) and not bool(np.all(valid)):
+        raise ValueError(message)
+
+
 @final
 class PlanSummary(eqx.Module):
-    """What an observing plan delivers for each planet in a batch.
+    """Physical data delivered by a plan, with canonical planet axis P.
 
-    Every field describes the plan's data on one planet, so each carries the
-    leading planet axis P. Failed visits (for example a phase inside the
-    inner working angle) keep their epoch and are excluded through
-    ``visit_success``, a mask rather than a branch, so a batch keeps one
-    static shape.
+    Noise is the standard deviation of measured spectral flux divided by
+    a fixed reference planet flux in each bin (dimensionless fractional
+    planet-flux units, not planet-to-star contrast). The normalization must
+    also be applied to any signal model and correlated factors. It is not
+    a noise estimate divided by a noisy measured flux.
+
+    Version 2 removes ``snr``: consumers choose their signal model and SNR
+    convention. For the toy's unit signal, migrate positive v1 SNR using
+    ``noise_sigma = 1 / snr``. Missing data use ``spectrum_visit = -1``.
+    ``mass_measured`` is now derived from ``rv_precision_ms``.
 
     Attributes:
-        snr: Signal-to-noise ratio per spectral bin accumulated over the
-            plan, shape (P, B).
-        spectral_resolution: Spectral resolving power lambda / delta-lambda
-            of the plan's spectra, shape (P,).
-        visit_epochs_d: Scheduled visit epochs in days of mission time,
-            shape (P, V).
-        visit_success: True where a visit returned usable data, shape (P, V).
-        astrometric_precision_mas: One-sigma astrometric precision of each
-            visit in milliarcseconds, shape (P, V).
-        mass_measured: True where the plan includes a mass measurement of
-            the planet, shape (P,).
+        bin_wavelength_nm: Bin centres in nm, (B,) or (P, B).
+        noise_sigma: Finite positive independent noise sigma, (P, B), in
+            fractional planet-flux units. Total covariance per planet is
+            diag(noise_sigma**2) + F F^T.
+        noise_corr_factors: Optional finite F, (P, B, Kc), in the same
+            units as noise_sigma. None or Kc = 0 denotes white noise.
+        noise_known: Whether the noise covariance is known, bool (P,).
+        spectral_resolution: Resolving power lambda / delta-lambda, (P,).
+        visit_epochs_d: Mission epochs in days, (P, V).
+        visit_success: Usable-data mask, bool (P, V).
+        visit_photometric_snr: Nonnegative photometric SNR, (P, V).
+        spectrum_visit: Integer visit index, (P,); -1 means no spectrum.
+            A spectrum at a failed visit is unusable.
+        astrometric_precision_mas: One-sigma precision in mas, (P, V).
+        rv_precision_ms: Positive RV precision in m/s, (P,); inf means
+            no mass measurement.
+
+    Shapes and index dtype are checked even during tracing. Value checks
+    run on concrete construction; validate inputs before passing them to jit.
     """
 
-    snr: jax.Array = eqx.field(converter=jnp.asarray)
+    CONTRACT_VERSION: ClassVar[int] = CONTRACT_VERSION
+
+    bin_wavelength_nm: jax.Array = eqx.field(converter=jnp.asarray)
+    noise_sigma: jax.Array = eqx.field(converter=jnp.asarray)
+    noise_known: jax.Array = eqx.field(converter=_as_bool)
     spectral_resolution: jax.Array = eqx.field(converter=jnp.asarray)
     visit_epochs_d: jax.Array = eqx.field(converter=jnp.asarray)
     visit_success: jax.Array = eqx.field(converter=_as_bool)
+    visit_photometric_snr: jax.Array = eqx.field(converter=jnp.asarray)
+    spectrum_visit: jax.Array = eqx.field(converter=jnp.asarray)
     astrometric_precision_mas: jax.Array = eqx.field(converter=jnp.asarray)
-    mass_measured: jax.Array = eqx.field(converter=_as_bool)
+    rv_precision_ms: jax.Array = eqx.field(converter=jnp.asarray)
+    noise_corr_factors: jax.Array | None = eqx.field(
+        default=None, converter=_optional_array
+    )
 
     def __check_init__(self):
-        """Validate that every field shares the planet axis."""
-        if self.snr.ndim != 2:
-            raise ValueError(f"snr must have shape (P, B), got {self.snr.shape}")
-        n_planets = self.snr.shape[0]
-        if self.visit_epochs_d.ndim != 2 or self.visit_epochs_d.shape[0] != n_planets:
+        """Validate planet, spectral, and visit axes and concrete values."""
+        if self.noise_sigma.ndim != 2:
             raise ValueError(
-                f"visit_epochs_d must have shape ({n_planets}, V), got "
-                f"{self.visit_epochs_d.shape}"
+                f"noise_sigma must have shape (P, B), got {self.noise_sigma.shape}"
             )
+        p, b = self.noise_sigma.shape
+        if self.bin_wavelength_nm.shape not in ((b,), (p, b)):
+            raise ValueError("bin_wavelength_nm must have shape (B,) or (P, B)")
+        if self.visit_epochs_d.ndim != 2 or self.visit_epochs_d.shape[0] != p:
+            raise ValueError(f"visit_epochs_d must have shape ({p}, V)")
         visits = self.visit_epochs_d.shape
-        for name in ("visit_success", "astrometric_precision_mas"):
+        for name in (
+            "visit_success",
+            "astrometric_precision_mas",
+            "visit_photometric_snr",
+        ):
             shape = getattr(self, name).shape
             if shape != visits:
                 raise ValueError(f"{name} must have shape {visits}, got {shape}")
-        for name in ("spectral_resolution", "mass_measured"):
+        for name in (
+            "spectral_resolution",
+            "rv_precision_ms",
+            "noise_known",
+            "spectrum_visit",
+        ):
             shape = getattr(self, name).shape
-            if shape != (n_planets,):
-                raise ValueError(f"{name} must have shape ({n_planets},), got {shape}")
+            if shape != (p,):
+                raise ValueError(f"{name} must have shape ({p},), got {shape}")
+        if not jnp.issubdtype(self.spectrum_visit.dtype, jnp.integer):
+            raise ValueError("spectrum_visit must have integer dtype")
+        f = self.noise_corr_factors
+        if f is not None:
+            if f.ndim != 3 or f.shape[:2] != (p, b):
+                raise ValueError("noise_corr_factors must have shape (P, B, Kc)")
+            _check_values(jnp.isfinite(f), "noise_corr_factors must be finite")
+        _check_values(
+            jnp.isfinite(self.noise_sigma) & (self.noise_sigma > 0),
+            "noise_sigma must be finite and > 0",
+        )
+        _check_values(
+            self.rv_precision_ms > 0,
+            "rv_precision_ms must be > 0 (inf allowed)",
+        )
+        _check_values(
+            (self.spectrum_visit >= -1) & (self.spectrum_visit < visits[1]),
+            "spectrum_visit must be in [-1, V-1]",
+        )
+        _check_values(
+            self.visit_photometric_snr >= 0,
+            "visit_photometric_snr must be >= 0",
+        )
+
+    @property
+    def mass_measured(self) -> jax.Array:
+        """Whether a finite RV precision supplies a mass measurement, (P,)."""
+        return jnp.isfinite(self.rv_precision_ms)
 
     @property
     def n_planets(self) -> int:
         """The batch size P."""
-        return self.snr.shape[0]
+        return self.noise_sigma.shape[0]
 
 
 @final

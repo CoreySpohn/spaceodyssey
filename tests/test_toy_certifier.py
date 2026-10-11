@@ -38,7 +38,7 @@ def predictive_for(theta, combined_snr) -> PlanPredictive:
     """A one-bin plan with the given combined SNR per planet."""
     theta = jnp.asarray(theta, dtype=float)
     snr = jnp.asarray(combined_snr, dtype=float)[:, None]
-    plan = make_plan(n_planets=theta.shape[0], n_bins=1, snr=snr)
+    plan = make_plan(n_planets=theta.shape[0], n_bins=1, noise_sigma=1.0 / snr)
     return PlanPredictive(plan=plan, truth=theta)
 
 
@@ -135,8 +135,10 @@ class TestClosedForm:
         Tolerance: exact-algebra (sqrt(9 + 16) = 5 in floating point).
         """
         toy = make_toy()
-        two_bin = make_plan(n_planets=1, n_bins=2, snr=jnp.array([[3.0, 4.0]]))
-        one_bin = make_plan(n_planets=1, n_bins=1, snr=jnp.array([[5.0]]))
+        two_bin = make_plan(
+            n_planets=1, n_bins=2, noise_sigma=1.0 / jnp.array([[3.0, 4.0]])
+        )
+        one_bin = make_plan(n_planets=1, n_bins=1, noise_sigma=jnp.array([[0.2]]))
         theta = jnp.array([0.8])
         a = toy.integrate(PlanPredictive(plan=two_bin, truth=theta))
         b = toy.integrate(PlanPredictive(plan=one_bin, truth=theta))
@@ -198,10 +200,13 @@ class TestParityLimit:
 class TestRangeFlag:
     """Out-of-range is a returned flag, never an exception inside jit."""
 
-    def test_zero_snr_flags_out_of_range_under_jit(self):
-        """A planet with no SNR is flagged, at the zero-information limit."""
+    def test_unknown_noise_flags_out_of_range_under_jit(self):
+        """Unknown noise is outside the known-noise toy, with finite outputs."""
         toy = make_toy()
-        predictive = predictive_for([1.0, 1.0], [0.0, 5.0])
+        predictive = PlanPredictive(
+            plan=make_plan(n_planets=2, noise_known=[False, True]),
+            truth=jnp.ones(2),
+        )
         outcome = jax.jit(toy.integrate)(predictive)
         assert not bool(outcome.in_range[0])
         assert bool(outcome.in_range[1])
@@ -267,3 +272,63 @@ class TestSeamConformance:
         """Integrate returns the outcome contract."""
         outcome = make_toy().integrate(predictive_for([0.5], [4.0]))
         assert isinstance(outcome, CertificationOutcome)
+
+
+@pytest.mark.parametrize("rank", [None, 0])
+def test_white_noise_matches_v1_closed_form(rank):
+    snr = np.array([[1.0, 2.0], [3.0, 4.0], [0.2, 0.3]])
+    theta = np.array([0.1, 0.6, 1.0])
+    factors = None if rank is None else jnp.zeros((3, 2, rank))
+    plan = make_plan(noise_sigma=1.0 / snr, noise_corr_factors=factors)
+    outcome = make_toy().integrate(PlanPredictive(plan=plan, truth=theta))
+    d = (theta - BOUNDARY) * np.sqrt(np.sum(snr**2, axis=1)) / SIGMA_UNIT_SNR
+    np.testing.assert_allclose(outcome.p_pos, norm.cdf(d - norm.isf(ALPHA)), rtol=2e-6)
+    np.testing.assert_allclose(outcome.p_neg, norm.cdf(-d - norm.isf(ALPHA)), rtol=2e-6)
+    plain = make_toy().integrate(
+        PlanPredictive(plan=make_plan(noise_sigma=1.0 / snr), truth=theta)
+    )
+    np.testing.assert_array_equal(outcome.p_pos, plain.p_pos)
+
+
+def test_correlated_noise_matches_dense_reference_under_jit():
+    noise = np.array([[0.2, 0.4], [0.3, 0.1], [0.2, 0.3]])
+    factors = np.array([[[0.4], [0.4]], [[0.1], [0.3]], [[0.2], [-0.1]]])
+    theta = np.array([0.5, 0.8, 0.1])
+    plan = make_plan(noise_sigma=noise, noise_corr_factors=factors)
+    toy = make_toy()
+    outcome = jax.jit(toy.integrate)(PlanPredictive(plan=plan, truth=theta))
+    combined = np.array(
+        [
+            np.sqrt(np.ones(2) @ np.linalg.solve(np.diag(n**2) + f @ f.T, np.ones(2)))
+            for n, f in zip(noise, factors, strict=True)
+        ]
+    )
+    np.testing.assert_allclose(
+        toy.posterior_sd(plan), SIGMA_UNIT_SNR / combined, rtol=2e-6
+    )
+    expected = norm.cdf(
+        (theta - BOUNDARY) * combined / SIGMA_UNIT_SNR - norm.isf(ALPHA)
+    )
+    np.testing.assert_allclose(outcome.p_pos, expected, rtol=2e-6)
+
+
+@pytest.mark.parametrize(
+    "case", ["no_spectrum", "no_success", "failed_spectrum", "no_visits"]
+)
+def test_absent_data_has_zero_finite_verdicts(case):
+    fields = {
+        "no_spectrum": {"spectrum_visit": [-1, -1, -1]},
+        "no_success": {"visit_success": jnp.zeros((3, 4), dtype=bool)},
+        "failed_spectrum": {"visit_success": [[False, True, True, True]] * 3},
+        "no_visits": {"n_visits": 0},
+    }[case]
+    predictive = PlanPredictive(
+        plan=make_plan(**fields), truth=jnp.array([0.1, 0.5, 1.0])
+    )
+    for integrate in (make_toy().integrate, jax.jit(make_toy().integrate)):
+        outcome = integrate(predictive)
+        for leaf in jax.tree_util.tree_leaves(outcome):
+            assert bool(jnp.all(jnp.isfinite(leaf)))
+        np.testing.assert_array_equal(outcome.p_pos, 0.0)
+        np.testing.assert_array_equal(outcome.p_neg, 0.0)
+        assert bool(jnp.all(outcome.in_range))
