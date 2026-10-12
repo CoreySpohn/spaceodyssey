@@ -3,7 +3,10 @@
 import numpy as np
 
 from spaceodyssey.viz import _extract
+from spaceodyssey.viz._axes import decimal_log_ticks
+from spaceodyssey.viz._legend import legend_below, scatter_key
 from spaceodyssey.viz._require import eyepiece
+from spaceodyssey.viz.labels import CLAIM_LABELS
 
 # Resolve style roles at call time; eyepiece owns their fallback policy.
 PLANE_CMAP_ROLE = "probability"
@@ -139,7 +142,8 @@ def plot_claim_posterior(
                 None,
             )
             if first is not None:
-                titles[first].append(f"P({claim.name}) = {mass:.2f}")
+                label = CLAIM_LABELS.get(claim.name, claim.name.replace("_", " "))
+                titles[first].append(f"P({label}) = {mass:.2f}")
     artists = {key: [] for key in ("hist", "fill", "lines", "truth", "title", "text")}
     text_options = normalize_kwargs(text_kw, Text)
     for ax, (name, panel) in zip(axes, panels.items(), strict=True):
@@ -197,6 +201,7 @@ def plot_claim_posterior(
         artists["title"].append(ax.set_title("\n".join(titles[name]), **text_options))
         ax.set_xlabel(panel["display"].label)
         ax.set_ylabel("weight" if weights is not None else "samples")
+        decimal_log_ticks(ax.xaxis)
     block = []
     if risk is not None:
         block.append(f"risk = {risk}")
@@ -403,4 +408,43 @@ def plot_planet_plane(
             )
             ax.set_xlim(xlim, auto=ax.get_autoscalex_on())
             ax.set_ylim(ylim, auto=ax.get_autoscaley_on())
+    handles, labels = [], []
+    # Prefer active examples so the range key uses the probability/cloud style.
+    for flag, label in ((True, "in range"), (False, "out of range")):
+        for collection, mask in ((points, active), (inactive, ~active)):
+            indices = np.flatnonzero(data["in_range"][mask] == flag)
+            if len(indices):
+                handles.append(scatter_key(collection, indices[0]))
+                labels.append(label)
+                break
+    if (~active).any():
+        handles.append(scatter_key(inactive))
+        labels.append("inactive")
+    for key, label in (("marked", "marked (ring)"), ("truth", "truth")):
+        if artists[key] is not None:
+            handles.append(scatter_key(artists[key]))
+            labels.append(label)
+    if artists["collection"] is not None:
+        from matplotlib.lines import Line2D
+
+        contour = artists["collection"]
+        width = contour.get_linewidths()[0]
+        offset, dashes = contour.get_linestyles()[0]
+        # Collection dash lengths are already scaled; Line2D scales on input.
+        if plt.rcParams["lines.scale_dashes"] and width and dashes is not None:
+            offset, dashes = offset / width, np.asarray(dashes) / width
+        handles.append(
+            Line2D(
+                [],
+                [],
+                color=contour.get_edgecolors()[0],
+                linewidth=width,
+                linestyle=(offset, dashes),
+            )
+        )
+        labels.append("claim region")
+    if handles:
+        legend_below(ax, handles, labels, ncols=3)
+    decimal_log_ticks(ax.xaxis)
+    decimal_log_ticks(ax.yaxis)
     return ep.PlotResult(ax, artists, insets=insets)

@@ -3,6 +3,8 @@
 import numpy as np
 
 from spaceodyssey.viz import _extract
+from spaceodyssey.viz._axes import decimal_log_ticks
+from spaceodyssey.viz._legend import scatter_key
 from spaceodyssey.viz._require import eyepiece
 from spaceodyssey.viz.labels import CHANNEL_LABELS
 
@@ -292,6 +294,7 @@ def plot_yield_sweep(
     artists = {key: [] for key in ("line", "scatter", "lines", "bound", "zero_floor")}
     for ax, channel in zip(axes, channels, strict=True):
         floor = zero_floor if channel == "y_wrong" else None
+        legend_handles, legend_labels = [], []
         for name, values in series.items():
             point, lo, hi = values[channel]
             zeros = point == 0
@@ -325,6 +328,9 @@ def plot_yield_sweep(
                 scatter.set_edgecolors(edges)
             artists["scatter"].append(scatter)
             artists["lines"].extend(result.artists["lines"])
+            filled = np.flatnonzero(scatter.get_facecolors()[:, 3] > 0)
+            legend_handles.append(scatter_key(scatter, filled[0] if len(filled) else 0))
+            legend_labels.append(name)
         if channel == "y_wrong":
             for index, values in enumerate(bounds.values()):
                 if floor is not None:
@@ -338,6 +344,9 @@ def plot_yield_sweep(
                 if categories is not None:
                     options.update(linestyle="none", marker="_")
                 artists["bound"].extend(ax.plot(x, values, **options))
+                if index == 0:
+                    legend_handles.append(artists["bound"][-1])
+                    legend_labels.append(options["label"])
         if log_x:
             ax.set_xscale("log")
         if log_y or floor is not None:
@@ -345,6 +354,8 @@ def plot_yield_sweep(
         if floor is not None:
             result = ep.log_zero_floor(ax, floor)
             artists["zero_floor"].extend(result.artists["lines"])
+        decimal_log_ticks(ax.xaxis)
+        decimal_log_ticks(ax.yaxis, zero_floor=floor)
         if categories is not None:
             ax.set_xticks(x, categories)
         ax.set_xlabel(
@@ -354,5 +365,5 @@ def plot_yield_sweep(
         )
         ax.set_ylabel(f"Expected planets ({CHANNEL_LABELS[channel]})")
         if len(series) > 1 or (channel == "y_wrong" and bounds):
-            ax.legend()
+            ax.legend(legend_handles, legend_labels)
     return ep.MosaicResult(axes, artists, update=None)

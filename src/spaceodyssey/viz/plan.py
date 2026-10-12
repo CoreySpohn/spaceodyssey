@@ -3,6 +3,7 @@
 import numpy as np
 
 from spaceodyssey.viz import _extract
+from spaceodyssey.viz._legend import legend_below, scatter_key
 from spaceodyssey.viz._require import eyepiece
 
 # Interim defaults: eyepiece owns the statistic fallback; rows use plan indices.
@@ -116,6 +117,24 @@ def plot_plan_visits(
     ax.set_yticks(np.arange(len(rows)), labels)
     ax.set_ylim(max(len(rows) - 0.5, 0.5), -0.5)
     ax.set_xlabel("visit epoch (d)")
+    handles, key_labels = [], []
+    for collection, mask, status in zip(
+        collections, (success, ~success), ("successful", "failed"), strict=True
+    ):
+        for spectrum, kind in ((False, "visit"), (True, "spectrum")):
+            indices = np.flatnonzero(data["spectrum"][mask] == spectrum)
+            if len(indices):
+                handles.append(scatter_key(collection, indices[0]))
+                key_labels.append(f"{status} {kind}")
+    if texts:
+        from matplotlib.lines import Line2D
+
+        handles.append(
+            Line2D([], [], marker="$M$", linestyle="none", color=texts[0].get_color())
+        )
+        key_labels.append("mass measured")
+    if handles:
+        legend_below(ax, handles, key_labels)
     return ep.PlotResult(
         ax,
         {"scatter": collections, "cbar": result.artists["cbar"], "text": texts},

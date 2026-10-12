@@ -3,6 +3,7 @@
 import numpy as np
 
 from spaceodyssey.viz import _extract
+from spaceodyssey.viz._legend import legend_below, scatter_key
 from spaceodyssey.viz._require import eyepiece
 
 VERDICT_PALETTE_NAMES = ("positive", "negative")
@@ -211,7 +212,7 @@ def plot_certification_curve(
     ax.set_ylabel("Certification probability")
     if x_label is not None:
         ax.set_xlabel(x_label)
-    ax.legend()
+    legend_below(ax)
     return ep.PlotResult(ax, artists, update=None, insets=())
 
 
@@ -319,4 +320,12 @@ def plot_tier_agreement(
         artists["title"].append(ax.set_title(name.replace("_", " ")))
         ax.set_xlabel("Approximate-tier probability")
         ax.set_ylabel("Reference-tier frequency")
+        handles, labels = [], []
+        for mask, label in ((~hollow, "in range"), (hollow, "out of range")):
+            indices = np.flatnonzero(mask)
+            if len(indices):
+                handles.append(scatter_key(scatter, indices[0]))
+                labels.append(label)
+        if handles:
+            legend_below(ax, handles, labels, ncols=1)
     return ep.MosaicResult(axes, artists, update=None)

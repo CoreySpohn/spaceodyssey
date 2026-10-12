@@ -1233,8 +1233,8 @@ def test_plot_claim_posterior_smoke(posterior_samples, save_viz_png):
         EXOEARTH_CANDIDATE.claim_truth(posterior_samples), weights=weights, axis=0
     )
     assert [title.get_text() for title in result.artists["title"]] == [
-        f"P(habitable_zone) = {expected_mass[0]:.2f}",
-        f"P(radius_class) = {expected_mass[1]:.2f}",
+        f"P(habitable zone) = {expected_mass[0]:.2f}",
+        f"P(radius class) = {expected_mass[1]:.2f}",
         "",
         f"P(water) = {expected_mass[2]:.2f}",
     ]
@@ -1364,7 +1364,7 @@ def test_claim_posterior_selection_overrides_and_array_forms(posterior_samples):
     assert result.axes.shape == (2,)
     assert result.axes[1].get_xlabel() == "stored coupled radius"
     assert result.axes[1].get_xscale() == "linear"
-    assert result.artists["title"][1].get_text() == "P(radius_class) = 0.25"
+    assert result.artists["title"][1].get_text() == "P(radius class) = 0.25"
     assert not result.artists["text"]
     for index in range(2):
         np.testing.assert_array_equal(
@@ -1595,6 +1595,192 @@ def test_tier_agreement_routed_styles_preserve_hollows(tier_outcomes):
     assert all(line.get_linestyle() == ":" for line in result.artists["line"])
     assert point_kw == {"s": 70, "alpha": 0.4, "c": "black"}
     assert ref_kw == {"lw": 3, "ls": ":"}
+
+
+# Visual-review regressions inspect artists, never image pixels.
+def assert_decimal_ticks(axis, *, zero_floor=None):
+    lo, hi = sorted(axis.get_view_interval())
+    ticks = [t for t in axis.get_major_ticks() if lo <= t.get_loc() <= hi]
+    assert len(ticks) >= 2
+    for tick in ticks:
+        expected = "0" if tick.get_loc() == zero_floor else f"{tick.get_loc():g}"
+        assert tick.label1.get_text() == expected
+    assert all(not t.get_text() for t in axis.get_minorticklabels())
+
+
+def legend_outside(ax):
+    ax.figure.canvas.draw()
+    legend = ax.get_legend()
+    assert legend is not None
+    bbox = legend.get_window_extent()
+    assert not bbox.overlaps(ax.get_window_extent())
+    assert ax.figure.bbox.contains(bbox.x0, bbox.y0)
+    assert ax.figure.bbox.contains(bbox.x1, bbox.y1)
+    assert_legend_keys_inside(legend)
+    return dict(
+        zip((t.get_text() for t in legend.texts), legend.legend_handles, strict=True)
+    )
+
+
+def assert_legend_keys_inside(legend):
+    from matplotlib.collections import PathCollection
+
+    bbox = legend.get_window_extent()
+    for handle in legend.legend_handles:
+        if isinstance(handle, PathCollection):
+            centers = handle.get_offset_transform().transform(handle.get_offsets())
+            centers += handle.get_transform().transform((0, 0))
+            assert all(bbox.contains(x, y) for x, y in centers)
+
+
+def assert_scatter_key(handle, artist, index=0):
+    np.testing.assert_array_equal(
+        handle.get_paths()[0].vertices,
+        artist.get_paths()[index % len(artist.get_paths())].vertices,
+    )
+    for getter in ("get_facecolors", "get_edgecolors", "get_sizes", "get_linewidths"):
+        expected = getattr(artist, getter)()
+        actual = getattr(handle, getter)()
+        if len(expected):
+            np.testing.assert_allclose(actual[0], expected[index % len(expected)])
+        else:
+            assert len(actual) == 0
+
+
+def test_review_posterior_decimal_ticks(posterior_samples):
+    from spaceodyssey.viz import plot_claim_posterior
+
+    result = plot_claim_posterior(posterior_samples, EXOEARTH_CANDIDATE)
+    result.fig.canvas.draw()
+    for ax in result.axes[:3]:
+        assert_decimal_ticks(ax.xaxis)
+
+
+def test_review_plane_decimal_ticks():
+    result = plot_planet_plane([0.6, 1, 1.5], [0.7, 1, 1.4])
+    result.fig.canvas.draw()
+    for axis in (result.ax.xaxis, result.ax.yaxis):
+        assert_decimal_ticks(axis)
+
+
+@pytest.mark.parametrize("floor", [None, 0.001])
+def test_review_sweep_decimal_ticks(floor):
+    result = plot_yield_sweep(
+        [0.6, 1, 1.5],
+        {"y_issued": [0.7, 1, 1.4], "y_wrong": [0.01, 0.03, 0.1]},
+        log_x=True,
+        log_y=True,
+        zero_floor=floor,
+    )
+    result.fig.canvas.draw()
+    for ax in result.axes:
+        assert_decimal_ticks(ax.xaxis)
+    assert_decimal_ticks(result.axes[0].yaxis)
+    assert_decimal_ticks(result.axes[1].yaxis, zero_floor=floor)
+    if floor is not None:
+        result.axes[1].set_ylim(floor, 1)
+        result.fig.canvas.draw()
+        assert_decimal_ticks(result.axes[1].yaxis, zero_floor=floor)
+
+
+@pytest.mark.parametrize(
+    "scatter_kw", [None, {"marker": "D", "s": 60, "linewidths": 2}]
+)
+def test_review_visit_marker_key(visit_plan, scatter_kw):
+    from spaceodyssey.viz import plot_plan_visits
+
+    result = plot_plan_visits(visit_plan, scatter_kw=scatter_kw)
+    handles = legend_outside(result.ax)
+    good, failed = result.artists["scatter"]
+    assert_scatter_key(handles["successful visit"], good, 0)
+    assert_scatter_key(handles["failed visit"], failed, 1)
+    assert_scatter_key(handles["successful spectrum"], good, 2)
+    assert_scatter_key(handles["failed spectrum"], failed, 0)
+    assert handles["mass measured"].get_marker() == "$M$"
+    assert to_rgba(handles["mass measured"].get_color()) == to_rgba(
+        result.artists["text"][0].get_color()
+    )
+
+
+@pytest.mark.parametrize("scatter_kw", [None, {"marker": "D", "s": 60, "alpha": 0.4}])
+def test_review_plane_marker_key(scatter_kw):
+    result = plot_planet_plane(
+        [0.5, 1, 1.5, 2],
+        [0.5, 1, 1.5, 2],
+        values=[0.1, 0.5, 0.7, 0.9],
+        active=[False, True, True, True],
+        in_range=[True, True, False, True],
+        marked=[False, True, False, False],
+        truth=(1.2, 1.1),
+        profile=EXOEARTH_CANDIDATE,
+        scatter_kw=scatter_kw,
+        region_kw={"linewidths": 2, "linestyles": ":"},
+    )
+    handles = legend_outside(result.ax)
+    inactive, active = result.artists["scatter"]
+    assert_scatter_key(handles["in range"], active, 0)
+    assert_scatter_key(handles["out of range"], active, 1)
+    assert_scatter_key(handles["inactive"], inactive)
+    assert_scatter_key(handles["truth"], result.artists["truth"])
+    assert_scatter_key(handles["marked (ring)"], result.artists["marked"])
+    contour = result.artists["collection"]
+    region = handles["claim region"]
+    np.testing.assert_allclose(region.get_color(), contour.get_edgecolors()[0])
+    assert region.get_linewidth() == contour.get_linewidths()[0]
+    assert region.is_dashed()
+    # Line2D stores rendered dash lengths here; collection styles are also
+    # already scaled by linewidth, so the key must not scale them twice.
+    actual_offset, actual_dashes = region._dash_pattern
+    expected_offset, expected_dashes = contour.get_linestyles()[0]
+    assert actual_offset == expected_offset
+    np.testing.assert_allclose(actual_dashes, expected_dashes)
+
+
+@pytest.mark.parametrize(
+    "point_kw", [None, {"marker": "s", "s": 70, "alpha": 0.4, "c": "black"}]
+)
+def test_review_tier_marker_key(tier_outcomes, point_kw):
+    from spaceodyssey.viz import plot_tier_agreement
+
+    result = plot_tier_agreement(*tier_outcomes, point_kw=point_kw)
+    for k, ax in enumerate(result.axes):
+        handles = legend_outside(ax)
+        scatter = result.artists["scatter"][k]
+        mask = np.asarray(tier_outcomes[0].claim_in_range)[:, k]
+        assert_scatter_key(handles["in range"], scatter, np.flatnonzero(mask)[0])
+        assert_scatter_key(handles["out of range"], scatter, np.flatnonzero(~mask)[0])
+
+
+def test_review_certification_legend_outside(curve_outcome):
+    result = plot_certification_curve(
+        [0, 1, 2, 3],
+        curve_outcome,
+        reference=curve_outcome,
+        indicator=[0.1, 0.4, 0.8, 1],
+    )
+    handles = legend_outside(result.ax)
+    assert "negative (approximate)" in handles
+
+
+@pytest.mark.parametrize("wrong", [[0, 0.03, 0.01], [0.02, 0.03, 0.01], [0, 0, 0]])
+def test_review_sweep_legend_matches_fill(wrong):
+    result = plot_yield_sweep(
+        [1, 2, 3],
+        {"y_issued": [2, 4, 3], "y_wrong": wrong},
+        bound=[0.1, 0.2, 0.3],
+        zero_floor=0.001,
+        line_kw={"marker": "s", "color": "purple"},
+    )
+    result.fig.canvas.draw()
+    legend = result.axes[1].get_legend()
+    assert_legend_keys_inside(legend)
+    handles = dict(
+        zip((t.get_text() for t in legend.texts), legend.legend_handles, strict=True)
+    )
+    filled = np.flatnonzero(np.asarray(wrong) > 0)
+    assert_scatter_key(
+        handles["yield"], result.artists["scatter"][1], filled[0] if len(filled) else 0
+    )
 
 
 def test_tier_agreement_hollow_edges_survive_edge_override(tier_outcomes):

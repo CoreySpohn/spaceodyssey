@@ -35,3 +35,9 @@ CHANNEL_LABELS = {
     "y_neg": "certified negative",
     "y_neg_wrong": "wrong among negative",
 }
+
+CLAIM_LABELS = {
+    "habitable_zone": "habitable zone",
+    "radius_class": "radius class",
+    "water": "water",
+}
