@@ -42,6 +42,7 @@ Documentation = "https://spaceodyssey.readthedocs.io"
 [project.optional-dependencies]
 retrieval = ["exojax"]
 optics = ["physicaloptix"]
+# TODO: raise the floor to the eyepiece release that carries ep.role.
 viz = ["eyepiece>=0.9.0"]
 dev = ["pre-commit"]
 test = ["pytest", "nox", "hypothesis", "pytest-cov", "ineedvalidation>=1.1", "spaceodyssey[viz]"]
