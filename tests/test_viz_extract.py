@@ -314,6 +314,69 @@ def test_out_of_range_midpoint_spans():
     )
 
 
+def test_certification_curve_extraction_device_arrays_and_intervals():
+    import jax.numpy as jnp
+
+    x, series, mask, xr, points, indicator, threshold = (
+        _extract.certification_curve_data(
+            jnp.array([1, 2]),
+            {"pos": jnp.array([0.25, 0.75]), "in_range": [True, False]},
+            channels=("pos",),
+            reference={"pos": jnp.array([0, 0.5, 1]), "pos_se": [0.1, 0.1, 0.1]},
+            x_reference=jnp.array([1, 1.5, 2]),
+            indicator=jnp.array([0.5, 1]),
+            threshold=jnp.array(1.5),
+        )
+    )
+    assert all(isinstance(a, np.ndarray) for a in (x, series["pos"], xr, indicator))
+    np.testing.assert_array_equal(mask, [True, False])
+    np.testing.assert_array_equal(points["pos"][0], [0, 0.5, 1])
+    np.testing.assert_allclose(points["pos"][1], [0, 0.304003601546, 0.804003601546])
+    np.testing.assert_allclose(points["pos"][2], [0.195996398454, 0.695996398454, 1])
+    assert threshold == 1.5
+
+
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ({"x": []}, "nonempty shape"),
+        ({"x": [1, 1]}, "strictly increasing"),
+        ({"x": [1, np.nan]}, "finite"),
+        ({"x": [0, 1], "log_x": True}, "positive"),
+        ({"outcome": {"pos": [0.1]}}, "expected shape"),
+        ({"outcome": {"pos": [0.1, np.nan]}}, "probabilities"),
+        ({"channels": ()}, "must not be empty"),
+        ({"channels": ("unknown",)}, "unknown verdict channel"),
+        ({"confidence": 1}, "confidence"),
+        ({"confidence": np.nan}, "confidence"),
+        ({"indicator": [0, 2]}, "probabilities"),
+        ({"threshold": [1, 2]}, "expected shape"),
+        ({"threshold": 0, "log_x": True}, "positive"),
+        ({"x_reference": [1, 2]}, "require reference"),
+        ({"reference": {"pos": [0.1]}}, "expected shape"),
+        ({"reference": {"pos": [0, 1]}, "x_reference": [1, np.inf]}, "finite"),
+        ({"reference": {"pos": [0, 1], "pos_se": [-1, 0]}}, "nonnegative"),
+        (
+            {
+                "reference": {"pos": [0, 1]},
+                "reference_intervals": {"pos": ([1, 1], [0, 0])},
+            },
+            "ordered",
+        ),
+    ],
+)
+def test_certification_curve_extraction_errors(options, message):
+    with pytest.raises(ValueError, match=message):
+        _extract.certification_curve_data(
+            **{
+                "x": [1, 2],
+                "outcome": {"pos": [0.2, 0.8]},
+                "channels": ("pos",),
+                **options,
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "x, log", [([1], False), ([1, 1], False), ([2, 1], False), ([0, 1], True)]
 )

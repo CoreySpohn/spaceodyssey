@@ -5,6 +5,7 @@ treated as planets, and stored report intervals are never estimated again.
 """
 
 from collections.abc import Mapping
+from statistics import NormalDist
 
 import numpy as np
 
@@ -351,6 +352,112 @@ def verdict_series(outcome, channels=("pos", "neg")):
         _field(outcome, "in_range", np.ones(shape, dtype=bool)), "in_range", shape, bool
     )
     return series, in_range
+
+
+def certification_curve_data(
+    x,
+    outcome,
+    *,
+    channels=("pos", "neg"),
+    reference=None,
+    x_reference=None,
+    reference_intervals=None,
+    indicator=None,
+    confidence=0.95,
+    log_x=False,
+    threshold=None,
+):
+    """Read sweep probabilities and reference intervals without using replicates.
+
+    Args:
+        x: Nonempty, strictly increasing finite coordinates shaped (S,).
+        outcome: CertificationOutcome or mapping of channels to (S,) arrays.
+        channels: Nonempty subset of pos, neg, and wrong.
+        reference: Optional outcome or channel mapping at reference coordinates.
+            Bare mappings may supply channel_se arrays, such as pos_se.
+        x_reference: Reference coordinates, default x.
+        reference_intervals: Optional channel-to-(lo, hi) mapping. Each endpoint
+            has shape (S_ref,). Supplied endpoints are retained exactly.
+        indicator: Optional probability array shaped (S,).
+        confidence: Central normal interval confidence strictly between 0 and 1.
+        log_x: Require positive sweep and reference coordinates.
+        threshold: Optional finite scalar x reference, positive when log_x.
+
+    Returns:
+        Tuple of x, channel arrays, in_range, reference coordinates, reference
+        channel-to-(point, lo, hi) triples, indicator, and threshold. Missing
+        explicit intervals use clipped normal intervals from standard errors;
+        absent standard errors leave both endpoints None.
+
+    Raises:
+        ValueError: If shapes, coordinates, probabilities, errors, or intervals
+            are invalid, or reference options are given without a reference.
+
+    Example::
+
+        arrays = certification_curve_data([1, 2], {"pos": [0.2, 0.8]},
+                                          channels=("pos",))
+    """
+    x = _array(x, "x")
+    if x.ndim != 1 or not x.size:
+        raise ValueError(f"x: expected nonempty shape (S,), received {x.shape}")
+    if not np.isfinite(x).all() or np.any(np.diff(x) <= 0):
+        raise ValueError("x must be finite and strictly increasing")
+    if log_x and np.any(x <= 0):
+        raise ValueError("log_x requires positive coordinates")
+    confidence = _array(confidence, "confidence", ())
+    if not 0 < confidence < 1:
+        raise ValueError("confidence must be strictly between 0 and 1")
+    if threshold is not None:
+        threshold = _array(threshold, "threshold", ())
+        if not np.isfinite(threshold) or (log_x and threshold <= 0):
+            raise ValueError("threshold must be finite and positive when log_x")
+        threshold = float(threshold)
+    series, in_range = verdict_series(outcome, channels)
+    for channel, values in series.items():
+        _probability_array(values, channel, x.shape)
+    if indicator is not None:
+        indicator = _probability_array(indicator, "indicator", x.shape)
+    if reference is None:
+        if x_reference is not None or reference_intervals is not None:
+            raise ValueError("reference options require reference")
+        return x, series, in_range, None, {}, indicator, threshold
+    points, _ = verdict_series(reference, channels)
+    xr = x if x_reference is None else _array(x_reference, "x_reference")
+    shape = next(iter(points.values())).shape
+    _array(xr, "x_reference", shape)
+    if not np.isfinite(xr).all() or (log_x and np.any(xr <= 0)):
+        raise ValueError("x_reference must be finite and positive when log_x")
+    intervals = {} if reference_intervals is None else reference_intervals
+    z = -NormalDist().inv_cdf((1 - float(confidence)) / 2)
+    reference_data = {}
+    for channel, point in points.items():
+        _probability_array(point, f"reference {channel}", shape)
+        if channel in intervals:
+            lo, hi = _array(intervals[channel], f"{channel} intervals", (2, *shape))
+            if not (np.isfinite(lo).all() and np.isfinite(hi).all()) or np.any(lo > hi):
+                raise ValueError(f"{channel} intervals must be finite and ordered")
+        else:
+            name = (
+                f"{channel}_se" if isinstance(reference, Mapping) else f"p_{channel}_se"
+            )
+            se = _field(reference, name)
+            lo = hi = None
+            if se is not None:
+                se = _array(se, name, shape)
+                if not np.isfinite(se).all() or np.any(se < 0):
+                    raise ValueError(f"{name} must be finite and nonnegative")
+                lo, hi = np.clip(point - z * se, 0, 1), np.clip(point + z * se, 0, 1)
+        reference_data[channel] = point, lo, hi
+    return x, series, in_range, xr, reference_data, indicator, threshold
+
+
+def _probability_array(values, name, shape):
+    """Validate a probability array while converting device arrays to NumPy."""
+    values = _array(values, name, shape)
+    if not np.isfinite(values).all() or np.any((values < 0) | (values > 1)):
+        raise ValueError(f"{name} must contain finite probabilities in [0, 1]")
+    return values
 
 
 def planet_plane_data(

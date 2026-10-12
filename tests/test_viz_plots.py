@@ -10,7 +10,11 @@ from matplotlib.colors import to_rgba
 
 from spaceodyssey.profiles import ALPHA_BAND
 from spaceodyssey.reporting import PairedDifference, certified_yield
-from spaceodyssey.viz import plot_yield_comparison, plot_yield_sweep
+from spaceodyssey.viz import (
+    plot_certification_curve,
+    plot_yield_comparison,
+    plot_yield_sweep,
+)
 from tests.test_plan import make_outcome
 
 
@@ -18,6 +22,200 @@ from tests.test_plan import make_outcome
 def close_figures():
     yield
     plt.close("all")
+
+
+@pytest.fixture
+def curve_outcome():
+    return make_outcome(
+        n_planets=4,
+        p_pos=[0, 0.2, 0.5, 0.9],
+        p_neg=[0.8, 0.6, 0.3, 0],
+        p_wrong=[0, 0.02, 0.01, 0.03],
+        p_pos_se=[0.1, 0.05, 0.1, 0.2],
+        p_neg_se=[0.2, 0.1, 0.05, 0.1],
+        in_range=[True, False, False, True],
+        p_pos_rep=np.full((7, 4), 0.55),
+        p_neg_rep=np.full((7, 4), 0.15),
+        p_wrong_rep=np.full((7, 4), 0.05),
+        p_neg_wrong_rep=np.zeros((7, 4)),
+        replicate_kind="bootstrap",
+        replicate_key="example",
+    )
+
+
+def test_plot_certification_curve_smoke(curve_outcome, save_viz_png):
+    result = plot_certification_curve(
+        [0, 1, 2, 3],
+        curve_outcome,
+        reference=curve_outcome,
+        indicator=[0.1, 0.4, 0.8, 1],
+        threshold=1.5,
+        x_label="signal-to-noise ratio (dimensionless)",
+    )
+    assert isinstance(result, ep.PlotResult)
+    assert result.update is None and result.insets == ()
+    assert set(result.artists) == {
+        "line",
+        "scatter",
+        "lines",
+        "fill",
+        "indicator",
+        "threshold",
+        "text",
+    }
+    assert len(result.artists["line"]) == len(result.artists["scatter"]) == 2
+    assert len(result.artists["lines"]) == 8
+    assert result.ax.get_ylim() == (0, 1)
+    assert "dimensionless" in result.ax.get_xlabel()
+    assert result.artists["indicator"][0].get_linestyle() == "--"
+    np.testing.assert_array_equal(
+        result.artists["threshold"][0].get_xdata(), [1.5, 1.5]
+    )
+    assert result.artists["text"][0].get_transform() == result.ax.get_xaxis_transform()
+    result.fig.set_size_inches(6, 3)
+    result.fig.canvas.draw()
+    save_viz_png(result, "plot_certification_curve")
+
+
+@pytest.mark.parametrize(
+    "x, log_x, expected",
+    [([0, 1, 2, 3], False, [0.5, 2.5]), ([1, 4, 16, 64], True, [2, 32])],
+)
+def test_certification_curve_span_known_answer(curve_outcome, x, log_x, expected):
+    result = plot_certification_curve(x, curve_outcome, log_x=log_x)
+    (span,) = result.artists["fill"]
+    vertices = span.get_patch_transform().transform(span.get_path().vertices)
+    np.testing.assert_allclose([vertices[:, 0].min(), vertices[:, 0].max()], expected)
+    np.testing.assert_allclose(span.get_facecolor(), to_rgba(ep.neutral(0.12)))
+    assert result.ax.get_xscale() == ("log" if log_x else "linear")
+
+
+def test_certification_curve_replicates_are_not_planets(curve_outcome):
+    channels = ("pos", "neg", "wrong")
+    result = plot_certification_curve(
+        [0, 1, 2, 3], curve_outcome, reference=curve_outcome, channels=channels
+    )
+    assert len(result.artists["line"]) == len(result.artists["scatter"]) == 3
+    for index, channel in enumerate(channels):
+        expected = np.asarray(getattr(curve_outcome, f"p_{channel}"))
+        line, points = result.artists["line"][index], result.artists["scatter"][index]
+        assert len(line.get_xdata()) == len(points.get_offsets()) == 4
+        np.testing.assert_array_equal(line.get_ydata(), expected)
+        np.testing.assert_array_equal(points.get_offsets()[:, 1], expected)
+        np.testing.assert_array_equal(points.get_facecolors()[:, 3] == 0, expected == 0)
+
+
+def test_certification_curve_bare_arrays_and_reference_intervals(curve_outcome):
+    channels = ("pos", "neg", "wrong")
+    bare = {
+        key: np.asarray(getattr(curve_outcome, f"p_{key}"))
+        for ch in channels
+        for key in (ch, f"{ch}_se")
+    }
+    bare["in_range"] = np.asarray(curve_outcome.in_range)
+    options = dict(
+        channels=channels,
+        x_reference=[0.1, 0.9, 1.9, 2.9],
+        confidence=0.9,
+        reference_intervals={"wrong": ([0.001] * 4, [0.123] * 4)},
+    )
+    typed = plot_certification_curve(
+        [0, 1, 2, 3], curve_outcome, reference=curve_outcome, **options
+    )
+    arrays = plot_certification_curve([0, 1, 2, 3], bare, reference=bare, **options)
+    for key in ("line", "lines"):
+        for a, b in zip(typed.artists[key], arrays.artists[key], strict=True):
+            np.testing.assert_array_equal(a.get_xydata(), b.get_xydata())
+    for a, b in zip(typed.artists["scatter"], arrays.artists["scatter"], strict=True):
+        np.testing.assert_array_equal(a.get_offsets(), b.get_offsets())
+    z = 1.6448536269514722
+    for index, channel in enumerate(channels[:2]):
+        expected = bare[channel]
+        se = bare[f"{channel}_se"]
+        for j, line in enumerate(typed.artists["lines"][index * 4 : (index + 1) * 4]):
+            np.testing.assert_allclose(
+                line.get_ydata(),
+                np.clip([expected[j] - z * se[j], expected[j] + z * se[j]], 0, 1),
+            )
+    for line in typed.artists["lines"][8:]:
+        np.testing.assert_array_equal(line.get_ydata(), [0.001, 0.123])
+
+
+@pytest.mark.parametrize("layout", [None, "constrained"])
+def test_certification_curve_preserves_caller_axes(curve_outcome, layout):
+    fig, axes = plt.subplots(1, 2, layout=layout)
+    engine = fig.get_layout_engine()
+    positions = [ax.get_position(original=True).bounds for ax in axes]
+    result = plot_certification_curve([0, 1, 2, 3], curve_outcome, ax=axes[0])
+    assert result.ax is axes[0] and fig.get_layout_engine() is engine
+    for ax, position in zip(axes, positions, strict=True):
+        np.testing.assert_array_equal(ax.get_position(original=True).bounds, position)
+        assert ax.get_shared_x_axes().get_siblings(ax) == [ax]
+        assert ax.get_shared_y_axes().get_siblings(ax) == [ax]
+    assert not axes[1].lines and not axes[1].collections and not axes[1].patches
+
+
+def test_certification_curve_axes_shape_error(curve_outcome):
+    _, axes = plt.subplots(1, 2)
+    with pytest.raises(ValueError, match=r"expected shape \(\), received \(2,\)"):
+        plot_certification_curve([0, 1, 2, 3], curve_outcome, ax=axes)
+
+
+def test_certification_curve_styles_overlays_and_short_reference(curve_outcome):
+    x = [0, 1, 2, 3]
+    first = plot_certification_curve(x, curve_outcome, channels=("wrong", "neg", "pos"))
+    palette = ep.SourceStyles(["positive", "negative"])
+    for line, color in zip(
+        first.artists["line"],
+        [ep.role("alert"), palette["negative"]["color"], palette["positive"]["color"]],
+        strict=True,
+    ):
+        assert to_rgba(line.get_color()) == to_rgba(color)
+    line_kw, point_kw = {"lw": 3}, {"s": 70}
+    interval_kw, span_kw, ref_kw = {"lw": 4}, {"alpha": 0.25}, {"lw": 2}
+    second = plot_certification_curve(
+        x,
+        curve_outcome,
+        channels=("pos",),
+        ax=first.ax,
+        reference={"pos": [0, 0.8]},
+        x_reference=[0.5, 2.5],
+        reference_intervals={"pos": ([0, 0.7], [0.2, 0.9])},
+        colors={"pos": "black"},
+        label="trial",
+        indicator=[0.1, 0.2, 0.3, 0.4],
+        line_kw=line_kw,
+        point_kw=point_kw,
+        interval_kw=interval_kw,
+        span_kw=span_kw,
+        threshold=2,
+        ref_kw=ref_kw,
+    )
+    assert second.artists["line"][0].get_linewidth() == 3
+    assert second.artists["scatter"][0].get_sizes()[0] == 70
+    assert second.artists["lines"][0].get_linewidth() == 4
+    assert second.artists["fill"][0].get_alpha() == 0.25
+    assert second.artists["threshold"][0].get_linewidth() == 2
+    assert to_rgba(second.artists["indicator"][0].get_color()) == to_rgba("black")
+    assert len(second.artists["scatter"][0].get_offsets()) == 2
+    assert "trial: positive (reference)" in [
+        t.get_text() for t in first.ax.legend_.texts
+    ]
+    assert all(line in first.ax.lines for line in first.artists["line"])
+    assert line_kw == {"lw": 3} and point_kw == {"s": 70}
+    assert (
+        interval_kw == {"lw": 4} and span_kw == {"alpha": 0.25} and ref_kw == {"lw": 2}
+    )
+
+
+def test_certification_curve_reference_without_errors():
+    result = plot_certification_curve(
+        [1, 2], {"pos": [0.2, 0.8]}, reference={"pos": [0, 1]}, channels=("pos",)
+    )
+    assert result.artists["lines"] == result.artists["fill"] == []
+    np.testing.assert_array_equal(
+        result.artists["scatter"][0].get_offsets(), [[1, 0], [2, 1]]
+    )
 
 
 @pytest.fixture
