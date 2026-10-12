@@ -1,4 +1,4 @@
-"""Certification probabilities across physical parameter sweeps."""
+"""Certification probabilities across physical sweeps and fidelity tiers."""
 
 import numpy as np
 
@@ -10,6 +10,9 @@ WRONG_VERDICT_ROLE = "alert"
 SCENERY_LEVEL = 0.6
 OUT_OF_RANGE_LEVEL = 0.12
 VERDICT_LABELS = {"pos": "positive", "neg": "negative", "wrong": "wrong"}
+TIER_DATA_ROLE = "data"
+# U1 ships in eyepiece 0.9.0; keep the upstream capability choice explicit.
+TIER_AGREEMENT_PRIMITIVE = "calibration"
 
 
 def _verdict_styles(ep):
@@ -210,3 +213,110 @@ def plot_certification_curve(
         ax.set_xlabel(x_label)
     ax.legend()
     return ep.PlotResult(ax, artists, update=None, insets=())
+
+
+def plot_tier_agreement(
+    outcome,
+    reference,
+    *,
+    claims=None,
+    verdicts=("pos", "neg"),
+    tolerance=None,
+    axes=None,
+    point_kw=None,
+    ref_kw=None,
+):
+    """Compare approximate probabilities with reference frequencies per claim.
+
+    Args:
+        outcome: Approximate CertificationOutcome with claim_names, claim_p_pos,
+            claim_p_neg, and claim_in_range shaped (P, K). Alternatively, a
+            mapping with claim_names and pos, neg, in_range arrays shaped (K, P).
+            Only requested verdict probability fields are required.
+        reference: Reference outcome or mapping in the same form. Claim names
+            and their order must agree; planet rows must correspond. Its range
+            mask is required but does not control marker fill.
+        claims: Nonempty unique subset of claim names in panel order; None
+            selects all claims. Titles replace underscores with spaces.
+        verdicts: Nonempty unique subset of pos and neg, pooled in each panel.
+        tolerance: Optional finite nonnegative absolute half-width about the
+            identity line. The band is clipped to [0, 1].
+        axes: Axes array shaped (K_selected,), or None to create a row. Caller
+            layout, slot geometry, and sharing are preserved. Both probability
+            axes are linear with limits [0, 1].
+        point_kw: Scatter overrides for pooled points, in verdict then planet
+            order per panel. Filled points default to the data role. Points
+            outside the approximate tier's range remain hollow with neutral
+            edges, including when alpha or color is overridden.
+        ref_kw: Line2D overrides for the identity line.
+
+    Returns:
+        MosaicResult with update=None. Artists contain lists in panel order:
+        ``scatter`` (one pooled collection per claim), ``line`` (identity),
+        ``fill`` (tolerance bands, empty when omitted), and ``title``. The
+        ``lines`` list is empty because no intervals are estimated or drawn.
+
+    Raises:
+        ValueError: If claim fields are absent, claim names or shapes disagree,
+            selections are invalid, or probabilities or tolerance are invalid.
+
+    Example::
+
+        from spaceodyssey.viz import plot_tier_agreement
+        approximate = {
+            "claim_names": ("water",), "pos": [[0.2, 0.8]],
+            "in_range": [[True, False]],
+        }
+        reference = {**approximate, "pos": [[0.25, 0.75]]}
+        result = plot_tier_agreement(approximate, reference, verdicts=("pos",))
+    """
+    ep = eyepiece()
+    from matplotlib import pyplot as plt
+    from matplotlib.colors import to_rgba
+
+    panels = _extract.tier_agreement_data(
+        outcome, reference, claims=claims, verdicts=verdicts, tolerance=tolerance
+    )
+    shape = (len(panels),)
+    if axes is None:
+        _, axes = plt.subplots(1, len(panels), squeeze=False, layout="constrained")
+        axes = axes[0]
+    elif np.shape(axes) != shape:
+        raise ValueError(f"axes: expected shape {shape}, received {np.shape(axes)}")
+    axes = np.asarray(axes, dtype=object)
+    artists = {key: [] for key in ("scatter", "line", "lines", "fill", "title")}
+    calibration = getattr(ep, TIER_AGREEMENT_PRIMITIVE)
+    for ax, (name, x, y, hollow) in zip(axes, panels, strict=True):
+        options = {"color": ep.role(TIER_DATA_ROLE), **(point_kw or {})}
+        result = calibration(
+            x,
+            y,
+            ax=ax,
+            hollow=hollow,
+            scale="linear",
+            lim=(0, 1),
+            tolerance=tolerance,
+            point_kw=options,
+            ref_kw=ref_kw,
+        )
+        scatter = result.artists["scatter"]
+        if hollow.any():
+            colors = scatter.get_edgecolors()
+            edges = (
+                np.broadcast_to(colors, (len(x), 4)).copy()
+                if len(colors)
+                else np.zeros((len(x), 4))
+            )
+            edges[hollow] = to_rgba(
+                ep.neutral(SCENERY_LEVEL), alpha=options.get("alpha")
+            )
+            scatter.set_edgecolors(edges)
+        for key, artist in result.artists.items():
+            if key == "lines":
+                artists[key].extend(artist)
+            else:
+                artists[key].append(artist)
+        artists["title"].append(ax.set_title(name.replace("_", " ")))
+        ax.set_xlabel("Approximate-tier probability")
+        ax.set_ylabel("Reference-tier frequency")
+    return ep.MosaicResult(axes, artists, update=None)

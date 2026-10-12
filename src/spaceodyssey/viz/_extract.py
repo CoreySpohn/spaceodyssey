@@ -1047,6 +1047,9 @@ def tier_agreement_series(outcome, reference, *, claims=None, verdicts=("pos", "
         ValueError: If claim fields are missing, names disagree, shapes disagree,
             or a requested claim is unknown.
     """
+    verdicts = tuple(verdicts)
+    if len(set(verdicts)) != len(verdicts):
+        raise ValueError("verdicts must be unique")
     names, left, in_range = _claim_arrays(outcome, verdicts)
     other_names, right, _ = _claim_arrays(reference, verdicts)
     if names != other_names:
@@ -1054,6 +1057,8 @@ def tier_agreement_series(outcome, reference, *, claims=None, verdicts=("pos", "
     for verdict in verdicts:
         _array(right[verdict], f"reference {verdict}", left[verdict].shape)
     selected = names if claims is None else tuple(claims)
+    if not selected or len(set(selected)) != len(selected):
+        raise ValueError("claims must be nonempty and unique")
     unknown = [name for name in selected if name not in names]
     if unknown:
         raise ValueError(f"unknown claims {unknown!r}; received claim_names {names!r}")
@@ -1066,3 +1071,43 @@ def tier_agreement_series(outcome, reference, *, claims=None, verdicts=("pos", "
         },
         in_range[indices],
     )
+
+
+def tier_agreement_data(
+    outcome, reference, *, claims=None, verdicts=("pos", "neg"), tolerance=None
+):
+    """Pool selected verdicts into one comparison array per claim.
+
+    Args:
+        outcome: Approximate outcome or claim-first bare mapping.
+        reference: Matching reference outcome or bare mapping.
+        claims: Optional claim names in panel order.
+        verdicts: Nonempty unique subset of pos and neg in pooling order.
+        tolerance: Optional finite nonnegative scalar identity-band half-width.
+
+    Returns:
+        List of (name, x, y, hollow) tuples, each array shaped (P * V,),
+        where V is the number of selected verdicts.
+
+    Raises:
+        ValueError: If claim inputs, probabilities, or tolerance are invalid.
+
+    Example::
+
+        panels = tier_agreement_data(outcome, reference, claims=("water",))
+    """
+    names, series, in_range = tier_agreement_series(
+        outcome, reference, claims=claims, verdicts=verdicts
+    )
+    if tolerance is not None:
+        width = _array(tolerance, "tolerance", ())
+        if not np.isfinite(width) or width < 0:
+            raise ValueError("tolerance must be finite and nonnegative")
+    panels = []
+    for k, name in enumerate(names):
+        x = np.concatenate([pair[0][k] for pair in series.values()])
+        y = np.concatenate([pair[1][k] for pair in series.values()])
+        _probability_array(x, "approximate claim values", x.shape)
+        _probability_array(y, "reference claim values", x.shape)
+        panels.append((name, x, y, np.tile(~in_range[k], len(series))))
+    return panels

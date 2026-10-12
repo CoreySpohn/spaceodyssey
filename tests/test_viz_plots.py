@@ -1419,3 +1419,193 @@ def test_claim_posterior_risk_shape_error(posterior_samples):
         ValueError, match=r"risk: expected shape \(\) or \(3,\), received \(2,\)"
     ):
         plot_claim_posterior(posterior_samples, EXOEARTH_CANDIDATE, risk=[0.1, 0.2])
+
+
+@pytest.fixture
+def tier_outcomes():
+    fields = dict(
+        claim_names=("zone", "radius_class"),
+        claim_p_wrong=np.zeros((3, 2)),
+        claim_p_neg_wrong=np.zeros((3, 2)),
+        claim_truth_positive=np.ones((3, 2), dtype=bool),
+    )
+    approximate = make_outcome(
+        **fields,
+        claim_p_pos=[[0, 0.6], [0.3, 0.8], [0.7, 1]],
+        claim_p_neg=[[1, 0.2], [0.5, 0], [0.1, 0]],
+        claim_in_range=[[True, False], [False, False], [True, True]],
+    )
+    reference = make_outcome(
+        **fields,
+        claim_p_pos=[[0.05, 0.55], [0.35, 0.75], [0.65, 0.95]],
+        claim_p_neg=[[0.95, 0.25], [0.45, 0.05], [0.15, 0.05]],
+        claim_in_range=np.ones((3, 2), dtype=bool),
+    )
+    return approximate, reference
+
+
+def test_plot_tier_agreement_smoke(tier_outcomes, save_viz_png):
+    from spaceodyssey.viz import plot_tier_agreement
+
+    result = plot_tier_agreement(*tier_outcomes, tolerance=0.1)
+    assert isinstance(result, ep.MosaicResult)
+    assert result.axes.shape == (2,) and result.update is None
+    assert set(result.artists) == {"scatter", "line", "lines", "fill", "title"}
+    assert result.artists["lines"] == []
+    assert [t.get_text() for t in result.artists["title"]] == ["zone", "radius class"]
+    for ax, line, band in zip(
+        result.axes, result.artists["line"], result.artists["fill"], strict=True
+    ):
+        assert ax.get_xlim() == ax.get_ylim() == (0, 1)
+        assert ax.get_xscale() == ax.get_yscale() == "linear"
+        assert "probability" in ax.get_xlabel() and "frequency" in ax.get_ylabel()
+        np.testing.assert_array_equal(line.get_xydata(), [[0, 0], [1, 1]])
+        vertices = band.get_paths()[0].vertices
+        assert np.all((vertices >= 0) & (vertices <= 1))
+        interior = vertices[(vertices[:, 0] > 0) & (vertices[:, 0] < 1)]
+        np.testing.assert_allclose(np.abs(interior[:, 1] - interior[:, 0]), 0.1)
+    result.fig.set_size_inches(7, 3)
+    result.fig.canvas.draw()
+    save_viz_png(result, "plot_tier_agreement")
+
+
+@pytest.mark.parametrize("claims", [None, ("radius_class",), ("radius_class", "zone")])
+@pytest.mark.parametrize("verdicts", [("pos", "neg"), ("neg",), ("neg", "pos")])
+def test_tier_agreement_hollow_count_and_offsets(tier_outcomes, claims, verdicts):
+    from spaceodyssey.viz import plot_tier_agreement
+
+    outcome, reference = tier_outcomes
+    result = plot_tier_agreement(*tier_outcomes, claims=claims, verdicts=verdicts)
+    result.fig.canvas.draw()
+    count = 0
+    indices = [
+        outcome.claim_names.index(name) for name in claims or outcome.claim_names
+    ]
+    for k, scatter in zip(indices, result.artists["scatter"], strict=True):
+        x = np.concatenate(
+            [np.asarray(getattr(outcome, f"claim_p_{v}"))[:, k] for v in verdicts]
+        )
+        y = np.concatenate(
+            [np.asarray(getattr(reference, f"claim_p_{v}"))[:, k] for v in verdicts]
+        )
+        np.testing.assert_array_equal(scatter.get_offsets(), np.column_stack((x, y)))
+        hollow = np.tile(~np.asarray(outcome.claim_in_range)[:, k], len(verdicts))
+        faces = scatter.get_facecolors()
+        np.testing.assert_array_equal(faces[:, 3] == 0, hollow)
+        np.testing.assert_allclose(
+            faces[~hollow], np.tile(to_rgba(ep.role("data")), ((~hollow).sum(), 1))
+        )
+        np.testing.assert_allclose(
+            scatter.get_edgecolors()[hollow],
+            np.tile(to_rgba(ep.neutral(0.6)), (hollow.sum(), 1)),
+        )
+        count += (faces[:, 3] == 0).sum()
+    assert count == (~np.asarray(outcome.claim_in_range)[:, indices]).sum() * len(
+        verdicts
+    )
+
+
+def test_tier_agreement_bare_arrays(tier_outcomes):
+    from spaceodyssey.viz import plot_tier_agreement
+
+    bare = [
+        dict(
+            claim_names=o.claim_names,
+            pos=np.asarray(o.claim_p_pos).T,
+            neg=np.asarray(o.claim_p_neg).T,
+            in_range=np.asarray(o.claim_in_range).T,
+        )
+        for o in tier_outcomes
+    ]
+    typed = plot_tier_agreement(*tier_outcomes)
+    arrays = plot_tier_agreement(*bare)
+    assert arrays.artists["fill"] == []
+    for a, b in zip(typed.artists["scatter"], arrays.artists["scatter"], strict=True):
+        np.testing.assert_array_equal(a.get_offsets(), b.get_offsets())
+        np.testing.assert_array_equal(a.get_facecolors(), b.get_facecolors())
+    for a, b in zip(typed.artists["line"], arrays.artists["line"], strict=True):
+        np.testing.assert_array_equal(a.get_xydata(), b.get_xydata())
+
+
+@pytest.mark.parametrize("layout", [None, "constrained"])
+def test_tier_agreement_preserves_caller_axes(tier_outcomes, layout):
+    from spaceodyssey.viz import plot_tier_agreement
+
+    fig, axes = plt.subplots(1, 3, layout=layout)
+    engine = fig.get_layout_engine()
+    positions = [ax.get_position(original=True).bounds for ax in axes]
+    result = plot_tier_agreement(*tier_outcomes, axes=axes[:2])
+    assert all(a is b for a, b in zip(result.axes, axes[:2], strict=True))
+    assert fig.get_layout_engine() is engine
+    for ax, position in zip(axes, positions, strict=True):
+        np.testing.assert_array_equal(ax.get_position(original=True).bounds, position)
+        assert ax.get_shared_x_axes().get_siblings(ax) == [ax]
+        assert ax.get_shared_y_axes().get_siblings(ax) == [ax]
+    assert not axes[2].lines and not axes[2].collections
+
+
+@pytest.mark.parametrize("shape", [(), (1,), (1, 2)])
+def test_tier_agreement_axes_shape_error(tier_outcomes, shape):
+    from spaceodyssey.viz import plot_tier_agreement
+
+    _, ax = plt.subplots()
+    with pytest.raises(ValueError) as error:
+        plot_tier_agreement(*tier_outcomes, axes=np.full(shape, ax, dtype=object))
+    assert "expected shape (2,)" in str(error.value)
+    assert f"received {shape}" in str(error.value)
+
+
+@pytest.mark.parametrize("names", [("radius_class", "zone"), ("zone", "water")])
+def test_tier_agreement_claim_name_mismatch_raises(tier_outcomes, names):
+    from spaceodyssey.viz import plot_tier_agreement
+
+    outcome, reference = tier_outcomes
+    changed = replace(reference, claim_names=names)
+    with pytest.raises(ValueError, match="claim_names disagree"):
+        plot_tier_agreement(outcome, changed, claims=("zone",))
+
+
+@pytest.mark.parametrize("side", [0, 1])
+def test_tier_agreement_missing_claims_raises(tier_outcomes, side):
+    from spaceodyssey.viz import plot_tier_agreement
+
+    pair = list(tier_outcomes)
+    pair[side] = make_outcome()
+    with pytest.raises(ValueError, match="claim fields"):
+        plot_tier_agreement(*pair)
+
+
+def test_tier_agreement_routed_styles_preserve_hollows(tier_outcomes):
+    from spaceodyssey.viz import plot_tier_agreement
+
+    point_kw = {"s": 70, "alpha": 0.4, "c": "black"}
+    ref_kw = {"lw": 3, "ls": ":"}
+    result = plot_tier_agreement(*tier_outcomes, point_kw=point_kw, ref_kw=ref_kw)
+    result.fig.canvas.draw()
+    for k, scatter in enumerate(result.artists["scatter"]):
+        hollow = np.tile(~np.asarray(tier_outcomes[0].claim_in_range)[:, k], 2)
+        assert scatter.get_sizes()[0] == 70
+        np.testing.assert_array_equal(scatter.get_facecolors()[:, 3] == 0, hollow)
+        np.testing.assert_allclose(scatter.get_facecolors()[~hollow, 3], 0.4)
+        np.testing.assert_allclose(
+            scatter.get_edgecolors()[hollow, :3],
+            np.tile(to_rgba(ep.neutral(0.6))[:3], (hollow.sum(), 1)),
+        )
+    assert all(line.get_linewidth() == 3 for line in result.artists["line"])
+    assert all(line.get_linestyle() == ":" for line in result.artists["line"])
+    assert point_kw == {"s": 70, "alpha": 0.4, "c": "black"}
+    assert ref_kw == {"lw": 3, "ls": ":"}
+
+
+def test_tier_agreement_hollow_edges_survive_edge_override(tier_outcomes):
+    from spaceodyssey.viz import plot_tier_agreement
+
+    result = plot_tier_agreement(*tier_outcomes, point_kw={"edgecolors": "none"})
+    result.fig.canvas.draw()
+    for k, scatter in enumerate(result.artists["scatter"]):
+        hollow = np.tile(~np.asarray(tier_outcomes[0].claim_in_range)[:, k], 2)
+        np.testing.assert_array_equal(scatter.get_facecolors()[:, 3] == 0, hollow)
+        np.testing.assert_allclose(
+            scatter.get_edgecolors()[hollow],
+            np.tile(to_rgba(ep.neutral(0.6)), (hollow.sum(), 1)),
+        )

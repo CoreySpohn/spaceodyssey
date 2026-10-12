@@ -771,3 +771,62 @@ def test_claim_posterior_extraction_device_arrays_and_constant_bins():
 def test_claim_posterior_extraction_invalid_arguments(samples, options, message):
     with pytest.raises(ValueError, match=message):
         _extract.claim_posterior_data(samples, EXOEARTH_CANDIDATE, **options)
+
+
+def test_tier_agreement_pooling_device_arrays():
+    import jax.numpy as jnp
+
+    bare = dict(
+        claim_names=("zone",),
+        pos=jnp.array([[0, 0.75]]),
+        neg=jnp.array([[1, 0.25]]),
+        in_range=jnp.array([[True, False]]),
+    )
+    [(name, x, y, hollow)] = _extract.tier_agreement_data(bare, bare)
+    assert name == "zone"
+    assert all(isinstance(a, np.ndarray) for a in (x, y, hollow))
+    np.testing.assert_array_equal(x, [0, 0.75, 1, 0.25])
+    np.testing.assert_array_equal(y, x)
+    np.testing.assert_array_equal(hollow, [False, True, False, True])
+
+
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ({"claims": ()}, "nonempty"),
+        ({"claims": ("zone", "zone")}, "unique"),
+        ({"claims": ("unknown",)}, "unknown claims"),
+        ({"verdicts": ()}, "must not be empty"),
+        ({"verdicts": ("pos", "pos")}, "unique"),
+        ({"verdicts": ("wrong",)}, "unknown claim verdict"),
+        ({"tolerance": -1}, "nonnegative"),
+        ({"tolerance": np.nan}, "finite"),
+        ({"tolerance": [0.1]}, "expected shape"),
+    ],
+)
+def test_tier_agreement_invalid_selections_and_tolerance(
+    claim_outcome, options, message
+):
+    with pytest.raises(ValueError, match=message):
+        _extract.tier_agreement_data(claim_outcome, claim_outcome, **options)
+
+
+@pytest.mark.parametrize(
+    "field, value, message",
+    [
+        ("pos", None, "missing pos"),
+        ("in_range", None, "missing in_range"),
+        ("pos", [[np.nan]], "finite probabilities"),
+        ("pos", [[1.1]], "finite probabilities"),
+        ("pos", [[-0.1]], "finite probabilities"),
+        ("pos", [0.5], "expected shape"),
+        ("pos", [[0.5, 0.6]], "expected shape"),
+    ],
+)
+@pytest.mark.parametrize("side", [0, 1])
+def test_tier_agreement_invalid_bare_fields(field, value, message, side):
+    bare = dict(claim_names=("zone",), pos=[[0.5]], in_range=[[True]])
+    pair = [bare, bare]
+    pair[side] = {**bare, field: value}
+    with pytest.raises(ValueError, match=message):
+        _extract.tier_agreement_data(*pair, verdicts=("pos",))
