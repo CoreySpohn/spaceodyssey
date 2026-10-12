@@ -363,7 +363,7 @@ def plot_yield_sweep(
             if x_label is not None
             else (r"$\alpha$ (dimensionless)" if profiles else "sweep parameter")
         )
-        ax.set_ylabel(f"Expected planets ({CHANNEL_LABELS[channel]})")
+        ax.set_ylabel(f"Expected planets\n({CHANNEL_LABELS[channel]})")
         if len(series) > 1 or (channel == "y_wrong" and bounds):
             ax.legend(legend_handles, legend_labels)
     return ep.MosaicResult(axes, artists, update=None)

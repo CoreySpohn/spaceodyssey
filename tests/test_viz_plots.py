@@ -1795,3 +1795,19 @@ def test_tier_agreement_hollow_edges_survive_edge_override(tier_outcomes):
             scatter.get_edgecolors()[hollow],
             np.tile(to_rgba(ep.neutral(0.6)), (hollow.sum(), 1)),
         )
+
+
+@pytest.mark.parametrize("size", [(6.4, 4.8), (7, 3)])
+def test_yield_sweep_ylabels_stay_inside_figure(sweep_reports, size):
+    result = plot_yield_sweep(
+        ALPHA_BAND, sweep_reports, bound="profile", zero_floor=0.001
+    )
+    result.fig.set_size_inches(*size)
+    result.fig.canvas.draw()
+    figure_box = result.fig.bbox
+    for ax in result.axes:
+        label_box = ax.yaxis.label.get_window_extent()
+        assert label_box.x0 >= figure_box.x0 - 0.5
+        assert label_box.x1 <= figure_box.x1 + 0.5
+        assert label_box.y0 >= figure_box.y0 - 0.5
+        assert label_box.y1 <= figure_box.y1 + 0.5
