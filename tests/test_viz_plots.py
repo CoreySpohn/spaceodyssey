@@ -1199,3 +1199,223 @@ def test_plane_display_override():
 def test_plane_invalid_plot_arguments(options, match):
     with pytest.raises(ValueError, match=match):
         plot_planet_plane([1], [1], **options)
+
+
+@pytest.fixture
+def posterior_samples():
+    return {
+        "ln_a_eeid": np.log([0.5, 1.0, 1.2, 2.0]),
+        "ln_rp_re": np.log([1.0, 1.0, 1.5, 0.7]),
+        "ln_rp_sqrt_a_eeid": np.log([0.7, 1.0, 1.6, 0.7]),
+        "log10_h2o_vmr": np.array([-5.0, -3.0, -4.0, -2.0]),
+    }
+
+
+def test_plot_claim_posterior_smoke(posterior_samples, save_viz_png):
+    from spaceodyssey.viz import QUANTITY_DISPLAY, plot_claim_posterior
+
+    weights = [1, 2, 3, 4]
+    truth = {name: values[1] for name, values in posterior_samples.items()}
+    result = plot_claim_posterior(
+        posterior_samples,
+        EXOEARTH_CANDIDATE,
+        weights=weights,
+        truth=truth,
+        bins=4,
+        risk=0.0123456789,
+        verdict="certified as supplied",
+    )
+    assert isinstance(result, ep.MosaicResult) and result.update is None
+    assert result.axes.shape == (4,)
+    assert set(result.artists) == {"hist", "fill", "lines", "truth", "title", "text"}
+    names = tuple(posterior_samples)
+    expected_mass = np.average(
+        EXOEARTH_CANDIDATE.claim_truth(posterior_samples), weights=weights, axis=0
+    )
+    assert [title.get_text() for title in result.artists["title"]] == [
+        f"P(habitable_zone) = {expected_mass[0]:.2f}",
+        f"P(radius_class) = {expected_mass[1]:.2f}",
+        "",
+        f"P(water) = {expected_mass[2]:.2f}",
+    ]
+    for index, (name, ax) in enumerate(zip(names, result.axes, strict=True)):
+        assert ax.get_xlabel() == QUANTITY_DISPLAY[name].label
+        assert ax.get_xscale() == QUANTITY_DISPLAY[name].scale
+        values = posterior_samples[name]
+        actual = truth[name]
+        if name.startswith("ln_"):
+            values, actual = np.exp(values), np.exp(actual)
+        bars = result.artists["hist"][index]
+        bounds = np.array(
+            [bar.get_x() for bar in bars] + [bars[-1].get_x() + bars[-1].get_width()]
+        )
+        np.testing.assert_allclose(
+            [bar.get_height() for bar in bars],
+            np.histogram(values, bins=bounds, weights=weights)[0],
+        )
+        assert sum(bar.get_height() for bar in bars) == sum(weights)
+        if name.startswith("ln_"):
+            np.testing.assert_allclose(
+                np.diff(np.log(bounds)), np.log(bounds[1] / bounds[0])
+            )
+        np.testing.assert_allclose(result.artists["truth"][index].get_xdata(), actual)
+        np.testing.assert_allclose(bars[0].get_facecolor(), to_rgba(ep.role("model")))
+        np.testing.assert_allclose(
+            result.artists["truth"][index].get_color(), ep.neutral(0.6)
+        )
+    for lines, expected in zip(
+        result.artists["lines"], [[0.95, 1.67], [1.4], [0.8], [-4]], strict=True
+    ):
+        np.testing.assert_allclose([line.get_xdata()[0] for line in lines], expected)
+    for patches, expected in zip(
+        result.artists["fill"],
+        [[0.95, 1.67], [0.7, 1.4], [0.8, 1.6], [-4, -2]],
+        strict=True,
+    ):
+        patch = patches[0]
+        np.testing.assert_allclose(
+            [patch.get_x(), patch.get_x() + patch.get_width()], expected
+        )
+        np.testing.assert_allclose(patch.get_facecolor(), to_rgba(ep.neutral(0.15)))
+    block = result.artists["text"][0]
+    assert block.get_text() == "risk = 0.0123456789\ncertified as supplied"
+    assert block.get_position() == (1.04, 0.5)
+    assert block.get_transform() is result.axes[-1].transAxes
+    result.fig.canvas.draw()
+    save_viz_png(result, "plot_claim_posterior")
+
+
+@pytest.mark.parametrize(
+    "risk", [0.123456789123456, [0.1, 0.2, 0.3], np.array([0.2, 0.4, 0.6])]
+)
+def test_claim_posterior_prints_supplied_values(posterior_samples, risk):
+    from spaceodyssey.viz import plot_claim_posterior
+
+    result = plot_claim_posterior(
+        posterior_samples,
+        EXOEARTH_CANDIDATE,
+        risk=risk,
+        verdict="undecided: caller decision",
+        show_mass=False,
+    )
+    assert (
+        result.artists["text"][0].get_text()
+        == f"risk = {risk}\nundecided: caller decision"
+    )
+    assert all(title.get_text() == "" for title in result.artists["title"])
+
+
+@pytest.mark.parametrize("layout", [None, "constrained"])
+def test_claim_posterior_preserves_caller_geometry(posterior_samples, layout):
+    from spaceodyssey.viz import plot_claim_posterior
+
+    fig, axes = plt.subplots(1, 5, layout=layout)
+    positions = [ax.get_position(original=True).bounds for ax in axes]
+    engine = fig.get_layout_engine()
+    axes[0].set_xlim(0.3, 3)
+    axes[0].set_ylim(0, 100)
+    result = plot_claim_posterior(posterior_samples, EXOEARTH_CANDIDATE, axes=axes[:4])
+    assert all(a is b for a, b in zip(result.axes, axes[:4], strict=True))
+    assert fig.get_layout_engine() is engine
+    assert axes[0].get_xlim() == (0.3, 3) and axes[0].get_ylim() == (0, 100)
+    for ax, position in zip(axes, positions, strict=True):
+        np.testing.assert_array_equal(ax.get_position(original=True).bounds, position)
+        assert ax.get_shared_x_axes().get_siblings(ax) == [ax]
+        assert ax.get_shared_y_axes().get_siblings(ax) == [ax]
+    assert not axes[-1].patches and not axes[-1].lines
+
+
+@pytest.mark.parametrize("shape", [(), (1,), (1, 4)])
+def test_claim_posterior_axes_shape_error(posterior_samples, shape):
+    from spaceodyssey.viz import plot_claim_posterior
+
+    _, ax = plt.subplots()
+    with pytest.raises(ValueError) as error:
+        plot_claim_posterior(
+            posterior_samples, EXOEARTH_CANDIDATE, axes=np.full(shape, ax)
+        )
+    assert "expected shape (4,)" in str(error.value)
+    assert f"received {shape}" in str(error.value)
+
+
+def test_claim_posterior_selection_overrides_and_array_forms(posterior_samples):
+    from spaceodyssey.viz import QuantityDisplay, plot_claim_posterior
+
+    names = ("log10_h2o_vmr", "ln_rp_sqrt_a_eeid")
+    options = dict(
+        quantities=names,
+        bins=[-5, -2, 0, 1],
+        display={
+            names[1]: QuantityDisplay("stored coupled radius", "identity", "linear")
+        },
+        hist_kw={"alpha": 0.4},
+        edge_kw={"lw": 3},
+        truth_kw={"ls": ":"},
+        region_kw={"alpha": 0.2},
+        text_kw={"fontsize": 9},
+        truth={name: posterior_samples[name][0] for name in names},
+    )
+    result = plot_claim_posterior(posterior_samples, EXOEARTH_CANDIDATE, **options)
+    bare = plot_claim_posterior(
+        {name: values.tolist() for name, values in posterior_samples.items()},
+        EXOEARTH_CANDIDATE,
+        **options,
+    )
+    assert result.axes.shape == (2,)
+    assert result.axes[1].get_xlabel() == "stored coupled radius"
+    assert result.axes[1].get_xscale() == "linear"
+    assert result.artists["title"][1].get_text() == "P(radius_class) = 0.25"
+    assert not result.artists["text"]
+    for index in range(2):
+        np.testing.assert_array_equal(
+            [bar.get_height() for bar in result.artists["hist"][index]],
+            [bar.get_height() for bar in bare.artists["hist"][index]],
+        )
+        assert result.artists["hist"][index][0].get_alpha() == 0.4
+        assert result.artists["lines"][index][0].get_linewidth() == 3
+        assert result.artists["truth"][index].get_linestyle() == ":"
+        assert result.artists["fill"][index][0].get_alpha() == 0.2
+        assert result.artists["title"][index].get_fontsize() == 9
+    assert options["truth_kw"] == {"ls": ":"}
+
+
+def test_claim_posterior_unknown_quantity_and_shared_claims():
+    from spaceodyssey.profile import Claim, Edge, Profile
+    from spaceodyssey.viz import plot_claim_posterior
+
+    profile = Profile(
+        "custom",
+        (
+            Claim("low", (Edge("custom", 0, "below"),), "positive"),
+            Claim("high", (Edge("custom", 1, "above"),), "positive"),
+        ),
+        0.05,
+        support_rule="separate",
+        prior_set_id="test",
+    )
+    result = plot_claim_posterior({"custom": [-1, 0, 1, 2]}, profile, bins=3)
+    assert result.axes.shape == (1,)
+    assert result.axes[0].get_xlabel() == "custom"
+    assert result.axes[0].get_xscale() == "linear"
+    assert result.artists["title"][0].get_text() == "P(low) = 0.50\nP(high) = 0.50"
+    assert len(result.artists["fill"][0]) == 2
+    assert [bar.get_height() for bar in result.artists["hist"][0]] == [1, 1, 2]
+
+
+def test_claim_posterior_missing_key_error(posterior_samples):
+    from spaceodyssey.viz import plot_claim_posterior
+
+    del posterior_samples["ln_rp_re"]
+    with pytest.raises(
+        ValueError, match=r"missing quantity 'ln_rp_re'.*received keys.*ln_a_eeid"
+    ):
+        plot_claim_posterior(posterior_samples, EXOEARTH_CANDIDATE)
+
+
+def test_claim_posterior_risk_shape_error(posterior_samples):
+    from spaceodyssey.viz import plot_claim_posterior
+
+    with pytest.raises(
+        ValueError, match=r"risk: expected shape \(\) or \(3,\), received \(2,\)"
+    ):
+        plot_claim_posterior(posterior_samples, EXOEARTH_CANDIDATE, risk=[0.1, 0.2])

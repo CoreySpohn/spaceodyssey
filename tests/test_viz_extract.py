@@ -709,3 +709,65 @@ def test_observed_extraction_invalid_fields(
     observed_arrays[source][field] = value
     with pytest.raises(ValueError, match=message):
         _extract.observed_data_arrays(*observed_arrays)
+
+
+def test_claim_posterior_extraction_weighted_counts_and_regions(samples):
+    panels, masses = _extract.claim_posterior_data(
+        samples,
+        EXOEARTH_CANDIDATE,
+        weights=[1, 2, 3, 4],
+        bins=4,
+        truth={"ln_a_eeid": 0},
+    )
+    assert tuple(panels) == tuple(_extract.edges_by_quantity(EXOEARTH_CANDIDATE))
+    np.testing.assert_allclose(masses, [0.8, 0.1, 0.8])
+    assert panels["ln_a_eeid"]["truth"] == 1
+    np.testing.assert_allclose(panels["ln_a_eeid"]["intervals"], [[0.95, 1.67]])
+    np.testing.assert_allclose(panels["ln_rp_re"]["intervals"], [[-np.inf, 1.4]])
+    np.testing.assert_allclose(
+        panels["ln_rp_sqrt_a_eeid"]["intervals"], [[0.8, np.inf]]
+    )
+    for panel in panels.values():
+        assert panel["counts"].sum() == 10
+    np.testing.assert_allclose(panels["log10_h2o_vmr"]["counts"], [2, 3, 1, 4])
+
+
+def test_claim_posterior_extraction_device_arrays_and_constant_bins():
+    import jax.numpy as jnp
+
+    panels, mass = _extract.claim_posterior_data(
+        {"log10_h2o_vmr": jnp.array([-3, -3])},
+        WATER_ONLY,
+        weights=jnp.array([1, 2]),
+        bins=3,
+    )
+    panel = panels["log10_h2o_vmr"]
+    assert isinstance(panel["values"], np.ndarray)
+    np.testing.assert_array_equal(panel["counts"], [0, 3, 0])
+    np.testing.assert_array_equal(mass, [1])
+    panels, _ = _extract.claim_posterior_data(
+        {"log10_h2o_vmr": [0, 0]},
+        WATER_ONLY,
+        display={"log10_h2o_vmr": QuantityDisplay("exp abundance", "exp", "log")},
+    )
+    assert panels["log10_h2o_vmr"]["bins"][0] > 0
+    assert panels["log10_h2o_vmr"]["counts"].sum() == 2
+
+
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ({"quantities": []}, "quantities"),
+        ({"quantities": ["missing"]}, "quantities"),
+        ({"quantities": ["ln_a_eeid"] * 2}, "quantities"),
+        ({"bins": 0}, "bins"),
+        ({"bins": 2.5}, "bins"),
+        ({"bins": [2, 1]}, "bins"),
+        ({"bins": [0, 1]}, "positive on log axes"),
+        ({"truth": {"ln_a_eeid": np.nan}}, "truth must be finite"),
+        ({"truth": {"ln_a_eeid": [0, 1]}}, "expected shape"),
+    ],
+)
+def test_claim_posterior_extraction_invalid_arguments(samples, options, message):
+    with pytest.raises(ValueError, match=message):
+        _extract.claim_posterior_data(samples, EXOEARTH_CANDIDATE, **options)

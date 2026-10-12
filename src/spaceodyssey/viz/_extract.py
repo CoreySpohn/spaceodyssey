@@ -179,6 +179,117 @@ def transform_quantity(values, quantity, display=None):
     raise ValueError(f"unknown display transform {transform!r}")
 
 
+def claim_posterior_data(
+    samples,
+    profile,
+    *,
+    weights=None,
+    truth=None,
+    quantities=None,
+    display=None,
+    bins=40,
+):
+    """Extract transformed marginals, weighted counts, and claim intersections.
+
+    Args:
+        samples: Mapping of profile quantities to nonempty (N,) arrays.
+        profile: Profile defining the claims and default quantity order.
+        weights: Optional finite nonnegative (N,) importance weights.
+        truth: Optional mapping of quantities to finite scalar truths.
+        quantities: Optional nonempty sequence selecting and ordering quantities.
+        display: Optional QuantityDisplay overrides.
+        bins: Positive integer count or increasing edges in display coordinates.
+
+    Returns:
+        Ordered panel mapping and claim masses in profile order. Each panel
+        holds display metadata, values, bins, counts, thresholds, per-claim
+        intervals, and an optional truth coordinate. Counts sum weights when
+        supplied, otherwise samples. Unbounded intervals retain infinite ends.
+
+    Raises:
+        ValueError: If samples, weights, quantities, bins, or truth are invalid.
+
+    Example::
+
+        panels, masses = claim_posterior_data(samples, profile, bins=20)
+    """
+    masses = claim_mass(samples, profile, weights)
+    grouped = edges_by_quantity(profile)
+    names = tuple(grouped) if quantities is None else tuple(quantities)
+    if not names or len(set(names)) != len(names) or set(names) - grouped.keys():
+        raise ValueError(
+            "quantities must be a nonempty unique subset of profile quantities"
+        )
+    weights = None if weights is None else _array(weights, "weights")
+    panels = {}
+    for name in names:
+        spec = quantity_display(name, display)
+        values = transform_quantity(samples[name], name, display)
+        if not np.isfinite(values).all() or (
+            spec.scale == "log" and np.any(values <= 0)
+        ):
+            raise ValueError(
+                f"{name}: displayed samples must be finite and positive on log axes"
+            )
+        if np.ndim(bins) == 0:
+            if not isinstance(bins, int | np.integer) or bins <= 0:
+                raise ValueError("bins must be a positive integer or increasing edges")
+            # Choosing bins in log coordinates also handles a constant marginal.
+            log_bins = spec.transform == "exp" or spec.scale == "log"
+            coordinates = np.log(values) if log_bins else values
+            bounds = np.histogram_bin_edges(coordinates, bins=bins)
+            bounds = np.exp(bounds) if log_bins else bounds
+            bounds[0] = min(bounds[0], values.min())
+            bounds[-1] = max(bounds[-1], values.max())
+        else:
+            bounds = _array(bins, "bins")
+        if (
+            bounds.ndim != 1
+            or bounds.size < 2
+            or not np.isfinite(bounds).all()
+            or np.any(np.diff(bounds) <= 0)
+            or (spec.scale == "log" and np.any(bounds <= 0))
+        ):
+            raise ValueError(
+                "bins must be finite increasing edges, positive on log axes"
+            )
+        thresholds = transform_quantity(
+            [edge.threshold for edge in grouped[name]], name, display
+        )
+        intervals = []
+        for claim in profile.claims:
+            edges = [edge for edge in claim.edges if edge.quantity == name]
+            if not edges:
+                continue
+            low, high = -np.inf, np.inf
+            for edge in edges:
+                value = float(transform_quantity(edge.threshold, name, display))
+                if edge.side == "above":
+                    low = max(low, value)
+                else:
+                    high = min(high, value)
+            intervals.append((low, high))
+        actual = None
+        if truth is not None and name in truth:
+            actual = float(
+                transform_quantity(_array(truth[name], name, ()), name, display)
+            )
+            if not np.isfinite(actual) or (spec.scale == "log" and actual <= 0):
+                raise ValueError(
+                    f"{name}: truth must be finite and positive on log axes"
+                )
+        panels[name] = {
+            "display": spec,
+            "values": values,
+            "bins": bounds,
+            "counts": np.histogram(values, bins=bounds, weights=weights)[0],
+            "thresholds": thresholds,
+            "intervals": intervals,
+            "truth": actual,
+        }
+    return panels, masses
+
+
 def report_interval(report, channel="y_cert_pos", interval="random"):
     """Read an estimate and its stored endpoints without recomputing uncertainty.
 

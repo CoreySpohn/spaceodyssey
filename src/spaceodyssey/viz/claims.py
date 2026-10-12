@@ -13,6 +13,210 @@ INACTIVE_LEVEL = 0.3
 CLOUD_ALPHA = 0.2
 OUTCOME_CBAR_LABEL = "P(certified positive)"
 PLANE_QUANTITIES = ("ln_a_eeid", "ln_rp_re")
+# Interim panel policy: retain every profile quantity, including coupled radius.
+POSTERIOR_OMITTED_QUANTITIES = ()
+COUNTED_REGION_LEVEL = 0.15
+
+
+def plot_claim_posterior(
+    samples,
+    profile,
+    *,
+    weights=None,
+    truth=None,
+    quantities=None,
+    display=None,
+    bins=40,
+    risk=None,
+    verdict=None,
+    show_mass=True,
+    axes=None,
+    hist_kw=None,
+    edge_kw=None,
+    truth_kw=None,
+    region_kw=None,
+    text_kw=None,
+):
+    """Draw posterior marginals against the exact edges of a claim profile.
+
+    Args:
+        samples: Mapping from profile quantity names to bare NumPy, device, or
+            array-like samples shaped (N,). All profile quantities are required.
+        profile: Profile supplying claim edges and names.
+        weights: Optional nonnegative finite importance weights shaped (N,).
+            Histograms sum these weights; claim masses use normalized weights.
+        truth: Optional mapping of quantity names to scalar stored truth values.
+        quantities: Nonempty unique selection of profile quantities in panel
+            order. Defaults to all quantities in first edge appearance order.
+        display: Optional QuantityDisplay overrides. Unknown names use their raw
+            name on a linear identity axis.
+        bins: Positive count, or explicit increasing edges in displayed units.
+            Automatic bins are geometric for exponential transforms or log axes.
+        risk: Scalar or (K,) certifier risk in profile claim order. Printed using
+            str without rounding, recalculation, or comparison with claim mass.
+        verdict: Optional string printed verbatim beside the supplied risk.
+        show_mass: Print each claim's joint posterior mass, to two decimals, on
+            its first displayed quantity. A multi-quantity claim is evaluated
+            jointly, even though each panel shades only its marginal edges.
+        axes: Array of Axes shaped (Q,), one per selected quantity, or None to
+            create a row. Caller layout, geometry, sharing, and limits survive.
+        hist_kw: Bar styling overrides routed to eyepiece.hist_fill bar_kw.
+        edge_kw: Line overrides routed to eyepiece.ref_line for each threshold.
+        truth_kw: Line overrides for truth references, solid by default.
+        region_kw: Fill overrides routed to eyepiece.spans, one intersection
+            per claim on the displayed quantity.
+        text_kw: Text overrides for titles and the risk/verdict block.
+
+    Returns:
+        MosaicResult with update=None and artists ``hist`` (BarContainers),
+        ``fill`` (lists of region patches), ``lines`` (lists of edge lines),
+        ``truth`` (line or None), and ``title`` (Text), each in panel order.
+        ``text`` is a list containing the optional risk/verdict block, located
+        at (1.04, 0.5) in the last panel's axes coordinates.
+
+    Raises:
+        ValueError: If samples, weights, bins, truth, risk, or axes shapes are
+            invalid. Missing sample errors name the quantity and received keys.
+
+    Example::
+
+        from spaceodyssey.profiles import WATER_ONLY
+        from spaceodyssey.viz import plot_claim_posterior
+        result = plot_claim_posterior(
+            {"log10_h2o_vmr": [-5, -3, -2]}, WATER_ONLY,
+            risk=0.02, verdict="certified",
+        )
+    """
+    ep = eyepiece()
+    from matplotlib import pyplot as plt
+    from matplotlib.cbook import normalize_kwargs
+    from matplotlib.lines import Line2D
+    from matplotlib.text import Text
+
+    if quantities is None:
+        quantities = tuple(
+            name
+            for name in _extract.edges_by_quantity(profile)
+            if name not in POSTERIOR_OMITTED_QUANTITIES
+        )
+    panels, masses = _extract.claim_posterior_data(
+        samples,
+        profile,
+        weights=weights,
+        truth=truth,
+        quantities=quantities,
+        display=display,
+        bins=bins,
+    )
+    if risk is not None and np.shape(risk) not in ((), (len(profile.claims),)):
+        raise ValueError(
+            f"risk: expected shape () or {(len(profile.claims),)}, "
+            f"received {np.shape(risk)}"
+        )
+    shape = (len(panels),)
+    if axes is None:
+        _, axes = plt.subplots(
+            1,
+            len(panels),
+            squeeze=False,
+            layout="constrained",
+            figsize=(3.5 * len(panels), 3),
+        )
+        axes = axes[0]
+    else:
+        axes = np.asarray(axes, dtype=object)
+        if axes.shape != shape:
+            raise ValueError(f"axes: expected shape {shape}, received {axes.shape}")
+    titles = {name: [] for name in panels}
+    if show_mass:
+        for claim, mass in zip(profile.claims, masses, strict=True):
+            first = next(
+                (
+                    name
+                    for name in panels
+                    if any(e.quantity == name for e in claim.edges)
+                ),
+                None,
+            )
+            if first is not None:
+                titles[first].append(f"P({claim.name}) = {mass:.2f}")
+    artists = {key: [] for key in ("hist", "fill", "lines", "truth", "title", "text")}
+    text_options = normalize_kwargs(text_kw, Text)
+    for ax, (name, panel) in zip(axes, panels.items(), strict=True):
+        xlim, ylim = ax.get_xlim(), ax.get_ylim()
+        auto_x, auto_y = ax.get_autoscalex_on(), ax.get_autoscaley_on()
+        ax.set_xscale(panel["display"].scale)
+        result = ep.hist_fill(
+            panel["values"],
+            panel["bins"],
+            ax=ax,
+            color=ep.role(POSTERIOR_ROLE),
+            bar_kw=hist_kw,
+        )
+        bars = result.artists["hist"]
+        # hist_fill owns bar styling; importance weights supply the heights.
+        for bar, count in zip(bars, panel["counts"], strict=True):
+            bar.set_height(count)
+        bars.datavalues = panel["counts"]
+        ax.set_ylim(0, 1.08 * max(panel["counts"]) or 1)
+        if not auto_x:
+            ax.set_xlim(xlim)
+        if not auto_y:
+            ax.set_ylim(ylim)
+        artists["hist"].append(bars)
+        artists["fill"].append(
+            ep.spans(
+                intervals=panel["intervals"],
+                ax=ax,
+                color=ep.neutral(COUNTED_REGION_LEVEL),
+                fill_kw=region_kw,
+            ).artists["fill"]
+        )
+        artists["lines"].append(
+            [
+                ep.ref_line(
+                    ax,
+                    value,
+                    orient="v",
+                    color=ep.neutral(SCENERY_LEVEL),
+                    line_kw=edge_kw,
+                ).artists["line"]
+                for value in panel["thresholds"]
+            ]
+        )
+        actual = None
+        if panel["truth"] is not None:
+            actual = ep.ref_line(
+                ax,
+                panel["truth"],
+                orient="v",
+                color=ep.neutral(SCENERY_LEVEL),
+                line_kw={"linestyle": "-", **normalize_kwargs(truth_kw, Line2D)},
+            ).artists["line"]
+        artists["truth"].append(actual)
+        artists["title"].append(ax.set_title("\n".join(titles[name]), **text_options))
+        ax.set_xlabel(panel["display"].label)
+        ax.set_ylabel("weight" if weights is not None else "samples")
+    block = []
+    if risk is not None:
+        block.append(f"risk = {risk}")
+    if verdict is not None:
+        block.append(str(verdict))
+    if block:
+        artists["text"].append(
+            axes[-1].text(
+                1.04,
+                0.5,
+                "\n".join(block),
+                **{
+                    "transform": axes[-1].transAxes,
+                    "ha": "left",
+                    "va": "center",
+                    **text_options,
+                },
+            )
+        )
+    return ep.MosaicResult(axes, artists)
 
 
 def plot_planet_plane(
