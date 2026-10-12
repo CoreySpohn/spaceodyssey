@@ -199,7 +199,10 @@ def report_interval(report, channel="y_cert_pos", interval="random"):
         return np.nan, None, None
     if np.isscalar(report):
         return float(report), None, None
-    if isinstance(report, tuple | list | np.ndarray):
+    if isinstance(report, tuple | list) or hasattr(report, "shape"):
+        report = np.asarray(report, dtype=float)
+        if report.ndim == 0:
+            return float(report), None, None
         point, lo, hi = _array(report, "report", (3,))
         return (point, None, None) if interval == "none" else (point, lo, hi)
     yields = _field(report, "yields")
@@ -217,6 +220,104 @@ def report_interval(report, channel="y_cert_pos", interval="random"):
         )
     lo, hi = intervals[channel]
     return point, lo, hi
+
+
+def yield_comparison_data(
+    rows,
+    channel="y_cert_pos",
+    *,
+    references=None,
+    margin=None,
+    predicted=(),
+    difference=None,
+    difference_channels=("y_cert_pos", "y_wrong", "y_neg"),
+    interval="random",
+    gap=None,
+):
+    """Read comparison rows and paired channels without estimating uncertainty.
+
+    Args:
+        rows: Nonempty mapping of labels to reports, points, triples, or None.
+        channel: Yield channel for the first panel.
+        references: Optional mapping of row labels to reference points or reports.
+        margin: Nonnegative scalar, or mapping keyed by row and channel names.
+        predicted: Row names whose estimates are predictions.
+        difference: PairedDifference or channel-to-point/triple mapping.
+        difference_channels: Nonempty channel sequence for the optional panel.
+        interval: Stored interval selection: random, total, or none.
+        gap: Optional pair of row names with finite point estimates.
+
+    Returns:
+        Tuple of panels and optional (left point, right point, signed gap).
+        Each panel is an ordered mapping of names to (point, lo, hi, reference,
+        margin) tuples. Missing points retain their rows as NaN.
+
+    Raises:
+        ValueError: If channels, keys, margins, or stored intervals are invalid.
+
+    Example::
+
+        panels, gap = yield_comparison_data({"trial": (2, 1, 3)}, margin=0.5)
+    """
+    if channel not in CHANNEL_LABELS:
+        raise ValueError(f"unknown yield channel {channel!r}")
+    if not isinstance(rows, Mapping) or not rows:
+        raise ValueError("rows must be a nonempty mapping")
+    if interval not in ("random", "total", "none"):
+        raise ValueError("interval must be 'random', 'total', or 'none'")
+    references = {} if references is None else references
+    if not isinstance(references, Mapping) or set(references) - rows.keys():
+        raise ValueError("references must be a mapping keyed by row names")
+    if set(predicted) - rows.keys():
+        raise ValueError("predicted must contain only row names")
+    channels = tuple(difference_channels) if difference is not None else ()
+    if difference is not None and (
+        not channels or any(name not in CHANNEL_LABELS for name in channels)
+    ):
+        raise ValueError("difference_channels must be a nonempty subset of channels")
+    if isinstance(margin, Mapping):
+        if set(margin) - (rows.keys() | set(channels)):
+            raise ValueError("margin keys must be row names or difference channels")
+        margins = dict(margin)
+    else:
+        margins = dict.fromkeys((*rows, *channels), margin)
+    for name, value in margins.items():
+        if value is not None:
+            value = np.asarray(value, dtype=float)
+            if value.ndim or not np.isfinite(value) or value < 0:
+                raise ValueError("margin must be finite and nonnegative")
+            margins[name] = float(value)
+    panels = [{}]
+    for name, report in rows.items():
+        point, lo, hi = report_interval(report, channel, interval)
+        ref = None
+        if name in references:
+            ref, _, _ = report_interval(references[name], channel, "none")
+            if not np.isfinite(ref):
+                raise ValueError("references must be finite")
+        panels[0][name] = (point, lo, hi, ref, margins.get(name))
+    if difference is not None:
+        panels.append({})
+        for name in channels:
+            if isinstance(difference, Mapping):
+                if name not in difference:
+                    raise ValueError(f"difference missing channel {name!r}")
+                value = difference[name]
+            else:
+                if name not in difference.yields:
+                    raise ValueError(f"difference missing channel {name!r}")
+                value = difference
+            point, lo, hi = report_interval(value, name, interval)
+            panels[1][name] = (point, lo, hi, 0.0, margins.get(name))
+    gap_values = None
+    if gap is not None:
+        if len(gap) != 2 or any(name not in rows for name in gap):
+            raise ValueError("gap must contain two row names")
+        left, right = (panels[0][name][0] for name in gap)
+        if not np.isfinite([left, right]).all():
+            raise ValueError("gap rows must have finite point estimates")
+        gap_values = (left, right, right - left)
+    return panels, gap_values
 
 
 def verdict_series(outcome, channels=("pos", "neg")):

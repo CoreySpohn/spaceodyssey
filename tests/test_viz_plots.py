@@ -9,8 +9,8 @@ import pytest
 from matplotlib.colors import to_rgba
 
 from spaceodyssey.profiles import ALPHA_BAND
-from spaceodyssey.reporting import certified_yield
-from spaceodyssey.viz import plot_yield_sweep
+from spaceodyssey.reporting import PairedDifference, certified_yield
+from spaceodyssey.viz import plot_yield_comparison, plot_yield_sweep
 from tests.test_plan import make_outcome
 
 
@@ -248,3 +248,247 @@ def test_yield_sweep_refuses_missing_stored_intervals(sweep_reports):
 def test_yield_sweep_invalid_inputs(options, match):
     with pytest.raises(ValueError, match=match):
         plot_yield_sweep([0, 1], {"y_issued": [2, 3], "y_wrong": [0, 0.1]}, **options)
+
+
+@pytest.fixture
+def comparison_report():
+    base = certified_yield(make_outcome(), [1, 2, 3], certificate="example")
+    return replace(
+        base,
+        y_cert_pos=2.0,
+        intervals={"y_cert_pos": (-8.125, 12.5)},
+        total_intervals={"y_cert_pos": (-9.75, 15.25)},
+        standard_errors={"y_cert_pos": 999.0},
+    )
+
+
+@pytest.fixture
+def comparison_difference():
+    return PairedDifference(
+        yields={"y_cert_pos": 2.0, "y_wrong": 0.0, "y_neg": -1.0},
+        replicate_yields={},
+        standard_errors=dict.fromkeys(("y_cert_pos", "y_wrong", "y_neg"), 999.0),
+        intervals={
+            "y_cert_pos": (-7.5, 11.25),
+            "y_wrong": (-0.125, 0.75),
+            "y_neg": (-9.5, 3.25),
+        },
+        interval_kind="replicate-batch",
+        replicate_key="example",
+        confidence=0.95,
+    )
+
+
+def test_plot_yield_comparison_smoke(comparison_difference, save_viz_png):
+    result = plot_yield_comparison(
+        {"scored": (3, 2.5, 3.5), "prediction": 4, "pending": None},
+        references={"scored": 3.2, "pending": 2},
+        margin=0.5,
+        predicted=("prediction",),
+        difference=comparison_difference,
+        gap=("scored", "prediction"),
+    )
+    assert isinstance(result, ep.MosaicResult)
+    assert result.axes.shape == (2,)
+    assert result.update is None
+    assert set(result.artists) == {
+        "scatter",
+        "lines",
+        "fill",
+        "reference",
+        "line",
+        "bracket",
+        "text",
+    }
+    assert len(result.artists["scatter"]) == 5
+    assert len(result.artists["fill"]) == 5
+    assert result.artists["text"][0].get_text() == "gap = 1"
+    np.testing.assert_array_equal(
+        result.artists["bracket"][0].get_xdata(), [3, 3, 4, 4]
+    )
+    result.fig.set_size_inches(8, 3)
+    result.fig.canvas.draw()
+    save_viz_png(result, "plot_yield_comparison")
+
+
+@pytest.mark.parametrize("interval", ["random", "total", "none"])
+def test_yield_comparison_reads_report_intervals(comparison_report, interval):
+    field = "total_intervals" if interval == "total" else "intervals"
+    report = comparison_report
+    bare = np.array([report.y_cert_pos, *getattr(report, field)["y_cert_pos"]])
+    typed = plot_yield_comparison(
+        {"plan": report}, references={"plan": report}, interval=interval
+    )
+    arrays = plot_yield_comparison(
+        {"plan": bare}, references={"plan": report.y_cert_pos}, interval=interval
+    )
+    np.testing.assert_array_equal(
+        typed.artists["scatter"][0].get_offsets(),
+        arrays.artists["scatter"][0].get_offsets(),
+    )
+    for key in ("lines", "reference"):
+        for a, b in zip(typed.artists[key], arrays.artists[key], strict=True):
+            np.testing.assert_array_equal(a.get_xydata(), b.get_xydata())
+    if interval == "none":
+        assert typed.artists["lines"] == []
+    else:
+        (line,) = typed.artists["lines"]
+        np.testing.assert_array_equal(
+            line.get_xdata(), getattr(report, field)["y_cert_pos"]
+        )
+        np.testing.assert_array_equal(line.get_ydata(), [0, 0])
+
+
+@pytest.mark.parametrize("interval", ["random", "none"])
+def test_yield_comparison_reads_paired_intervals(comparison_difference, interval):
+    diff = comparison_difference
+    channels = tuple(diff.yields)
+    typed = plot_yield_comparison({"plan": 3}, difference=diff, interval=interval)
+    assert len(typed.artists["lines"]) == (3 if interval == "random" else 0)
+    bare = plot_yield_comparison(
+        {"plan": 3},
+        difference={
+            name: (diff.yields[name], *diff.intervals[name]) for name in channels
+        },
+        interval=interval,
+    )
+    for a, b in zip(typed.artists["scatter"], bare.artists["scatter"], strict=True):
+        np.testing.assert_array_equal(a.get_offsets(), b.get_offsets())
+    for index, (a, b) in enumerate(
+        zip(typed.artists["lines"], bare.artists["lines"], strict=True)
+    ):
+        np.testing.assert_array_equal(a.get_xydata(), b.get_xydata())
+        np.testing.assert_array_equal(a.get_xdata(), diff.intervals[channels[index]])
+    if interval == "none":
+        assert typed.artists["lines"] == []
+    (zero,) = typed.artists["line"]
+    np.testing.assert_array_equal(zero.get_xdata(), [0, 0])
+    assert zero.get_transform() == typed.axes[1].get_xaxis_transform()
+    assert [t.get_text() for t in typed.axes[1].get_yticklabels()] == [
+        "certified positive",
+        "wrong among issued",
+        "certified negative",
+    ]
+
+
+def test_yield_comparison_refuses_empty_intervals(
+    comparison_report, comparison_difference
+):
+    report = replace(comparison_report, intervals={})
+    with pytest.raises(ValueError, match=r'independent-lower-bound.*interval="none"'):
+        plot_yield_comparison({"plan": report})
+    assert (
+        plot_yield_comparison({"plan": report}, interval="none").artists["lines"] == []
+    )
+    diff = replace(comparison_difference, intervals={})
+    with pytest.raises(ValueError, match=r'replicate-batch.*interval="none"'):
+        plot_yield_comparison({"plan": 3}, difference=diff)
+    with pytest.raises(
+        ValueError, match=r"total interval unavailable.*replicate-batch"
+    ):
+        plot_yield_comparison(
+            {"plan": 3}, difference=comparison_difference, interval="total"
+        )
+
+
+@pytest.mark.parametrize("with_difference", [False, True])
+@pytest.mark.parametrize("layout", [None, "constrained"])
+def test_yield_comparison_panel_count_and_caller_geometry(
+    with_difference, layout, comparison_difference
+):
+    diff = comparison_difference if with_difference else None
+    count = 2 if with_difference else 1
+    own = plot_yield_comparison({"plan": 3}, difference=diff)
+    assert own.axes.shape == (count,)
+    assert len(own.fig.axes) == count
+    fig, axes = plt.subplots(1, 3, layout=layout)
+    engine = fig.get_layout_engine()
+    positions = [ax.get_position(original=True).bounds for ax in axes]
+    result = plot_yield_comparison({"plan": 3}, difference=diff, axes=axes[:count])
+    assert all(a is b for a, b in zip(result.axes, axes[:count], strict=True))
+    assert fig.get_layout_engine() is engine
+    for ax, position in zip(axes, positions, strict=True):
+        np.testing.assert_array_equal(ax.get_position(original=True).bounds, position)
+        assert ax.get_shared_x_axes().get_siblings(ax) == [ax]
+        assert ax.get_shared_y_axes().get_siblings(ax) == [ax]
+    assert not axes[2].collections and not axes[2].lines
+
+
+@pytest.mark.parametrize(
+    "with_difference, shape", [(False, (2,)), (False, ()), (True, (1,)), (True, (1, 2))]
+)
+def test_yield_comparison_axes_shape_error(
+    with_difference, shape, comparison_difference
+):
+    _, ax = plt.subplots()
+    with pytest.raises(ValueError) as error:
+        plot_yield_comparison(
+            {"plan": 3},
+            difference=comparison_difference if with_difference else None,
+            axes=np.full(shape, ax, dtype=object),
+        )
+    assert f"expected shape {(2,) if with_difference else (1,)}" in str(error.value)
+    assert f"received {shape}" in str(error.value)
+
+
+def test_yield_comparison_rows_bands_and_roles(comparison_difference):
+    result = plot_yield_comparison(
+        {"prediction": 4, "pending": None, "scored": 0},
+        references={"prediction": 3, "pending": 2},
+        predicted=("prediction",),
+        margin={"prediction": 0.5, "pending": 0.25, "y_wrong": 0.125},
+        difference=comparison_difference,
+    )
+    assert [t.get_text() for t in result.axes[0].get_yticklabels()] == [
+        "prediction",
+        "pending",
+        "scored",
+    ]
+    assert result.axes[0].yaxis_inverted()
+    points = result.artists["scatter"]
+    np.testing.assert_array_equal(points[0].get_offsets(), [[4, 0]])
+    np.testing.assert_array_equal(points[1].get_offsets(), [[0, 2]])
+    for point, role in zip(
+        points, ["model", "data", "data", "alert", "data"], strict=True
+    ):
+        np.testing.assert_allclose(point.get_edgecolors()[0], to_rgba(ep.role(role)))
+    assert points[1].get_facecolors()[0, 3] == points[3].get_facecolors()[0, 3] == 0
+    for tick, x, row in zip(result.artists["reference"], [3, 2], [0, 1], strict=True):
+        np.testing.assert_array_equal(tick.get_xydata(), [[x, row]])
+        assert to_rgba(tick.get_color()) == to_rgba(ep.neutral(0.6))
+    for band, bounds in zip(
+        result.artists["fill"], [(2.5, 3.5), (1.75, 2.25), (-0.125, 0.125)], strict=True
+    ):
+        vertices = band.get_paths()[0].vertices
+        np.testing.assert_array_equal(
+            [vertices[:, 0].min(), vertices[:, 0].max()], bounds
+        )
+        np.testing.assert_allclose(band.get_facecolors()[0], to_rgba(ep.neutral(0.15)))
+
+
+def test_yield_comparison_routed_styles_are_not_mutated():
+    point_kw = {"s": 70, "marker": "s"}
+    interval_kw, ref_kw, band_kw = {"lw": 4}, {"lw": 3}, {"alpha": 0.25}
+    result = plot_yield_comparison(
+        {"plan": (2, 1, 3)},
+        references={"plan": 2.5},
+        margin=0.5,
+        difference={"y_wrong": (0, -0.1, 0.2)},
+        difference_channels=("y_wrong",),
+        point_kw=point_kw,
+        interval_kw=interval_kw,
+        ref_kw=ref_kw,
+        band_kw=band_kw,
+    )
+    assert result.artists["scatter"][0].get_sizes()[0] == 70
+    assert result.artists["lines"][0].get_linewidth() == 4
+    assert (
+        result.artists["reference"][0].get_linewidth()
+        == result.artists["line"][0].get_linewidth()
+        == 3
+    )
+    assert result.artists["fill"][0].get_alpha() == 0.25
+    assert point_kw == {"s": 70, "marker": "s"}
+    assert (
+        interval_kw == {"lw": 4} and ref_kw == {"lw": 3} and band_kw == {"alpha": 0.25}
+    )

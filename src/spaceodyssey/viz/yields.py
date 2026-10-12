@@ -1,4 +1,4 @@
-"""Expected planet yields against statistical or physical sweep coordinates."""
+"""Expected planet yield comparisons and parameter sweeps."""
 
 import numpy as np
 
@@ -8,6 +8,186 @@ from spaceodyssey.viz.labels import CHANNEL_LABELS
 
 SCENERY_LEVEL = 0.6
 WRONG_YIELD_ROLE = "alert"
+COMPARISON_ROLES = {"predicted": "model", "scored": "data"}
+MARGIN_SCENERY_LEVEL = 0.15
+
+
+def plot_yield_comparison(
+    rows,
+    *,
+    channel="y_cert_pos",
+    references=None,
+    margin=None,
+    predicted=(),
+    difference=None,
+    difference_channels=("y_cert_pos", "y_wrong", "y_neg"),
+    interval="random",
+    gap=None,
+    axes=None,
+    point_kw=None,
+    interval_kw=None,
+    band_kw=None,
+    ref_kw=None,
+):
+    """Compare expected planet counts with stored uncertainty and reference bands.
+
+    Args:
+        rows: Nonempty mapping of plan names to CertifiedYield reports, bare
+            floats, (point, lo, hi) arrays, or None. Insertion order runs from
+            top to bottom; None retains its label without an estimate.
+        channel: Yield channel shown in the first panel.
+        references: Mapping of row names to reference floats or CertifiedYield
+            reports. Reference intervals are ignored. Missing keys omit ticks.
+        margin: Nonnegative half-width of equivalence bands. A scalar applies
+            to all references and difference channels. A mapping uses row names
+            in panel one and channel names in panel two; missing keys omit bands.
+            No equivalence verdict is computed.
+        predicted: Row names drawn in the model role; scored rows use data.
+        difference: PairedDifference, or a bare mapping of channels to floats or
+            (point, lo, hi) arrays. Adds a second panel only when supplied.
+            Wrong channels use alert; other differences use data.
+        difference_channels: Channels shown in the second panel, in row order.
+        interval: ``random`` reads intervals, ``total`` reads total_intervals,
+            and ``none`` omits intervals. Endpoints are never recomputed. Missing
+            intervals raise with interval_kind and the remedy interval="none".
+            PairedDifference has no total_intervals, so total raises for it.
+        gap: Optional (row_a, row_b) names. A bracket below the first panel's
+            rows labels the signed point difference row_b minus row_a.
+        axes: Axes array shaped (1,), or (2,) when difference is supplied.
+            None creates a row of panels. Caller layout and sharing are retained.
+        point_kw: Overrides passed to interval_points for ax.scatter.
+        interval_kw: Overrides passed to interval_points for interval lines.
+        band_kw: Overrides passed to ax.fill_betweenx for per-row margin bands.
+        ref_kw: Line2D overrides for reference ticks and the difference zero line.
+
+    Returns:
+        MosaicResult with update=None. Artists contain ``scatter`` (one estimate
+        collection per nonmissing row), ``lines`` (stored intervals), ``fill``
+        (margin bands), ``reference`` (ticks), ``line`` (the zero line),
+        ``bracket`` (optional gap line), and ``text`` (gap label). Lists follow
+        panel then row order; missing estimates contribute no point or interval.
+
+    Raises:
+        ValueError: If axes shapes, channels, keys, margins, or intervals are
+            invalid. Axes errors name both expected and received shapes.
+
+    Example::
+
+        from spaceodyssey.viz import plot_yield_comparison
+        result = plot_yield_comparison(
+            {"plan A": (3, 2.5, 3.6), "plan B": 4},
+            references={"plan A": 3.2}, margin=0.5, predicted=("plan B",),
+        )
+    """
+    ep = eyepiece()
+    from matplotlib import pyplot as plt
+    from matplotlib.cbook import normalize_kwargs
+    from matplotlib.lines import Line2D
+
+    predicted = tuple(predicted)
+    panels, gap_values = _extract.yield_comparison_data(
+        rows,
+        channel,
+        references=references,
+        margin=margin,
+        predicted=predicted,
+        difference=difference,
+        difference_channels=difference_channels,
+        interval=interval,
+        gap=gap,
+    )
+    shape = (len(panels),)
+    if axes is None:
+        _, axes = plt.subplots(1, len(panels), squeeze=False, layout="constrained")
+        axes = axes[0]
+    else:
+        axes = np.asarray(axes, dtype=object)
+        if axes.shape != shape:
+            raise ValueError(f"axes: expected shape {shape}, received {axes.shape}")
+    artists = {
+        key: []
+        for key in ("scatter", "lines", "fill", "reference", "line", "bracket", "text")
+    }
+    ref_options = normalize_kwargs(ref_kw, Line2D)
+    for panel_index, (ax, panel) in enumerate(zip(axes, panels, strict=True)):
+        for row, (name, (point, lo, hi, ref, width)) in enumerate(panel.items()):
+            if ref is not None and width is not None:
+                artists["fill"].append(
+                    ax.fill_betweenx(
+                        [row - 0.35, row + 0.35],
+                        ref - width,
+                        ref + width,
+                        **{
+                            "color": ep.neutral(MARGIN_SCENERY_LEVEL),
+                            "zorder": 0,
+                            **(band_kw or {}),
+                        },
+                    )
+                )
+            if panel_index == 0 and ref is not None:
+                artists["reference"].extend(
+                    ax.plot(
+                        [ref],
+                        [row],
+                        **{
+                            "color": ep.neutral(SCENERY_LEVEL),
+                            "marker": "|",
+                            "markersize": 12,
+                            "linestyle": "none",
+                            **ref_options,
+                        },
+                    )
+                )
+            if np.isnan(point):
+                continue
+            role = COMPARISON_ROLES[
+                "predicted" if panel_index == 0 and name in predicted else "scored"
+            ]
+            if panel_index == 1 and name in ("y_wrong", "y_neg_wrong"):
+                role = WRONG_YIELD_ROLE
+            result = ep.interval_points(
+                [row],
+                [point],
+                lo,
+                hi,
+                ax=ax,
+                orient="h",
+                color=ep.role(role),
+                point_kw=point_kw,
+                interval_kw=interval_kw,
+            )
+            artists["scatter"].append(result.artists["scatter"])
+            artists["lines"].extend(result.artists["lines"])
+        if panel_index == 1:
+            result = ep.ref_line(
+                ax, 0, orient="v", color=ep.neutral(SCENERY_LEVEL), line_kw=ref_kw
+            )
+            artists["line"].append(result.artists["line"])
+        ax.set_yticks(
+            range(len(panel)),
+            list(panel) if panel_index == 0 else [CHANNEL_LABELS[n] for n in panel],
+        )
+        ax.set_ylim(len(panel) - 0.5, -0.5)
+        ax.set_xlabel(
+            f"Expected planets ({CHANNEL_LABELS[channel]})"
+            if panel_index == 0
+            else "Difference in expected planets"
+        )
+    if gap_values is not None:
+        left, right, delta = gap_values
+        result = ep.bracket(
+            axes[0],
+            left,
+            right,
+            len(rows),
+            f"gap = {delta:g}",
+            depth=0.15,
+            color=ep.neutral(SCENERY_LEVEL),
+        )
+        artists["bracket"].append(result.artists["line"])
+        artists["text"].append(result.artists["text"])
+        axes[0].set_ylim(len(rows) + 0.5, -0.5)
+    return ep.MosaicResult(axes, artists, update=None)
 
 
 def plot_yield_sweep(

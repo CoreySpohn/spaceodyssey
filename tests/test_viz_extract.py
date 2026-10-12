@@ -194,6 +194,62 @@ def test_bare_report_intervals():
         _extract.report_interval(2, interval="invalid")
 
 
+def test_yield_comparison_extraction_keeps_missing_rows_and_signed_gap():
+    panels, gap = _extract.yield_comparison_data(
+        {"first": (2, -8, 12), "pending": None, "last": 1},
+        references={"pending": 3},
+        margin={"pending": 0.5, "y_wrong": 0.125},
+        difference={"y_wrong": (0, -2, 7)},
+        difference_channels=("y_wrong",),
+        gap=("first", "last"),
+    )
+    assert tuple(panels[0]) == ("first", "pending", "last")
+    assert panels[0]["first"] == (2, -8, 12, None, None)
+    assert np.isnan(panels[0]["pending"][0])
+    assert panels[0]["pending"][1:] == (None, None, 3, 0.5)
+    assert panels[1]["y_wrong"] == (0, -2, 7, 0, 0.125)
+    assert gap == (2, 1, -1)
+
+
+def test_yield_comparison_extraction_accepts_device_arrays():
+    import jax.numpy as jnp
+
+    panels, _ = _extract.yield_comparison_data(
+        {"plan": jnp.array([2, -8, 12]), "prediction": jnp.array(3)},
+        references={"plan": jnp.array(4)},
+        difference={"y_wrong": jnp.array([0, -1, 2])},
+        difference_channels=("y_wrong",),
+    )
+    assert panels[0]["plan"] == (2, -8, 12, 4, None)
+    assert panels[0]["prediction"] == (3, None, None, None, None)
+    assert panels[1]["y_wrong"] == (0, -1, 2, 0, None)
+
+
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ({"rows": {}}, "nonempty mapping"),
+        ({"channel": "unknown"}, "unknown yield channel"),
+        ({"interval": "unknown"}, "interval must"),
+        ({"references": {"unknown": 1}}, "row names"),
+        ({"references": {"plan": np.inf}}, "finite"),
+        ({"predicted": ("unknown",)}, "row names"),
+        ({"margin": -1}, "finite and nonnegative"),
+        ({"margin": np.nan}, "finite and nonnegative"),
+        ({"margin": [1, 2]}, "finite and nonnegative"),
+        ({"margin": {"unknown": 1}}, "margin keys"),
+        ({"difference": {}, "difference_channels": ()}, "nonempty subset"),
+        ({"difference": {}, "difference_channels": ("unknown",)}, "nonempty subset"),
+        ({"difference": {}}, "missing channel"),
+        ({"gap": ("plan", "unknown")}, "two row names"),
+        ({"rows": {"plan": None}, "gap": ("plan", "plan")}, "finite point"),
+    ],
+)
+def test_yield_comparison_extraction_rejects_invalid_inputs(options, message):
+    with pytest.raises(ValueError, match=message):
+        _extract.yield_comparison_data(**{"rows": {"plan": 2}, **options})
+
+
 def test_planet_arrays_ignore_replicates_and_retain_out_of_range():
     outcome = make_outcome(
         in_range=[True, False, True],
