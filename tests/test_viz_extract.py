@@ -499,3 +499,85 @@ def test_claim_mass_keeps_sample_dtype_at_thresholds():
         EXOEARTH_CANDIDATE.claim_truth({k: jnp.asarray(v) for k, v in samples.items()})
     ).mean(axis=0)
     np.testing.assert_allclose(_extract.claim_mass(samples, EXOEARTH_CANDIDATE), direct)
+
+
+@pytest.fixture
+def observed_arrays():
+    data = {
+        "spectrum": [[1, 2]],
+        "astrometry_mas": [[[10, -5], [np.nan, np.nan], [20, 15]]],
+        "visit_usable": [[True, False, True]],
+    }
+    plan = {
+        "noise_sigma": [[0.1, 0.25]],
+        "bin_wavelength_nm": [500, 900],
+        "astrometric_precision_mas": [[2, np.nan, 3]],
+    }
+    return data, plan
+
+
+def test_observed_extraction_covariance_and_units(observed_arrays):
+    data, plan = observed_arrays
+    result = _extract.observed_data_arrays(
+        data, plan, astrometric_corr=-0.5, expected=[0.9, 1.8]
+    )
+    np.testing.assert_array_equal(result["sky"], [[10, -5], [20, 15]])
+    np.testing.assert_array_equal(
+        result["covariance"], [[[4, -2], [-2, 4]], [[9, -4.5], [-4.5, 9]]]
+    )
+    np.testing.assert_array_equal(result["wavelength_um"], [0.5, 0.9])
+    np.testing.assert_array_equal(result["lo"], [0.9, 1.75])
+    np.testing.assert_array_equal(result["hi"], [1.1, 2.25])
+    np.testing.assert_array_equal(result["expected"], [0.9, 1.8])
+    assert result["has_spectrum"]
+
+
+def test_observed_extraction_device_arrays_and_absent_data(observed_arrays):
+    import jax.numpy as jnp
+
+    data, plan = observed_arrays
+    data = {k: jnp.asarray(v) for k, v in data.items()}
+    plan = {k: jnp.asarray(v) for k, v in plan.items()}
+    result = _extract.observed_data_arrays(data, plan, planet=jnp.asarray(0))
+    assert isinstance(result["sky"], np.ndarray)
+    np.testing.assert_allclose(result["hi"], [1.1, 2.25])
+    data.update(has_spectrum=[False], visit_usable=[[False] * 3])
+    result = _extract.observed_data_arrays(data, plan)
+    assert result["sky"].shape == (0, 2)
+    assert result["covariance"].shape == (0, 2, 2)
+    assert result["spectrum"].size == result["lo"].size == result["hi"].size == 0
+
+
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ({"planet": -1}, "integer index"),
+        ({"planet": 1}, "integer index"),
+        ({"planet": 0.5}, "integer index"),
+        ({"astrometric_corr": 1.1}, "in "),
+        ({"astrometric_corr": np.nan}, "finite"),
+        ({"expected": [1]}, "expected shape"),
+    ],
+)
+def test_observed_extraction_invalid_arguments(observed_arrays, options, message):
+    with pytest.raises(ValueError, match=message):
+        _extract.observed_data_arrays(*observed_arrays, **options)
+
+
+@pytest.mark.parametrize(
+    "source, field, value, message",
+    [
+        (0, "spectrum", [1, 2], "expected shape"),
+        (0, "visit_usable", [[True]], "expected shape"),
+        (0, "astrometry_mas", [[[np.nan, 1]] * 3], "usable astrometry"),
+        (1, "astrometric_precision_mas", [[0, 1, 2]], "positive precision"),
+        (1, "noise_sigma", [[0, 1]], "positive noise_sigma"),
+        (1, "bin_wavelength_nm", [500], "expected shape"),
+    ],
+)
+def test_observed_extraction_invalid_fields(
+    observed_arrays, source, field, value, message
+):
+    observed_arrays[source][field] = value
+    with pytest.raises(ValueError, match=message):
+        _extract.observed_data_arrays(*observed_arrays)

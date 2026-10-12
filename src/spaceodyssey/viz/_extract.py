@@ -653,6 +653,95 @@ def plan_visit_data(plan, planets=None):
     }
 
 
+def observed_data_arrays(data, plan, planet=0, expected=None, astrometric_corr=0.0):
+    """Select usable astrometry and read spectral measurements in display units.
+
+    Args:
+        data: ObservedData or mapping with astrometry_mas (P, V, 2),
+            visit_usable (P, V), spectrum (P, B), and optional has_spectrum (P,).
+            Missing has_spectrum means all spectra are present.
+        plan: PlanSummary or mapping with astrometric_precision_mas (P, V),
+            noise_sigma (P, B), and bin_wavelength_nm (B,) or (P, B).
+        planet: Integer planet index.
+        expected: Optional noiseless spectrum shaped (B,).
+        astrometric_corr: Scalar correlation in [-1, 1].
+
+    Returns:
+        Dict with sky positions, covariance matrices, wavelength_um, spectrum,
+        lo and hi one-sigma endpoints, has_spectrum, and expected. Missing
+        spectra have empty measurement arrays; wavelength_um retains all bins.
+
+    Raises:
+        ValueError: If shapes, indices, correlation, or usable data are invalid.
+
+    Example::
+
+        arrays = observed_data_arrays(data, plan, planet=0)
+    """
+    spectrum = _array(_field(data, "spectrum"), "spectrum")
+    if spectrum.ndim != 2:
+        raise ValueError(f"spectrum: expected shape (P, B), received {spectrum.shape}")
+    p, b = spectrum.shape
+    index = np.asarray(planet)
+    if index.ndim or not np.issubdtype(index.dtype, np.integer) or not 0 <= index < p:
+        raise ValueError("planet must be an integer index in [0, P)")
+    usable = _array(_field(data, "visit_usable"), "visit_usable", dtype=bool)
+    if usable.ndim != 2 or usable.shape[0] != p:
+        raise ValueError(
+            f"visit_usable: expected shape ({p}, V), received {usable.shape}"
+        )
+    sky = _array(_field(data, "astrometry_mas"), "astrometry_mas", (*usable.shape, 2))[
+        planet, usable[planet]
+    ]
+    precision = _array(
+        _field(plan, "astrometric_precision_mas"),
+        "astrometric_precision_mas",
+        usable.shape,
+    )[planet, usable[planet]]
+    if (
+        not np.isfinite(sky).all()
+        or not (np.isfinite(precision) & (precision > 0)).all()
+    ):
+        raise ValueError("usable astrometry must be finite with positive precision")
+    rho = _array(astrometric_corr, "astrometric_corr", ())
+    if not np.isfinite(rho) or abs(rho) > 1:
+        raise ValueError("astrometric_corr must be finite and in [-1, 1]")
+    covariance = precision[:, None, None] ** 2 * np.array([[1, rho], [rho, 1]])
+    sigma = _array(_field(plan, "noise_sigma"), "noise_sigma", (p, b))[planet]
+    wave = _array(_field(plan, "bin_wavelength_nm"), "bin_wavelength_nm")
+    if wave.shape not in ((b,), (p, b)):
+        raise ValueError(
+            f"bin_wavelength_nm: expected shape {(b,)} or {(p, b)}, "
+            f"received {wave.shape}"
+        )
+    wave = wave if wave.ndim == 1 else wave[planet]
+    has_spectrum = bool(
+        _array(
+            _field(data, "has_spectrum", np.ones(p, dtype=bool)),
+            "has_spectrum",
+            (p,),
+            bool,
+        )[planet]
+    )
+    flux = spectrum[planet] if has_spectrum else np.empty(0)
+    sigma = sigma if has_spectrum else np.empty(0)
+    if not np.isfinite(flux).all() or not (np.isfinite(sigma) & (sigma > 0)).all():
+        raise ValueError("measured spectrum must be finite with positive noise_sigma")
+    if not (np.isfinite(wave) & (wave > 0)).all():
+        raise ValueError("bin_wavelength_nm must be finite and positive")
+    expected = None if expected is None else _array(expected, "expected", (b,))
+    return {
+        "sky": sky,
+        "covariance": covariance,
+        "wavelength_um": wave / 1000,
+        "spectrum": flux,
+        "lo": flux - sigma,
+        "hi": flux + sigma,
+        "has_spectrum": has_spectrum,
+        "expected": expected,
+    }
+
+
 def _claim_arrays(outcome, verdicts):
     """Normalize typed (P, K) fields or bare (K, P) channels to claim-first arrays."""
     names = _field(outcome, "claim_names")

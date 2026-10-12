@@ -492,3 +492,296 @@ def test_yield_comparison_routed_styles_are_not_mutated():
     assert (
         interval_kw == {"lw": 4} and ref_kw == {"lw": 3} and band_kw == {"alpha": 0.25}
     )
+
+
+@pytest.fixture
+def visit_plan():
+    from tests.test_plan import make_plan
+
+    return make_plan(
+        n_visits=3,
+        visit_epochs_d=[[0, 10, np.nan], [2, 12, 22], [4, np.nan, np.nan]],
+        visit_success=[[True, False, True], [False, True, True], [True, False, False]],
+        spectrum_visit=[1, 2, -1],
+        visit_photometric_snr=[[3, 0, 99], [0, 6, 9], [12, 0, 0]],
+        k_precision_ms=[1, np.inf, 2],
+        astrometric_precision_mas=[[1, 2, 3], [2, 3, 4], [3, 4, 5]],
+    )
+
+
+@pytest.fixture
+def observed_data():
+    from spaceodyssey.truth import ObservedData
+
+    return ObservedData(
+        spectrum=[[0, 1], [2, 3], [0, 0]],
+        has_spectrum=[True, True, False],
+        photometry=np.ones((3, 3)),
+        astrometry_mas=[
+            [[10, 5], [0, 0], [20, -5]],
+            [[30, 2], [40, 4], [0, 0]],
+            [[0, 0], [0, 0], [0, 0]],
+        ],
+        visit_usable=[[True, False, True], [True, True, False], [False] * 3],
+        rv_semi_amplitude_ms=np.zeros(3),
+    )
+
+
+def test_plot_plan_visits_smoke(visit_plan, save_viz_png):
+    from matplotlib.markers import MarkerStyle
+
+    from spaceodyssey.viz import plot_plan_visits
+
+    result = plot_plan_visits(visit_plan)
+    assert isinstance(result, ep.PlotResult)
+    assert result.update is None
+    assert set(result.artists) == {"scatter", "cbar", "text"}
+    good, failed = result.artists["scatter"]
+    np.testing.assert_array_equal(
+        good.get_offsets(), [[0, 0], [12, 1], [22, 1], [4, 2]]
+    )
+    np.testing.assert_array_equal(failed.get_offsets(), [[10, 0], [2, 1]])
+    np.testing.assert_array_equal(good.get_array(), [3, 6, 9, 12])
+    square = MarkerStyle("s")
+    vertices = square.get_path().transformed(square.get_transform()).vertices
+    count = sum(
+        np.array_equal(path.vertices, vertices)
+        for scatter in (good, failed)
+        for path in scatter.get_paths()
+    )
+    assert count == (np.asarray(visit_plan.spectrum_visit) >= 0).sum() == 2
+    assert (
+        sum(len(s.get_offsets()) for s in (good, failed))
+        == np.isfinite(visit_plan.visit_epochs_d).sum()
+    )
+    assert failed.get_facecolors().size == 0
+    np.testing.assert_allclose(failed.get_edgecolors()[0], to_rgba(ep.neutral(0.6)))
+    assert [t.get_position() for t in result.artists["text"]] == [(0.98, 0), (0.98, 2)]
+    assert result.ax.yaxis_inverted()
+    assert [t.get_text() for t in result.ax.get_yticklabels()] == [
+        "planet 0",
+        "planet 1",
+        "planet 2",
+    ]
+    assert len(result.insets) == 1
+    result.fig.set_size_inches(5, 3)
+    result.fig.canvas.draw()
+    assert result.insets[0].get_position().x0 > result.ax.get_position().x1
+    save_viz_png(result, "plot_plan_visits")
+
+
+def test_plan_visits_selection_bare_arrays_and_styles(visit_plan):
+    from spaceodyssey.viz import plot_plan_visits
+
+    bare = {
+        name: np.asarray(getattr(visit_plan, name))
+        for name in (
+            "visit_epochs_d",
+            "visit_success",
+            "visit_photometric_snr",
+            "spectrum_visit",
+            "k_precision_ms",
+        )
+    }
+    style = {"s": 70, "alpha": 0.8}
+    options = dict(
+        planets=[2, 0],
+        labels=["outer", "inner"],
+        snr_vlim=(0, 20),
+        scatter_kw=style,
+        cbar_kw={"label": "SNR"},
+    )
+    typed = plot_plan_visits(visit_plan, **options)
+    arrays = plot_plan_visits(bare, **options)
+    for a, b in zip(typed.artists["scatter"], arrays.artists["scatter"], strict=True):
+        np.testing.assert_array_equal(a.get_offsets(), b.get_offsets())
+        for pa, pb in zip(a.get_paths(), b.get_paths(), strict=True):
+            np.testing.assert_array_equal(pa.vertices, pb.vertices)
+        assert a.get_sizes()[0] == 70
+    assert typed.artists["scatter"][0].get_clim() == (0, 20)
+    assert typed.artists["cbar"].ax.get_ylabel() == "SNR"
+    assert [t.get_text() for t in typed.ax.get_yticklabels()] == ["outer", "inner"]
+    assert style == {"s": 70, "alpha": 0.8}
+
+
+@pytest.mark.parametrize(
+    "epochs, success", [([[np.nan]], [[True]]), ([[1]], [[False]])]
+)
+def test_plan_visits_empty_success_and_padded_spectrum(epochs, success):
+    from spaceodyssey.viz import plot_plan_visits
+
+    result = plot_plan_visits(
+        dict(
+            visit_epochs_d=epochs,
+            visit_success=success,
+            visit_photometric_snr=[[0]],
+            spectrum_visit=[0],
+        )
+    )
+    assert len(result.artists["scatter"][0].get_offsets()) == 0
+    assert len(result.artists["scatter"][1].get_offsets()) == int(
+        np.isfinite(epochs[0][0])
+    )
+    result.fig.canvas.draw()
+
+
+def test_plot_observed_data_smoke(observed_data, visit_plan, save_viz_png):
+    from spaceodyssey.viz import plot_observed_data
+
+    result = plot_observed_data(
+        observed_data, visit_plan, expected=[0.1, 0.9], astrometric_corr=0.5, n_sigma=2
+    )
+    assert isinstance(result, ep.MosaicResult)
+    assert result.axes.shape == (2,) and result.update is None
+    assert set(result.artists) == {
+        "scatter",
+        "ellipse",
+        "star",
+        "lines",
+        "line",
+        "text",
+    }
+    usable = np.asarray(observed_data.visit_usable[0])
+    positions = np.asarray(observed_data.astrometry_mas[0])[usable]
+    np.testing.assert_array_equal(result.artists["scatter"][0].get_offsets(), positions)
+    assert len(result.artists["ellipse"]) == usable.sum() == 2
+    for ellipse, mean, sigma in zip(
+        result.artists["ellipse"], positions, [1, 3], strict=True
+    ):
+        np.testing.assert_array_equal(ellipse.center, mean)
+        # Recover the covariance from the actual ellipse geometry.
+        angle = np.deg2rad(ellipse.angle)
+        rotation = np.array(
+            [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
+        )
+        covariance = (
+            rotation
+            @ np.diag((np.array([ellipse.width, ellipse.height]) / 4) ** 2)
+            @ rotation.T
+        )
+        np.testing.assert_allclose(
+            covariance, sigma**2 * np.array([[1, 0.5], [0.5, 1]])
+        )
+        np.testing.assert_allclose(ellipse.get_edgecolor(), to_rgba(ep.role("data")))
+    assert result.axes[0].get_aspect() == 1
+    np.testing.assert_array_equal(result.artists["star"].get_offsets(), [[0, 0]])
+    np.testing.assert_allclose(
+        result.artists["star"].get_facecolors()[0], to_rgba(ep.role("star"))
+    )
+    np.testing.assert_allclose(
+        result.artists["scatter"][1].get_offsets(), [[0.5, 0], [0.9, 1]]
+    )
+    for line, wave, flux in zip(
+        result.artists["lines"], [0.5, 0.9], [0, 1], strict=True
+    ):
+        np.testing.assert_allclose(
+            line.get_xydata(), [[wave, flux - 0.2], [wave, flux + 0.2]]
+        )
+    for scatter in result.artists["scatter"]:
+        np.testing.assert_allclose(
+            scatter.get_facecolors()[0], to_rgba(ep.role("data"))
+        )
+    np.testing.assert_allclose(
+        result.artists["line"][0].get_xydata(), [[0.5, 0.1], [0.9, 0.9]]
+    )
+    assert to_rgba(result.artists["line"][0].get_color()) == to_rgba(ep.neutral(0.6))
+    result.fig.set_size_inches(7, 3)
+    result.fig.canvas.draw()
+    save_viz_png(result, "plot_observed_data")
+
+
+def test_observed_data_bare_and_per_planet_wavelengths(observed_data, visit_plan):
+    from spaceodyssey.viz import plot_observed_data
+
+    bare = {
+        name: np.asarray(getattr(observed_data, name))
+        for name in ("astrometry_mas", "visit_usable", "spectrum", "has_spectrum")
+    }
+    plan = {
+        name: np.asarray(getattr(visit_plan, name))
+        for name in ("astrometric_precision_mas", "noise_sigma", "bin_wavelength_nm")
+    }
+    typed = plot_observed_data(observed_data, visit_plan, planet=1)
+    plan["bin_wavelength_nm"] = np.tile(plan["bin_wavelength_nm"], (3, 1))
+    arrays = plot_observed_data(bare, plan, planet=1)
+    for key in ("scatter", "lines"):
+        for a, b in zip(typed.artists[key], arrays.artists[key], strict=True):
+            method = "get_offsets" if key == "scatter" else "get_xydata"
+            np.testing.assert_array_equal(getattr(a, method)(), getattr(b, method)())
+    for a, b in zip(typed.artists["ellipse"], arrays.artists["ellipse"], strict=True):
+        np.testing.assert_array_equal(a.center, b.center)
+        assert (a.width, a.height, a.angle) == (b.width, b.height, b.angle)
+    plan["bin_wavelength_nm"][1] = [600, 800]
+    changed = plot_observed_data(bare, plan, planet=1)
+    np.testing.assert_allclose(
+        changed.artists["scatter"][1].get_offsets()[:, 0], [0.6, 0.8]
+    )
+
+
+def test_observed_data_empty_and_routed_styles(observed_data, visit_plan):
+    from spaceodyssey.viz import plot_observed_data
+
+    empty = plot_observed_data(observed_data, visit_plan, planet=2)
+    assert not empty.artists["ellipse"] and not empty.artists["lines"]
+    assert all(len(s.get_offsets()) == 0 for s in empty.artists["scatter"])
+    assert empty.artists["text"][0].get_text() == "no spectrum"
+    point_kw, ellipse_kw = {"s": 70, "c": "black"}, {"lw": 3}
+    interval_kw, line_kw = {"lw": 4}, {"c": "black", "lw": 2}
+    result = plot_observed_data(
+        observed_data,
+        visit_plan,
+        expected=[0, 1],
+        point_kw=point_kw,
+        ellipse_kw=ellipse_kw,
+        interval_kw=interval_kw,
+        line_kw=line_kw,
+    )
+    assert all(s.get_sizes()[0] == 70 for s in result.artists["scatter"])
+    assert result.artists["ellipse"][0].get_linewidth() == 3
+    assert result.artists["lines"][0].get_linewidth() == 4
+    assert result.artists["line"][0].get_linewidth() == 2
+    assert point_kw == {"s": 70, "c": "black"} and ellipse_kw == {"lw": 3}
+    assert interval_kw == {"lw": 4} and line_kw == {"c": "black", "lw": 2}
+
+
+@pytest.mark.parametrize("plot", ["plan", "observed"])
+@pytest.mark.parametrize("layout", [None, "constrained"])
+def test_plan_plots_preserve_caller_geometry(plot, layout, observed_data, visit_plan):
+    from spaceodyssey.viz import plot_observed_data, plot_plan_visits
+
+    fig, axes = plt.subplots(1, 3, layout=layout)
+    engine = fig.get_layout_engine()
+    positions = [ax.get_position(original=True).bounds for ax in axes]
+    if plot == "plan":
+        result = plot_plan_visits(visit_plan, ax=axes[0])
+        assert result.ax is axes[0]
+    else:
+        result = plot_observed_data(observed_data, visit_plan, axes=axes[:2])
+        assert all(a is b for a, b in zip(result.axes, axes[:2], strict=True))
+    assert fig.get_layout_engine() is engine
+    for ax, position in zip(axes, positions, strict=True):
+        np.testing.assert_array_equal(ax.get_position(original=True).bounds, position)
+        assert ax.get_shared_x_axes().get_siblings(ax) == [ax]
+        assert ax.get_shared_y_axes().get_siblings(ax) == [ax]
+    assert not axes[2].collections and not axes[2].lines
+
+
+@pytest.mark.parametrize("shape", [(), (1,), (1, 2)])
+def test_observed_axes_shape_errors(shape, observed_data, visit_plan):
+    from spaceodyssey.viz import plot_observed_data
+
+    _, ax = plt.subplots()
+    with pytest.raises(ValueError) as error:
+        plot_observed_data(
+            observed_data, visit_plan, axes=np.full(shape, ax, dtype=object)
+        )
+    assert "expected shape (2,)" in str(error.value)
+    assert f"received {shape}" in str(error.value)
+
+
+def test_plan_axes_shape_error(visit_plan):
+    from spaceodyssey.viz import plot_plan_visits
+
+    _, axes = plt.subplots(1, 2)
+    with pytest.raises(ValueError, match=r"expected shape \(\), received \(2,\)"):
+        plot_plan_visits(visit_plan, ax=axes)
