@@ -8,7 +8,7 @@ from collections.abc import Mapping
 
 import numpy as np
 
-from spaceodyssey.viz.labels import QUANTITY_DISPLAY, QuantityDisplay
+from spaceodyssey.viz.labels import CHANNEL_LABELS, QUANTITY_DISPLAY, QuantityDisplay
 
 
 def _field(source, name, default=None):
@@ -379,6 +379,123 @@ def zero_floor_values(values, zero_floor):
         raise ValueError("values must be finite and nonnegative")
     zeros = values == 0
     return np.where(zeros, zero_floor, values), zeros
+
+
+def _sweep_channel(reports, channel, interval, size):
+    """Read one sweep channel from report rows or bare columns."""
+    if isinstance(reports, Mapping):
+        values = _array(reports.get(channel), channel)
+        if values.shape not in ((size,), (size, 3)):
+            raise ValueError(
+                f"{channel}: expected shape {(size,)} or {(size, 3)}, "
+                f"received {values.shape}"
+            )
+        rows = [report_interval(value, interval=interval) for value in values]
+    else:
+        if len(reports) != size:
+            raise ValueError(
+                f"reports: expected length {size}, received {len(reports)}"
+            )
+        rows = [report_interval(report, channel, interval) for report in reports]
+    point, lo, hi = zip(*rows, strict=True)
+    point = np.asarray(point, dtype=float)
+    if not np.isfinite(point).all() or np.any(point < 0):
+        raise ValueError(f"{channel} yields must be finite and nonnegative")
+    # Missing intervals remain absent; NaNs suppress only those interval artists.
+    lo = None if all(v is None for v in lo) else np.asarray(lo, dtype=float)
+    hi = None if all(v is None for v in hi) else np.asarray(hi, dtype=float)
+    return point, lo, hi
+
+
+def yield_sweep_data(x, reports, channels, bound=None, interval="random"):
+    """Extract sweep coordinates, stored intervals, and stated bounds.
+
+    Args:
+        x: Nonempty sequence of numbers, strings, or Profiles.
+        reports: Report sequence, channel-to-array mapping, or mapping of
+            series names to either form. Bare columns have shape (S,) or
+            (S, 3), with triples holding point, lower, and upper endpoints.
+        channels: Nonempty sequence of yield channel names.
+        bound: None, ``profile``, or nonnegative values shaped (S,).
+        interval: Stored interval selection: ``random``, ``total``, or ``none``.
+
+    Returns:
+        Tuple of numeric coordinates, categorical labels or None, whether x
+        contains profiles, series-to-channel data, and series-to-bound arrays.
+
+    Raises:
+        ValueError: If channels, coordinates, counts, bounds, or shapes disagree.
+
+    Example::
+
+        data = yield_sweep_data([1, 2], {"y_wrong": [0, 0.1]}, ("y_wrong",))
+    """
+    if not channels or any(channel not in CHANNEL_LABELS for channel in channels):
+        raise ValueError(
+            f"channels must be a nonempty subset of {tuple(CHANNEL_LABELS)}"
+        )
+    if interval not in ("random", "total", "none"):
+        raise ValueError("interval must be 'random', 'total', or 'none'")
+    raw = np.asarray(x, dtype=object)
+    if raw.ndim != 1 or not raw.size:
+        raise ValueError(f"x: expected nonempty shape (S,), received {raw.shape}")
+    profiles = all(hasattr(value, "issued_error_bound") for value in raw)
+    categorical = all(isinstance(value, str) for value in raw)
+    labels = tuple(raw) if categorical else None
+    coordinates = (
+        np.arange(len(raw), dtype=float)
+        if categorical
+        else _array([value.alpha for value in raw] if profiles else x, "x")
+    )
+    if not np.isfinite(coordinates).all():
+        raise ValueError("x must be finite")
+    if isinstance(bound, str) and (bound != "profile" or not profiles):
+        raise ValueError('bound="profile" requires x to be a sequence of Profiles')
+    if not isinstance(reports, Mapping) or any(k in CHANNEL_LABELS for k in reports):
+        reports = {"yield": reports}
+    if not reports:
+        raise ValueError("reports must contain at least one series")
+    series, bounds = {}, {}
+    for name, rows in reports.items():
+        series[name] = {
+            channel: _sweep_channel(rows, channel, interval, len(raw))
+            for channel in channels
+        }
+        if bound is not None:
+            if isinstance(bound, str):
+                issued, _, _ = _sweep_channel(rows, "y_issued", "none", len(raw))
+                values = profile_bounds(raw, [{"y_issued": v} for v in issued])
+            else:
+                values = _array(bound, "bound", coordinates.shape)
+            if not np.isfinite(values).all() or np.any(values < 0):
+                raise ValueError("bound must be finite and nonnegative")
+            bounds[name] = values
+    return coordinates, labels, profiles, series, bounds
+
+
+def sweep_floor_data(point, lo, hi, zero_floor):
+    """Map zero yields to their display floor and clip interval endpoints.
+
+    Args:
+        point: Nonnegative yield array.
+        lo: Lower interval endpoints or None.
+        hi: Upper interval endpoints or None.
+        zero_floor: Positive finite floor for the logarithmic display.
+
+    Returns:
+        Displayed points, lower and upper endpoints, and original zero mask.
+
+    Example::
+
+        point, lo, hi, zeros = sweep_floor_data([0, 1], None, None, 0.001)
+    """
+    displayed, zeros = zero_floor_values(point, zero_floor)
+    return (
+        displayed,
+        None if lo is None else np.maximum(lo, zero_floor),
+        None if hi is None else np.maximum(hi, zero_floor),
+        zeros,
+    )
 
 
 def plan_visit_data(plan, planets=None):

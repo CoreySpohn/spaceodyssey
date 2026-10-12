@@ -296,6 +296,51 @@ def test_zero_floor_retains_original_zero_mask():
     np.testing.assert_array_equal(zeros, [True, False, False])
 
 
+def test_yield_sweep_extraction_bare_device_arrays():
+    import jax.numpy as jnp
+
+    x, labels, profiles, series, bounds = _extract.yield_sweep_data(
+        jnp.array([1, 2]),
+        {"example": {"y_wrong": jnp.array([[0, -0.1, 0.2], [0.1, 0, 0.3]])}},
+        ("y_wrong",),
+        bound=jnp.array([0.2, 0.4]),
+    )
+    np.testing.assert_array_equal(x, [1, 2])
+    assert labels is None and not profiles
+    point, lo, hi = series["example"]["y_wrong"]
+    np.testing.assert_allclose(point, [0, 0.1])
+    np.testing.assert_allclose(lo, [-0.1, 0])
+    np.testing.assert_allclose(hi, [0.2, 0.3])
+    np.testing.assert_allclose(bounds["example"], [0.2, 0.4])
+
+
+def test_sweep_floor_clips_only_interval_endpoints():
+    point, lo, hi, zeros = _extract.sweep_floor_data(
+        [0, 0.001, 2], [-1, 0, 1], [0, 0.005, 3], 0.01
+    )
+    np.testing.assert_array_equal(point, [0.01, 0.001, 2])
+    np.testing.assert_array_equal(lo, [0.01, 0.01, 1])
+    np.testing.assert_array_equal(hi, [0.01, 0.01, 3])
+    np.testing.assert_array_equal(zeros, [True, False, False])
+
+
+@pytest.mark.parametrize(
+    "x, reports, bound, message",
+    [
+        ([], [], None, "nonempty shape"),
+        ([[1, 2]], [], None, "nonempty shape"),
+        ([1, np.nan], [], None, "finite"),
+        ([1, 2], [{"y_wrong": 0}], None, "expected length 2"),
+        ([1, 2], {"y_wrong": [0]}, None, "expected shape"),
+        ([1, 2], {"y_wrong": [-1, 2]}, None, "nonnegative"),
+        ([1, 2], {"y_wrong": [0, 2]}, [-1, 2], "nonnegative"),
+    ],
+)
+def test_yield_sweep_extraction_errors(x, reports, bound, message):
+    with pytest.raises(ValueError, match=message):
+        _extract.yield_sweep_data(x, reports, ("y_wrong",), bound, "none")
+
+
 def test_plan_visits_skip_padding_and_extract_spectrum_flags():
     plan = make_plan(
         n_visits=3,
