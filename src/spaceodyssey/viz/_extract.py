@@ -11,6 +11,8 @@ import numpy as np
 
 from spaceodyssey.viz.labels import CHANNEL_LABELS, QUANTITY_DISPLAY, QuantityDisplay
 
+PLANE_GRID_SIZE = 400
+
 
 def _field(source, name, default=None):
     """Read an attribute or a field in a bare-array mapping."""
@@ -484,13 +486,19 @@ def planet_plane_data(
     if a.ndim != 1:
         raise ValueError(f"a_eeid: expected shape (P,), received {a.shape}")
     rp = _array(rp_re, "rp_re", a.shape)
+    if not (np.isfinite(a).all() and np.isfinite(rp).all()) or np.any(
+        (a <= 0) | (rp <= 0)
+    ):
+        raise ValueError("plane coordinates must be finite and positive")
     if values is not None and hasattr(values, "p_pos"):
         series, outcome_range = verdict_series(values, ("pos",))
         values = series["pos"]
         if in_range is None:
             in_range = outcome_range
     result = {"a_eeid": a, "rp_re": rp}
-    result["values"] = None if values is None else _array(values, "values", a.shape)
+    result["values"] = (
+        None if values is None else _probability_array(values, "values", a.shape)
+    )
     for name, value, default in (
         ("active", active, True),
         ("in_range", in_range, True),
@@ -500,6 +508,35 @@ def planet_plane_data(
             np.full(a.shape, default) if value is None else value, name, a.shape, bool
         )
     return result
+
+
+def plane_region_grid(profile, xlim, ylim, display=None):
+    """Sample the plane region on a logarithmic grid in physical coordinates.
+
+    Args:
+        profile: Profile whose plane-expressible claims are intersected.
+        xlim: Displayed distance limits.
+        ylim: Displayed radius limits.
+        display: Optional quantity display overrides for the two plane axes.
+
+    Returns:
+        Displayed x and y vectors, a (400, 400) mask, and skipped claim names.
+
+    Example::
+
+        x, y, mask, skipped = plane_region_grid(profile, (0.5, 2), (0.5, 2))
+    """
+    physical, displayed = [], []
+    for quantity, limits in zip(("ln_a_eeid", "ln_rp_re"), (xlim, ylim), strict=True):
+        transform = quantity_display(quantity, display).transform
+        stored_limits = np.log(limits) if transform == "exp" else limits
+        stored = np.linspace(*stored_limits, PLANE_GRID_SIZE)
+        physical.append(np.exp(stored))
+        displayed.append(transform_quantity(stored, quantity, display))
+    mask, skipped = plane_region_mask(
+        profile, physical[0][None, :], physical[1][:, None]
+    )
+    return *displayed, mask, skipped
 
 
 def out_of_range_spans(x, in_range, *, log=False):

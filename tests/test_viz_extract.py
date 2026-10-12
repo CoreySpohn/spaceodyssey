@@ -297,6 +297,71 @@ def test_plane_range_override_and_cloud_defaults():
     assert not cloud["marked"].any()
 
 
+def test_plane_region_grid_physical_and_stored_display():
+    x, y, mask, skipped = _extract.plane_region_grid(
+        EXOEARTH_CANDIDATE, (0.4, 2.5), (0.4, 2)
+    )
+    assert x.shape == y.shape == (400,)
+    assert mask.shape == (400, 400) and skipped == ("water",)
+    np.testing.assert_allclose(x[[0, -1]], [0.4, 2.5])
+    np.testing.assert_allclose(y[[0, -1]], [0.4, 2])
+    np.testing.assert_allclose(np.diff(np.log(x)), np.log(2.5 / 0.4) / 399)
+    np.testing.assert_allclose(np.diff(np.log(y)), np.log(2 / 0.4) / 399)
+    expected = (
+        (x[None, :] >= 0.95)
+        & (x[None, :] <= 1.67)
+        & (y[:, None] <= 1.4)
+        & (y[:, None] * np.sqrt(x[None, :]) >= 0.8)
+    )
+    np.testing.assert_array_equal(mask, expected)
+    display = {
+        name: QuantityDisplay(name, "identity", "linear")
+        for name in ("ln_a_eeid", "ln_rp_re")
+    }
+    lx, ly, stored_mask, _ = _extract.plane_region_grid(
+        EXOEARTH_CANDIDATE, np.log([0.4, 2.5]), np.log([0.4, 2]), display
+    )
+    np.testing.assert_allclose(np.exp(lx), x)
+    np.testing.assert_allclose(np.exp(ly), y)
+    np.testing.assert_array_equal(stored_mask, mask)
+
+
+def test_plane_device_arrays():
+    import jax.numpy as jnp
+
+    data = _extract.planet_plane_data(
+        jnp.array([1, 2]),
+        jnp.array([0.5, 1]),
+        values=jnp.array([0, 1]),
+        active=jnp.array([True, False]),
+        in_range=jnp.array([False, True]),
+    )
+    assert all(isinstance(value, np.ndarray) for value in data.values())
+    np.testing.assert_array_equal(data["values"], [0, 1])
+    np.testing.assert_array_equal(data["in_range"], [False, True])
+
+
+@pytest.mark.parametrize(
+    "options, match",
+    [
+        ({"a_eeid": [0]}, "finite and positive"),
+        ({"rp_re": [-1]}, "finite and positive"),
+        ({"rp_re": [np.nan]}, "finite and positive"),
+        ({"a_eeid": [np.inf]}, "finite and positive"),
+        ({"a_eeid": [[1]]}, "expected shape"),
+        ({"rp_re": [1, 2]}, "expected shape"),
+        ({"values": [np.nan]}, "finite probabilities"),
+        ({"values": [1.1]}, "finite probabilities"),
+        ({"values": [-0.1]}, "finite probabilities"),
+        ({"values": [0, 1]}, "expected shape"),
+        ({"in_range": [False, True]}, "expected shape"),
+    ],
+)
+def test_plane_invalid_arrays(options, match):
+    with pytest.raises(ValueError, match=match):
+        _extract.planet_plane_data(**{"a_eeid": [1], "rp_re": [1], **options})
+
+
 def test_out_of_range_midpoint_spans():
     spans = _extract.out_of_range_spans([0, 1, 2, 3], [True, False, False, True])
     np.testing.assert_array_equal(spans, [[0.5, 2.5]])

@@ -8,10 +8,11 @@ import numpy as np
 import pytest
 from matplotlib.colors import to_rgba
 
-from spaceodyssey.profiles import ALPHA_BAND
+from spaceodyssey.profiles import ALPHA_BAND, EXOEARTH_CANDIDATE, WATER_ONLY
 from spaceodyssey.reporting import PairedDifference, certified_yield
 from spaceodyssey.viz import (
     plot_certification_curve,
+    plot_planet_plane,
     plot_yield_comparison,
     plot_yield_sweep,
 )
@@ -983,3 +984,218 @@ def test_plan_axes_shape_error(visit_plan):
     _, axes = plt.subplots(1, 2)
     with pytest.raises(ValueError, match=r"expected shape \(\), received \(2,\)"):
         plot_plan_visits(visit_plan, ax=axes)
+
+
+def test_plot_planet_plane_smoke(curve_outcome, save_viz_png):
+    result = plot_planet_plane(
+        [0.5, 1, 1.5, 2],
+        [0.5, 1, 1.5, 2],
+        values=curve_outcome,
+        profile=EXOEARTH_CANDIDATE,
+        marked=[False, True, False, False],
+        truth=(1.2, 1.1),
+    )
+    assert isinstance(result, ep.PlotResult) and result.update is None
+    assert set(result.artists) == {
+        "scatter",
+        "collection",
+        "cbar",
+        "region_skipped",
+        "marked",
+        "truth",
+    }
+    assert result.artists["region_skipped"] == ("water",)
+    assert result.ax.get_xscale() == result.ax.get_yscale() == "log"
+    assert result.artists["cbar"].ax.get_ylabel() == "P(certified positive)"
+    assert len(result.insets) == 1
+    assert result.insets[0] in result.ax.child_axes
+    result.fig.set_size_inches(5, 3)
+    result.fig.canvas.draw()
+    assert result.insets[0].get_position().x0 > result.ax.get_position().x1
+    np.testing.assert_array_equal(result.artists["marked"].get_offsets(), [[1, 1]])
+    np.testing.assert_allclose(result.artists["truth"].get_offsets(), [[1.2, 1.1]])
+    np.testing.assert_allclose(
+        result.artists["marked"].get_edgecolors()[0], to_rgba(ep.neutral(1))
+    )
+    np.testing.assert_allclose(
+        result.artists["truth"].get_facecolors()[0], to_rgba(ep.neutral(0.6))
+    )
+    save_viz_png(result, "plot_planet_plane")
+
+
+@pytest.mark.parametrize(
+    "active", [[True] * 4, [True, False, True, False], [False] * 4]
+)
+@pytest.mark.parametrize("cloud", [False, True])
+def test_plane_retains_every_planet_and_triangle(curve_outcome, active, cloud):
+    from matplotlib.markers import MarkerStyle
+
+    xy = np.array([[0.5, 0.8], [1, 1], [1.5, 1.2], [2, 1.4]])
+    result = plot_planet_plane(
+        *xy.T,
+        values=None if cloud else curve_outcome,
+        active=active,
+        in_range=curve_outcome.in_range,
+        marked=[True] * 4,
+    )
+    active = np.asarray(active)
+    triangle = MarkerStyle("^")
+    vertices = triangle.get_path().transformed(triangle.get_transform()).vertices
+    count = 0
+    total = 0
+    for collection, selected in zip(
+        result.artists["scatter"], (~active, active), strict=True
+    ):
+        np.testing.assert_allclose(collection.get_offsets(), xy[selected])
+        paths = collection.get_paths()
+        triangles = [np.array_equal(p.vertices, vertices) for p in paths]
+        np.testing.assert_array_equal(
+            triangles, ~np.asarray(curve_outcome.in_range)[selected]
+        )
+        total += len(collection.get_offsets())
+        count += sum(triangles)
+    assert total == 4 and count == 2  # Seven replicates never add planets.
+    inactive, points = result.artists["scatter"]
+    np.testing.assert_allclose(inactive.get_facecolors()[0], to_rgba(ep.neutral(0.3)))
+    assert inactive.get_zorder() < points.get_zorder()
+    if cloud:
+        assert result.insets == () and result.artists["cbar"] is None
+        np.testing.assert_allclose(
+            points.get_facecolors()[0], to_rgba(ep.role("model"), alpha=0.2)
+        )
+    else:
+        np.testing.assert_array_equal(
+            points.get_array(), np.asarray(curve_outcome.p_pos)[active]
+        )
+        assert points.get_clim() == (0, 1)
+    result.fig.canvas.draw()
+
+
+def test_plane_region_contour_known_answers():
+    result = plot_planet_plane([0.4, 2.5], [0.4, 2], profile=EXOEARTH_CANDIDATE)
+    contour = result.artists["collection"]
+    (path,) = contour.get_paths()
+    np.testing.assert_array_equal(
+        path.contains_points([[1, 1], [0.5, 1], [1, 1.5]]), [True, False, False]
+    )
+    vertices = path.vertices
+    np.testing.assert_allclose(
+        [vertices[:, 0].min(), vertices[:, 0].max()], [0.95, 1.67], rtol=0.006
+    )
+    assert vertices[:, 1].max() == pytest.approx(1.4, rel=0.006)
+    for distance in (0.95, 1.67):
+        nearby = vertices[np.abs(vertices[:, 0] - distance) < 0.012]
+        assert nearby[:, 1].min() == pytest.approx(0.8 / np.sqrt(distance), abs=0.006)
+    np.testing.assert_allclose(contour.get_edgecolors()[0], to_rgba(ep.neutral(0.6)))
+
+
+def test_plane_bare_arrays_override_and_routed_styles(curve_outcome):
+    x, y = [0.5, 1, 1.5, 2], [0.5, 1, 1.5, 2]
+    scatter_kw, region_kw, cbar_kw = (
+        {"s": 70, "marker": "s"},
+        {"linewidths": 3},
+        {"label": "score"},
+    )
+    options = dict(
+        in_range=[True, True, False, True],
+        vlim=(0.1, 0.9),
+        scatter_kw=scatter_kw,
+        region_kw=region_kw,
+        cbar_kw=cbar_kw,
+        profile=EXOEARTH_CANDIDATE,
+    )
+    typed = plot_planet_plane(x, y, values=curve_outcome, **options)
+    arrays = plot_planet_plane(x, y, values=np.asarray(curve_outcome.p_pos), **options)
+    for a, b in zip(typed.artists["scatter"], arrays.artists["scatter"], strict=True):
+        np.testing.assert_array_equal(a.get_offsets(), b.get_offsets())
+        for pa, pb in zip(a.get_paths(), b.get_paths(), strict=True):
+            np.testing.assert_array_equal(pa.vertices, pb.vertices)
+    assert typed.artists["scatter"][1].get_clim() == (0.1, 0.9)
+    assert typed.artists["scatter"][1].get_sizes()[0] == 70
+    assert typed.artists["collection"].get_linewidths()[0] == 3
+    assert typed.artists["cbar"].ax.get_ylabel() == "score"
+    assert scatter_kw == {"s": 70, "marker": "s"}
+    assert region_kw == {"linewidths": 3} and cbar_kw == {"label": "score"}
+
+
+@pytest.mark.parametrize("layout", [None, "constrained"])
+def test_plane_preserves_caller_geometry(layout):
+    fig, axes = plt.subplots(1, 2, layout=layout)
+    positions = [a.get_position(original=True).bounds for a in axes]
+    engine = fig.get_layout_engine()
+    axes[0].set_xlim(0.4, 3)
+    axes[0].set_ylim(0.4, 2)
+    result = plot_planet_plane(
+        [0.5, 2], [0.5, 2], values=[0, 1], profile=EXOEARTH_CANDIDATE, ax=axes[0]
+    )
+    assert result.ax is axes[0] and fig.get_layout_engine() is engine
+    assert axes[0].get_xlim() == (0.4, 3) and axes[0].get_ylim() == (0.4, 2)
+    for ax, position in zip(axes, positions, strict=True):
+        np.testing.assert_array_equal(ax.get_position(original=True).bounds, position)
+        assert ax.get_shared_x_axes().get_siblings(ax) == [ax]
+        assert ax.get_shared_y_axes().get_siblings(ax) == [ax]
+    assert not axes[1].collections and not axes[1].child_axes
+
+
+def test_plane_axes_shape_error():
+    _, axes = plt.subplots(1, 2)
+    with pytest.raises(ValueError, match=r"expected shape \(\), received \(2,\)"):
+        plot_planet_plane([1], [1], ax=axes)
+
+
+@pytest.mark.parametrize("profile", [None, WATER_ONLY, EXOEARTH_CANDIDATE])
+def test_plane_empty_and_uniform_regions(profile):
+    result = plot_planet_plane([], [], values=[], profile=profile)
+    assert sum(len(s.get_offsets()) for s in result.artists["scatter"]) == 0
+    if profile is not EXOEARTH_CANDIDATE:
+        assert result.artists["collection"] is None
+    assert result.artists["region_skipped"] == (() if profile is None else ("water",))
+    result.fig.canvas.draw()
+
+
+def test_plane_region_absent_when_view_is_outside():
+    _, ax = plt.subplots()
+    ax.set_xlim(3, 4)
+    ax.set_ylim(2, 3)
+    result = plot_planet_plane([3.5], [2.5], profile=EXOEARTH_CANDIDATE, ax=ax)
+    assert result.artists["collection"] is None
+    assert result.artists["region_skipped"] == ("water",)
+
+
+def test_plane_display_override():
+    from spaceodyssey.viz import QuantityDisplay
+
+    display = {
+        "ln_a_eeid": QuantityDisplay("log distance ratio", "identity", "linear"),
+        "ln_rp_re": QuantityDisplay("log radius", "identity", "linear"),
+    }
+    result = plot_planet_plane(
+        [0.5, 1, 2],
+        [0.5, 1, 2],
+        truth=(1.2, 1.1),
+        display=display,
+        profile=EXOEARTH_CANDIDATE,
+    )
+    np.testing.assert_allclose(
+        result.artists["scatter"][1].get_offsets(), np.log([[0.5, 0.5], [1, 1], [2, 2]])
+    )
+    np.testing.assert_allclose(
+        result.artists["truth"].get_offsets(), np.log([[1.2, 1.1]])
+    )
+    assert result.ax.get_xscale() == result.ax.get_yscale() == "linear"
+    assert result.ax.get_xlabel() == "log distance ratio"
+    assert result.artists["collection"].get_paths()[0].contains_point((0, 0))
+
+
+@pytest.mark.parametrize(
+    "options, match",
+    [
+        ({"truth": (0, 1)}, "finite and positive"),
+        ({"truth": (1,)}, "expected shape"),
+        ({"vlim": (1, 0)}, "finite and increasing"),
+        ({"vlim": (0, np.inf)}, "finite and increasing"),
+    ],
+)
+def test_plane_invalid_plot_arguments(options, match):
+    with pytest.raises(ValueError, match=match):
+        plot_planet_plane([1], [1], **options)
