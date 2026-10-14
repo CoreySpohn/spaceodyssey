@@ -273,6 +273,8 @@ provide a `PriorSet` with that exact id. Profile names are free-text display lab
 The profile content hash includes the claims, risk, support and evidence rules,
 and prior-set id. It excludes the display label. Claim order fixes the output axis;
 edge order within a claim and the sign of zero do not change identity.
+The evidence rule is `every_claim` (prior-only risk must exceed alpha) or `none`
+(the condition is dropped).
 
 `AbstractProfileCertificate` checks compatibility before subclass construction
 runs, including custom `__init__` and `__check_init__` methods. Constructors must

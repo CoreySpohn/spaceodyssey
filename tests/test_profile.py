@@ -149,6 +149,7 @@ def test_invalid_edge_and_claim_constructions(constructor, args):
         {"support_rule": np.array("joint")},
         {"evidence_rule": np.array("every_claim")},
         {"evidence_rule": "joint"},
+        {"evidence_rule": "None"},
     ],
 )
 def test_invalid_profile_constructions(changes):
@@ -312,3 +313,9 @@ def test_float32_rounding_is_preserved_in_content_hash():
     assert dataclasses.replace(REFERENCE, claims=(claim,)).content_hash() != (
         dataclasses.replace(REFERENCE, claims=(rounded,)).content_hash()
     )
+
+
+def test_evidence_rule_none_is_valid_and_changes_the_hash():
+    free = dataclasses.replace(REFERENCE, evidence_rule="none")
+    assert free.evidence_rule == "none"
+    assert free.content_hash() != REFERENCE.content_hash()

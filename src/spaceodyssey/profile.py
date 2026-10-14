@@ -15,7 +15,7 @@ from jax import Array
 Side = Literal["above", "below"]
 Counted = Literal["positive", "either"]
 SupportRule = Literal["separate", "joint", "split"]
-EvidenceRule = Literal["every_claim"]
+EvidenceRule = Literal["every_claim", "none"]
 
 
 def _nonempty_string(value: object, name: str) -> None:
@@ -115,7 +115,8 @@ class Profile:
             split of alpha across claims. Required keyword argument.
         prior_set_id: Nonempty identifier of the robustness prior set, required
             as a keyword argument.
-        evidence_rule: Require prior-only risk to exceed alpha for every claim.
+        evidence_rule: "every_claim" requires prior-only risk to exceed alpha for
+            every claim; "none" drops that condition.
 
     Raises:
         ValueError: A field violates the configuration invariants.
@@ -146,8 +147,8 @@ class Profile:
         if self.support_rule not in ("joint", "separate", "split"):
             raise ValueError("support_rule must be 'joint', 'separate' or 'split'")
         _nonempty_string(self.evidence_rule, "evidence_rule")
-        if self.evidence_rule != "every_claim":
-            raise ValueError("evidence_rule must be 'every_claim'")
+        if self.evidence_rule not in ("every_claim", "none"):
+            raise ValueError("evidence_rule must be 'every_claim' or 'none'")
 
     @property
     def claim_names(self) -> tuple[str, ...]:
