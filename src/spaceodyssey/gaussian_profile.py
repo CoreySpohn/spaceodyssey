@@ -407,7 +407,7 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
                     np.abs(off_diagonal) <= 100 * np.finfo(correlation.dtype).eps
                 )
             diagonal = diagonal and is_diagonal
-            if self.flat_prior:
+            if self.flat_prior or self.profile.evidence_rule == "none":
                 evidence_pos = evidence_neg = jnp.ones(
                     len(self.profile.claims), dtype=bool
                 )

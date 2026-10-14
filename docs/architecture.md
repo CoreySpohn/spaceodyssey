@@ -323,7 +323,8 @@ wrapper runs eagerly on the host, validates inputs and this geometry, and cannot
 be jitted, vmapped, or differentiated in any argument. Nonlinear quantities are
 rejected before posterior computation. Stand-alone claim columns use the profile
 alpha even when the combined event uses `split`. Prior evidence is required for each
-report in the proper Gaussian experiment. Negative profile events are unions
+report in the proper Gaussian experiment unless the profile's evidence rule is `none`,
+which drops it as the flat-prior experiment does. Negative profile events are unions
 of negative reports for positive-counted claims; wrong counted events include
 wrong reports of either-counted claims.
 

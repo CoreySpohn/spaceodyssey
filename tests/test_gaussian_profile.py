@@ -368,6 +368,22 @@ def test_prior_evidence_and_missing_spectra():
         assert bool(missing.in_range[0])
 
 
+def test_evidence_rule_none_drops_the_prior_evidence_condition():
+    import dataclasses
+
+    from spaceodyssey import GaussianProfileCertifier
+
+    with jax.enable_x64():
+        profile = profile_for([Claim("x", (Edge("x", -10.0, "above"),), "positive")])
+        free = dataclasses.replace(profile, evidence_rule="none")
+        model = GaussianModel()
+        data = experiment(model, [[0.0, 0.0]])
+        with_evidence = GaussianProfileCertifier(profile, model).integrate(data)
+        without = GaussianProfileCertifier(free, model).integrate(data)
+        assert float(with_evidence.p_pos[0]) == 0
+        assert float(without.p_pos[0]) > 0.5
+
+
 def test_integer_cast_quantity_is_rejected():
     from spaceodyssey import GaussianProfileCertifier
 
