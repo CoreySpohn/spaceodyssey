@@ -370,18 +370,24 @@ class CertificationOutcome(eqx.Module):
                     f"{name} must be finite and in [0, 1]",
                 )
             )
+        # Relations are evaluated in at least float32 so that rounding in a
+        # low-precision channel dtype cannot hide a violation.
+        p_pos, p_neg, p_wrong, p_neg_wrong = (
+            jnp.asarray(value, dtype=jnp.promote_types(value.dtype, jnp.float32))
+            for value in (self.p_pos, self.p_neg, self.p_wrong, self.p_neg_wrong)
+        )
         value_checks.extend(
             (
                 (
-                    self.p_pos + self.p_neg <= 1 + _OUTCOME_PROBABILITY_SLACK,
+                    p_pos + p_neg <= 1 + _OUTCOME_PROBABILITY_SLACK,
                     "p_pos + p_neg exceeds one",
                 ),
                 (
-                    self.p_wrong <= self.p_pos + _OUTCOME_PROBABILITY_SLACK,
+                    p_wrong <= p_pos + _OUTCOME_PROBABILITY_SLACK,
                     "p_wrong exceeds p_pos",
                 ),
                 (
-                    self.p_neg_wrong <= self.p_neg + _OUTCOME_PROBABILITY_SLACK,
+                    p_neg_wrong <= p_neg + _OUTCOME_PROBABILITY_SLACK,
                     "p_neg_wrong exceeds p_neg",
                 ),
             )

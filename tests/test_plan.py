@@ -149,6 +149,18 @@ class TestCertificationOutcome:
         with pytest.raises(ValueError, match=field):
             make_outcome(**{field: value})
 
+    @pytest.mark.parametrize(
+        ("dtype", "p_pos"),
+        [(jnp.bfloat16, 0.50390625), (jnp.float16, 0.50048828125)],
+    )
+    def test_rejects_overlap_hidden_by_low_precision_rounding(self, dtype, p_pos):
+        """The relations are checked in at least float32, not the channel dtype."""
+        with pytest.raises(ValueError, match=r"p_pos.*p_neg"):
+            make_outcome(
+                p_pos=jnp.full(3, p_pos, dtype=dtype),
+                p_neg=jnp.full(3, 0.5, dtype=dtype),
+            )
+
     def test_rejects_overlapping_verdicts(self):
         """Positive and negative verdicts cannot overlap beyond the slack."""
         with pytest.raises(ValueError, match=r"p_pos.*p_neg") as error:
