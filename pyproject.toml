@@ -21,18 +21,10 @@ dependencies = [
     "equinox",
     "jax",
     "jaxlib",
+    "numpy",
     "scipy",
-    "hwoutils",
-    "optixstuff",
-    "yippy",
-    "orbix",
-    "skyscapes",
-    "jaxedith",
     "photomancy",
     "planit-py",
-    "coronagraphoto",
-    "coronachrome",
-    "coronalyze",
 ]
 
 [project.urls]
@@ -40,9 +32,13 @@ Repository = "https://github.com/CoreySpohn/spaceodyssey"
 Documentation = "https://spaceodyssey.readthedocs.io"
 
 [project.optional-dependencies]
+physics-etc = ["jaxedith"]
+physics-scene = ["skyscapes", "orbix"]
+physics-image = ["coronagraphoto", "coronachrome", "coronalyze", "yippy"]
+all-physics = ["spaceodyssey[physics-etc,physics-scene,physics-image]"]
 retrieval = ["exojax"]
 optics = ["physicaloptix"]
-viz = ["eyepiece>=0.10.0"]
+viz = ["eyepiece>=0.10.0", "matplotlib"]
 dev = ["pre-commit"]
 test = ["pytest", "nox", "hypothesis", "pytest-cov", "ineedvalidation>=1.1", "spaceodyssey[viz]"]
 docs = [

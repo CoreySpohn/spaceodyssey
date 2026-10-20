@@ -34,7 +34,16 @@ composition layer for the HWO simulation suite:
 | coronalyze | post-processing and detection statistics |
 | photomancy | posteriors, evidence, expected information gain |
 | planit-py | scheduling policies and the decision vocabulary |
-| yippy / optixstuff / hwoutils | coronagraph performance data, hardware primitives, shared math |
+| yippy | coronagraph performance data |
+
+photomancy and planit-py are core dependencies. Physics libraries for planned
+adapters are optional: `spaceodyssey[physics-etc]` installs jaxedith;
+`spaceodyssey[physics-scene]` installs skyscapes and orbix; and
+`spaceodyssey[physics-image]` installs coronagraphoto, coronachrome, coronalyze
+and yippy. `spaceodyssey[all-physics]` includes all three groups. These libraries
+are not required to import the campaign core. Adapters must import them lazily,
+so the registry can report missing requirements as unavailable implementations.
+optixstuff and hwoutils are not declared dependencies.
 
 ![Suite dependency direction](diagrams/library-stack.svg)
 

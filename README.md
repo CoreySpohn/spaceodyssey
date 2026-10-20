@@ -39,6 +39,20 @@ Or with pip:
 pip install spaceodyssey
 ```
 
+The base installation includes the campaign core. Optional physics libraries
+for planned adapters are grouped by role:
+
+| Extra | Libraries | Adapter role |
+| --- | --- | --- |
+| `physics-etc` | jaxedith | Exposure-time measurements |
+| `physics-scene` | skyscapes, orbix | Universe sources and observing context |
+| `physics-image` | coronagraphoto, coronachrome, coronalyze, yippy | Image-level instruments, post-processing and characterization |
+
+Install all physics libraries with `uv pip install "spaceodyssey[all-physics]"`,
+or select an extra such as `uv pip install "spaceodyssey[physics-scene]"`.
+Plotting requires `spaceodyssey[viz]`, which includes eyepiece and matplotlib.
+Physics libraries remain optional until their adapters import them.
+
 *(Note: You may need to install JAX separately to match your specific hardware acceleration requirements.)*
 
 ## Quick Start
