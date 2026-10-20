@@ -118,6 +118,7 @@ def profile_for(claims, *, rule="separate"):
         0.05,
         support_rule=rule,
         prior_set_id="normal@1",
+        evidence_rule="every_claim",
     )
 
 
@@ -380,6 +381,26 @@ def test_evidence_rule_none_drops_the_prior_evidence_condition():
         data = experiment(model, [[0.0, 0.0]])
         with_evidence = GaussianProfileCertifier(profile, model).integrate(data)
         without = GaussianProfileCertifier(free, model).integrate(data)
+        assert float(with_evidence.p_pos[0]) == 0
+        assert float(without.p_pos[0]) > 0.5
+
+
+def test_reference_profile_allows_positives_when_prior_evidence_binds():
+    from spaceodyssey import GaussianProfileCertifier
+    from spaceodyssey.profiles import EXOEARTH_CANDIDATE
+
+    with jax.enable_x64():
+        reference = replace(
+            EXOEARTH_CANDIDATE,
+            claims=(Claim("x", (Edge("x", -10.0, "above"),), "positive"),),
+        )
+        strict = replace(reference, evidence_rule="every_claim")
+        model = GaussianModel(prior_set_id=reference.prior_set_id)
+        data = experiment(model, [[0.0, 0.0]])
+        without = GaussianProfileCertifier(reference, model).integrate(data)
+        with_evidence = GaussianProfileCertifier(strict, model).integrate(data)
+        assert without.fidelity == with_evidence.fidelity == "closed_form"
+        assert np.all(np.asarray(without.p_pos) >= np.asarray(with_evidence.p_pos))
         assert float(with_evidence.p_pos[0]) == 0
         assert float(without.p_pos[0]) > 0.5
 

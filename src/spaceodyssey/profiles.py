@@ -24,6 +24,8 @@ Earth radii.
 The water claim uses a log10 volume mixing ratio threshold of -4.
 Compatible truth models must declare a prior set with id
 ``exoearth-reference@1``. Profile names are free-text display labels.
+The reference profiles do not apply the prior-only evidence condition.
+The ``EXOEARTH_CANDIDATE_EVERY_CLAIM`` variant keeps that condition for every claim.
 """
 
 import math
@@ -55,6 +57,12 @@ EXOEARTH_CANDIDATE = Profile(
     alpha=0.05,
     support_rule="joint",
     prior_set_id="exoearth-reference@1",
+    evidence_rule="none",
+)
+EXOEARTH_CANDIDATE_EVERY_CLAIM = replace(
+    EXOEARTH_CANDIDATE,
+    name="exoearth_candidate_every_claim",
+    evidence_rule="every_claim",
 )
 HABITABLE_ZONE_ONLY = replace(
     EXOEARTH_CANDIDATE, name="habitable_zone_only", claims=(HABITABLE_ZONE,)
@@ -92,6 +100,7 @@ ALPHA_BAND = (
 __all__ = [
     "ALPHA_BAND",
     "EXOEARTH_CANDIDATE",
+    "EXOEARTH_CANDIDATE_EVERY_CLAIM",
     "FULL_POSITIVE",
     "HABITABLE_ZONE",
     "HABITABLE_ZONE_ONLY",

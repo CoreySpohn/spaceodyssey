@@ -78,6 +78,7 @@ def test_name_is_label_and_canonical_hash():
         0.05,
         support_rule="joint",
         prior_set_id="example@1",
+        evidence_rule="every_claim",
     )
     renamed = dataclasses.replace(profile, name="another label")
     assert renamed.content_hash() == profile.content_hash()
@@ -286,7 +287,7 @@ def test_signed_zero_and_edge_order_are_canonical():
         assert other.claims[0].edges[0].threshold.hex() == (0.0).hex()
 
 
-@pytest.mark.parametrize("missing", ["support_rule", "prior_set_id"])
+@pytest.mark.parametrize("missing", ["support_rule", "prior_set_id", "evidence_rule"])
 def test_profile_requires_explicit_keyword_configuration(missing):
     fields = dataclasses.asdict(REFERENCE)
     fields["claims"] = REFERENCE.claims
@@ -298,6 +299,41 @@ def test_profile_requires_explicit_keyword_configuration(missing):
 def test_profile_configuration_is_keyword_only():
     with pytest.raises(TypeError, match="positional"):
         Profile("label", REFERENCE.claims, 0.05, "joint", "example@1")
+
+
+def test_profile_evidence_configuration_is_keyword_only():
+    with pytest.raises(TypeError, match="positional"):
+        Profile(
+            "label",
+            REFERENCE.claims,
+            0.05,
+            "every_claim",
+            support_rule="joint",
+            prior_set_id="example@1",
+        )
+
+
+def test_reference_profiles_do_not_require_prior_evidence():
+    assert REFERENCE.evidence_rule == "none"
+    for name in profiles.__all__:
+        if name == "EXOEARTH_CANDIDATE_EVERY_CLAIM":
+            continue
+        value = getattr(profiles, name)
+        candidates = value if isinstance(value, tuple) else (value,)
+        for profile in candidates:
+            if isinstance(profile, Profile):
+                assert profile.evidence_rule == "none", profile.name
+
+
+def test_every_claim_variant_preserves_reference_configuration():
+    strict = profiles.EXOEARTH_CANDIDATE_EVERY_CLAIM
+    assert "EXOEARTH_CANDIDATE_EVERY_CLAIM" in profiles.__all__
+    assert strict.name == "exoearth_candidate_every_claim"
+    assert strict.evidence_rule == "every_claim"
+    for item in dataclasses.fields(REFERENCE):
+        if item.name not in ("name", "evidence_rule"):
+            assert getattr(strict, item.name) == getattr(REFERENCE, item.name)
+    assert strict.content_hash() != REFERENCE.content_hash()
 
 
 def test_reference_prior_identity():
@@ -316,6 +352,7 @@ def test_float32_rounding_is_preserved_in_content_hash():
 
 
 def test_evidence_rule_none_is_valid_and_changes_the_hash():
-    free = dataclasses.replace(REFERENCE, evidence_rule="none")
+    strict = dataclasses.replace(REFERENCE, evidence_rule="every_claim")
+    free = dataclasses.replace(strict, evidence_rule="none")
     assert free.evidence_rule == "none"
-    assert free.content_hash() != REFERENCE.content_hash()
+    assert free.content_hash() != strict.content_hash()

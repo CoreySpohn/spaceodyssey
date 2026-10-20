@@ -1392,6 +1392,7 @@ def test_claim_posterior_unknown_quantity_and_shared_claims():
         0.05,
         support_rule="separate",
         prior_set_id="test",
+        evidence_rule="every_claim",
     )
     result = plot_claim_posterior({"custom": [-1, 0, 1, 2]}, profile, bins=3)
     assert result.axes.shape == (1,)

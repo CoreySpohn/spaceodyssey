@@ -266,7 +266,8 @@ planets; the model defines their quantities, prior sets, and expected observatio
 `LinearGaussianTruthModel` in `spaceodyssey.testing` supplies a simple reference
 model. Its former name, `LinearGaussianTruth`, is a deprecated alias.
 
-Profiles require explicit keyword arguments for `support_rule` and `prior_set_id`.
+Profiles require explicit keyword arguments for `support_rule`, `prior_set_id`,
+and `evidence_rule`.
 The reference profiles use `joint` support, bounding the probability that any
 reported claim is wrong. `separate` and `split` remain available for per-claim
 risk and equally divided familywise risk. The reference profiles declare the
@@ -277,7 +278,8 @@ The profile content hash includes the claims, risk, support and evidence rules,
 and prior-set id. It excludes the display label. Claim order fixes the output axis;
 edge order within a claim and the sign of zero do not change identity.
 The evidence rule is `every_claim` (prior-only risk must exceed alpha) or `none`
-(the condition is dropped).
+(the condition is dropped). The reference profiles use `none`.
+`EXOEARTH_CANDIDATE_EVERY_CLAIM` keeps the `every_claim` condition for every claim.
 
 `AbstractProfileCertificate` checks compatibility before subclass construction
 runs, including custom `__init__` and `__check_init__` methods. Constructors must

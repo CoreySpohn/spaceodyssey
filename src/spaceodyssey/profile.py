@@ -116,7 +116,7 @@ class Profile:
         prior_set_id: Nonempty identifier of the robustness prior set, required
             as a keyword argument.
         evidence_rule: "every_claim" requires prior-only risk to exceed alpha for
-            every claim; "none" drops that condition.
+            every claim; "none" drops that condition. Required keyword argument.
 
     Raises:
         ValueError: A field violates the configuration invariants.
@@ -127,7 +127,7 @@ class Profile:
     alpha: float
     support_rule: SupportRule = field(kw_only=True)
     prior_set_id: str = field(kw_only=True)
-    evidence_rule: EvidenceRule = "every_claim"
+    evidence_rule: EvidenceRule = field(kw_only=True)
 
     def __post_init__(self) -> None:
         """Validate the profile, including after dataclasses.replace."""

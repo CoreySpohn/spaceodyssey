@@ -41,6 +41,7 @@ def make_profile(**kwargs):
         alpha=0.05,
         support_rule="joint",
         prior_set_id="uniform@1",
+        evidence_rule="every_claim",
     )
     fields.update(kwargs)
     return Profile(**fields)
