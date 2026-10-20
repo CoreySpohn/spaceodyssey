@@ -130,6 +130,134 @@ class TestCertificationOutcome:
         with pytest.raises(ValueError, match="p_pos"):
             make_outcome(p_pos=jnp.zeros((3, 1)))
 
+    @pytest.mark.parametrize("field", ["p_pos", "p_neg", "p_wrong", "p_neg_wrong"])
+    @pytest.mark.parametrize("value", [-1e-7, 1.0 + 1e-7, jnp.nan, jnp.inf, -jnp.inf])
+    def test_rejects_invalid_probability_values(self, field, value):
+        """Every channel has exact finite bounds on in-range planets."""
+        values = jnp.zeros(3).at[1].set(value)
+        with pytest.raises(ValueError, match=field) as error:
+            make_outcome(**{field: values})
+        assert "planet" in str(error.value)
+        assert "[1]" in str(error.value)
+
+    @pytest.mark.parametrize("field", ["p_pos", "p_neg", "p_pos_se"])
+    @pytest.mark.parametrize(
+        "value", [jnp.ones(3, dtype=bool), jnp.full(3, 0.1 + 0.1j)]
+    )
+    def test_rejects_non_real_probability_dtypes(self, field, value):
+        """Boolean or complex channels cannot satisfy the real-valued contract."""
+        with pytest.raises(ValueError, match=field):
+            make_outcome(**{field: value})
+
+    def test_rejects_overlapping_verdicts(self):
+        """Positive and negative verdicts cannot overlap beyond the slack."""
+        with pytest.raises(ValueError, match=r"p_pos.*p_neg") as error:
+            make_outcome(p_neg=jnp.array([0.1, 0.5, 0.5]))
+        assert "planet" in str(error.value)
+        assert "[1, 2]" in str(error.value)
+
+    def test_rejects_wrong_positive_exceeding_positive(self):
+        """Wrong positive certifications are a subset of positive ones."""
+        with pytest.raises(ValueError, match=r"p_wrong.*p_pos") as error:
+            make_outcome(p_wrong=jnp.array([0.0, 0.7, 0.0]))
+        assert "planet" in str(error.value)
+        assert "[1]" in str(error.value)
+
+    def test_rejects_wrong_negative_exceeding_negative(self):
+        """Wrong negative certifications are a subset of negative ones."""
+        with pytest.raises(ValueError, match=r"p_neg_wrong.*p_neg") as error:
+            make_outcome(p_neg_wrong=jnp.array([0.0, 0.2, 0.0]))
+        assert "planet" in str(error.value)
+        assert "[1]" in str(error.value)
+
+    @pytest.mark.parametrize(
+        "field", ["p_pos_se", "p_neg_se", "p_wrong_se", "p_neg_wrong_se"]
+    )
+    @pytest.mark.parametrize("value", [-1e-7, jnp.nan, -jnp.inf])
+    def test_rejects_invalid_standard_errors(self, field, value):
+        """Standard errors must be nonnegative, excluding NaN."""
+        values = jnp.zeros(3).at[1].set(value)
+        with pytest.raises(ValueError, match=field) as error:
+            make_outcome(**{field: values})
+        assert "planet" in str(error.value)
+        assert "[1]" in str(error.value)
+
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {"p_pos": 0.6, "p_neg": 0.4 + 1e-7},
+            {"p_wrong": 0.6 + 1e-7},
+            {"p_neg_wrong": 0.1 + 1e-7},
+        ],
+    )
+    def test_accepts_probability_relations_inside_slack(self, changes):
+        """Each probability relation permits rounding within 1e-6."""
+        outcome = make_outcome(
+            **{name: jnp.full(3, value) for name, value in changes.items()}
+        )
+        for name, value in changes.items():
+            np.testing.assert_array_equal(getattr(outcome, name), jnp.full(3, value))
+
+    @pytest.mark.parametrize("positive", [0.0, 1.0])
+    def test_accepts_probability_endpoints(self, positive):
+        """Exact probability endpoints and subset equality are valid."""
+        make_outcome(
+            p_pos=jnp.full(3, positive),
+            p_neg=jnp.full(3, 1 - positive),
+            p_wrong=jnp.full(3, positive),
+            p_neg_wrong=jnp.full(3, 1 - positive),
+        )
+
+    def test_accepts_positive_infinite_standard_errors(self):
+        """The standard error contract requires nonnegativity, not finiteness."""
+        make_outcome(
+            **{
+                name: jnp.full(3, jnp.inf)
+                for name in ("p_pos_se", "p_neg_se", "p_wrong_se", "p_neg_wrong_se")
+            }
+        )
+
+    @pytest.mark.parametrize("value", [-1.0, 2.0, jnp.nan, jnp.inf, 0.9])
+    def test_accepts_invalid_out_of_range_values(self, value):
+        """Untrusted planets are excluded from every main channel value check."""
+        fields = {
+            name: jnp.array([0.0, value, 0.0])
+            for name in (
+                "p_pos",
+                "p_neg",
+                "p_wrong",
+                "p_neg_wrong",
+                "p_pos_se",
+                "p_neg_se",
+                "p_wrong_se",
+                "p_neg_wrong_se",
+            )
+        }
+        outcome = make_outcome(in_range=[True, False, True], **fields)
+        np.testing.assert_array_equal(outcome.p_pos, fields["p_pos"])
+
+    def test_constructs_from_traced_arrays_under_jit(self):
+        """Valid outcome construction accepts traced probabilities and flags."""
+
+        @jax.jit
+        def build(positive, in_range):
+            return make_outcome(
+                p_pos=positive,
+                p_neg=1 - positive,
+                p_wrong=positive / 2,
+                p_neg_wrong=(1 - positive) / 2,
+                p_pos_se=positive / 10,
+                p_neg_se=positive / 10,
+                p_wrong_se=positive / 10,
+                p_neg_wrong_se=positive / 10,
+                in_range=in_range,
+            )
+
+        positive = jnp.array([0.0, 0.6, 1.0])
+        outcome = build(positive, jnp.ones(3, dtype=bool))
+        np.testing.assert_array_equal(outcome.p_pos, positive)
+        np.testing.assert_allclose(outcome.p_neg_wrong, (1 - positive) / 2)
+
     def test_in_range_check_passes_when_all_in_range(self):
         """No planet out of range, no exception."""
         make_outcome().raise_if_out_of_range()

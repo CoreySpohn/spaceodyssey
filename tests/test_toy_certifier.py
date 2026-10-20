@@ -5,6 +5,7 @@ distribution, the declared SNR mapping typed once here), never from the
 certifier's own helpers.
 """
 
+import equinox as eqx
 import ineedvalidation as vv
 import jax
 import jax.numpy as jnp
@@ -254,9 +255,12 @@ class TestSeamConformance:
 
     def test_outcome_check_catches_overlapping_verdicts(self):
         """p_pos + p_neg > 1 breaks the outcome contract."""
-        bad = make_outcome(p_pos=jnp.full((3,), 0.7), p_neg=jnp.full((3,), 0.5))
+        valid = make_outcome(p_pos=jnp.full((3,), 0.7))
+        bad = eqx.tree_at(lambda outcome: outcome.p_neg, valid, jnp.full((3,), 0.5))
         with pytest.raises(AssertionError, match="exceeds one"):
             check_outcome(bad)
+        with pytest.raises(ValueError, match=r"p_pos.*p_neg"):
+            make_outcome(p_pos=jnp.full((3,), 0.7), p_neg=jnp.full((3,), 0.5))
 
     def test_outcome_check_ignores_out_of_range_values(self):
         """Untrusted out-of-range values are excluded, but never all of them."""

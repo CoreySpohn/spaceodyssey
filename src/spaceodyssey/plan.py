@@ -9,7 +9,9 @@ per-planet array carries one canonical leading batch axis P of planets;
 wavelengths may also be shared across planets.
 
 Shape and dtype checks run at construction, including during tracing;
-value checks run on concrete inputs. A tier outside its validated range reports it
+concrete outcomes enforce finite [0, 1] probabilities, exclusive verdicts,
+wrong-event subset bounds (1e-6 relation slack), and nonnegative standard errors
+on in-range planets. A tier outside its validated range reports it
 through :attr:`CertificationOutcome.in_range`, which the host-side
 :meth:`CertificationOutcome.raise_if_out_of_range` turns into an exception.
 """
@@ -29,6 +31,7 @@ def _as_bool(value) -> jax.Array:
 
 
 CONTRACT_VERSION = 3
+_OUTCOME_PROBABILITY_SLACK = 1e-6
 
 
 def _optional_array(value):
@@ -244,6 +247,10 @@ class CertificationOutcome(eqx.Module):
     verdict that is false for it. Closed-form tiers report zero standard
     errors.
 
+    Concrete construction enforces finite [0, 1] probabilities and nonnegative
+    standard errors on in-range planets; verdicts are exclusive and wrong events
+    are subsets of their verdicts, with 1e-6 slack on these relations.
+
     Attributes:
         p_pos: Probability of certification in the counted (positive)
             direction, shape (P,).
@@ -318,7 +325,7 @@ class CertificationOutcome(eqx.Module):
     fidelity: str | None = eqx.field(default=None, static=True)
 
     def __check_init__(self):
-        """Validate planet axes, optional claims, hash, and replicates."""
+        """Validate planet axes, values, optional claims, hash, and replicates."""
         shape = self.p_pos.shape
         if len(shape) != 1:
             raise ValueError(f"p_pos must have shape (P,), got {shape}")
@@ -336,6 +343,59 @@ class CertificationOutcome(eqx.Module):
             other = getattr(self, name).shape
             if other != shape:
                 raise ValueError(f"{name} must have shape {shape}, got {other}")
+
+        for name in (
+            "p_pos",
+            "p_neg",
+            "p_wrong",
+            "p_neg_wrong",
+            "p_pos_se",
+            "p_neg_se",
+            "p_wrong_se",
+            "p_neg_wrong_se",
+        ):
+            dtype = getattr(self, name).dtype
+            if not (
+                jnp.issubdtype(dtype, jnp.floating)
+                or jnp.issubdtype(dtype, jnp.integer)
+            ):
+                raise ValueError(f"{name} must have a real numeric dtype, got {dtype}")
+
+        value_checks = []
+        for name in ("p_pos", "p_neg", "p_wrong", "p_neg_wrong"):
+            value = getattr(self, name)
+            value_checks.append(
+                (
+                    jnp.isfinite(value) & (value >= 0) & (value <= 1),
+                    f"{name} must be finite and in [0, 1]",
+                )
+            )
+        value_checks.extend(
+            (
+                (
+                    self.p_pos + self.p_neg <= 1 + _OUTCOME_PROBABILITY_SLACK,
+                    "p_pos + p_neg exceeds one",
+                ),
+                (
+                    self.p_wrong <= self.p_pos + _OUTCOME_PROBABILITY_SLACK,
+                    "p_wrong exceeds p_pos",
+                ),
+                (
+                    self.p_neg_wrong <= self.p_neg + _OUTCOME_PROBABILITY_SLACK,
+                    "p_neg_wrong exceeds p_neg",
+                ),
+            )
+        )
+        for name in ("p_pos_se", "p_neg_se", "p_wrong_se", "p_neg_wrong_se"):
+            value_checks.append((getattr(self, name) >= 0, f"{name} must be >= 0"))
+        for valid, message in value_checks:
+            valid = ~self.in_range | valid
+            indices = (
+                []
+                if isinstance(valid, jax.core.Tracer)
+                else np.flatnonzero(~np.asarray(valid))[:5].tolist()
+            )
+            _check_values(valid, f"{message}; offending planet indices {indices}")
 
         if self.profile_hash is not None:
             if (

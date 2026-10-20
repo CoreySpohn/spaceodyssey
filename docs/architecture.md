@@ -253,6 +253,9 @@ zero-yield plans, including in the strict analytic engine. Unknown noise is
 outside the toy's validated range and is flagged through `in_range`.
 Shapes and spectrum index dtype are checked during tracing; value validation
 runs during concrete construction. Validate inputs before passing them to JIT.
+Concrete `CertificationOutcome` construction enforces finite [0, 1] probabilities,
+exclusive verdicts and wrong-event subset bounds (1e-6 relation slack), and
+nonnegative standard errors over in-range planets only.
 
 ## Profiles, truth models, and the claim axis
 

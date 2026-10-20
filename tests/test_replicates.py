@@ -146,7 +146,8 @@ def test_metadata_without_replicates_rejected(metadata):
 
 
 def test_bootstrap_main_need_not_equal_mean():
-    assert report(outcome(kind="bootstrap", p_pos=[0.625])).y_issued == 0.625
+    value = outcome(kind="bootstrap", p_pos=[0.625], p_neg=[0.25])
+    assert report(value).y_issued == 0.625
 
 
 def test_replicate_jit_and_grad():
