@@ -31,6 +31,10 @@ from dataclasses import replace
 
 from spaceodyssey.profile import Claim, Edge, Profile
 
+# Reference definition: skyscapes.habitable_zone, HZ_INNER_EEID and
+# HZ_OUTER_EEID here, OPTIMISTIC_HZ_INNER_EEID and OPTIMISTIC_HZ_OUTER_EEID in
+# OPTIMISTIC_ZONE. The values stay literal so profiles do not import skyscapes;
+# tests/test_habitable_zone_parity.py keeps the two equal.
 HABITABLE_ZONE = Claim(
     "habitable_zone",
     (
