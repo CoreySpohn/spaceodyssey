@@ -1,7 +1,7 @@
 """The habitable-zone claim edges match the skyscapes reference definition.
 
-skyscapes is an optional physics dependency, so the comparison is skipped
-when it, or a release that carries ``skyscapes.habitable_zone``, is absent.
+The comparison is skipped when the installed skyscapes does not provide
+``skyscapes.habitable_zone``: skyscapes is absent, or is an older release.
 """
 
 import math
