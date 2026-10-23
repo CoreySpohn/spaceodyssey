@@ -1,11 +1,14 @@
 """Truth parameters, model priors, and simulated plan observations."""
 
 import abc
+import hashlib
+import json
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+import numpy as np
 from photomancy.priors import AbstractPrior
 
 from spaceodyssey.errors import UnsupportedProfile
@@ -100,6 +103,44 @@ class PriorSet(eqx.Module):
             raise ValueError("nominal_index must index a member")
         if any(p.ndim != self.members[0].ndim for p in self.members):
             raise ValueError("prior set members must have equal ndim")
+
+    def content_hash(self) -> str:
+        """Return the SHA-256 digest of canonical, versioned prior-set JSON.
+
+        Member order, types, pytree structure (including static fields), and
+        leaf dtypes, shapes, and values are content. Floats use hexadecimal
+        strings with signed zero normalized. This host-side operation is
+        independent of Python's randomized in-process hash.
+        """
+        members = []
+        for member in self.members:
+            leaves = []
+            for leaf in jax.tree_util.tree_leaves(member):
+                array = np.asarray(leaf)
+                values = array.reshape(-1).tolist()
+                if jnp.issubdtype(array.dtype, jnp.floating):
+                    values = [(float(value) + 0.0).hex() for value in values]
+                leaves.append(
+                    {"dtype": str(array.dtype), "shape": array.shape, "values": values}
+                )
+            members.append(
+                {
+                    "type": f"{type(member).__module__}.{type(member).__qualname__}",
+                    "treedef": str(jax.tree_util.tree_structure(member)),
+                    "leaves": leaves,
+                }
+            )
+        content = {
+            "schema": "spaceodyssey.PriorSet/1",
+            "id": self.id,
+            "labels": self.labels,
+            "nominal_index": self.nominal_index,
+            "members": members,
+        }
+        encoded = json.dumps(content, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        return hashlib.sha256(encoded).hexdigest()
 
 
 def _plan_masks(plan):

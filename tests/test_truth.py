@@ -287,6 +287,108 @@ def test_model_prior_invariants(cause):
         InvalidModel()
 
 
+def make_hash_prior_set(**kwargs):
+    fields = dict(
+        members=(
+            Uniform(
+                jnp.array([0.0], dtype=jnp.float32), jnp.array([1.0], dtype=jnp.float32)
+            ),
+            Uniform(
+                jnp.array([-1.0], dtype=jnp.float32),
+                jnp.array([2.0], dtype=jnp.float32),
+            ),
+        ),
+        id="test@1",
+        labels=("nominal", "wide"),
+        nominal_index=0,
+    )
+    fields.update(kwargs)
+    return PriorSet(**fields)
+
+
+def test_prior_set_content_hash_is_stable_hex():
+    prior_set = make_hash_prior_set()
+    digest = prior_set.content_hash()
+    assert len(digest) == 64
+    assert set(digest) <= set("0123456789abcdef")
+    assert digest == prior_set.content_hash()
+    assert digest == make_hash_prior_set().content_hash()
+
+
+def test_prior_set_content_hash_golden():
+    assert make_hash_prior_set().content_hash() == (
+        "a3d1f1f42cd314830d43b64018175bf1f30c14e20e6c07b4fd7039224051559c"
+    )
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        (0.5, 0.75),
+        (1, 2),
+        (False, True),
+        ("first", "second"),
+        (np.array([1], dtype=np.int32), np.array([1], dtype=np.int16)),
+        (np.array([True]), np.array([False])),
+        (np.array([1, 2]), np.array([[1, 2]])),
+    ],
+)
+def test_prior_set_content_hash_tracks_leaf_values_dtype_and_shape(first, second):
+    class AnnotatedUniform(Uniform):
+        annotation: object
+
+    def make(annotation):
+        member = AnnotatedUniform(jnp.zeros(1), jnp.ones(1), annotation)
+        return PriorSet((member,), "test@1", ("nominal",), 0)
+
+    assert make(first).content_hash() == make(first).content_hash()
+    assert make(first).content_hash() != make(second).content_hash()
+
+
+def test_prior_set_content_hash_tracks_member_type_and_static_fields():
+    class TaggedUniform(Uniform):
+        tag: str = eqx.field(static=True, default="first")
+
+    def make(member):
+        return PriorSet((member,), "test@1", ("nominal",), 0)
+
+    plain = make(Uniform(jnp.zeros(1), jnp.ones(1)))
+    first = make(TaggedUniform(jnp.zeros(1), jnp.ones(1)))
+    second = make(TaggedUniform(jnp.zeros(1), jnp.ones(1), "second"))
+    assert plain.content_hash() != first.content_hash()
+    assert first.content_hash() != second.content_hash()
+
+
+@pytest.mark.parametrize("change", ["bound", "label", "id", "nominal", "order"])
+def test_prior_set_content_hash_tracks_content(change):
+    original = make_hash_prior_set()
+    updates = {
+        "bound": {
+            "members": (
+                Uniform(jnp.array([0.0]), jnp.array([1.5])),
+                original.members[1],
+            )
+        },
+        "label": {"labels": ("central", "wide")},
+        "id": {"id": "test@2"},
+        "nominal": {"nominal_index": 1},
+        "order": {"members": original.members[::-1]},
+    }
+    changed = make_hash_prior_set(**updates[change])
+    assert changed.content_hash() != original.content_hash()
+
+
+def test_prior_set_content_hash_normalizes_signed_zero():
+    original = make_hash_prior_set()
+    changed = make_hash_prior_set(
+        members=(
+            Uniform(jnp.array([-0.0]), jnp.array([1.0])),
+            original.members[1],
+        )
+    )
+    assert changed.content_hash() == original.content_hash()
+
+
 def test_uniform_prior_quantities_and_public_exports():
     model = LinearGaussianTruthModel(low=[-2, -3], high=[4, 5])
     np.testing.assert_array_equal(model.prior.forward(jnp.array([0.0, 1.0])), [-2, 5])
