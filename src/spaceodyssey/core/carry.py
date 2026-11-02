@@ -1,0 +1,190 @@
+"""Carry."""
+
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+
+from spaceodyssey.core.enums import (
+    F64,
+    I64,
+    PUBLIC,
+    AdmissionCode,
+    B,
+    EventKind,
+    Stage,
+)
+from spaceodyssey.core.events import EventTable, empty_events, enqueue
+from spaceodyssey.core.ledger import Ledger
+from spaceodyssey.core.records import RecordLog, empty_log
+from spaceodyssey.core.snapshot import MeanBelief
+
+
+class Carry(eqx.Module):
+    """Complete immutable state of a transaction run."""
+
+    tick: jax.Array
+    stage: jax.Array
+    micro: jax.Array
+    phase: jax.Array
+    ev: EventTable
+    log: RecordLog
+    n_log: jax.Array
+    ledger: Ledger
+    belief: MeanBelief
+    pbelief: MeanBelief
+    acquisition_counts: jax.Array
+    pstate: jax.Array
+    woke: jax.Array
+    done: jax.Array
+    draining: jax.Array
+    stalled: jax.Array
+    idle: jax.Array
+    overflow: jax.Array
+    violation: jax.Array
+    double_settle: jax.Array
+    dup_fold: jax.Array
+    n_dec: jax.Array
+    next_sid: jax.Array
+
+
+def _zero_belief(caps):
+    return MeanBelief(
+        mean=jnp.zeros(caps.n_subjects, F64),
+        n=jnp.zeros(caps.n_subjects, I64),
+        aux=jnp.zeros(caps.n_an, F64),
+    )
+
+
+def empty_carry(caps, balance=None):
+    """A zeroed carry at tick 0, stage Stage.SETTLE, with an empty queue and log."""
+    z = jnp.asarray(0, I64)
+    f = jnp.asarray(False)
+    br, nr = caps.n_balance_rows, caps.n_resources
+    return Carry(
+        tick=z,
+        stage=z,
+        micro=z,
+        phase=z,
+        ev=empty_events(caps),
+        log=empty_log(caps),
+        n_log=z,
+        ledger=Ledger(
+            balance=jnp.zeros((br, nr), F64) if balance is None else balance,
+            lane_busy_until=jnp.zeros(caps.n_lanes, I64),
+            lane_gen=jnp.zeros(caps.n_lanes, I64),
+            lane_closed=jnp.zeros(caps.n_lanes, B),
+            lane_draining=jnp.zeros(caps.n_lanes, B),
+        ),
+        belief=_zero_belief(caps),
+        pbelief=_zero_belief(caps),
+        acquisition_counts=jnp.zeros(caps.n_subjects, I64),
+        pstate=jnp.zeros(caps.n_pstate, F64),
+        woke=f,
+        done=f,
+        draining=f,
+        stalled=f,
+        idle=f,
+        overflow=f,
+        violation=f,
+        double_settle=f,
+        dup_fold=f,
+        n_dec=z,
+        next_sid=z,
+    )
+
+
+class StepEmit(eqx.Module):
+    """A handler's bookkeeping output."""
+
+    n_written: jax.Array
+    last_slot: jax.Array
+
+
+class Trace(eqx.Module):
+    """One per executor step."""
+
+    handled: jax.Array
+    kind: jax.Array
+    tick: jax.Array
+    stage: jax.Array
+    micro: jax.Array
+    sid: jax.Array
+    lane: jax.Array
+    channel: jax.Array
+    subject: jax.Array
+    acquisition_index: jax.Array
+    audience: jax.Array
+    n_written: jax.Array
+    rec_status: jax.Array
+    wake: jax.Array
+    n_dec: jax.Array
+    eff_kind: jax.Array
+    admit_code: jax.Array
+    belief_mean: jax.Array
+    belief_aux: jax.Array
+    n_log: jax.Array
+    pol_u: jax.Array
+
+
+def empty_trace(caps):
+    """Return a zeroed trace row."""
+    z = jnp.asarray(0, I64)
+    f = jnp.asarray(False)
+    return Trace(
+        handled=f,
+        kind=z,
+        tick=z,
+        stage=z,
+        micro=z,
+        sid=z,
+        lane=z,
+        channel=z,
+        subject=z,
+        acquisition_index=z,
+        audience=z,
+        n_written=z,
+        rec_status=z,
+        wake=f,
+        n_dec=z,
+        eff_kind=jnp.zeros(caps.n_effects, I64),
+        admit_code=jnp.full(caps.n_effects, AdmissionCode.NONE, I64),
+        belief_mean=jnp.zeros(caps.n_subjects, F64),
+        belief_aux=jnp.zeros(caps.n_an, F64),
+        n_log=z,
+        pol_u=jnp.asarray(0.0, F64),
+    )
+
+
+def _tree_set(carry, **paths):
+    """Set carry leaves by dotted name, e.g. `_tree_set(c, **{"ledger.balance": x})`."""
+    names = list(paths)
+
+    def getter(c):
+        out = []
+        for n in names:
+            o = c
+            for part in n.split("."):
+                o = getattr(o, part)
+            out.append(o)
+        return tuple(out)
+
+    return eqx.tree_at(getter, carry, tuple(paths.values()))
+
+
+def init_carry(study, truth):
+    """Initialize the budget and public kickoff wake at tick 0."""
+    caps = study.caps
+    c = empty_carry(caps, balance=study.budget)
+    c = _tree_set(
+        c, belief=study.observer.init(caps), pbelief=study.observer.init(caps)
+    )
+    c = enqueue(
+        c,
+        True,
+        kind=EventKind.WAIT,
+        tick=0,
+        stage=Stage.ADMIT,
+        audience=PUBLIC,
+        caps=caps,
+    )
+    return study.process.seed(c, caps)

@@ -1,0 +1,184 @@
+"""Events."""
+
+import dataclasses
+
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+
+from spaceodyssey.core.enums import BIG, I64, N_STAGES, B
+
+
+def _order_key_py(tick, stage, micro, sid, caps):
+    return ((tick * N_STAGES + stage) * caps.max_micro + micro) * caps.max_sid + sid
+
+
+def order_key(tick, stage, micro, sid, caps):
+    """Packed key, lexicographic in (tick, stage, micro, sid) within the caps."""
+    key = _order_key_py(
+        jnp.asarray(tick, I64),
+        jnp.asarray(stage, I64),
+        jnp.asarray(micro, I64),
+        jnp.asarray(sid, I64),
+        caps,
+    )
+    return key.astype(I64)
+
+
+class EventTable(eqx.Module):
+    """One row per queued event; `valid` false means an empty slot."""
+
+    kind: jax.Array
+    tick: jax.Array
+    stage: jax.Array
+    micro: jax.Array
+    sid: jax.Array
+    lane: jax.Array
+    channel_index: jax.Array  # index into the channel table
+    channel: jax.Array  # stable channel id
+    subject: jax.Array
+    acquisition_index: jax.Array
+    gen: jax.Array  # lane generation named by a Cancel
+    group: jax.Array  # admission group of the decision that created the row
+    audience: jax.Array
+    slot: jax.Array  # log slot a Release row refers to
+    scope: jax.Array
+    disposition: jax.Array
+    acquisition_id: jax.Array  # sid of the Done row a record settles under
+    valid: jax.Array
+
+
+def empty_events(caps):
+    """Return an empty fixed-capacity event table."""
+    z = jnp.zeros(caps.n_events, I64)
+    return EventTable(
+        **{n: z for n in EVENT_INT_FIELDS}, valid=jnp.zeros(caps.n_events, B)
+    )
+
+
+def where_tree(pred, a, b):
+    """`jnp.where(pred, x, y)` on every leaf pair."""
+    return jax.tree_util.tree_map(lambda x, y: jnp.where(pred, x, y), a, b)
+
+
+def _set_row(table, i, write, **fields):
+    """Write named fields of row i of a struct-of-arrays module where `write`."""
+    names = tuple(fields)
+    new = tuple(
+        getattr(table, n).at[i].set(jnp.where(write, v, getattr(table, n)[i]))
+        for n, v in fields.items()
+    )
+    return eqx.tree_at(lambda t: tuple(getattr(t, n) for n in names), table, new)
+
+
+def enqueue(
+    carry,
+    ok,
+    *,
+    kind,
+    tick,
+    stage,
+    lane=0,
+    channel_index=0,
+    channel=0,
+    subject=0,
+    acquisition_index=0,
+    gen=0,
+    group=0,
+    audience=0,
+    slot=-1,
+    scope=0,
+    disposition=0,
+    acquisition_id=-1,
+    caps,
+):
+    """Add one row to the queue where `ok`, applying the micro placement rule.
+
+    A row at the current (tick, stage) gets micro + 1; a later one gets micro 0; an
+    earlier one is placed at the current position with micro + 1 and sets
+    `violation`. A full queue or an exhausted `next_sid` sets `overflow` and leaves
+    every existing row alone.
+    """
+    tick = jnp.asarray(tick, I64)
+    stage = jnp.asarray(stage, I64)
+    ok = jnp.asarray(ok, B)
+    free = ~carry.ev.valid
+    has_slot = free.any()
+    sid_ok = carry.next_sid < caps.max_sid
+    write = ok & has_slot & sid_ok
+    i = jnp.argmax(free)
+
+    same = (tick == carry.tick) & (stage == carry.stage)
+    later = (tick > carry.tick) | ((tick == carry.tick) & (stage > carry.stage))
+    earlier = ~same & ~later
+    micro = jnp.where(later, 0, carry.micro + 1).astype(I64)
+    tick_w = jnp.where(earlier, carry.tick, tick)
+    stage_w = jnp.where(earlier, carry.stage, stage)
+
+    ev = _set_row(
+        carry.ev,
+        i,
+        write,
+        kind=jnp.asarray(kind, I64),
+        tick=tick_w,
+        stage=stage_w,
+        micro=micro,
+        sid=carry.next_sid,
+        lane=jnp.asarray(lane, I64),
+        channel_index=jnp.asarray(channel_index, I64),
+        channel=jnp.asarray(channel, I64),
+        subject=jnp.asarray(subject, I64),
+        acquisition_index=jnp.asarray(acquisition_index, I64),
+        gen=jnp.asarray(gen, I64),
+        group=jnp.asarray(group, I64),
+        audience=jnp.asarray(audience, I64),
+        slot=jnp.asarray(slot, I64),
+        scope=jnp.asarray(scope, I64),
+        disposition=jnp.asarray(disposition, I64),
+        acquisition_id=jnp.asarray(acquisition_id, I64),
+        valid=jnp.asarray(True),
+    )
+    return eqx.tree_at(
+        lambda c: (c.ev, c.next_sid, c.overflow, c.violation),
+        carry,
+        (
+            ev,
+            carry.next_sid + write.astype(I64),
+            carry.overflow | (ok & ~(has_slot & sid_ok)),
+            carry.violation | (write & earlier),
+        ),
+    )
+
+
+def select_next(carry, caps):
+    """Pop the queued row with the smallest order key.
+
+    Return (carry, one-row EventTable, has_row). Free the slot before running any
+    handler, allowing a replacement even when the queue was full. Update the current
+    position to the selected row and set stalled when its microstep reaches the guard.
+    """
+    ev = carry.ev
+    keys = jnp.where(
+        ev.valid, order_key(ev.tick, ev.stage, ev.micro, ev.sid, caps), BIG
+    )
+    i = jnp.argmin(keys)
+    has = ev.valid.any()
+    row = jax.tree_util.tree_map(lambda a: a[i], ev)
+    cleared = ev.valid.at[i].set(jnp.where(has, False, ev.valid[i]))
+    new = eqx.tree_at(
+        lambda c: (c.ev, c.tick, c.stage, c.micro, c.stalled),
+        carry,
+        (
+            eqx.tree_at(lambda e: e.valid, ev, cleared),
+            jnp.where(has, row.tick, carry.tick),
+            jnp.where(has, row.stage, carry.stage),
+            jnp.where(has, row.micro, carry.micro),
+            carry.stalled | (has & (row.micro >= caps.micro_guard)),
+        ),
+    )
+    return new, row, has
+
+
+EVENT_INT_FIELDS = tuple(
+    f.name for f in dataclasses.fields(EventTable) if f.name != "valid"
+)
