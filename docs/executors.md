@@ -42,19 +42,29 @@ request row at the current tick in the admit stage, addressed to the policy audi
 stamped with the fingerprint of the snapshot the decision read, that snapshot's release
 version and the decision's index.
 
+The protocol admits one outstanding question per world. Additional Queries receive
+`AdmissionCode.NO_SLOT` until its Result releases, including a second Query in the
+same decision.
+
 When the transaction reaches the request row it moves it into `Carry.request` and stops:
 no later row runs until the host answers. The host's answer is a record of the service's
 kind, readable by the audience of the snapshot it was asked on. `commit_result` logs the
 record and queues a `Result` row at the request's own tick and stage, the next microstep,
-so no other work separates them. The transaction handles the `Result` row through the
-ordinary release rules: the record is released at that tick and the policy wakes in the
+so no other work separates them. Sibling effects from that decision run after the
+answer, regardless of their order in the effect table. Remaining rows at that tick and
+stage move together behind the answer, preserving their relative order. A campaign
+drain waits for queued requests, pending requests and queued results. The transaction
+handles the `Result` row through the ordinary release rules: the record is released
+at that tick and the policy wakes in the
 same stage. The request and the `Result` rows both carry the snapshot fingerprint, and
 both appear in the history.
 
 A service is an `AbstractHostService`: a `kind` (the record kind index of its answers) and
 `answer(request, view)`, which receives the request and the audience's masked snapshot
-as numpy arrays and returns the payload columns. It sees nothing else. Before answering,
-the executor rebuilds the snapshot and checks that its fingerprint equals the one on the
+as numpy arrays and returns the payload columns. The service-facing request carries
+the question's semantic coordinates, not its internal stage or microstep, which can
+depend on private events. It sees nothing else. Before answering, the executor rebuilds
+the snapshot and checks that its fingerprint equals the one on the
 request, so a snapshot that changed under a pending question is an error, not a quiet
 difference.
 
@@ -79,10 +89,13 @@ holds one count for the observer and one for the policy, and a snapshot reports 
 audience's count. A release moves only the versions of the audiences it reaches, by one,
 so a row the policy cannot read leaves the policy's version alone.
 
-Each decision records the fingerprint of the snapshot it read (`Trace.snapshot_fp`, zero
-where no decision ran; `snapshot_fp` in the history). The fingerprint is a 64-bit digest of
+Each snapshot carries the belief of its own audience. Each decision records the
+fingerprint of the snapshot it read (`Trace.snapshot_fp`, zero where no decision ran;
+`snapshot_fp` in the history). The fingerprint is a 64-bit digest of
 the integer content of the masked view: every integer column of the visible rows, the row
 count, the belief sample counts, the tick, the decision index and the release version.
+The digest chains each integer into the previous hash state in column and row order;
+exchanging integer contributions cannot preserve it by commutative summation.
 Floating-point content is left out on purpose, since it is computed from the prefix the
 integers name and executors may differ in it by rounding. Because the digest is taken
 from the view the policy was handed, a row, column or event the audience cannot see leaves

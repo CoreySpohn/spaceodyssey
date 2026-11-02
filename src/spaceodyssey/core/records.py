@@ -125,9 +125,13 @@ def payload_columns(caps, kind, audience):
 
 
 def masked_record(rec, caps, audience):
-    """The record as `audience` may read it: unreadable payload columns are zero."""
+    """Hide queue-derived identities and payload columns the audience cannot read."""
     keep = payload_columns(caps, rec.kind, audience)
-    return dataclasses.replace(rec, payload=jnp.where(keep, rec.payload, 0.0))
+    return dataclasses.replace(
+        rec,
+        acquisition_id=jnp.zeros_like(rec.acquisition_id),
+        payload=jnp.where(keep, rec.payload, 0.0),
+    )
 
 
 class Record(eqx.Module):

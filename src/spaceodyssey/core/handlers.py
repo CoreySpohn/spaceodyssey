@@ -132,8 +132,8 @@ def h_done(c, ev, study, truth, root):
 def h_release(c, ev, study, truth, root):
     """Make a record visible and fold it into the observer, once per acquisition.
 
-    The observer accepts every released row but folds only the first accepted revision
-    of an acquisition; the policy belief does the same over policy releases. When a
+    Each audience accepts only rows addressed to it by both the event and the record,
+    and folds only the first accepted revision of an acquisition. When a
     later revision is accepted, the earlier rows are marked `superseded_by` it. A row
     held back (`RecordStatus.UNRELEASED`) is neither released nor accepted.
     """
@@ -142,7 +142,10 @@ def h_release(c, ev, study, truth, root):
     log = c.log
     rec = _log_rec(log, slot)
     held = rec.status == RecordStatus.UNRELEASED
-    public = ((ev.audience & Audience.POLICY) != 0) & ~held
+    audience = ev.audience & rec.audience
+    readable = rec.valid & ~held
+    public = ((audience & Audience.POLICY) != 0) & readable
+    to_observer = ((audience & Audience.OBSERVER) != 0) & readable
     already = log.accepted_tick[slot] >= 0
     others = (
         log.valid
@@ -152,19 +155,29 @@ def h_release(c, ev, study, truth, root):
     accepted = others & (log.accepted_tick >= 0)
     obs = masked_record(rec, caps, Audience.OBSERVER)
     folded = study.observer.analyze(study.observer.fold(c.belief, obs, caps))
-    belief = where_tree(~already & ~held & ~accepted.any(), folded, c.belief)
+    belief = where_tree(to_observer & ~already & ~accepted.any(), folded, c.belief)
     # the policy's belief folds only records released to the policy audience, once
     seen = log.released_tick[slot] >= 0
-    pol = masked_record(rec, caps, Audience.POLICY)
-    pfolded = study.observer.analyze(study.observer.fold(c.pbelief, pol, caps))
     released = others & (log.released_tick >= 0)
+    # The policy fold sees supersession only from revisions it can read, just
+    # like its snapshot; observer-only revisions cannot change this metadata.
+    pol_rec = dataclasses.replace(
+        rec,
+        superseded_by=jnp.max(
+            jnp.where(released & (log.revision > rec.revision), log.revision, -1)
+        ),
+    )
+    pol = masked_record(pol_rec, caps, Audience.POLICY)
+    pfolded = study.observer.analyze(study.observer.fold(c.pbelief, pol, caps))
     pbelief = where_tree(public & ~seen & ~released.any(), pfolded, c.pbelief)
     older = jnp.where(accepted & (log.revision < rec.revision), rec.revision, -1)
     newer = jnp.max(jnp.where(accepted, log.revision, -1))
     newer = jnp.where(newer > rec.revision, newer, -1)
-    superseded = jnp.maximum(log.superseded_by, jnp.where(held, -1, older))
+    superseded = jnp.maximum(log.superseded_by, jnp.where(to_observer, older, -1))
     superseded = superseded.at[slot].set(
-        jnp.where(held, log.superseded_by[slot], jnp.maximum(superseded[slot], newer))
+        jnp.where(
+            to_observer, jnp.maximum(superseded[slot], newer), log.superseded_by[slot]
+        )
     )
     log = eqx.tree_at(
         lambda lg: (lg.released_tick, lg.accepted_tick, lg.superseded_by),
@@ -174,15 +187,14 @@ def h_release(c, ev, study, truth, root):
                 jnp.where(public, ev.tick, log.released_tick[slot])
             ),
             log.accepted_tick.at[slot].set(
-                jnp.where(already | held, log.accepted_tick[slot], ev.tick)
+                jnp.where(to_observer & ~already, ev.tick, log.accepted_tick[slot])
             ),
             superseded,
         ),
     )
     # a version counts a release the audience can read, as its snapshot shows it
-    to_observer = (ev.audience & Audience.OBSERVER) != 0
     versions = c.release_version + jnp.stack(
-        [~already & ~held & to_observer, public & ~seen]
+        [~already & to_observer, public & ~seen]
     ).astype(I64)
     c1 = _tree_set(
         c,
@@ -190,8 +202,8 @@ def h_release(c, ev, study, truth, root):
         pbelief=pbelief,
         log=log,
         release_version=versions,
-        woke=jnp.asarray(True),
-        dup_fold=c.dup_fold | already,
+        woke=public & ~seen,
+        dup_fold=c.dup_fold | (to_observer & already) | (public & seen),
     )
     return c1, _emit(0, slot), record_none(caps)
 

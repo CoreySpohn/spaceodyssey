@@ -24,11 +24,9 @@ from spaceodyssey.core.snapshot import snapshot_fingerprint, snapshot_view
 
 @dataclasses.dataclass(frozen=True)
 class Request:
-    """What the host is asked: plain integers read off the pending request row."""
+    """The question's semantic coordinates, without private queue positions."""
 
     tick: int
-    stage: int
-    micro: int
     service: int  # the `channel_index` of the Query effect
     subject: int
     audience: int  # who the snapshot was cut for, and who may read the answer
@@ -60,8 +58,6 @@ def read_request(carry):
         return None
     return Request(
         tick=int(row.tick),
-        stage=int(row.stage),
-        micro=int(row.micro),
         service=int(row.channel_index),
         subject=int(row.subject),
         audience=int(row.audience),
@@ -106,6 +102,13 @@ def commit_result(carry, payload, kind, study):
     )
     c1, slot = write_log(carry, rec, caps)
     wrote = c1.n_log > carry.n_log
+    # Reserve the next microstep for the answer. Move any peers still at this
+    # position together, preserving their relative order behind the Result.
+    ev = c1.ev
+    peers = ev.valid & (ev.tick == req.tick) & (ev.stage == req.stage)
+    first_micro = jnp.min(jnp.where(peers, ev.micro, study.caps.max_micro))
+    shift = jnp.maximum(req.micro + 2 - first_micro, 0)
+    c1 = _tree_set(c1, **{"ev.micro": ev.micro + jnp.where(wrote & peers, shift, 0)})
     c2 = enqueue(
         c1,
         wrote,

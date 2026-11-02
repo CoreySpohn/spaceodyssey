@@ -50,6 +50,11 @@ lowered leave every column readable.
 
 ## Release and the fold
 
+A release reaches only the intersection of the event's audience and the record's
+audience. Acceptance ticks, release ticks, beliefs and release versions change only
+for those readers. A held row or a release that the policy cannot read never wakes
+the policy.
+
 The observer accepts every row released to it and folds the first accepted revision of
 an acquisition. When a later revision is accepted, the earlier rows are marked
 `superseded_by` it, and the later revision is logged but not folded again. The policy
@@ -58,6 +63,11 @@ a refit is left to the observer kit.
 
 A snapshot reports `superseded_by` from the rows its own audience can see, so an
 observer-only revision does not show through a policy snapshot.
+
+Folds hide the same queue-derived acquisition identity as snapshots. A policy fold
+also sees supersession only from policy-released revisions. The full identities and
+provenance remain in the stored log for accounting and reconstruction. Observer
+snapshots carry the observer belief; policy snapshots carry the policy belief.
 
 ## A second kind
 

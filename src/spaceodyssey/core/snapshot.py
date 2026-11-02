@@ -108,7 +108,7 @@ def snapshot_view(carry, audience, caps):
     return Snapshot(
         log=RecordLog(**cols),
         n_rows=vis.sum().astype(I64),
-        belief=carry.pbelief,
+        belief=carry.pbelief if audience == Audience.POLICY else carry.belief,
         tick=carry.tick,
         n_dec=carry.n_dec,
         release_version=carry.release_version[version_slot(audience)],
@@ -131,9 +131,13 @@ def _mix(x):
 def _digest(a, salt):
     """Order-sensitive 64-bit digest of an integer or boolean array."""
     flat = jnp.ravel(a).astype(I64).astype(jnp.uint64)
-    pos = jnp.arange(flat.shape[0], dtype=jnp.uint64)
-    key = _mix(pos + jnp.asarray(np.uint64(salt), jnp.uint64))
-    return jnp.sum(_mix(flat ^ key))
+    seed = _mix(jnp.asarray(np.uint64(salt), jnp.uint64))
+
+    def chain(h, value):
+        return _mix(h ^ value), None
+
+    h, _ = jax.lax.scan(chain, seed, flat)
+    return _mix(h ^ jnp.asarray(flat.size, jnp.uint64))
 
 
 def snapshot_fingerprint(view):
@@ -149,9 +153,12 @@ def snapshot_fingerprint(view):
     log = view.log
     leaves = [getattr(log, n) for n in LOG_INT_FIELDS] + [log.valid]
     leaves += [view.n_rows, view.belief.n, view.tick, view.n_dec, view.release_version]
-    h = jnp.asarray(np.uint64(len(leaves)), jnp.uint64)
+    # Tag field boundaries, then chain all words in one scan.
+    words = []
     for i, leaf in enumerate(leaves):
-        h = _mix(h ^ _digest(jnp.asarray(leaf), i + 1))
+        flat = jnp.ravel(jnp.asarray(leaf)).astype(I64)
+        words.extend((jnp.asarray([i + 1, flat.size], I64), flat))
+    h = _digest(jnp.concatenate(words), len(leaves))
     return jax.lax.bitcast_convert_type(h, I64)
 
 

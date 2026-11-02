@@ -65,9 +65,12 @@ def advance(carry, root, study, truth, *, wake_fn=wake_by_audience):
     c2, emit, rec = step(c1, ev, study, truth, root)
     c3 = where_tree(handled, c2, carry)
     drainable = c3.ev.valid & (
-        (c3.ev.kind == EventKind.DONE) | (c3.ev.kind == EventKind.RELEASE)
+        (c3.ev.kind == EventKind.DONE)
+        | (c3.ev.kind == EventKind.RELEASE)
+        | (c3.ev.kind == EventKind.REQUEST)
+        | (c3.ev.kind == EventKind.RESULT)
     )
-    drained = handled & c3.draining & ~drainable.any()
+    drained = handled & c3.draining & ~drainable.any() & ~c3.request.valid
     idle = carry.idle | (act & ~has)
     c4 = _tree_set(c3, idle=idle, done=c3.done | drained | idle)
     raised = handled & wake_fn(c4, ev)
@@ -273,6 +276,7 @@ def _group_code(c, eff, member, study):
 def _admit_rows(c, eff, mask, study, fp):
     """Admit the rows of one decision, Observe rows of one group in or out whole."""
     caps = study.caps
+    first_sid = c.next_sid
     n = caps.n_effects
     out = [jnp.asarray(AdmissionCode.NONE, I64)] * n
     decided = jnp.zeros(n, jnp.bool_)
@@ -337,7 +341,11 @@ def _admit_rows(c, eff, mask, study, fp):
             caps=caps,
         )
         asked = act & allowed & (kind == EffectKind.QUERY)
-        room = (~c.ev.valid).any() & (c.next_sid < caps.max_sid)
+        outstanding = c.request.valid | jnp.any(
+            c.ev.valid
+            & ((c.ev.kind == EventKind.REQUEST) | (c.ev.kind == EventKind.RESULT))
+        )
+        room = (~c.ev.valid).any() & (c.next_sid < caps.max_sid) & ~outstanding
         c = enqueue(
             c,
             asked & room,
@@ -370,6 +378,18 @@ def _admit_rows(c, eff, mask, study, fp):
             ],
             AdmissionCode.OK,
         ).astype(I64)
+    # A question is answered before any sibling event at this position runs,
+    # including siblings listed before the Query in the effect table.
+    ev = c.ev
+    added = ev.valid & (ev.sid >= first_sid)
+    asks = added & (ev.kind == EventKind.REQUEST)
+    siblings = (
+        added
+        & (ev.kind != EventKind.REQUEST)
+        & (ev.tick == c.tick)
+        & (ev.stage == c.stage)
+    )
+    c = _tree_set(c, **{"ev.micro": ev.micro + jnp.where(asks.any() & siblings, 2, 0)})
     return c, jnp.stack(out)
 
 
