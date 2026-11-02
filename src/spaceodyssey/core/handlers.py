@@ -111,6 +111,7 @@ def h_done(c, ev, study, truth, root):
         vintage=ev.scope,
         config_id=jnp.asarray(0, I64),
         cost=channels.cost[channel_index],
+        charged=channels.cost[channel_index],
         valid=~dup & ~stale,
     )
     rec = _realize_rec(c, study, truth, root, base, jnp.asarray(1.0, F64))
@@ -173,11 +174,14 @@ def h_process(c, ev, study, truth, root):
     return c4, _emit(written.astype(I64), slot), rec
 
 
-def _cancel_lane(c, study, truth, root, lane, enable):
+def _cancel_lane(
+    c, study, truth, root, lane, enable, status=RecordStatus.PARTIAL, refund=True
+):
     """Cancel a live occupancy and refund its unused cost.
 
     Live-cancel path: invalidate the lane's pending Done row, write the partial record
-    at the elapsed fraction, refund the unused cost, free the lane.
+    at the elapsed fraction, refund the unused cost, free the lane. With `refund` false
+    the record is charged in full and nothing comes back (a fault).
     """
     caps, channels = study.caps, study.channels
     pend = c.ev.valid & (c.ev.kind == EventKind.DONE) & (c.ev.lane == lane)
@@ -190,6 +194,7 @@ def _cancel_lane(c, study, truth, root, lane, enable):
     )
     start_tick = c.ev.tick[i] - dur
     frac = jnp.clip((c.tick - start_tick).astype(F64) / dur.astype(F64), 0.0, 1.0)
+    spent = frac if refund else jnp.asarray(1.0, F64)
     base = dataclasses.replace(
         record_none(caps),
         kind=channels.kind[channel_index],
@@ -202,7 +207,7 @@ def _cancel_lane(c, study, truth, root, lane, enable):
         end_tick=c.tick,
         # a cancellation record is never released in the tick it is cancelled
         available_tick=c.tick + jnp.maximum(lat, 1),
-        status=jnp.asarray(RecordStatus.PARTIAL, I64),
+        status=jnp.asarray(status, I64),
         phase=c.ev.scope[i],
         acquisition_id=c.ev.acquisition_id[i],
         revision=jnp.asarray(0, I64),
@@ -212,12 +217,13 @@ def _cancel_lane(c, study, truth, root, lane, enable):
         source=c.ev.channel[i],
         vintage=c.ev.scope[i],
         config_id=jnp.asarray(0, I64),
-        cost=channels.cost[channel_index] * frac,
+        cost=channels.cost[channel_index] * spent,
+        charged=channels.cost[channel_index] * spent,
         valid=has,
     )
     rec = _realize_rec(c, study, truth, root, base, frac)
     rows = _resource_rows(study, lane)
-    refund = jnp.where(has, channels.cost[channel_index] * (1.0 - frac), 0.0)
+    credit = jnp.where(has, channels.cost[channel_index] * (1.0 - spent), 0.0)
     c1 = _tree_set(
         c,
         **{
@@ -228,7 +234,7 @@ def _cancel_lane(c, study, truth, root, lane, enable):
             ),
             "ledger.balance": c.ledger.balance.at[
                 rows, jnp.arange(caps.n_resources)
-            ].add(refund),
+            ].add(credit),
             "ledger.lane_busy_until": c.ledger.lane_busy_until.at[lane].set(
                 jnp.where(has, c.tick, c.ledger.lane_busy_until[lane])
             ),
@@ -250,8 +256,26 @@ def h_cancel(c, ev, study, truth, root):
     return c1, _emit(n, slot), rec
 
 
+def h_fault(c, ev, study, truth, root):
+    """A fault on a lane fails its live occupancy: charged in full, nothing refunded.
+
+    Like a Cancel it names a generation and acts only if that is the lane's current one.
+    Which of a fault and a settlement at one tick runs first is the channel's declared
+    coincident order, applied by the event queue.
+    """
+    live = ev.gen == c.ledger.lane_gen[ev.lane]
+    c1, n, slot, rec = _cancel_lane(
+        c, study, truth, root, ev.lane, live, RecordStatus.FAILED, False
+    )
+    return c1, _emit(n, slot), rec
+
+
 def h_stop(c, ev, study, truth, root):
-    """Close, drain or abort a scope (lane, asset, program, campaign)."""
+    """Close, drain or abort a scope (lane, asset, program, campaign).
+
+    Below campaign scope a drain closes exactly as a close does: the running occupancies
+    finish either way. At campaign scope a drain also ends the run once they settle.
+    """
     caps = study.caps
     lanes = jnp.arange(caps.n_lanes)
     in_scope = jnp.select(
@@ -266,7 +290,6 @@ def h_stop(c, ev, study, truth, root):
         c,
         **{
             "ledger.lane_closed": c.ledger.lane_closed | in_scope,
-            "ledger.lane_draining": c.ledger.lane_draining | (in_scope & drain),
             "draining": c.draining | (campaign & drain),
         },
     )
@@ -293,5 +316,15 @@ def step(carry, ev, study, truth, root):
     )
 
 
-HANDLERS = (h_none, h_done, h_release, h_wait, h_stop, h_process, h_cancel, h_none)
+HANDLERS = (
+    h_none,
+    h_done,
+    h_release,
+    h_wait,
+    h_stop,
+    h_process,
+    h_cancel,
+    h_none,
+    h_fault,
+)
 PUBLIC = Audience.OBSERVER | Audience.POLICY

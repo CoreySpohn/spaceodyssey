@@ -29,10 +29,11 @@ def test_leaky_wake_with_private_writer_also_caught(baseline):
     assert sc.wakes > baseline.wakes
 
 
-def test_releasing_process_wakes_once_and_is_coincident(baseline):
+def test_releasing_process_coalesces_with_the_release_it_coincides_with(baseline):
     sc = run_leak(LEAK_SCENARIOS["releasing"], wake_by_audience, n_worlds=2)
     assert sc.coincident_present
-    assert sc.wakes == baseline.wakes + 2  # one extra wake per world
+    # the process event and the record release share a tick: one decision, not two
+    assert sc.wakes == baseline.wakes
 
 
 def test_baseline_policy_is_not_trivially_idle(baseline):

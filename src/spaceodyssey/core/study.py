@@ -25,10 +25,20 @@ class Clock(eqx.Module):
 
 
 class Agenda(eqx.Module):
-    """Policies and the phase boundaries that select them."""
+    """Policies, the phase boundaries that select them, and what each phase may ask.
+
+    `permitted_effects` holds one bitmask over `EffectKind` per phase (see
+    `effect_mask`); admission refuses an effect whose bit is clear.
+    """
 
     policies: tuple[AbstractPolicy, ...]
     phase_until: tuple[int, ...]
+    permitted_effects: tuple[int, ...]
+
+    def __check_init__(self):
+        """Require one mask per phase."""
+        if len(self.permitted_effects) != len(self.policies):
+            raise ValueError("permitted_effects needs one mask per policy phase")
 
 
 class Study(eqx.Module):

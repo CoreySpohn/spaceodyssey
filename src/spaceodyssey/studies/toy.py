@@ -10,9 +10,11 @@ import numpy as np
 
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import (
+    ALL_EFFECTS,
     F64,
     I64,
     PUBLIC,
+    CoincidentOrder,
     Disposition,
     EffectKind,
     EventKind,
@@ -182,6 +184,7 @@ def _effects(
     lane=0,
     scope=0,
     disposition=0,
+    disruptive=False,
 ):
     def col(v):
         return jnp.asarray(v, I64) * jnp.ones(caps.n_effects, I64)
@@ -199,6 +202,8 @@ def _effects(
         disposition=col(disposition)
         if np.ndim(disposition) == 0
         else jnp.asarray(disposition, I64),
+        disruptive=jnp.asarray(disruptive, jnp.bool_)
+        * jnp.ones(caps.n_effects, jnp.bool_),
     )
 
 
@@ -336,6 +341,7 @@ class FixedPlanPolicy(AbstractPolicy):
             lane=jnp.zeros(caps.n_effects, I64),
             scope=jnp.asarray(scopes, I64),
             disposition=jnp.asarray(disps, I64),
+            disruptive=jnp.zeros(caps.n_effects, jnp.bool_),
         )
         new_ps = jnp.asarray(pstate).at[0].add(1.0 if advance_plan else 0.0)
         return eff, new_ps, jr.uniform(key, dtype=F64)
@@ -538,6 +544,8 @@ def survey_1(caps=None, **overrides):
         kind=jnp.full(c, RECORD_MEASUREMENT, I64),
         audience=jnp.full(c, PUBLIC, I64),
         cost=jnp.ones((c, caps.n_resources), F64),
+        charge=jnp.ones((c, caps.n_resources), F64),
+        coincident_order=jnp.full(c, CoincidentOrder.FAULT_FIRST, I64),
     )
     budget = jnp.concatenate(
         [
@@ -560,8 +568,18 @@ def survey_1(caps=None, **overrides):
         design=ToyDesign(gain=1.0),
     )
     base.update(overrides)
-    base["assets"] = AssetTable(base.pop("lane_asset"), base.pop("transition_ticks"))
-    base["agenda"] = Agenda(base.pop("policies"), base.pop("phase_until"))
+    base["assets"] = AssetTable(
+        lane_asset=base.pop("lane_asset"),
+        transition_ticks=base.pop("transition_ticks"),
+        freeze_ticks=jnp.zeros(caps.n_assets, I64),
+        disruptive_resource=jnp.full(caps.n_assets, -1, I64),
+    )
+    policies = base.pop("policies")
+    base["agenda"] = Agenda(
+        policies,
+        base.pop("phase_until"),
+        base.pop("permitted_effects", (ALL_EFFECTS,) * len(policies)),
+    )
     base["clock"] = Clock(1.0)
     base["world_source"] = ToyWorldSource()
     base["objective"] = ToyObjective(threshold=base.pop("detect_thr", 3.0))

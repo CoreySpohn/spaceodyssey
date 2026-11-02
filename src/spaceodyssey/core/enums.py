@@ -9,6 +9,8 @@ I64 = jnp.int64
 F64 = jnp.float64
 B = jnp.bool_
 N_STAGES = 5
+N_TIES = 3
+TIE_NEUTRAL = 1
 BIG = int(np.iinfo(np.int64).max // 4)
 
 
@@ -33,6 +35,7 @@ class EventKind(IntEnum):
     PROCESS = 5
     CANCEL = 6
     RESULT = 7
+    FAULT = 8
 
 
 class EffectKind(IntEnum):
@@ -94,6 +97,31 @@ class AdmissionCode(IntEnum):
     HORIZON = 5
     UNSUPPORTED = 6
     NONE = 7
+    OUTSIDE_VALIDITY = 8
+    FROZEN_HORIZON = 9
+    FORBIDDEN = 10
+
+
+class CoincidentOrder(IntEnum):
+    """How a channel orders a fault against a settlement at the same tick and stage."""
+
+    SETTLE_FIRST = 0
+    FAULT_FIRST = 1
+
+
+class ChargeRule(IntEnum):
+    """How a program row is charged (reserved; only the receipt rule exists)."""
+
+    RECEIPT = 0
+
+
+class RemainderRule(IntEnum):
+    """What happens to an unspent balance at the end of its window (reserved)."""
+
+    NONE = 0
+    FORFEIT = 1
+    CARRY_OVER = 2
+    REALLOCATE = 3
 
 
 class Audience(IntFlag):
@@ -104,3 +132,14 @@ class Audience(IntFlag):
 
 
 PUBLIC = Audience.OBSERVER | Audience.POLICY
+
+
+def effect_mask(*kinds):
+    """Bitmask over `EffectKind` with one bit per listed kind."""
+    mask = 0
+    for kind in kinds:
+        mask |= 1 << int(kind)
+    return mask
+
+
+ALL_EFFECTS = effect_mask(*EffectKind)

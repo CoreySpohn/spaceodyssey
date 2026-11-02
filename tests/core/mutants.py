@@ -48,6 +48,7 @@ MUTANT_HANDLERS = (
     handlers.h_process,
     _clone(handlers.h_cancel, _cancel_lane=_cancel),
     handlers.h_none,
+    _clone(handlers.h_fault, _cancel_lane=_cancel),
 )
 
 
@@ -57,7 +58,7 @@ def _mutant_step(carry, ev, study, truth, root):
 
 def _padded_step(carry, ev, study, truth, root):
     return _step_with_table(
-        carry, ev, study, truth, root, handlers.HANDLERS + (handlers.h_none,) * 4
+        carry, ev, study, truth, root, handlers.HANDLERS + (handlers.h_none,) * 3
     )
 
 
@@ -113,3 +114,41 @@ class PaddedCompiledExecutor(CompiledExecutor):
 class PaddedHostExecutor(HostExecutor):
     def advance(self, carry, root, study, truth, *, wake_fn=core.wake_by_audience):
         return _padded_advance_jit(carry, root, study, truth, wake_fn=wake_fn)
+
+
+def _never_waits(carry, caps):
+    """The per-wake rule: a decision is due after every waking event."""
+    return jnp.asarray(True)
+
+
+_per_wake_advance = _clone(transaction.advance, decision_due=_never_waits)
+_per_wake_advance_jit = eqx.filter_jit(_per_wake_advance)
+
+
+class PerWakeHostExecutor(HostExecutor):
+    """Negative control: one decision per waking event instead of one per tick."""
+
+    def advance(self, carry, root, study, truth, *, wake_fn=core.wake_by_audience):
+        return _per_wake_advance_jit(carry, root, study, truth, wake_fn=wake_fn)
+
+
+def _h_cancel_decrementing(c, ev, study, truth, root):
+    """Negative control: a cancel frees the acquisition index it consumed."""
+    c1, emit, rec = handlers.h_cancel(c, ev, study, truth, root)
+    counts = c1.acquisition_counts.at[rec.subject].add(-emit.n_written)
+    return eqx.tree_at(lambda x: x.acquisition_counts, c1, counts), emit, rec
+
+
+DECREMENTING_HANDLERS = (
+    *handlers.HANDLERS[:6],
+    _h_cancel_decrementing,
+    *handlers.HANDLERS[7:],
+)
+
+
+def _decrementing_step(carry, ev, study, truth, root):
+    return _step_with_table(carry, ev, study, truth, root, DECREMENTING_HANDLERS)
+
+
+_decrementing_advance = _clone(transaction.advance, step=_decrementing_step)
+decrementing_advance_jit = eqx.filter_jit(_decrementing_advance)

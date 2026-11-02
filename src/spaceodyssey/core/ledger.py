@@ -4,7 +4,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from spaceodyssey.core.enums import I64
+from spaceodyssey.core.enums import I64, TIE_NEUTRAL, CoincidentOrder
 
 
 class ChannelTable(eqx.Module):
@@ -17,6 +17,8 @@ class ChannelTable(eqx.Module):
     kind: jax.Array
     audience: jax.Array
     cost: jax.Array  # F64[C, R]
+    charge: jax.Array  # F64[C, R], reserved: what a receipt debits; equals cost
+    coincident_order: jax.Array  # CoincidentOrder per channel; no default
 
 
 class Ledger(eqx.Module):
@@ -26,7 +28,12 @@ class Ledger(eqx.Module):
     lane_busy_until: jax.Array
     lane_gen: jax.Array
     lane_closed: jax.Array
-    lane_draining: jax.Array
+    # reserved, read by no rule yet
+    program_charge_rule: jax.Array  # I64[P]
+    valid_from_tick: jax.Array  # I64[BR]
+    valid_until_tick: jax.Array  # I64[BR]
+    remainder_rule: jax.Array  # I64[BR]
+    disruptive_used: jax.Array  # I64[A]
 
 
 def _resource_rows(study, lane):
@@ -44,7 +51,23 @@ def _resource_rows(study, lane):
 
 
 class AssetTable(eqx.Module):
-    """Per-lane asset membership and transition duration."""
+    """Per-lane asset membership and transition duration.
+
+    `freeze_ticks` and `disruptive_resource` have one entry per asset and are reserved:
+    no rule reads them yet.
+    """
 
     lane_asset: jax.Array
     transition_ticks: jax.Array
+    freeze_ticks: jax.Array  # I64[A], 0 means no horizon
+    disruptive_resource: jax.Array  # I64[A], -1 means none
+
+
+def fault_tie(channels, channel_index):
+    """Rank of a fault row on a channel among rows sharing its tick, stage and micro.
+
+    A channel that orders faults first ranks them below the neutral rank, one that
+    settles first ranks them above it.
+    """
+    first = channels.coincident_order[channel_index] == CoincidentOrder.FAULT_FIRST
+    return jnp.where(first, TIE_NEUTRAL - 1, TIE_NEUTRAL + 1).astype(I64)

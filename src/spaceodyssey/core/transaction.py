@@ -15,7 +15,7 @@ from spaceodyssey.core.enums import (
     EventKind,
     Stage,
 )
-from spaceodyssey.core.events import enqueue, select_next, where_tree
+from spaceodyssey.core.events import enqueue, order_key, select_next, where_tree
 from spaceodyssey.core.handlers import step
 from spaceodyssey.core.keys import policy_key
 from spaceodyssey.core.ledger import _resource_rows
@@ -37,8 +37,23 @@ def wake_by_audience(carry, ev):
     )
 
 
+def decision_due(carry, caps):
+    """Whether no queued row is left at this tick ahead of the decide stage."""
+    limit = order_key(carry.tick, Stage.DECIDE, 0, 0, caps, 0)
+    ev = carry.ev
+    keys = order_key(ev.tick, ev.stage, ev.micro, ev.sid, caps, ev.tie)
+    return ~jnp.any(ev.valid & (keys < limit))
+
+
 def advance(carry, root, study, truth, *, wake_fn=wake_by_audience):
-    """Select the next event, handle it, consume it. Returns (carry, trace, wake)."""
+    """Select the next event, handle it, consume it. Returns (carry, trace, wake).
+
+    Wakes coalesce per tick. An event that wakes the policy marks the wake pending; the
+    decision fires once, on the event after which no queued row remains at or before the
+    current tick ahead of the decide stage, so every record released at that tick is
+    in the decision's view. Rows the decision itself enqueues run after it and may wake
+    a further decision at the next microstep, bounded by the microstep guard.
+    """
     caps = study.caps
     act = active(carry)
     c1, ev, has = select_next(carry, caps)
@@ -51,8 +66,10 @@ def advance(carry, root, study, truth, *, wake_fn=wake_by_audience):
     drained = handled & c3.draining & ~drainable.any()
     idle = carry.idle | (act & ~has)
     c4 = _tree_set(c3, idle=idle, done=c3.done | drained | idle)
-    wake = handled & wake_fn(c4, ev)
-    c5 = _tree_set(c4, woke=wake)
+    raised = handled & wake_fn(c4, ev)
+    pending = c4.pending_wake | raised
+    wake = handled & pending & decision_due(c4, caps) & ~c4.done & ~c4.draining
+    c5 = _tree_set(c4, woke=jnp.asarray(False), pending_wake=pending & ~wake)
     z = jnp.asarray(0, I64)
 
     def g(x):
@@ -128,10 +145,19 @@ def mask_effects(effects, wake):
     )
 
 
-def _admit_row(c, eff, e, study):
+def _phase_mask(c, study):
+    """Bitmask of the effects the current phase may ask for."""
+    masks = jnp.asarray(study.agenda.permitted_effects, I64)
+    return masks[jnp.clip(c.phase, 0, masks.shape[0] - 1)]
+
+
+def _permitted(mask, kind):
+    return ((mask >> kind) & 1) == 1
+
+
+def _commit_observe(c, eff, e, ok, study):
+    """Debit, occupy the lane and queue the settlement of effect row e where `ok`."""
     caps, channels = study.caps, study.channels
-    act = active(c)
-    kind = eff.kind[e]
     t = c.tick
     channel_index = eff.channel_index[e]
     lane = channels.lane[channel_index]
@@ -142,27 +168,6 @@ def _admit_row(c, eff, e, study):
     )
     rows = _resource_rows(study, lane)
     cols = jnp.arange(caps.n_resources)
-    funds = jnp.all(c.ledger.balance[rows, cols] >= channels.cost[channel_index])
-    room = (~c.ev.valid).any() & (c.next_sid < caps.max_sid)
-    code = jnp.select(
-        [
-            c.ledger.lane_closed[lane] | c.draining,
-            c.ledger.lane_busy_until[lane] > t,
-            done_t > study.horizon_tick,
-            ~funds,
-            ~room,
-        ],
-        [
-            AdmissionCode.LANE_CLOSED,
-            AdmissionCode.LANE_BUSY,
-            AdmissionCode.HORIZON,
-            AdmissionCode.NO_FUNDS,
-            AdmissionCode.NO_SLOT,
-        ],
-        AdmissionCode.OK,
-    ).astype(I64)
-    obs = act & (kind == EffectKind.OBSERVE)
-    ok = obs & (code == AdmissionCode.OK)
     gen = c.ledger.lane_gen[lane] + ok.astype(I64)
     subject = eff.subject[e]
     acquisition_index = c.acquisition_counts[subject]
@@ -179,7 +184,7 @@ def _admit_row(c, eff, e, study):
             "acquisition_counts": c.acquisition_counts.at[subject].add(ok.astype(I64)),
         },
     )
-    c1 = enqueue(
+    return enqueue(
         c1,
         ok,
         kind=EventKind.DONE,
@@ -197,72 +202,162 @@ def _admit_row(c, eff, e, study):
         acquisition_id=c.next_sid,
         caps=caps,
     )
-    w = eff.tick[e]
-    c1 = enqueue(
-        c1,
-        act & (kind == EffectKind.WAIT),
-        kind=EventKind.WAIT,
-        tick=jnp.maximum(w, t),
-        stage=jnp.where(w > t, Stage.RELEASE, Stage.ADMIT),
-        group=eff.group[e],
-        audience=PUBLIC,
-        caps=caps,
-    )
-    c1 = enqueue(
-        c1,
-        act & (kind == EffectKind.STOP),
-        kind=EventKind.STOP,
-        tick=t,
-        stage=Stage.ADMIT,
-        lane=eff.lane[e],
-        group=eff.group[e],
-        audience=PUBLIC,
-        scope=eff.scope[e],
-        disposition=eff.disposition[e],
-        caps=caps,
-    )
-    c1 = enqueue(
-        c1,
-        act & (kind == EffectKind.CANCEL),
-        kind=EventKind.CANCEL,
-        tick=t,
-        stage=Stage.ADMIT,
-        lane=eff.lane[e],
-        gen=c.ledger.lane_gen[eff.lane[e]] + eff.tick[e],
-        group=eff.group[e],
-        audience=PUBLIC,
-        caps=caps,
-    )
-    reserved = (kind == EffectKind.ALLOCATE) | (kind == EffectKind.QUERY)
-    out = jnp.select(
-        [~act | (kind == EffectKind.NONE), obs, reserved],
-        [AdmissionCode.NONE, code, AdmissionCode.UNSUPPORTED],
-        AdmissionCode.OK,
-    ).astype(I64)
-    return c1, out
+
+
+def _group_code(c, eff, member, study):
+    """Admission result of the rows in `member`, judged as one group.
+
+    The group is admitted on its summed demand per resource row, on lane availability
+    (two rows on one lane cannot both run) and on queue room for every row. The result
+    is the first refusal in row order, or OK when every row passes.
+    """
+    caps, channels = study.caps, study.channels
+    n = caps.n_effects
+    t = c.tick
+    lanes = [channels.lane[eff.channel_index[f]] for f in range(n)]
+    rows = [_resource_rows(study, lanes[f]) for f in range(n)]
+    cost = [channels.cost[eff.channel_index[f]] for f in range(n)]
+    n_members = sum(member[f].astype(I64) for f in range(n))
+    room = ((~c.ev.valid).sum() >= n_members) & (c.next_sid + n_members <= caps.max_sid)
+    cols = jnp.arange(caps.n_resources)
+    codes = []
+    for f in range(n):
+        ci = eff.channel_index[f]
+        done_t = (
+            t + study.assets.transition_ticks[lanes[f]] + channels.occupancy_ticks[ci]
+        )
+        clash = jnp.asarray(False)
+        for g in range(f):
+            clash = clash | (member[g] & (lanes[g] == lanes[f]))
+        demand = jnp.zeros(caps.n_resources)
+        for g in range(n):
+            demand = demand + jnp.where(member[g] & (rows[g] == rows[f]), cost[g], 0.0)
+        funds = jnp.all(c.ledger.balance[rows[f], cols] >= demand)
+        code = jnp.select(
+            [
+                c.ledger.lane_closed[lanes[f]] | c.draining,
+                (c.ledger.lane_busy_until[lanes[f]] > t) | clash,
+                done_t > study.horizon_tick,
+                ~funds,
+                ~room,
+            ],
+            [
+                AdmissionCode.LANE_CLOSED,
+                AdmissionCode.LANE_BUSY,
+                AdmissionCode.HORIZON,
+                AdmissionCode.NO_FUNDS,
+                AdmissionCode.NO_SLOT,
+            ],
+            AdmissionCode.OK,
+        ).astype(I64)
+        codes.append(jnp.where(member[f], code, AdmissionCode.OK))
+    first = jnp.asarray(AdmissionCode.OK, I64)
+    for f in reversed(range(n)):
+        first = jnp.where(codes[f] != AdmissionCode.OK, codes[f], first)
+    return first
+
+
+def _admit_rows(c, eff, mask, study):
+    """Admit the rows of one decision, Observe rows of one group in or out whole."""
+    caps = study.caps
+    n = caps.n_effects
+    out = [jnp.asarray(AdmissionCode.NONE, I64)] * n
+    decided = jnp.zeros(n, jnp.bool_)
+    for e in range(n):
+        act = active(c)
+        kind = eff.kind[e]
+        allowed = _permitted(mask, kind)
+        obs = act & (kind == EffectKind.OBSERVE) & allowed
+        # the first undecided row of a group admits every row of that group
+        start = obs & ~decided[e]
+        member = jnp.stack(
+            [
+                start
+                & (f >= e)
+                & (eff.kind[f] == EffectKind.OBSERVE)
+                & _permitted(mask, eff.kind[f])
+                & (eff.group[f] == eff.group[e])
+                for f in range(n)
+            ]
+        )
+        gcode = _group_code(c, eff, member, study)
+        ok = gcode == AdmissionCode.OK
+        for f in range(n):
+            c = _commit_observe(c, eff, f, member[f] & ok, study)
+            out[f] = jnp.where(member[f], gcode, out[f])
+        decided = decided | member
+        t = c.tick
+        w = eff.tick[e]
+        c = enqueue(
+            c,
+            act & allowed & (kind == EffectKind.WAIT),
+            kind=EventKind.WAIT,
+            tick=jnp.maximum(w, t),
+            stage=jnp.where(w > t, Stage.RELEASE, Stage.ADMIT),
+            group=eff.group[e],
+            audience=PUBLIC,
+            caps=caps,
+        )
+        c = enqueue(
+            c,
+            act & allowed & (kind == EffectKind.STOP),
+            kind=EventKind.STOP,
+            tick=t,
+            stage=Stage.ADMIT,
+            lane=eff.lane[e],
+            group=eff.group[e],
+            audience=PUBLIC,
+            scope=eff.scope[e],
+            disposition=eff.disposition[e],
+            caps=caps,
+        )
+        c = enqueue(
+            c,
+            act & allowed & (kind == EffectKind.CANCEL),
+            kind=EventKind.CANCEL,
+            tick=t,
+            stage=Stage.ADMIT,
+            lane=eff.lane[e],
+            gen=c.ledger.lane_gen[eff.lane[e]] + eff.tick[e],
+            group=eff.group[e],
+            audience=PUBLIC,
+            caps=caps,
+        )
+        reserved = (kind == EffectKind.ALLOCATE) | (kind == EffectKind.QUERY)
+        out[e] = jnp.select(
+            [~act | (kind == EffectKind.NONE), ~allowed, obs, reserved],
+            [
+                AdmissionCode.NONE,
+                AdmissionCode.FORBIDDEN,
+                out[e],
+                AdmissionCode.UNSUPPORTED,
+            ],
+            AdmissionCode.OK,
+        ).astype(I64)
+    return c, jnp.stack(out)
 
 
 def admit(carry, effects, study):
-    """Admit effect rows against the balance left by earlier rows.
+    """Admit a decision's effect rows. Returns (carry, admission code per row).
 
-    Admit a decision's effect rows in order, each against the balance left by the rows
-    before it. Returns (carry, admission code per row).
+    Rows run in order, each against the balance left by the rows before it, except that
+    Observe rows sharing a `group` id are judged together: summed demand per resource
+    row, lane availability and queue room for all of them, then every row is admitted or
+    none is, and a refused group takes no acquisition index. An effect whose bit is
+    clear in the phase's permitted mask is refused as forbidden and changes nothing.
     """
-    caps = study.caps
     supported = (
         (effects.kind == EffectKind.OBSERVE)
         | (effects.kind == EffectKind.WAIT)
         | (effects.kind == EffectKind.STOP)
         | (effects.kind == EffectKind.CANCEL)
     )
-    any_eff = active(carry) & supported.any()
+    phase = phase_at(carry, study)
+    mask = _phase_mask(_tree_set(carry, phase=phase), study)
+    any_eff = active(carry) & (supported & _permitted(mask, effects.kind)).any()
     c = _tree_set(carry, stage=jnp.where(any_eff, Stage.ADMIT, carry.stage))
-    c = _tree_set(c, phase=jnp.where(any_eff, phase_at(c, study), c.phase))
-    codes = []
-    for e in range(caps.n_effects):
-        c, code = _admit_row(c, effects, e, study)
-        codes.append(code)
-    return c, jnp.stack(codes)
+    c = _tree_set(c, phase=jnp.where(any_eff, phase, c.phase))
+    return _admit_rows(c, effects, mask, study)
 
 
 def close_decision(carry, effects, pstate, wake, study):
@@ -286,6 +381,7 @@ def finish_trace(trace, effects, codes, u, wake, carry):
         trace,
         n_dec=carry.n_dec,
         eff_kind=effects.kind,
+        eff_disruptive=effects.disruptive,
         admit_code=codes,
         pol_u=jnp.where(wake, u, 0.0),
         belief_mean=carry.belief.mean,

@@ -111,6 +111,23 @@ HAND_HISTORIES = {
         (160, A, STOP),
         (180, R, REL),
     ),
+    # the two bundled occupancies release at 260; one decision sees both records
+    "bundle": (
+        KICKOFF,
+        (110, S, DONE),
+        (130, R, REL),
+        (240, S, DONE),
+        (260, S, DONE),
+        (260, R, REL),
+        (260, R, REL),
+        (370, S, DONE),
+        (390, R, REL),
+        (500, S, DONE),
+        (520, R, REL),
+        (630, S, DONE),
+        (650, R, REL),
+        (650, A, STOP),
+    ),
     "phase_switch": (
         KICKOFF,
         (110, S, DONE),
@@ -203,6 +220,22 @@ HAND_ROWS = {
         (0, 0, 0, 0, 0),
         (1, 0, 0, 0, 0),
     ),
+    "bundle": (
+        (0, 0, 0, 0, 1),
+        (0, 0, 0, 1, 0),
+        (0, 0, 0, 0, 1),
+        (0, 1, 0, 1, 0),
+        (2, 1, 1, 1, 0),
+        (0, 1, 0, 0, 0),
+        (2, 1, 1, 0, 1),
+        (0, 0, 1, 1, 0),
+        (0, 0, 1, 0, 1),
+        (0, 1, 2, 1, 0),
+        (0, 1, 2, 0, 1),
+        (0, 0, 2, 1, 0),
+        (0, 0, 2, 0, 1),
+        (0, 0, 0, 0, 0),
+    ),
     "phase_switch": (
         (0, 0, 0, 0, 1),
         (0, 0, 0, 1, 0),
@@ -246,6 +279,13 @@ def _one_partial_at(h, subject, acquisition_index, fraction):
     )
 
 
+def _no_refusal(h):
+    refused = (h.ints["admit_code"] != AdmissionCode.OK) & (
+        h.ints["admit_code"] != AdmissionCode.NONE
+    )
+    return not bool(refused.any())
+
+
 HAND_INVARIANTS = {
     "baseline": (
         lambda h: h.ints["n_dec"][-1] == 6 and h.n_records == 5,
@@ -283,6 +323,17 @@ HAND_INVARIANTS = {
     "coincident": (
         lambda h: h.rows[4][3] == 1 and h.rows[5][3] == 2,
         lambda h: not h.double_settle and h.n_records == 3,
+    ),
+    "bundle": (
+        # one decision at 260 sees both records, so no plan entry meets a busy lane
+        lambda h: h.n_records == 6 and _all_completed(h),
+        _no_refusal,
+        # the bundle admits two acquisitions of subject 1 at one decision
+        lambda h: (
+            sorted(h.ints["acquisition_index"][h.ints["subject"] == 1].tolist())
+            == [0, 1, 2]
+        ),
+        lambda h: h.ints["n_dec"][-1] == 6,
     ),
     "phase_switch": (
         lambda h: h.ints["phase"].tolist() == [0, 0, 0, 1, 1],
@@ -427,6 +478,7 @@ HAND_STUDIES = {
     "coincident": lambda: kinds.survey_1(
         policies=(frozen(plan=((0, 11), (1, 12)), bundle_at=0, wait_at=1),)
     ),
+    "bundle": lambda: _retimed_bundle_study(),
     "phase_switch": lambda: kinds.survey_1(
         policies=(
             frozen(plan=((0, 10), (1, 10), (0, 10))),
@@ -435,6 +487,17 @@ HAND_STUDIES = {
         phase_until=(300, 1000),
     ),
 }
+
+
+def _retimed_bundle_study():
+    """A bundle whose two occupancies release at one tick.
+
+    Channel 12 occupies its lane for 125 ticks instead of 50, so the bundle's records
+    release together at 260 and one decision sees both.
+    """
+    base = kinds.survey_1(policies=(frozen(bundle_at=1),))
+    occupancy = base.channels.occupancy_ticks.at[2].set(125)
+    return eqx.tree_at(lambda st: st.channels.occupancy_ticks, base, occupancy)
 
 
 def _delayed_release_study():
@@ -502,19 +565,9 @@ def build_corpus():
         ),
         _case(
             "bundle",
-            lambda: kinds.survey_1(policies=(frozen(bundle_at=1),)),
-            None,
-            (
-                # the lane-2 Release wakes an extra decision, whose Observe finds
-                # lane 0 busy; the plan is spent one record early
-                lambda h: h.n_records == 5 and _all_completed(h),
-                lambda h: bool(np.any(h.ints["admit_code"] == AdmissionCode.LANE_BUSY)),
-                # the bundle admits two acquisition_counts of subject 1 at one decision
-                lambda h: (
-                    sorted(h.ints["acquisition_index"][h.ints["subject"] == 1].tolist())
-                    == [0, 1, 2]
-                ),
-            ),
+            hs["bundle"],
+            HAND_HISTORIES["bundle"],
+            HAND_INVARIANTS["bundle"],
         ),
         _case(
             "phase_switch",

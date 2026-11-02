@@ -11,14 +11,23 @@ from hypothesis import strategies as st
 
 from spaceodyssey import core as sch
 from spaceodyssey.core.capacities import Capacities
-from spaceodyssey.core.enums import BIG, N_STAGES, Audience, EventKind, Stage
+from spaceodyssey.core.enums import (
+    BIG,
+    N_STAGES,
+    N_TIES,
+    TIE_NEUTRAL,
+    Audience,
+    EventKind,
+    Stage,
+)
 
 CAPS = Capacities()
 
 
-def order_key_np(tick, stage, micro, sid, caps):
+def order_key_np(tick, stage, micro, sid, caps, tie=TIE_NEUTRAL):
     """Python-int twin of `order_key` (no retrace per hypothesis example)."""
-    return ((tick * N_STAGES + stage) * caps.max_micro + micro) * caps.max_sid + sid
+    pos = ((tick * N_STAGES + stage) * caps.max_micro + micro) * N_TIES + tie
+    return pos * caps.max_sid + sid
 
 
 def carry_at(caps=CAPS, **fields):

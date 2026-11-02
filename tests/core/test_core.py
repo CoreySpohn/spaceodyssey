@@ -129,14 +129,16 @@ def test_no_funds_and_lane_busy_codes():
     )
 
 
-def test_admission_is_cumulative_within_a_decision():
-    # two occupancies of one decision on the same lane: the second finds the lane busy
+def test_admission_is_cumulative_across_groups_of_a_decision():
+    # two occupancies of one decision on the same lane, in different groups: the
+    # second finds the lane busy after the first
     e = observe_effect(0, 10)
     e = dataclasses.replace(
         e,
         kind=e.kind.at[1].set(1),
         subject=e.subject.at[1].set(1),
         channel_index=e.channel_index.at[1].set(0),
+        group=e.group.at[1].set(1),
     )
     c, codes = admit_j(carry0(), e, STUDY)
     assert [int(x) for x in codes] == [0, AdmissionCode.LANE_BUSY]

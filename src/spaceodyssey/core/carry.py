@@ -10,7 +10,9 @@ from spaceodyssey.core.enums import (
     PUBLIC,
     AdmissionCode,
     B,
+    ChargeRule,
     EventKind,
+    RemainderRule,
     Stage,
 )
 from spaceodyssey.core.events import EventTable, empty_events, enqueue
@@ -35,6 +37,7 @@ class Carry(eqx.Module):
     acquisition_counts: jax.Array
     pstate: jax.Array
     woke: jax.Array
+    pending_wake: jax.Array
     done: jax.Array
     draining: jax.Array
     stalled: jax.Array
@@ -75,13 +78,18 @@ def empty_carry(caps, balance=None):
             lane_busy_until=jnp.zeros(caps.n_lanes, I64),
             lane_gen=jnp.zeros(caps.n_lanes, I64),
             lane_closed=jnp.zeros(caps.n_lanes, B),
-            lane_draining=jnp.zeros(caps.n_lanes, B),
+            program_charge_rule=jnp.full(caps.n_programs, ChargeRule.RECEIPT, I64),
+            valid_from_tick=jnp.zeros(br, I64),
+            valid_until_tick=jnp.full(br, caps.max_tick, I64),
+            remainder_rule=jnp.full(br, RemainderRule.NONE, I64),
+            disruptive_used=jnp.zeros(caps.n_assets, I64),
         ),
         belief=_zero_belief(caps),
         pbelief=_zero_belief(caps),
         acquisition_counts=jnp.zeros(caps.n_subjects, I64),
         pstate=jnp.zeros(caps.n_pstate, F64),
         woke=f,
+        pending_wake=f,
         done=f,
         draining=f,
         stalled=f,
@@ -123,6 +131,7 @@ class Trace(eqx.Module):
     wake: jax.Array
     n_dec: jax.Array
     eff_kind: jax.Array
+    eff_disruptive: jax.Array
     admit_code: jax.Array
     belief_mean: jax.Array
     belief_aux: jax.Array
@@ -151,6 +160,7 @@ def empty_trace(caps):
         wake=f,
         n_dec=z,
         eff_kind=jnp.zeros(caps.n_effects, I64),
+        eff_disruptive=jnp.zeros(caps.n_effects, B),
         admit_code=jnp.full(caps.n_effects, AdmissionCode.NONE, I64),
         belief_mean=jnp.zeros(caps.n_subjects, F64),
         belief_aux=jnp.zeros(caps.n_an, F64),

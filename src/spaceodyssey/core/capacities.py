@@ -4,7 +4,7 @@ import dataclasses
 
 import jax
 
-from spaceodyssey.core.enums import BIG, N_STAGES
+from spaceodyssey.core.enums import BIG, N_STAGES, N_TIES
 from spaceodyssey.core.events import _order_key_py
 
 
@@ -36,7 +36,7 @@ class Capacities:
     @property
     def max_tick(self) -> int:
         """Largest tick representable below the invalid-row sentinel."""
-        return BIG // (N_STAGES * self.max_micro * self.max_sid) - 1
+        return BIG // (N_STAGES * self.max_micro * N_TIES * self.max_sid) - 1
 
     def __post_init__(self):
         """Validate integer arithmetic bounds and static shapes."""
@@ -48,7 +48,12 @@ class Capacities:
         if not self.n_an <= self.n_subjects:
             raise ValueError("n_an must not exceed n_subjects")
         largest = _order_key_py(
-            self.max_tick, N_STAGES - 1, self.max_micro - 1, self.max_sid - 1, self
+            self.max_tick,
+            N_STAGES - 1,
+            self.max_micro - 1,
+            self.max_sid - 1,
+            self,
+            N_TIES - 1,
         )
         if not largest < BIG:
             raise ValueError("largest order key reaches BIG")

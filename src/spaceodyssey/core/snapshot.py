@@ -6,7 +6,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from spaceodyssey.core.enums import I64, Audience
+from spaceodyssey.core.enums import I64, Audience, B
 from spaceodyssey.core.records import LOG_INT_FIELDS, RecordLog
 
 
@@ -44,12 +44,16 @@ class EffectTable(eqx.Module):
     lane: jax.Array
     scope: jax.Array
     disposition: jax.Array
+    disruptive: jax.Array  # reserved: asks to break a frozen horizon
 
 
 def effects_none(caps):
     """Return an effect table with no active rows."""
     z = jnp.zeros(caps.n_effects, I64)
-    return EffectTable(**{n: z for n in EFFECT_FIELDS})
+    return EffectTable(
+        **{n: z for n in EFFECT_FIELDS if n != "disruptive"},
+        disruptive=jnp.zeros(caps.n_effects, B),
+    )
 
 
 def visible_rows(log, audience):
@@ -71,7 +75,7 @@ def snapshot_view(carry, audience, caps):
     vis = visible_rows(carry.log, audience)
     order = jnp.argsort(~vis, stable=True)
     cols = {}
-    for name in (*LOG_INT_FIELDS, "cost", "payload", "valid"):
+    for name in (*LOG_INT_FIELDS, "cost", "charged", "payload", "valid"):
         col = getattr(carry.log, name)
         mask = vis if col.ndim == 1 else vis[:, None]
         cols[name] = jnp.where(mask, col, jnp.zeros_like(col))[order]

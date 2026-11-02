@@ -6,21 +6,27 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from spaceodyssey.core.enums import BIG, I64, N_STAGES, B
+from spaceodyssey.core.enums import BIG, I64, N_STAGES, N_TIES, TIE_NEUTRAL, B
 
 
-def _order_key_py(tick, stage, micro, sid, caps):
-    return ((tick * N_STAGES + stage) * caps.max_micro + micro) * caps.max_sid + sid
+def _order_key_py(tick, stage, micro, sid, caps, tie=TIE_NEUTRAL):
+    pos = ((tick * N_STAGES + stage) * caps.max_micro + micro) * N_TIES + tie
+    return pos * caps.max_sid + sid
 
 
-def order_key(tick, stage, micro, sid, caps):
-    """Packed key, lexicographic in (tick, stage, micro, sid) within the caps."""
+def order_key(tick, stage, micro, sid, caps, tie=TIE_NEUTRAL):
+    """Packed key, lexicographic in (tick, stage, micro, tie, sid) within the caps.
+
+    `tie` ranks rows that share a tick, stage and microstep before the stable id breaks
+    the remaining ties; every row except a fault row carries the neutral rank.
+    """
     key = _order_key_py(
         jnp.asarray(tick, I64),
         jnp.asarray(stage, I64),
         jnp.asarray(micro, I64),
         jnp.asarray(sid, I64),
         caps,
+        jnp.asarray(tie, I64),
     )
     return key.astype(I64)
 
@@ -32,6 +38,7 @@ class EventTable(eqx.Module):
     tick: jax.Array
     stage: jax.Array
     micro: jax.Array
+    tie: jax.Array  # rank among rows at one (tick, stage, micro), before sid
     sid: jax.Array
     lane: jax.Array
     channel_index: jax.Array  # index into the channel table
@@ -90,6 +97,7 @@ def enqueue(
     scope=0,
     disposition=0,
     acquisition_id=-1,
+    tie=TIE_NEUTRAL,
     caps,
 ):
     """Add one row to the queue where `ok`, applying the micro placement rule.
@@ -123,6 +131,7 @@ def enqueue(
         tick=tick_w,
         stage=stage_w,
         micro=micro,
+        tie=jnp.asarray(tie, I64),
         sid=carry.next_sid,
         lane=jnp.asarray(lane, I64),
         channel_index=jnp.asarray(channel_index, I64),
@@ -159,7 +168,7 @@ def select_next(carry, caps):
     """
     ev = carry.ev
     keys = jnp.where(
-        ev.valid, order_key(ev.tick, ev.stage, ev.micro, ev.sid, caps), BIG
+        ev.valid, order_key(ev.tick, ev.stage, ev.micro, ev.sid, caps, ev.tie), BIG
     )
     i = jnp.argmin(keys)
     has = ev.valid.any()
