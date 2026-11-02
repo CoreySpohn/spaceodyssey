@@ -206,6 +206,10 @@ CLEAN = {
         ),
         (),
     ),
+    "policy_asks_query": (
+        lambda: _policy(effects=frozenset({EffectKind.QUERY})),
+        (),
+    ),
 }
 for case in CORPUS:
     CLEAN[f"corpus_{case.name}"] = (

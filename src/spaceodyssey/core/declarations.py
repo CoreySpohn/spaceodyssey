@@ -31,6 +31,7 @@ SUPPORTED_EFFECTS = frozenset(
         EffectKind.WAIT,
         EffectKind.STOP,
         EffectKind.CANCEL,
+        EffectKind.QUERY,
     }
 )
 

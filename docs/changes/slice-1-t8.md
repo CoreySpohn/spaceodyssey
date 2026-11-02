@@ -33,7 +33,7 @@
 | C001 | error | a policy phase `Need` is released later than its decision tick, to no policy audience, or on a channel the table lacks |
 | K001 | error | a measure or source draws without its stable-id coordinates (`subject`, `channel`, `acquisition_index` for a measure; `world` for a source) |
 | K002 | error | two measures share key coordinates, for example duplicate channel ids |
-| X001 | error | a component asks for `Allocate` or `Query`, requires a capability the selected executor lacks, or runs on other executors only |
+| X001 | error | a component asks for `Allocate`, requires a capability the selected executor lacks, or runs on other executors only |
 | X002 | error | `charge` differs from `cost`, `freeze_ticks` is nonzero, `disruptive_resource` is set, or a policy declares a disruptive effect |
 | T001 | warning | a policy asks DRAIN below campaign scope, where it equals CLOSE |
 | T002 | error | `coincident_order` is missing, has the wrong shape or holds a value outside `CoincidentOrder` |
@@ -76,8 +76,8 @@ None. No handler, executor or table changed.
 - Of the "claimed on a path the study does not request" half of X001, only the missing
   side exists; there is nothing in Slice 1 to claim.
 - Ledger reserved fields live in the carry, which is initialized to the defaults, so X002
-  checks the study tables and the declared disruptive effect only. `Query` is flagged
-  with `Allocate` because admission answers both as unsupported.
+  checks the study tables and the declared disruptive effect only. `Query` was flagged
+  with `Allocate` until the host protocol made it a supported effect.
 - The spec's X002 sentence names a later slice; the message says no rule reads the field.
 
 ## Left for later tasks
