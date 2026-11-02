@@ -1,0 +1,214 @@
+"""Seeded-mistake and correct studies for the pre-flight checks (not a test file).
+
+Each seeded study is `survey_1` (or the catalog study) with one thing wrong, and the
+single code it must raise. Components state their declarations through a static
+`Declaration`, the way a real component defines `declare`.
+"""
+
+import dataclasses
+
+import equinox as eqx
+import jax.numpy as jnp
+
+from spaceodyssey.core.declarations import (
+    HOST,
+    SCORER,
+    TRUTH,
+    Declaration,
+    Need,
+)
+from spaceodyssey.core.enums import (
+    I64,
+    Disposition,
+    EffectKind,
+    Scope,
+)
+from spaceodyssey.core.preflight import FindingCode as C
+from spaceodyssey.studies import catalog, toy
+from tests.core.corpus import CORPUS, frozen
+
+
+class StatedObserver(toy.ToyRunningMean):
+    stated: Declaration = eqx.field(static=True, default=Declaration())
+
+    def declare(self):
+        return self.stated
+
+
+class StatedPolicy(toy.NullPolicy):
+    stated: Declaration = eqx.field(static=True, default=Declaration())
+
+    def declare(self):
+        return self.stated
+
+
+class StatedChannelModel(toy.ToyPhotometry):
+    stated: Declaration = eqx.field(static=True, default=Declaration())
+
+    def declare(self):
+        return self.stated
+
+
+class StatedWorld(toy.ToyWorldSource):
+    stated: Declaration = eqx.field(static=True, default=Declaration())
+
+    def declare(self):
+        return self.stated
+
+
+def _replace(study, **fields):
+    return dataclasses.replace(study, **fields)
+
+
+def _with_policy(study, policy):
+    agenda = dataclasses.replace(study.agenda, policies=(policy,))
+    return _replace(study, agenda=agenda)
+
+
+def _with_model(**stated):
+    base = toy.survey_1()
+    model = StatedChannelModel(
+        noise=base.channel_model.noise, stated=Declaration(**stated)
+    )
+    return _replace(base, channel_model=model)
+
+
+def _coords_without(name):
+    return tuple(c for c in Declaration().key_coords if c != name)
+
+
+def _observer(**stated):
+    return _replace(
+        toy.survey_1(), observer=StatedObserver(stated=Declaration(**stated))
+    )
+
+
+def _policy(**stated):
+    return _with_policy(toy.survey_1(), StatedPolicy(stated=Declaration(**stated)))
+
+
+def _assets(**columns):
+    study = toy.survey_1()
+    return _replace(study, assets=dataclasses.replace(study.assets, **columns))
+
+
+def _channel_edit(**columns):
+    study = toy.survey_1()
+    return _replace(study, channels=dataclasses.replace(study.channels, **columns))
+
+
+def _unsupported_kind():
+    return _channel_edit(kind=toy.survey_1().channels.kind.at[2].set(9))
+
+
+def _dropped_order():
+    return _channel_edit(coincident_order=None)
+
+
+# name -> (the one code the study must raise, builder, executor selected)
+SEEDED = {
+    "observer_reads_truth": (C.F001, lambda: _observer(reads=(TRUTH,)), None),
+    "policy_reads_truth": (C.F001, lambda: _policy(reads=(TRUTH,)), None),
+    "observer_reads_scorer": (C.F002, lambda: _observer(reads=(SCORER,)), None),
+    "decision_before_release": (
+        C.C001,
+        lambda: _policy(needs=(Need(10, 0, 50),)),
+        None,
+    ),
+    "decision_reads_observer_only_channel": (
+        C.C001,
+        lambda: _with_policy(
+            catalog.catalog_study(),
+            StatedPolicy(
+                stated=Declaration(needs=(Need(catalog.CATALOG_CHANNEL_ID, 0, 5000),))
+            ),
+        ),
+        None,
+    ),
+    "draws_without_acquisition_index": (
+        C.K001,
+        lambda: _with_model(key_coords=_coords_without("acquisition_index")),
+        None,
+    ),
+    "world_draw_without_world": (
+        C.K001,
+        lambda: _replace(
+            toy.survey_1(),
+            world_source=StatedWorld(stated=Declaration(key_coords=("subject",))),
+        ),
+        None,
+    ),
+    "duplicate_channel_ids": (
+        C.K002,
+        lambda: _channel_edit(id=jnp.asarray([10, 10, 12], I64)),
+        None,
+    ),
+    "allocate": (
+        C.X001,
+        lambda: _policy(effects=frozenset({EffectKind.ALLOCATE})),
+        None,
+    ),
+    "gradients_on_host": (
+        C.X001,
+        lambda: _policy(requires=frozenset({"gradients"})),
+        HOST,
+    ),
+    "host_only_policy_on_compiled": (
+        C.X001,
+        lambda: _policy(executors=frozenset({HOST})),
+        "compiled",
+    ),
+    "charge_differs_from_cost": (
+        C.X002,
+        lambda: _channel_edit(charge=2.0 * jnp.ones((3, 3))),
+        None,
+    ),
+    "frozen_horizon": (
+        C.X002,
+        lambda: _assets(freeze_ticks=jnp.asarray([5, 0], I64)),
+        None,
+    ),
+    "disruptive_resource": (
+        C.X002,
+        lambda: _assets(disruptive_resource=jnp.asarray([0, -1], I64)),
+        None,
+    ),
+    "disruptive_effect": (C.X002, lambda: _policy(disruptive=True), None),
+    "drain_below_campaign": (
+        C.T001,
+        lambda: _with_policy(
+            toy.survey_1(),
+            frozen(stop_at=2, stop_scope=Scope.LANE, stop_disp=Disposition.DRAIN),
+        ),
+        None,
+    ),
+    "channel_without_order": (C.T002, _dropped_order, None),
+    "channel_order_out_of_range": (
+        C.T002,
+        lambda: _channel_edit(coincident_order=jnp.asarray([0, 1, 7], I64)),
+        None,
+    ),
+    "channel_kind_unregistered": (C.R001, _unsupported_kind, None),
+}
+
+# Correct studies and the codes they must raise (warnings only).
+_DRAIN_BELOW = {f"stop_{scope}_drain" for scope in ("lane", "asset", "program")}
+CLEAN = {
+    "survey_1": (toy.survey_1, ()),
+    "catalog_study": (catalog.catalog_study, ()),
+    "d2_study": (toy.d2_study, ()),
+    "stated_clean_components": (
+        lambda: _policy(
+            reads=(),
+            needs=(Need(10, 0, 500),),
+            requires=frozenset({"gradients"}),
+            stops=((Scope.CAMPAIGN, Disposition.DRAIN),),
+        ),
+        (),
+    ),
+}
+for case in CORPUS:
+    CLEAN[f"corpus_{case.name}"] = (
+        case.make_study,
+        (C.T001,) if case.name in _DRAIN_BELOW else (),
+    )
