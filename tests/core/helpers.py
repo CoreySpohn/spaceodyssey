@@ -64,7 +64,8 @@ def run_until(study, pred, truth=None, root=None, max_steps=60):
     for i in range(max_steps):
         if bool(pred(c)):
             return c
-        c, _ = transition_j(c, i, root, study, truth)
+        # Keep the loop index dynamic so all steps reuse one compiled transition.
+        c, _ = transition_j(c, jnp.asarray(i), root, study, truth)
     raise AssertionError("predicate never held")
 
 
@@ -73,7 +74,7 @@ def continue_until(c, study, truth, root, pred, max_steps=60):
     for i in range(max_steps):
         if bool(pred(c)):
             return c
-        c, _ = transition_j(c, i, root, study, truth)
+        c, _ = transition_j(c, jnp.asarray(i), root, study, truth)
     raise AssertionError("predicate never held")
 
 
@@ -125,7 +126,7 @@ def effects_of(kind, caps=CAPS):
 
 def run_until_quiet(c, study, truth, root, max_steps=60):
     for i in range(max_steps):
-        c, _ = transition_j(c, i, root, study, truth)
+        c, _ = transition_j(c, jnp.asarray(i), root, study, truth)
     return c
 
 
