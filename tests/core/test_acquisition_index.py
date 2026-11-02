@@ -219,7 +219,12 @@ def test_draw_follows_the_index():
             assert len(set(ordered)) == len(ordered)
 
 
-@pytest.mark.parametrize("case", CORPUS, ids=lambda c: c.name)
+# records a process or a host service writes take no admission index, so the cases built
+# on them are judged by the dense-index invariant instead
+ADMITTED = [c for c in CORPUS if c.name not in ("host_service", "revision")]
+
+
+@pytest.mark.parametrize("case", ADMITTED, ids=lambda c: c.name)
 def test_executors_agree_on_indices(case):
     study = case.make_study()
     truths, roots = worlds(1)

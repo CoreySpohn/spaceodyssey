@@ -8,7 +8,7 @@ import pytest
 
 from spaceodyssey.core import HostExecutor, MeanBelief, index_world, replay_belief
 from tests.core.corpus import CORPUS, CORPUS_BY_NAME
-from tests.core.helpers import N_STEPS_CORPUS, worlds
+from tests.core.helpers import N_STEPS_CORPUS, service_of, worlds
 
 RELEASING = [c for c in CORPUS if not c.name.startswith("overflow")]
 
@@ -23,7 +23,7 @@ def test_replay_reproduces_belief_bitwise(case):
     truths, roots = worlds(2)
     for w in range(2):
         carry, trace = HostExecutor().run(
-            study, index_world(truths, w), roots[w], N_STEPS_CORPUS
+            study, index_world(truths, w), roots[w], N_STEPS_CORPUS, **service_of(case)
         )
         replayed = replay_belief(study, carry, trace)
         assert _bits(replayed) == _bits(carry.belief), (case.name, w)

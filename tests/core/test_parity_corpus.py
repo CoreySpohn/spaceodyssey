@@ -10,7 +10,7 @@ from spaceodyssey.core import (
     histories_equal,
 )
 from tests.core.corpus import CORPUS
-from tests.core.helpers import N_STEPS_CORPUS, worlds
+from tests.core.helpers import N_STEPS_CORPUS, service_of, worlds
 
 N_WORLDS = 2
 
@@ -19,11 +19,13 @@ N_WORLDS = 2
 def test_ints_exact_and_floats_in_the_go_band(case):
     study = case.make_study()
     truths, roots = worlds(N_WORLDS)
-    compiled = CompiledExecutor().run_worlds(study, truths, roots, N_STEPS_CORPUS)
+    compiled = CompiledExecutor().run_worlds(
+        study, truths, roots, N_STEPS_CORPUS, **service_of(case)
+    )
     assert compiled.status.shape == (N_WORLDS,)
     for form in case.policy_forms:
         host = HostExecutor().run_worlds(
-            study, truths, roots, N_STEPS_CORPUS, policy_form=form
+            study, truths, roots, N_STEPS_CORPUS, policy_form=form, **service_of(case)
         )
         assert host.status.tolist() == compiled.status.tolist(), (case.name, form)
         for w in range(N_WORLDS):

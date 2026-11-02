@@ -132,6 +132,11 @@ def run_until_quiet(c, study, truth, root, max_steps=60):
 N_STEPS_CORPUS = 40
 
 
+def service_of(case):
+    """The keyword that hands a case its host service, empty when it has none."""
+    return {} if case.make_service is None else {"service": case.make_service()}
+
+
 def check_corpus_case(case, n_worlds=4, n_steps=N_STEPS_CORPUS):
     """Handle a transaction state update.
 
@@ -140,18 +145,25 @@ def check_corpus_case(case, n_worlds=4, n_steps=N_STEPS_CORPUS):
     """
     st = case.make_study()
     truths, roots = worlds(n_worlds)
-    cs, ts = CompiledExecutor().run(st, truths, roots, n_steps)
+    cs, ts = CompiledExecutor().run(st, truths, roots, n_steps, **service_of(case))
     for w in range(n_worlds):
         h = canonical_history(index_world(cs, w), index_world(ts, w))
         assert h.n_records >= 1 and h.n_handled >= 2, (case.name, "vacuous")
         for form in case.policy_forms:
             channel_index, th = HostExecutor().run(
-                st, index_world(truths, w), roots[w], n_steps, policy_form=form
+                st,
+                index_world(truths, w),
+                roots[w],
+                n_steps,
+                policy_form=form,
+                **service_of(case),
             )
             r = histories_equal(h, canonical_history(channel_index, th))
             assert r.structure_equal and r.max_int_diff == 0, (case.name, form, r)
             assert r.max_abs <= 1e-9, (case.name, form, r)
         if case.hand_history is not None:
             assert h.events == case.hand_history, case.name
+        if case.hand_rows is not None:
+            assert tuple(r[3:] for r in h.rows) == case.hand_rows, case.name
         for k, inv in enumerate(case.invariants):
             assert inv(h), (case.name, "invariant", k)

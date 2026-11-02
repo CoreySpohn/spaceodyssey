@@ -19,6 +19,10 @@ from tests.core import record_helpers as rh
 from tests.core.corpus import CORPUS, CORPUS_BY_NAME, PLAN5
 from tests.core.helpers import N_STEPS_CORPUS, worlds
 
+# the cases whose records carry the measurement variate; the host-service and revision
+# cases write no scorer-only value, and the snapshot invariant covers them
+SCORED = [c for c in CORPUS if c.name not in ("host_service", "revision")]
+
 
 def _run(study, executor, truths, roots, n_worlds):
     """Run `n_worlds` worlds; returns the list of final carries."""
@@ -54,7 +58,7 @@ def _hidden_columns_are_zero(carry, caps, reference=None):
 
 
 @pytest.mark.parametrize("executor", ["host", "compiled"])
-@pytest.mark.parametrize("case", CORPUS, ids=lambda c: c.name)
+@pytest.mark.parametrize("case", SCORED, ids=lambda c: c.name)
 def test_snapshot_hides_scorer_columns(case, executor):
     rh.SEEN.clear()
     study = rh.spied(case.make_study())

@@ -14,6 +14,8 @@ def test_corpus_has_the_planned_cases():
     planned = {
         "baseline", "wait", "delayed_release", "cancel_stale", "cancel_live", "bundle",
         "phase_switch", "coincident", "overflow_stall", "overflow_log",
+        "coalesced_release", "bundle_unaffordable", "forbidden_effect",
+        "catalog_record", "host_service", "revision",
     }  # fmt: skip
     stops = {
         f"stop_{s}_{d}"
