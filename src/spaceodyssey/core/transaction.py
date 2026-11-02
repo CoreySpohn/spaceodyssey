@@ -126,7 +126,13 @@ def decision_ordinal(carry):
 
 def decision_key(carry, root, study):
     """The policy key of the decision about to run at the current tick."""
-    return policy_key(root, phase_at(carry, study), carry.tick, decision_ordinal(carry))
+    return policy_key(
+        root,
+        phase_at(carry, study),
+        carry.tick,
+        decision_ordinal(carry),
+        coupling=study.coupling,
+    )
 
 
 def decide(carry, root, study):

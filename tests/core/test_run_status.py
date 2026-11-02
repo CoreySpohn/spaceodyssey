@@ -2,7 +2,9 @@
 
 import dataclasses
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from spaceodyssey.core import (
@@ -93,6 +95,19 @@ def test_status_agrees_across_executors():
         b = _run(HostExecutor, study, caps)
         assert a.status.tolist() == b.status.tolist()
         assert a.carry.overflow_mask.tolist() == b.carry.overflow_mask.tolist()
+
+
+def test_zero_step_budget_returns_matching_truncated_results():
+    study = kinds.survey_1()
+    truths, roots = worlds(2)
+    compiled = CompiledExecutor().run_worlds(study, truths, roots, 0)
+    host = HostExecutor().run_worlds(study, truths, roots, 0)
+    assert host.status.tolist() == compiled.status.tolist() == [RunStatus.TRUNCATED] * 2
+    assert not host.complete.any()
+    for a, b in zip(jax.tree.leaves(host), jax.tree.leaves(compiled), strict=True):
+        np.testing.assert_array_equal(a, b, strict=True)
+    assert host.trace.handled.shape == (2, 0)
+    assert host.history(0).n_handled == host.history(0).n_records == 0
 
 
 def test_status_priority_and_idle():

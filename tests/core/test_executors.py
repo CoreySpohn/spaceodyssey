@@ -6,6 +6,8 @@ Both executors on survey_1: hand histories, parity between scan and host, bookke
 import dataclasses
 
 import jax.numpy as jnp
+import jax.random as jr
+import numpy as np
 import pytest
 
 from spaceodyssey import core
@@ -120,3 +122,72 @@ def test_executors_are_compiled_once():
     assert n >= 1
     CompiledExecutor().run(kinds.survey_1(), truths, roots, 12, wake_fn=counting_wake)
     assert len(traces) == n  # equal study structure: no retrace
+
+
+class _DrawingWait(core.AbstractPolicy):
+    def decide(self, pstate, view, study, key):
+        effects = core.effects_none(study.caps)
+        effects = dataclasses.replace(
+            effects,
+            kind=effects.kind.at[0].set(
+                jnp.where(view.n_dec == 0, core.EffectKind.WAIT, core.EffectKind.NONE)
+            ),
+            tick=effects.tick.at[0].set(200),
+        )
+        return effects, pstate, jr.uniform(key, dtype=jnp.float64)
+
+
+@pytest.mark.parametrize("form", ["array", "python", "compiled"])
+@pytest.mark.parametrize("shared", [False, True])
+def test_policy_draws_respect_declared_phase_coupling(form, shared):
+    coupling = core.Coupling(
+        shared=((core.Purpose.POLICY, ("phase",)),) if shared else ()
+    )
+    studies = (
+        kinds.survey_1(policies=(_DrawingWait(),), coupling=coupling),
+        kinds.survey_1(
+            policies=(_DrawingWait(), _DrawingWait()),
+            phase_until=(100, 1000),
+            coupling=coupling,
+        ),
+    )
+    truths, roots = worlds(1)
+    draws = []
+    for study in studies:
+        if form == "compiled":
+            result = CompiledExecutor().run(study, truths, roots, 2)
+            trace = index_world(result.trace, 0)
+        else:
+            result = HostExecutor().run(
+                study, index_world(truths, 0), roots[0], 2, policy_form=form
+            )
+            trace = result.trace
+        assert int(trace.tick[1]) == 200 and bool(trace.wake[1])
+        draws.append(float(trace.pol_u[1]))
+    assert (draws[0] == draws[1]) == shared
+
+
+@pytest.mark.parametrize("field", ["micro", "sid", "acquisition_id"])
+def test_canonical_history_detects_corrupted_identities(field):
+    study = kinds.survey_1()
+    truths, roots = worlds(1)
+    carry, trace = HostExecutor().run(study, index_world(truths, 0), roots[0], 20)
+    original = canonical_history(carry, trace)
+    assert original.n_records == 5
+    if field == "acquisition_id":
+        log = dataclasses.replace(
+            carry.log, acquisition_id=jnp.zeros_like(carry.log.acquisition_id)
+        )
+        altered = canonical_history(dataclasses.replace(carry, log=log), trace)
+    else:
+        altered_trace = dataclasses.replace(
+            trace, **{field: getattr(trace, field) + trace.handled.astype(jnp.int64)}
+        )
+        altered = canonical_history(carry, altered_trace)
+    assert histories_equal(original, original).go
+    assert not histories_equal(original, altered).ok
+    if field == "acquisition_id":
+        np.testing.assert_array_equal(
+            original.ints[field],
+            np.asarray(carry.log.acquisition_id)[np.asarray(carry.log.valid)],
+        )

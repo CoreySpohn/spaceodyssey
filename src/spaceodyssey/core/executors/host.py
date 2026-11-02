@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from spaceodyssey.core.capacities import require_x64
-from spaceodyssey.core.carry import init_carry
+from spaceodyssey.core.carry import empty_trace, init_carry
 from spaceodyssey.core.enums import Audience
 from spaceodyssey.core.executors.base import AbstractExecutor, RunResult, index_world
 from spaceodyssey.core.service import answer_pending
@@ -70,6 +70,11 @@ class HostExecutor(AbstractExecutor):
         dec, adm, close, fin = self.decide, _adm, _close, _fin
         carry = _init(study, truth)
         caps = study.caps
+        if n_steps == 0:
+            trace = jax.tree_util.tree_map(
+                lambda x: jnp.empty((0, *x.shape), dtype=x.dtype), empty_trace(caps)
+            )
+            return RunResult(carry, trace)
         traces = []
         for _ in range(n_steps):
             carry, trace, wake = adv(carry, root, study, truth)

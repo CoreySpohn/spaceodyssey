@@ -126,6 +126,8 @@ def canonical_history(carry, trace):
         "event_fp": pick(trace.event_fp),
         "release_version": pick(trace.release_version),
         "release_version_final": np.asarray(carry.release_version),
+        "micro": pick(trace.micro),
+        "sid": pick(trace.sid),
         "tie": pick(trace.tie),
         "pending_wake": pick(trace.pending_wake),
         "pending_wake_final": np.asarray(carry.pending_wake),
@@ -133,6 +135,7 @@ def canonical_history(carry, trace):
         "run_status": np.asarray(run_status(carry)),
         "subject": np.asarray(log.subject)[v],
         "acquisition_index": np.asarray(log.acquisition_index)[v],
+        "acquisition_id": np.asarray(log.acquisition_id)[v],
         "channel": np.asarray(log.channel)[v],
         "status": np.asarray(log.status)[v],
         "phase": np.asarray(log.phase)[v],
@@ -226,21 +229,31 @@ def tree_equal_report(a, b):
         return rep
     for x, y in zip(la, lb, strict=False):
         x, y = np.asarray(x), np.asarray(y)
-        if x.dtype.kind in "biu" and y.dtype.kind in "biu":
-            if x.size:
-                d = np.abs(x.astype(np.int64) - y.astype(np.int64)).max()
+        if x.dtype != y.dtype:
+            rep["structure_equal"] = False
+            continue
+        if x.dtype.kind in "biu":
+            if not np.array_equal(x, y):
+                # Python integers retain the full difference at either 64-bit limit.
+                d = np.abs(x.astype(object) - y.astype(object)).max()
                 rep["max_int_diff"] = max(rep["max_int_diff"], int(d))
         else:
             if not x.size:
                 continue
             x, y = x.astype(np.float64), y.astype(np.float64)
-            same_nan = np.isnan(x) & np.isnan(y)
-            d = np.where(same_nan | (x == y), 0.0, np.abs(x - y))
-            scale = np.maximum(np.abs(x), np.abs(y))
-            relative_error = np.where(
-                scale > 0, d / np.where(scale > 0, scale, 1.0), 0.0
-            )
-            ulp = np.where(d > 0, d / np.spacing(np.where(scale > 0, scale, 1.0)), 0.0)
+            with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+                same_nan = np.isnan(x) & np.isnan(y)
+                d = np.where(same_nan | (x == y), 0.0, np.abs(x - y))
+                d = np.where(np.isnan(x) != np.isnan(y), np.inf, d)
+                scale = np.maximum(np.abs(x), np.abs(y))
+                relative_error = np.where(
+                    scale > 0, d / np.where(scale > 0, scale, 1.0), 0.0
+                )
+                ulp = np.where(
+                    d > 0, d / np.spacing(np.where(scale > 0, scale, 1.0)), 0.0
+                )
+            relative_error = np.where(np.isfinite(d), relative_error, np.inf)
+            ulp = np.where(np.isfinite(d), ulp, np.inf)
             rep["max_abs"] = max(rep["max_abs"], float(d.max()))
             rep["max_rel"] = max(rep["max_rel"], float(relative_error.max()))
             rep["max_ulps"] = max(rep["max_ulps"], float(ulp.max()))
