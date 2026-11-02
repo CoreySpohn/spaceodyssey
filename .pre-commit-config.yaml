@@ -7,6 +7,18 @@ repos:
         language: system
         types: [text]
         exclude: ^(CHANGELOG\.md|tools/check_internal_refs\.py)$
+      - id: check-domain-words
+        name: no domain words in the core
+        entry: python3 tools/check_domain_words.py
+        language: system
+        files: ^src/spaceodyssey/core/
+        pass_filenames: false
+      - id: check-core-imports
+        name: core import boundary
+        entry: python3 tools/check_core_imports.py
+        language: system
+        files: ^src/spaceodyssey/core/
+        pass_filenames: false
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: "v6.0.0"
     hooks:

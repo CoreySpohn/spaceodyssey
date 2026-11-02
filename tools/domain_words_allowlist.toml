@@ -1,0 +1,3 @@
+# Exceptions use [[entries]] with file, token, symbol or line, and a reason
+# of at least 20 characters. Keep at most three entries; stale entries fail.
+entries = []

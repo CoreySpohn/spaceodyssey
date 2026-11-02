@@ -1,0 +1,5 @@
+"""Completed rows and bandwidth are domain independent."""
+completed = True
+bandwidth = 1
+start_tick = 0
+admission = "constellation orbital detectable stellar"
