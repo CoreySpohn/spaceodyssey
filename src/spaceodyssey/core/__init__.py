@@ -50,7 +50,9 @@ from spaceodyssey.core.handlers import h_stop as h_stop
 from spaceodyssey.core.handlers import h_wait as h_wait
 from spaceodyssey.core.handlers import step as step
 from spaceodyssey.core.keys import COORDS as COORDS
+from spaceodyssey.core.keys import DEFAULT_COUPLING as DEFAULT_COUPLING
 from spaceodyssey.core.keys import MASK32 as MASK32
+from spaceodyssey.core.keys import Coupling as Coupling
 from spaceodyssey.core.keys import draw_key as draw_key
 from spaceodyssey.core.keys import fold64 as fold64
 from spaceodyssey.core.keys import key_for as key_for
@@ -87,6 +89,8 @@ from spaceodyssey.core.transaction import admit as admit
 from spaceodyssey.core.transaction import advance as advance
 from spaceodyssey.core.transaction import close_decision as close_decision
 from spaceodyssey.core.transaction import decide as decide
+from spaceodyssey.core.transaction import decision_key as decision_key
+from spaceodyssey.core.transaction import decision_ordinal as decision_ordinal
 from spaceodyssey.core.transaction import finish_trace as finish_trace
 from spaceodyssey.core.transaction import mask_effects as mask_effects
 from spaceodyssey.core.transaction import phase_at as phase_at

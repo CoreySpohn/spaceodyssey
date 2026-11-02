@@ -44,6 +44,8 @@ class Carry(eqx.Module):
     double_settle: jax.Array
     dup_fold: jax.Array
     n_dec: jax.Array
+    dec_tick: jax.Array
+    dec_ordinal: jax.Array
     next_sid: jax.Array
 
 
@@ -89,6 +91,8 @@ def empty_carry(caps, balance=None):
         double_settle=f,
         dup_fold=f,
         n_dec=z,
+        dec_tick=jnp.asarray(-1, I64),
+        dec_ordinal=z,
         next_sid=z,
     )
 

@@ -91,12 +91,22 @@ def phase_at(carry, study):
     return jnp.maximum(carry.phase, passed)
 
 
+def decision_ordinal(carry):
+    """Decisions already made at the current tick."""
+    return jnp.where(carry.dec_tick == carry.tick, carry.dec_ordinal, 0)
+
+
+def decision_key(carry, root, study):
+    """The policy key of the decision about to run at the current tick."""
+    return policy_key(root, phase_at(carry, study), carry.tick, decision_ordinal(carry))
+
+
 def decide(carry, root, study):
     """Run the policy of the current phase on the policy-audience view."""
     view = snapshot_view(carry, Audience.POLICY, study.caps)
     ph = phase_at(carry, study)
     pstate = jnp.where(ph != carry.phase, jnp.zeros_like(carry.pstate), carry.pstate)
-    key = policy_key(root, carry.n_dec)
+    key = decision_key(carry, root, study)
     branches = tuple(
         (lambda ps, v, k, p=p: p.decide(ps, v, study, k)) for p in study.agenda.policies
     )
@@ -262,6 +272,8 @@ def close_decision(carry, effects, pstate, wake, study):
         carry,
         pstate=jnp.where(w, pstate, carry.pstate),
         n_dec=carry.n_dec + w.astype(I64),
+        dec_tick=jnp.where(w, carry.tick, carry.dec_tick),
+        dec_ordinal=jnp.where(w, decision_ordinal(carry) + 1, carry.dec_ordinal),
         woke=jnp.asarray(False),
         stage=jnp.where(w, Stage.ADMIT, carry.stage),
         phase=jnp.where(w, phase_at(carry, study), carry.phase),

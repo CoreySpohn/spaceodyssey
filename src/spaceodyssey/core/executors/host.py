@@ -9,13 +9,13 @@ from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.carry import init_carry
 from spaceodyssey.core.enums import Audience
 from spaceodyssey.core.executors.base import AbstractExecutor, RunResult
-from spaceodyssey.core.keys import policy_key
 from spaceodyssey.core.snapshot import effects_none, snapshot_view
 from spaceodyssey.core.transaction import (
     admit,
     advance,
     close_decision,
     decide,
+    decision_key,
     finish_trace,
     mask_effects,
     phase_at,
@@ -37,6 +37,10 @@ class HostExecutor(AbstractExecutor):
         """Advance one event with the shared handler table."""
         return _adv(carry, root, study, truth, wake_fn=wake_fn)
 
+    def decide(self, carry, root, study):
+        """Run the policy of the current phase."""
+        return _dec(carry, root, study)
+
     def run(
         self,
         study,
@@ -57,7 +61,7 @@ class HostExecutor(AbstractExecutor):
         """
         require_x64()
         adv = lambda c, r, s, t: self.advance(c, r, s, t, wake_fn=wake_fn)  # noqa: E731
-        dec, adm, close, fin = _dec, _adm, _close, _fin
+        dec, adm, close, fin = self.decide, _adm, _close, _fin
         carry = _init(study, truth)
         caps = study.caps
         traces = []
@@ -81,7 +85,7 @@ class HostExecutor(AbstractExecutor):
                         if ph != int(carry.phase)
                         else np.asarray(carry.pstate)
                     )
-                    key = policy_key(root, carry.n_dec)
+                    key = decision_key(carry, root, study)
                     eff, pstate, u = study.agenda.policies[ph].decide_py(
                         ps, view_np, study, key
                     )

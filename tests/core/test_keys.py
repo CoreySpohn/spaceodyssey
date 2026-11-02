@@ -9,10 +9,20 @@ import pytest
 
 from spaceodyssey import core as sch
 from spaceodyssey.core.enums import Purpose
-from spaceodyssey.core.keys import COORDS, MASK32, draw_key, fold64, key_for, policy_key
+from spaceodyssey.core.keys import (
+    COORDS,
+    MASK32,
+    OPTIONAL_COORDS,
+    draw_key,
+    fold64,
+    key_for,
+    policy_key,
+)
 
 ROOT = jr.PRNGKey(0)
 BASE = {name: 1 for name in COORDS}
+OPT = OPTIONAL_COORDS
+BASE_WITHOUT_OPTIONAL = {n: 1 for n in COORDS if n not in OPT}
 
 
 def same(a, b):
@@ -143,6 +153,88 @@ def test_draw_key_matches_key_for():
     assert same(draw_key(ROOT, r, Purpose.MEASUREMENT), expected)
 
 
-def test_policy_key_by_n_dec():
-    assert not same(policy_key(ROOT, 3), policy_key(ROOT, 4))
-    assert same(policy_key(ROOT, 3), fold64(fold64(ROOT, Purpose.POLICY), 3))
+def test_policy_key_follows_meaning():
+    base = policy_key(ROOT, 0, 130, 0)
+    assert same(
+        base, fold64(fold64(fold64(fold64(fold64(ROOT, Purpose.POLICY), 0), 0), 130), 0)
+    )
+    assert not same(base, policy_key(ROOT, 0, 131, 0))
+    assert not same(base, policy_key(ROOT, 0, 130, 1))
+    assert not same(base, policy_key(ROOT, 1, 130, 0))
+    assert not same(base, policy_key(ROOT, 0, 130, 0, lineage=1))
+
+
+def test_coupling_shares_declared_coordinates():
+    shared = sch.Coupling(shared=((Purpose.POLICY, ("lineage",)),))
+    a = policy_key(ROOT, 0, 130, 0, lineage=1, coupling=shared)
+    b = policy_key(ROOT, 0, 130, 0, lineage=2, coupling=shared)
+    assert same(a, b)
+    assert not same(
+        policy_key(ROOT, 0, 130, 0, lineage=1), policy_key(ROOT, 0, 130, 0, lineage=2)
+    )
+    # the declaration is per purpose: measurement draws still separate lineages
+    rec = _rec(subject=1, channel=10, acquisition_index=2)
+    m1 = draw_key(ROOT, rec, Purpose.MEASUREMENT, lineage=1, coupling=shared)
+    m2 = draw_key(ROOT, rec, Purpose.MEASUREMENT, lineage=2, coupling=shared)
+    assert not same(m1, m2)
+    both = sch.Coupling(shared=((Purpose.MEASUREMENT, ("lineage", "branch")),))
+    assert same(
+        draw_key(ROOT, rec, Purpose.MEASUREMENT, lineage=1, branch=3, coupling=both),
+        draw_key(ROOT, rec, Purpose.MEASUREMENT, lineage=2, branch=4, coupling=both),
+    )
+
+
+def test_coupling_rejects_unknown_names():
+    with pytest.raises(ValueError):
+        sch.Coupling(shared=((Purpose.POLICY, ("step",)),))
+    with pytest.raises(ValueError):
+        sch.Coupling(shared=((Purpose.POLICY, ("tick",)),))
+
+
+def test_asset_and_branch_separate_draws_only_when_nonzero():
+    base = key_for(ROOT, **BASE_WITHOUT_OPTIONAL)
+    assert same(base, key_for(ROOT, **BASE_WITHOUT_OPTIONAL, asset=0, branch=0))
+    assert not same(base, key_for(ROOT, **BASE_WITHOUT_OPTIONAL, asset=1))
+    assert not same(base, key_for(ROOT, **BASE_WITHOUT_OPTIONAL, branch=1))
+    assert not same(
+        key_for(ROOT, **BASE_WITHOUT_OPTIONAL, asset=1),
+        key_for(ROOT, **BASE_WITHOUT_OPTIONAL, asset=2),
+    )
+
+
+def test_keys_trace_under_jit():
+    traced = jax.jit(lambda c: key_for(ROOT, **c))
+    coords = {n: jnp.asarray(i + 1, dtype=jnp.int64) for i, n in enumerate(COORDS)}
+    eager = key_for(ROOT, **{n: i + 1 for i, n in enumerate(COORDS)})
+    assert same(traced(coords), eager)
+    zero_optional = {**coords, "asset": jnp.asarray(0), "branch": jnp.asarray(0)}
+    assert same(
+        traced(zero_optional),
+        key_for(
+            ROOT,
+            **{n: v for n, v in zip(COORDS, range(1, 12), strict=True) if n not in OPT},
+        ),
+    )
+    pk = jax.jit(policy_key)
+    assert same(
+        pk(ROOT, jnp.asarray(1), jnp.asarray(130), jnp.asarray(2)),
+        policy_key(ROOT, 1, 130, 2),
+    )
+    rec = _rec(subject=2, channel=11, acquisition_index=3)
+    dk = jax.jit(lambda r: draw_key(ROOT, r, Purpose.MEASUREMENT))
+    assert same(dk(rec), draw_key(ROOT, rec, Purpose.MEASUREMENT))
+
+
+def test_inserting_acquisition_changes_no_other_draw():
+    """Draws of (subject, k) do not move when another subject gains an acquisition."""
+
+    def keys(counts):
+        return {
+            (s, k): key_for(ROOT, subject=s, channel=10, acquisition_index=k)
+            for s, n in counts.items()
+            for k in range(n)
+        }
+
+    before, after = keys({0: 3, 1: 2}), keys({0: 3, 1: 3, 2: 1})
+    assert all(same(before[k], after[k]) for k in before)
+    assert len({tuple(map(int, jr.key_data(v))) for v in after.values()}) == len(after)
