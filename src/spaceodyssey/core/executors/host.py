@@ -9,12 +9,14 @@ from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.carry import init_carry
 from spaceodyssey.core.enums import Audience
 from spaceodyssey.core.executors.base import AbstractExecutor, RunResult, index_world
+from spaceodyssey.core.service import answer_pending
 from spaceodyssey.core.snapshot import effects_none, snapshot_view
 from spaceodyssey.core.transaction import (
     admit,
     advance,
     close_decision,
     decide,
+    decision_fingerprint,
     decision_key,
     finish_trace,
     mask_effects,
@@ -28,6 +30,7 @@ _dec = eqx.filter_jit(decide)
 _adm = eqx.filter_jit(admit)
 _close = eqx.filter_jit(close_decision)
 _fin = eqx.filter_jit(finish_trace)
+_fp = eqx.filter_jit(decision_fingerprint)
 
 
 class HostExecutor(AbstractExecutor):
@@ -52,12 +55,15 @@ class HostExecutor(AbstractExecutor):
         wake_fn=wake_by_audience,
         view_log=None,
         effects_log=None,
+        service=None,
     ):
         """Python loop over steps; the decision stage may use a Python-form policy.
 
         With `view_log` a list, the policy view of every decision is appended to
         it; with `effects_log` a list, the effects of every decision (woken
-        steps only).
+        steps only). With a `service` (see `AbstractHostService`), a request the
+        transaction reaches is answered before the next step; without one it stays
+        pending and the run reports `RunStatus.AWAITING`.
         """
         require_x64()
         adv = lambda c, r, s, t: self.advance(c, r, s, t, wake_fn=wake_fn)  # noqa: E731
@@ -94,9 +100,12 @@ class HostExecutor(AbstractExecutor):
             eff = mask_effects(eff, wake)
             if effects_log is not None and bool(wake):
                 effects_log.append(eff)
-            carry, codes = adm(carry, eff, study)
+            fp = _fp(carry, study) if bool(wake) else jnp.asarray(0, jnp.int64)
+            carry, codes = adm(carry, eff, study, fp)
             carry = close(carry, eff, pstate, wake, study)
-            traces.append(fin(trace, eff, codes, u, wake, carry))
+            traces.append(fin(trace, eff, codes, u, wake, carry, fp))
+            if service is not None:
+                carry = answer_pending(carry, study, service)
         return RunResult(
             carry, jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces)
         )

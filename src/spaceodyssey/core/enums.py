@@ -36,6 +36,7 @@ class EventKind(IntEnum):
     CANCEL = 6
     RESULT = 7
     FAULT = 8
+    REQUEST = 9
 
 
 class EffectKind(IntEnum):
@@ -153,7 +154,8 @@ class RunStatus(IntEnum):
 
     `STALLED` is the microstep guard: a row reached the guard position, so the run
     stopped instead of looping within one tick. `OVERFLOW` names no capacity by
-    itself; `Carry.overflow_mask` holds the `Capacity` bits.
+    itself; `Carry.overflow_mask` holds the `Capacity` bits. `AWAITING` means a
+    request to the host is still unanswered, so nothing after it ran.
     """
 
     COMPLETE = 0
@@ -161,6 +163,12 @@ class RunStatus(IntEnum):
     TRUNCATED = 2
     STALLED = 3
     OVERFLOW = 4
+    AWAITING = 5
+
+
+def version_slot(audience):
+    """Index of an audience in `Carry.release_version`: 0 observer, 1 policy."""
+    return 1 if int(audience) == int(Audience.POLICY) else 0
 
 
 PUBLIC = Audience.OBSERVER | Audience.POLICY

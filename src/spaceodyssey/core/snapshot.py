@@ -5,8 +5,9 @@ import dataclasses
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-from spaceodyssey.core.enums import I64, Audience, B, RecordStatus
+from spaceodyssey.core.enums import I64, Audience, B, RecordStatus, version_slot
 from spaceodyssey.core.records import LOG_INT_FIELDS, RecordLog, payload_columns
 
 
@@ -26,6 +27,7 @@ class Snapshot(eqx.Module):
     belief: MeanBelief
     tick: jax.Array
     n_dec: jax.Array
+    release_version: jax.Array  # releases this audience has received so far
 
 
 class EffectTable(eqx.Module):
@@ -59,7 +61,9 @@ def effects_none(caps):
 def visible_rows(log, audience):
     """Select released policy rows or accepted observer rows by audience.
 
-    A row held back (`RecordStatus.UNRELEASED`) is never visible.
+    A row held back (`RecordStatus.UNRELEASED`) is never visible, and neither is a row
+    whose own audience leaves the reader out (a policy-only answer is absent from the
+    observer's view).
     """
     return (
         jnp.where(
@@ -67,6 +71,7 @@ def visible_rows(log, audience):
         )
         & log.valid
         & (log.status != RecordStatus.UNRELEASED)
+        & ((log.audience & int(audience)) != 0)
     )
 
 
@@ -106,7 +111,48 @@ def snapshot_view(carry, audience, caps):
         belief=carry.pbelief,
         tick=carry.tick,
         n_dec=carry.n_dec,
+        release_version=carry.release_version[version_slot(audience)],
     )
+
+
+_GOLDEN = np.uint64(0x9E3779B97F4A7C15)
+_MUL1 = np.uint64(0xBF58476D1CE4E5B9)
+_MUL2 = np.uint64(0x94D049BB133111EB)
+
+
+def _mix(x):
+    """The splitmix64 finalizer on uint64 arrays (wrapping arithmetic)."""
+    x = x + jnp.asarray(_GOLDEN, jnp.uint64)
+    x = (x ^ (x >> 30)) * jnp.asarray(_MUL1, jnp.uint64)
+    x = (x ^ (x >> 27)) * jnp.asarray(_MUL2, jnp.uint64)
+    return x ^ (x >> 31)
+
+
+def _digest(a, salt):
+    """Order-sensitive 64-bit digest of an integer or boolean array."""
+    flat = jnp.ravel(a).astype(I64).astype(jnp.uint64)
+    pos = jnp.arange(flat.shape[0], dtype=jnp.uint64)
+    key = _mix(pos + jnp.asarray(np.uint64(salt), jnp.uint64))
+    return jnp.sum(_mix(flat ^ key))
+
+
+def snapshot_fingerprint(view):
+    """Identity of the decision snapshot a view holds, as an int64.
+
+    The digest covers the integer content of the view only: every integer column of
+    the visible rows, the row count, the belief sample counts, the tick, the decision
+    index and the release version. It is taken from the masked view, so a row, column
+    or event the audience cannot see leaves it unchanged. Floating-point content is
+    left out on purpose: it is computed from the prefix the integers name, and two
+    executors may differ in it by rounding, which must not make their identities differ.
+    """
+    log = view.log
+    leaves = [getattr(log, n) for n in LOG_INT_FIELDS] + [log.valid]
+    leaves += [view.n_rows, view.belief.n, view.tick, view.n_dec, view.release_version]
+    h = jnp.asarray(np.uint64(len(leaves)), jnp.uint64)
+    for i, leaf in enumerate(leaves):
+        h = _mix(h ^ _digest(jnp.asarray(leaf), i + 1))
+    return jax.lax.bitcast_convert_type(h, I64)
 
 
 EFFECT_FIELDS = tuple(f.name for f in dataclasses.fields(EffectTable))

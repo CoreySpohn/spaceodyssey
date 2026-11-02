@@ -15,11 +15,13 @@ KILL_TOLERANCE = 1e-9
 def run_status(carry):
     """Per-lane `RunStatus` of a final carry (elementwise, so batches work).
 
-    An overflow outranks a stall, a stall outranks a run that merely used up its step
-    budget, and only a run that reached its own end without either is `COMPLETE`.
+    An overflow outranks a stall, a stall outranks a request nobody answered, that
+    outranks a run that merely used up its step budget, and only a run that reached its
+    own end without any of them is `COMPLETE`.
     """
     s = jnp.where(carry.done, RunStatus.COMPLETE, RunStatus.TRUNCATED)
     s = jnp.where(carry.idle, RunStatus.IDLE, s)
+    s = jnp.where(carry.request.valid, RunStatus.AWAITING, s)
     s = jnp.where(carry.stalled, RunStatus.STALLED, s)
     s = jnp.where(carry.overflow, RunStatus.OVERFLOW, s)
     return s.astype(I64)
@@ -120,6 +122,10 @@ def canonical_history(carry, trace):
         "eff_disruptive": pick(trace.eff_disruptive),
         "admit_code": pick(trace.admit_code),
         "n_dec": pick(trace.n_dec),
+        "snapshot_fp": pick(trace.snapshot_fp),
+        "event_fp": pick(trace.event_fp),
+        "release_version": pick(trace.release_version),
+        "release_version_final": np.asarray(carry.release_version),
         "tie": pick(trace.tie),
         "pending_wake": pick(trace.pending_wake),
         "pending_wake_final": np.asarray(carry.pending_wake),

@@ -14,17 +14,21 @@ from spaceodyssey.core.enums import (
     EffectKind,
     EventKind,
     Stage,
+    version_slot,
 )
 from spaceodyssey.core.events import enqueue, order_key, select_next, where_tree
 from spaceodyssey.core.handlers import step
 from spaceodyssey.core.keys import policy_key
 from spaceodyssey.core.ledger import _resource_rows
-from spaceodyssey.core.snapshot import snapshot_view
+from spaceodyssey.core.snapshot import snapshot_fingerprint, snapshot_view
 
 
 def active(c):
-    """Every write in `advance`, `admit` and `close_decision` is gated by this."""
-    return ~c.done & ~c.stalled & ~c.overflow & ~c.idle
+    """Every write in `advance`, `admit` and `close_decision` is gated by this.
+
+    A run waiting for the host to answer a request does nothing until it does.
+    """
+    return ~c.done & ~c.stalled & ~c.overflow & ~c.idle & ~c.request.valid
 
 
 def wake_by_audience(carry, ev):
@@ -94,6 +98,8 @@ def advance(carry, root, study, truth, *, wake_fn=wake_by_audience):
         wake=wake,
         pending_wake=c5.pending_wake,
         n_dec=c5.n_dec,
+        event_fp=g(ev.snapshot_fp),
+        release_version=c5.release_version,
         belief_mean=c5.belief.mean,
         belief_aux=c5.belief.aux,
         n_log=c5.n_log,
@@ -138,6 +144,11 @@ def decide(carry, root, study):
         view,
         key,
     )
+
+
+def decision_fingerprint(carry, study):
+    """Fingerprint of the snapshot the policy reads at the current state."""
+    return snapshot_fingerprint(snapshot_view(carry, Audience.POLICY, study.caps))
 
 
 def mask_effects(effects, wake):
@@ -259,7 +270,7 @@ def _group_code(c, eff, member, study):
     return first
 
 
-def _admit_rows(c, eff, mask, study):
+def _admit_rows(c, eff, mask, study, fp):
     """Admit the rows of one decision, Observe rows of one group in or out whole."""
     caps = study.caps
     n = caps.n_effects
@@ -325,21 +336,44 @@ def _admit_rows(c, eff, mask, study):
             audience=PUBLIC,
             caps=caps,
         )
-        reserved = (kind == EffectKind.ALLOCATE) | (kind == EffectKind.QUERY)
+        asked = act & allowed & (kind == EffectKind.QUERY)
+        room = (~c.ev.valid).any() & (c.next_sid < caps.max_sid)
+        c = enqueue(
+            c,
+            asked & room,
+            kind=EventKind.REQUEST,
+            tick=t,
+            stage=Stage.ADMIT,
+            subject=eff.subject[e],
+            channel_index=eff.channel_index[e],
+            group=eff.group[e],
+            audience=Audience.POLICY,
+            snapshot_fp=fp,
+            version=c.release_version[version_slot(Audience.POLICY)],
+            decision=c.n_dec,
+            caps=caps,
+        )
         out[e] = jnp.select(
-            [~act | (kind == EffectKind.NONE), ~allowed, obs, reserved],
+            [
+                ~act | (kind == EffectKind.NONE),
+                ~allowed,
+                obs,
+                kind == EffectKind.ALLOCATE,
+                (kind == EffectKind.QUERY) & ~room,
+            ],
             [
                 AdmissionCode.NONE,
                 AdmissionCode.FORBIDDEN,
                 out[e],
                 AdmissionCode.UNSUPPORTED,
+                AdmissionCode.NO_SLOT,
             ],
             AdmissionCode.OK,
         ).astype(I64)
     return c, jnp.stack(out)
 
 
-def admit(carry, effects, study):
+def admit(carry, effects, study, snapshot_fp=None):
     """Admit a decision's effect rows. Returns (carry, admission code per row).
 
     Rows run in order, each against the balance left by the rows before it, except that
@@ -347,19 +381,26 @@ def admit(carry, effects, study):
     row, lane availability and queue room for all of them, then every row is admitted or
     none is, and a refused group takes no acquisition index. An effect whose bit is
     clear in the phase's permitted mask is refused as forbidden and changes nothing.
+
+    A Query is not charged. It queues a request row at the current tick in the admit
+    stage, addressed to the policy audience and stamped with the fingerprint of the
+    snapshot the decision read (`snapshot_fp`, computed here when not given) and the
+    decision's index; `Allocate` is declared and answers unsupported.
     """
+    fp = decision_fingerprint(carry, study) if snapshot_fp is None else snapshot_fp
     supported = (
         (effects.kind == EffectKind.OBSERVE)
         | (effects.kind == EffectKind.WAIT)
         | (effects.kind == EffectKind.STOP)
         | (effects.kind == EffectKind.CANCEL)
+        | (effects.kind == EffectKind.QUERY)
     )
     phase = phase_at(carry, study)
     mask = _phase_mask(_tree_set(carry, phase=phase), study)
     any_eff = active(carry) & (supported & _permitted(mask, effects.kind)).any()
     c = _tree_set(carry, stage=jnp.where(any_eff, Stage.ADMIT, carry.stage))
     c = _tree_set(c, phase=jnp.where(any_eff, phase, c.phase))
-    return _admit_rows(c, effects, mask, study)
+    return _admit_rows(c, effects, mask, study, fp)
 
 
 def close_decision(carry, effects, pstate, wake, study):
@@ -377,11 +418,16 @@ def close_decision(carry, effects, pstate, wake, study):
     )
 
 
-def finish_trace(trace, effects, codes, u, wake, carry):
-    """Attach decision outputs and final belief state to a trace row."""
+def finish_trace(trace, effects, codes, u, wake, carry, snapshot_fp=0):
+    """Attach decision outputs and final belief state to a trace row.
+
+    `snapshot_fp` is the fingerprint of the snapshot the decision read; it is recorded
+    for a woken step and zero otherwise.
+    """
     return dataclasses.replace(
         trace,
         n_dec=carry.n_dec,
+        snapshot_fp=jnp.where(wake, jnp.asarray(snapshot_fp, I64), 0),
         eff_kind=effects.kind,
         eff_disruptive=effects.disruptive,
         admit_code=codes,
@@ -397,6 +443,7 @@ def transition(carry, i, root, study, truth, *, wake_fn=wake_by_audience):
     c, trace, wake = advance(carry, root, study, truth, wake_fn=wake_fn)
     eff, pstate, u = decide(c, root, study)
     eff = mask_effects(eff, wake)
-    c, codes = admit(c, eff, study)
+    fp = decision_fingerprint(c, study)
+    c, codes = admit(c, eff, study, fp)
     c = close_decision(c, eff, pstate, wake, study)
-    return c, finish_trace(trace, eff, codes, u, wake, c)
+    return c, finish_trace(trace, eff, codes, u, wake, c, fp)

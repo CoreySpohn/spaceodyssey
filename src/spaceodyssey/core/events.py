@@ -60,6 +60,9 @@ class EventTable(eqx.Module):
     scope: jax.Array
     disposition: jax.Array
     acquisition_id: jax.Array  # sid of the Done row a record settles under
+    snapshot_fp: jax.Array  # fingerprint of the snapshot a request or result names
+    version: jax.Array  # release version of that snapshot
+    decision: jax.Array  # index of the decision that asked
     valid: jax.Array
 
 
@@ -69,6 +72,12 @@ def empty_events(caps):
     return EventTable(
         **{n: z for n in EVENT_INT_FIELDS}, valid=jnp.zeros(caps.n_events, B)
     )
+
+
+def empty_event_row():
+    """One unoccupied event row with scalar leaves."""
+    z = jnp.asarray(0, I64)
+    return EventTable(**{n: z for n in EVENT_INT_FIELDS}, valid=jnp.asarray(False))
 
 
 def where_tree(pred, a, b):
@@ -105,6 +114,9 @@ def enqueue(
     scope=0,
     disposition=0,
     acquisition_id=-1,
+    snapshot_fp=0,
+    version=0,
+    decision=0,
     tie=TIE_NEUTRAL,
     caps,
 ):
@@ -153,6 +165,9 @@ def enqueue(
         scope=jnp.asarray(scope, I64),
         disposition=jnp.asarray(disposition, I64),
         acquisition_id=jnp.asarray(acquisition_id, I64),
+        snapshot_fp=jnp.asarray(snapshot_fp, I64),
+        version=jnp.asarray(version, I64),
+        decision=jnp.asarray(decision, I64),
         valid=jnp.asarray(True),
     )
     return eqx.tree_at(

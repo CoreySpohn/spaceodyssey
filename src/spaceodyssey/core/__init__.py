@@ -36,8 +36,10 @@ from spaceodyssey.core.enums import RunStatus as RunStatus
 from spaceodyssey.core.enums import Scope as Scope
 from spaceodyssey.core.enums import Stage as Stage
 from spaceodyssey.core.enums import effect_mask as effect_mask
+from spaceodyssey.core.enums import version_slot as version_slot
 from spaceodyssey.core.events import EVENT_INT_FIELDS as EVENT_INT_FIELDS
 from spaceodyssey.core.events import EventTable as EventTable
+from spaceodyssey.core.events import empty_event_row as empty_event_row
 from spaceodyssey.core.events import empty_events as empty_events
 from spaceodyssey.core.events import enqueue as enqueue
 from spaceodyssey.core.events import order_key as order_key
@@ -64,6 +66,8 @@ from spaceodyssey.core.handlers import h_fault as h_fault
 from spaceodyssey.core.handlers import h_none as h_none
 from spaceodyssey.core.handlers import h_process as h_process
 from spaceodyssey.core.handlers import h_release as h_release
+from spaceodyssey.core.handlers import h_request as h_request
+from spaceodyssey.core.handlers import h_result as h_result
 from spaceodyssey.core.handlers import h_stop as h_stop
 from spaceodyssey.core.handlers import h_wait as h_wait
 from spaceodyssey.core.handlers import step as step
@@ -103,11 +107,17 @@ from spaceodyssey.core.records import masked_record as masked_record
 from spaceodyssey.core.records import payload_columns as payload_columns
 from spaceodyssey.core.records import record_none as record_none
 from spaceodyssey.core.records import write_log as write_log
+from spaceodyssey.core.service import AbstractHostService as AbstractHostService
+from spaceodyssey.core.service import Request as Request
+from spaceodyssey.core.service import answer_pending as answer_pending
+from spaceodyssey.core.service import commit_result as commit_result
+from spaceodyssey.core.service import read_request as read_request
 from spaceodyssey.core.snapshot import EFFECT_FIELDS as EFFECT_FIELDS
 from spaceodyssey.core.snapshot import EffectTable as EffectTable
 from spaceodyssey.core.snapshot import MeanBelief as MeanBelief
 from spaceodyssey.core.snapshot import Snapshot as Snapshot
 from spaceodyssey.core.snapshot import effects_none as effects_none
+from spaceodyssey.core.snapshot import snapshot_fingerprint as snapshot_fingerprint
 from spaceodyssey.core.snapshot import snapshot_view as snapshot_view
 from spaceodyssey.core.snapshot import visible_rows as visible_rows
 from spaceodyssey.core.study import Agenda as Agenda
@@ -119,6 +129,7 @@ from spaceodyssey.core.transaction import advance as advance
 from spaceodyssey.core.transaction import close_decision as close_decision
 from spaceodyssey.core.transaction import decide as decide
 from spaceodyssey.core.transaction import decision_due as decision_due
+from spaceodyssey.core.transaction import decision_fingerprint as decision_fingerprint
 from spaceodyssey.core.transaction import decision_key as decision_key
 from spaceodyssey.core.transaction import decision_ordinal as decision_ordinal
 from spaceodyssey.core.transaction import finish_trace as finish_trace

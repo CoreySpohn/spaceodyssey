@@ -27,16 +27,18 @@ def replay_belief(study, carry, trace):
     """Rebuild the observer belief of one world from its recorded log alone.
 
     Reads only the record log and the order in which the run released rows (the
-    handled release steps of the trace). Each acquisition is folded once, in release
-    order, through the study's observer; later revisions are not folded. With the
-    executor's own observer on the same rows in the same order the result equals
+    handled release and result steps of the trace). Each acquisition is folded once, in
+    release order, through the study's observer; later revisions are not folded. With
+    the executor's own observer on the same rows in the same order the result equals
     `carry.belief` bit for bit.
     """
     log = dataclasses.replace(
         carry.log,
         **{n: np.asarray(getattr(carry.log, n)) for n in (*LOG_INT_FIELDS, "valid")},
     )
-    handled = np.asarray(trace.handled) & (np.asarray(trace.kind) == EventKind.RELEASE)
+    kind = np.asarray(trace.kind)
+    released = (kind == EventKind.RELEASE) | (kind == EventKind.RESULT)
+    handled = np.asarray(trace.handled) & released
     steps = zip(
         *(
             np.asarray(getattr(trace, n))[handled].tolist()

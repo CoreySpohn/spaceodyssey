@@ -238,7 +238,9 @@ def log_with_rows(rows, caps=CAPS):
     """
     c = sch.empty_carry(caps)
     for kind, v in rows:
-        c, slot = write_log_j(c, some_rec(caps, value0=float(v)), caps)
+        c, slot = write_log_j(
+            c, some_rec(caps, value0=float(v), audience=sch.PUBLIC), caps
+        )
         released_tick = 5 if kind == "pub" else -1
         c = eqx.tree_at(
             lambda x: x.log.released_tick,

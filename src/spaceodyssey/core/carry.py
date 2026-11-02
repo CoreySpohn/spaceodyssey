@@ -15,7 +15,12 @@ from spaceodyssey.core.enums import (
     RemainderRule,
     Stage,
 )
-from spaceodyssey.core.events import EventTable, empty_events, enqueue
+from spaceodyssey.core.events import (
+    EventTable,
+    empty_event_row,
+    empty_events,
+    enqueue,
+)
 from spaceodyssey.core.ledger import Ledger
 from spaceodyssey.core.records import RecordLog, empty_log
 from spaceodyssey.core.snapshot import MeanBelief
@@ -51,6 +56,8 @@ class Carry(eqx.Module):
     dec_tick: jax.Array
     dec_ordinal: jax.Array
     next_sid: jax.Array
+    release_version: jax.Array  # I64[2]: releases received by (observer, policy)
+    request: EventTable  # the host request being awaited; `valid` while unanswered
 
 
 def _zero_belief(caps):
@@ -104,6 +111,8 @@ def empty_carry(caps, balance=None):
         dec_tick=jnp.asarray(-1, I64),
         dec_ordinal=z,
         next_sid=z,
+        release_version=jnp.zeros(2, I64),
+        request=empty_event_row(),
     )
 
 
@@ -134,6 +143,9 @@ class Trace(eqx.Module):
     wake: jax.Array
     pending_wake: jax.Array
     n_dec: jax.Array
+    snapshot_fp: jax.Array  # fingerprint of the snapshot a decision read, else 0
+    event_fp: jax.Array  # fingerprint a handled request or result names, else 0
+    release_version: jax.Array  # I64[2] after the step
     eff_kind: jax.Array
     eff_disruptive: jax.Array
     admit_code: jax.Array
@@ -165,6 +177,9 @@ def empty_trace(caps):
         wake=f,
         pending_wake=f,
         n_dec=z,
+        snapshot_fp=z,
+        event_fp=z,
+        release_version=jnp.zeros(2, I64),
         eff_kind=jnp.zeros(caps.n_effects, I64),
         eff_disruptive=jnp.zeros(caps.n_effects, B),
         admit_code=jnp.full(caps.n_effects, AdmissionCode.NONE, I64),

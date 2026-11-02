@@ -108,12 +108,11 @@ def test_settle_exactly_once():
 
 
 def test_unsupported_effect_refused_without_change():
-    for kind in (EffectKind.ALLOCATE, EffectKind.QUERY):
-        c0 = carry0()
-        c2, code = admit_j(c0, effects_of(kind), STUDY)
-        r = sch.tree_equal_report(c0, c2)
-        assert int(code[0]) == AdmissionCode.UNSUPPORTED
-        assert r["max_abs"] == 0 and r["max_int_diff"] == 0
+    c0 = carry0()
+    c2, code = admit_j(c0, effects_of(EffectKind.ALLOCATE), STUDY)
+    r = sch.tree_equal_report(c0, c2)
+    assert int(code[0]) == AdmissionCode.UNSUPPORTED
+    assert r["max_abs"] == 0 and r["max_int_diff"] == 0
 
 
 def test_no_funds_and_lane_busy_codes():

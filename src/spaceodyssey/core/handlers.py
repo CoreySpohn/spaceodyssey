@@ -173,15 +173,37 @@ def h_release(c, ev, study, truth, root):
             superseded,
         ),
     )
+    # a version counts a release the audience can read, as its snapshot shows it
+    to_observer = (ev.audience & Audience.OBSERVER) != 0
+    versions = c.release_version + jnp.stack(
+        [~already & ~held & to_observer, public & ~seen]
+    ).astype(I64)
     c1 = _tree_set(
         c,
         belief=belief,
         pbelief=pbelief,
         log=log,
+        release_version=versions,
         woke=jnp.asarray(True),
         dup_fold=c.dup_fold | already,
     )
     return c1, _emit(0, slot), record_none(caps)
+
+
+def h_result(c, ev, study, truth, root):
+    """Commit a host's answer: release the record it names at its own tick.
+
+    The row sits at the tick and stage of its request, so the record is released and
+    the audience wakes within the same stage; it passes through the release rules
+    unchanged.
+    """
+    return h_release(c, ev, study, truth, root)
+
+
+def h_request(c, ev, study, truth, root):
+    """Hold the run for the host: the row moves into the carry until it is answered."""
+    held = dataclasses.replace(ev, valid=jnp.asarray(True))
+    return _tree_set(c, request=held), _emit(0, 0), record_none(study.caps)
 
 
 def h_wait(c, ev, study, truth, root):
@@ -352,7 +374,8 @@ HANDLERS = (
     h_stop,
     h_process,
     h_cancel,
-    h_none,
+    h_result,
     h_fault,
+    h_request,
 )
 PUBLIC = Audience.OBSERVER | Audience.POLICY
