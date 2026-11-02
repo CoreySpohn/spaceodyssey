@@ -20,6 +20,7 @@ and execution engines; physics and inference enter through adapters.
 
 architecture
 executors
+records
 ```
 
 ## API Reference
