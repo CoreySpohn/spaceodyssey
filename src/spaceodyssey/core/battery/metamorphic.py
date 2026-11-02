@@ -22,6 +22,9 @@ from spaceodyssey.core.transaction import transition
 
 # Float columns of a canonical history that no draw feeds.
 DRAW_FREE_FLOATS = ("cost", "charged", "balance")
+# Digests of a snapshot or event. They hash ticks and ids, which a relation moves by
+# design, and the fields they summarize are compared directly.
+DIGEST_FIELDS = ("snapshot_fp", "event_fp")
 # Log columns that hold a tick (-1 marks an unset one).
 TICK_LOG_FIELDS = (
     "start_tick",
@@ -59,6 +62,8 @@ def relabel_ids(
         ha, hb = canonical_history(ca, ta), canonical_history(cb, tb)
         n_records += ha.n_records
         for name, x in ha.ints.items():
+            if name in DIGEST_FIELDS:
+                continue
             x = lookup(x) if name == "channel" else x
             if not bits_equal(x, hb.ints[name]):
                 failures.append(f"world {w}: {name} changed under relabeling")
@@ -140,7 +145,7 @@ def _epoch_world(w, cb, tb, cl, tl, delta):
     if not bits_equal(handled, np.asarray(tl.handled)):
         return [f"world {w}: the handled steps changed"]
     for name in type(tb).__dataclass_fields__:
-        if name == "pol_u":
+        if name == "pol_u" or name in DIGEST_FIELDS:
             continue
         a, b = np.asarray(getattr(tb, name)), np.asarray(getattr(tl, name))
         if name == "tick":

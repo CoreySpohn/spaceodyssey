@@ -18,7 +18,8 @@ SHIFTED_LOG_FIELDS = ("available_tick", "released_tick", "accepted_tick")
 # Trace fields compared on every step that is not a release. The belief path moves with
 # its updates and the policy draw is keyed by its decision tick, which a release-woken
 # decision shares with the release, so both are compared separately or not at all.
-LATENCY_FREE_SKIP = ("belief_mean", "belief_aux", "pol_u")
+# The snapshot and event digests hash release ticks, which the delay moves by design.
+LATENCY_FREE_SKIP = ("belief_mean", "belief_aux", "pol_u", "snapshot_fp", "event_fp")
 
 
 def delayed(study, delay_ticks):
