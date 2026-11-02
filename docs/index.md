@@ -19,6 +19,7 @@ and execution engines; physics and inference enter through adapters.
 :maxdepth: 2
 
 architecture
+executors
 ```
 
 ## API Reference
