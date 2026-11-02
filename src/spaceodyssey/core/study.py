@@ -6,6 +6,7 @@ import jax.numpy as jnp
 
 from spaceodyssey.core.capacities import Capacities, require_x64
 from spaceodyssey.core.enums import F64
+from spaceodyssey.core.keys import DEFAULT_COUPLING, Coupling, Fork
 from spaceodyssey.core.kinds import (
     AbstractChannelModel,
     AbstractDesign,
@@ -57,6 +58,8 @@ class Study(eqx.Module):
     design: AbstractDesign
     world_source: AbstractWorldSource
     objective: AbstractObjective
+    coupling: Coupling = eqx.field(default_factory=lambda: DEFAULT_COUPLING)
+    fork: Fork = eqx.field(default_factory=Fork)
 
     def __check_init__(self):
         """Validate the arithmetic precision and that record kinds are registered.

@@ -65,7 +65,13 @@ def _realize_rec(c, study, truth, root, base, fraction):
     shares its variate with its full twin.
     """
     coords = dataclasses.replace(base, status=jnp.asarray(RecordStatus.COMPLETED, I64))
-    key = draw_key(root, coords, Purpose.MEASUREMENT)
+    key = draw_key(
+        root,
+        coords,
+        Purpose.MEASUREMENT,
+        branch=study.fork.branch_of(base.acquisition_index),
+        coupling=study.coupling,
+    )
     meas, z = study.channel_model.realize(
         truth,
         base.subject,

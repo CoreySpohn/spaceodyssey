@@ -23,8 +23,8 @@ def _clone(fn, **replacements):
 
 
 def _mutant_realize(c, study, truth, root, base, fraction):
-    def draw(root, coords, purpose):
-        return jr.fold_in(core.draw_key(root, coords, purpose), c.n_dec)
+    def draw(root, coords, purpose, **kw):
+        return jr.fold_in(core.draw_key(root, coords, purpose, **kw), c.n_dec)
 
     return _clone(handlers._realize_rec, draw_key=draw)(
         c, study, truth, root, base, fraction

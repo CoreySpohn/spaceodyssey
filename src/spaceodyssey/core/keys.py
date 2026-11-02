@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 
-from spaceodyssey.core.enums import Purpose
+from spaceodyssey.core.enums import BIG, I64, Purpose
 
 MASK32 = (1 << 32) - 1
 COORDS = (
@@ -64,6 +64,23 @@ class Coupling(eqx.Module):
 
 
 DEFAULT_COUPLING = Coupling()
+
+
+class Fork(eqx.Module):
+    """A counterfactual branch: acquisitions from `from_index` on draw on `branch`.
+
+    The default forks nothing (the start index is out of reach and the branch is zero),
+    and a zero branch leaves every key as it was before forks existed.
+    """
+
+    from_index: jax.Array = eqx.field(
+        default=BIG, converter=lambda x: jnp.asarray(x, I64)
+    )
+    branch: jax.Array = eqx.field(default=0, converter=lambda x: jnp.asarray(x, I64))
+
+    def branch_of(self, acquisition_index) -> jax.Array:
+        """The branch coordinate of an acquisition by its index."""
+        return jnp.where(acquisition_index >= self.from_index, self.branch, 0)
 
 
 def fold64(key, x) -> jax.Array:

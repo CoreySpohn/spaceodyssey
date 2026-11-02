@@ -75,6 +75,7 @@ from spaceodyssey.core.keys import COORDS as COORDS
 from spaceodyssey.core.keys import DEFAULT_COUPLING as DEFAULT_COUPLING
 from spaceodyssey.core.keys import MASK32 as MASK32
 from spaceodyssey.core.keys import Coupling as Coupling
+from spaceodyssey.core.keys import Fork as Fork
 from spaceodyssey.core.keys import draw_key as draw_key
 from spaceodyssey.core.keys import fold64 as fold64
 from spaceodyssey.core.keys import key_for as key_for
