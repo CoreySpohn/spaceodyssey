@@ -8,7 +8,7 @@ import numpy as np
 from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.carry import init_carry
 from spaceodyssey.core.enums import Audience
-from spaceodyssey.core.executors.base import AbstractExecutor, RunResult
+from spaceodyssey.core.executors.base import AbstractExecutor, RunResult, index_world
 from spaceodyssey.core.snapshot import effects_none, snapshot_view
 from spaceodyssey.core.transaction import (
     admit,
@@ -99,4 +99,15 @@ class HostExecutor(AbstractExecutor):
             traces.append(fin(trace, eff, codes, u, wake, carry))
         return RunResult(
             carry, jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces)
+        )
+
+    def run_worlds(self, study, truths, roots, n_steps, **kw):
+        """Run each world of a batch in turn and stack the results on a world axis."""
+        runs = [
+            self.run(study, index_world(truths, w), roots[w], n_steps, **kw)
+            for w in range(roots.shape[0])
+        ]
+        return RunResult(
+            jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[r.carry for r in runs]),
+            jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[r.trace for r in runs]),
         )

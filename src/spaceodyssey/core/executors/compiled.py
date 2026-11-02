@@ -38,3 +38,7 @@ class CompiledExecutor(AbstractExecutor):
         require_x64()
         carry, trace = _scan_worlds(self, study, truths, roots, wake_fn, n_steps)
         return RunResult(carry, trace)
+
+    def run_worlds(self, study, truths, roots, n_steps, **kw):
+        """Run a batch of worlds; the same call as `run`."""
+        return self.run(study, truths, roots, n_steps, **kw)

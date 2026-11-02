@@ -6,7 +6,15 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from spaceodyssey.core.enums import BIG, I64, N_STAGES, N_TIES, TIE_NEUTRAL, B
+from spaceodyssey.core.enums import (
+    BIG,
+    I64,
+    N_STAGES,
+    N_TIES,
+    TIE_NEUTRAL,
+    B,
+    Capacity,
+)
 
 
 def _order_key_py(tick, stage, micro, sid, caps, tie=TIE_NEUTRAL):
@@ -104,8 +112,8 @@ def enqueue(
 
     A row at the current (tick, stage) gets micro + 1; a later one gets micro 0; an
     earlier one is placed at the current position with micro + 1 and sets
-    `violation`. A full queue or an exhausted `next_sid` sets `overflow` and leaves
-    every existing row alone.
+    `violation`. A full queue or an exhausted `next_sid` sets `overflow`, records which
+    in `overflow_mask` and leaves every existing row alone.
     """
     tick = jnp.asarray(tick, I64)
     stage = jnp.asarray(stage, I64)
@@ -148,12 +156,15 @@ def enqueue(
         valid=jnp.asarray(True),
     )
     return eqx.tree_at(
-        lambda c: (c.ev, c.next_sid, c.overflow, c.violation),
+        lambda c: (c.ev, c.next_sid, c.overflow, c.overflow_mask, c.violation),
         carry,
         (
             ev,
             carry.next_sid + write.astype(I64),
             carry.overflow | (ok & ~(has_slot & sid_ok)),
+            carry.overflow_mask
+            | jnp.where(ok & ~has_slot, Capacity.QUEUE_SLOTS, 0)
+            | jnp.where(ok & has_slot & ~sid_ok, Capacity.STABLE_IDS, 0),
             carry.violation | (write & earlier),
         ),
     )

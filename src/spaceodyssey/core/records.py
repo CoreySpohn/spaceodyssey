@@ -6,7 +6,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from spaceodyssey.core.enums import F64, I64, B
+from spaceodyssey.core.enums import F64, I64, B, Capacity
 
 
 class Record(eqx.Module):
@@ -96,8 +96,8 @@ def empty_log(caps):
 def write_log(carry, rec, caps):
     """Append `rec` to the log where it is valid and a row is free.
 
-    A full log sets `overflow`, skips the write and returns the clamped slot; the
-    caller checks `n_log` before enqueueing a Release for the row.
+    A full log sets `overflow` (bit `Capacity.LOG_ROWS`), skips the write and returns
+    the clamped slot; the caller checks `n_log` before enqueueing a Release for the row.
     """
     ok = rec.valid & (carry.n_log < caps.n_log)
     s = jnp.minimum(carry.n_log, caps.n_log - 1)
@@ -108,9 +108,14 @@ def write_log(carry, rec, caps):
     cols["valid"] = carry.log.valid.at[s].set(jnp.where(ok, True, carry.log.valid[s]))
     log = RecordLog(**cols)
     out = eqx.tree_at(
-        lambda c: (c.log, c.n_log, c.overflow),
+        lambda c: (c.log, c.n_log, c.overflow, c.overflow_mask),
         carry,
-        (log, carry.n_log + ok.astype(I64), carry.overflow | (rec.valid & ~ok)),
+        (
+            log,
+            carry.n_log + ok.astype(I64),
+            carry.overflow | (rec.valid & ~ok),
+            carry.overflow_mask | jnp.where(rec.valid & ~ok, Capacity.LOG_ROWS, 0),
+        ),
     )
     return out, s
 

@@ -19,6 +19,7 @@ from spaceodyssey.core.enums import TIE_NEUTRAL as TIE_NEUTRAL
 from spaceodyssey.core.enums import AdmissionCode as AdmissionCode
 from spaceodyssey.core.enums import Audience as Audience
 from spaceodyssey.core.enums import B as B
+from spaceodyssey.core.enums import Capacity as Capacity
 from spaceodyssey.core.enums import ChargeRule as ChargeRule
 from spaceodyssey.core.enums import CoincidentOrder as CoincidentOrder
 from spaceodyssey.core.enums import Disposition as Disposition
@@ -27,6 +28,7 @@ from spaceodyssey.core.enums import EventKind as EventKind
 from spaceodyssey.core.enums import Purpose as Purpose
 from spaceodyssey.core.enums import RecordStatus as RecordStatus
 from spaceodyssey.core.enums import RemainderRule as RemainderRule
+from spaceodyssey.core.enums import RunStatus as RunStatus
 from spaceodyssey.core.enums import Scope as Scope
 from spaceodyssey.core.enums import Stage as Stage
 from spaceodyssey.core.enums import effect_mask as effect_mask
@@ -37,6 +39,8 @@ from spaceodyssey.core.events import enqueue as enqueue
 from spaceodyssey.core.events import order_key as order_key
 from spaceodyssey.core.events import select_next as select_next
 from spaceodyssey.core.events import where_tree as where_tree
+from spaceodyssey.core.executors.base import GO_TOLERANCE as GO_TOLERANCE
+from spaceodyssey.core.executors.base import KILL_TOLERANCE as KILL_TOLERANCE
 from spaceodyssey.core.executors.base import AbstractExecutor as AbstractExecutor
 from spaceodyssey.core.executors.base import ParityReport as ParityReport
 from spaceodyssey.core.executors.base import RunHistory as RunHistory
@@ -44,9 +48,11 @@ from spaceodyssey.core.executors.base import RunResult as RunResult
 from spaceodyssey.core.executors.base import canonical_history as canonical_history
 from spaceodyssey.core.executors.base import histories_equal as histories_equal
 from spaceodyssey.core.executors.base import index_world as index_world
+from spaceodyssey.core.executors.base import run_status as run_status
 from spaceodyssey.core.executors.base import tree_equal_report as tree_equal_report
 from spaceodyssey.core.executors.compiled import CompiledExecutor as CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor as HostExecutor
+from spaceodyssey.core.executors.replay import replay_belief as replay_belief
 from spaceodyssey.core.handlers import HANDLERS as HANDLERS
 from spaceodyssey.core.handlers import h_cancel as h_cancel
 from spaceodyssey.core.handlers import h_done as h_done

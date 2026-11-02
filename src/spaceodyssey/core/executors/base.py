@@ -2,9 +2,27 @@
 
 import equinox as eqx
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from spaceodyssey.core.carry import Carry, Trace
+from spaceodyssey.core.enums import I64, RunStatus
+
+GO_TOLERANCE = 1e-12
+KILL_TOLERANCE = 1e-9
+
+
+def run_status(carry):
+    """Per-lane `RunStatus` of a final carry (elementwise, so batches work).
+
+    An overflow outranks a stall, a stall outranks a run that merely used up its step
+    budget, and only a run that reached its own end without either is `COMPLETE`.
+    """
+    s = jnp.where(carry.done, RunStatus.COMPLETE, RunStatus.TRUNCATED)
+    s = jnp.where(carry.idle, RunStatus.IDLE, s)
+    s = jnp.where(carry.stalled, RunStatus.STALLED, s)
+    s = jnp.where(carry.overflow, RunStatus.OVERFLOW, s)
+    return s.astype(I64)
 
 
 def index_world(tree, w):
@@ -25,6 +43,13 @@ class RunHistory(eqx.Module):
     flags: tuple  # (done, idle, stalled, overflow, violation)
     ints: dict  # name -> int array
     floats: dict
+    status: int  # a RunStatus code
+    overflow_mask: int  # Capacity bits that ran out
+
+    @property
+    def complete(self):
+        """Whether the run reached its own end without stalling or overflowing."""
+        return self.status == RunStatus.COMPLETE
 
 
 class ParityReport(eqx.Module):
@@ -39,13 +64,18 @@ class ParityReport(eqx.Module):
 
     @property
     def ok(self):
-        """Whether the nonempty histories agree within tolerance."""
+        """Whether the nonempty histories agree below the kill tolerance."""
         return (
             self.structure_equal
             and self.max_int_diff == 0
-            and self.max_abs <= 1e-9
+            and self.max_abs <= KILL_TOLERANCE
             and not self.vacuous
         )
+
+    @property
+    def go(self):
+        """Whether the histories also agree within the go tolerance."""
+        return self.ok and self.max_abs <= GO_TOLERANCE
 
 
 def canonical_history(carry, trace):
@@ -90,6 +120,11 @@ def canonical_history(carry, trace):
         "eff_disruptive": pick(trace.eff_disruptive),
         "admit_code": pick(trace.admit_code),
         "n_dec": pick(trace.n_dec),
+        "tie": pick(trace.tie),
+        "pending_wake": pick(trace.pending_wake),
+        "pending_wake_final": np.asarray(carry.pending_wake),
+        "overflow_mask": np.asarray(carry.overflow_mask),
+        "run_status": np.asarray(run_status(carry)),
         "subject": np.asarray(log.subject)[v],
         "acquisition_index": np.asarray(log.acquisition_index)[v],
         "channel": np.asarray(log.channel)[v],
@@ -137,6 +172,8 @@ def canonical_history(carry, trace):
         ),
         ints=ints,
         floats=floats,
+        status=int(run_status(carry)),
+        overflow_mask=int(carry.overflow_mask),
     )
 
 
@@ -211,6 +248,24 @@ class RunResult(eqx.Module):
         """Iterate over the carry and trace."""
         return iter((self.carry, self.trace))
 
+    @property
+    def status(self):
+        """`RunStatus` codes, one per world of a batched run."""
+        return run_status(self.carry)
+
+    @property
+    def complete(self):
+        """Boolean per world: reached its own end, no stall, no overflow."""
+        return self.status == RunStatus.COMPLETE
+
+    def history(self, world=None):
+        """Canonical history of one world, or of a run without a world axis."""
+        if world is None:
+            return canonical_history(self.carry, self.trace)
+        return canonical_history(
+            index_world(self.carry, world), index_world(self.trace, world)
+        )
+
 
 class AbstractExecutor(eqx.Module):
     """Executor contract for the shared transaction."""
@@ -219,4 +274,12 @@ class AbstractExecutor(eqx.Module):
 
     def run(self, study, truths, roots, n_steps):
         """Run a study for a fixed step budget."""
+        raise NotImplementedError
+
+    def run_worlds(self, study, truths, roots, n_steps):
+        """Run a batch of worlds (leading axis on `truths` and `roots`).
+
+        Both executors return a `RunResult` with a leading world axis, so the same
+        status and history reads work on either.
+        """
         raise NotImplementedError

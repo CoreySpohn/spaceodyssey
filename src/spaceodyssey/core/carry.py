@@ -43,6 +43,7 @@ class Carry(eqx.Module):
     stalled: jax.Array
     idle: jax.Array
     overflow: jax.Array
+    overflow_mask: jax.Array
     violation: jax.Array
     double_settle: jax.Array
     dup_fold: jax.Array
@@ -95,6 +96,7 @@ def empty_carry(caps, balance=None):
         stalled=f,
         idle=f,
         overflow=f,
+        overflow_mask=z,
         violation=f,
         double_settle=f,
         dup_fold=f,
@@ -120,6 +122,7 @@ class Trace(eqx.Module):
     tick: jax.Array
     stage: jax.Array
     micro: jax.Array
+    tie: jax.Array
     sid: jax.Array
     lane: jax.Array
     channel: jax.Array
@@ -129,6 +132,7 @@ class Trace(eqx.Module):
     n_written: jax.Array
     rec_status: jax.Array
     wake: jax.Array
+    pending_wake: jax.Array
     n_dec: jax.Array
     eff_kind: jax.Array
     eff_disruptive: jax.Array
@@ -149,6 +153,7 @@ def empty_trace(caps):
         tick=z,
         stage=z,
         micro=z,
+        tie=z,
         sid=z,
         lane=z,
         channel=z,
@@ -158,6 +163,7 @@ def empty_trace(caps):
         n_written=z,
         rec_status=z,
         wake=f,
+        pending_wake=f,
         n_dec=z,
         eff_kind=jnp.zeros(caps.n_effects, I64),
         eff_disruptive=jnp.zeros(caps.n_effects, B),

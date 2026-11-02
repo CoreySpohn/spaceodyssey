@@ -131,6 +131,29 @@ class Audience(IntFlag):
     POLICY = 2
 
 
+class Capacity(IntFlag):
+    """Which static capacity ran out; the bits of `Carry.overflow_mask`."""
+
+    QUEUE_SLOTS = 1
+    STABLE_IDS = 2
+    LOG_ROWS = 4
+
+
+class RunStatus(IntEnum):
+    """How a run ended; only `COMPLETE` means the study ran to its own end.
+
+    `STALLED` is the microstep guard: a row reached the guard position, so the run
+    stopped instead of looping within one tick. `OVERFLOW` names no capacity by
+    itself; `Carry.overflow_mask` holds the `Capacity` bits.
+    """
+
+    COMPLETE = 0
+    IDLE = 1
+    TRUNCATED = 2
+    STALLED = 3
+    OVERFLOW = 4
+
+
 PUBLIC = Audience.OBSERVER | Audience.POLICY
 
 
