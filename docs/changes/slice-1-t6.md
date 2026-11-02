@@ -23,8 +23,9 @@
 - `snapshot_view` masks payload columns by the audience of the view and reports
   `superseded_by` over the rows that audience can see. `h_release` and `replay_belief`
   fold a record masked for the observer, and the policy belief folds one masked for the
-  policy. Capacities with no lowered registry leave every column readable; a kind index
-  the registry lacks has no readable column.
+  policy. A `Study` refuses capacities with no lowered registry, which would leave every
+  column readable (`test_study_refuses_unregistered_kinds`); a kind index the registry
+  lacks has no readable column.
 - Revisions. The observer accepts every released row and folds the first accepted
   revision of an acquisition; the policy belief does the same over the rows released to
   the policy. A later revision is logged and accepted but not folded, and the earlier
@@ -91,8 +92,8 @@ hand history and parity comparison is unchanged; only what a snapshot shows chan
 
 ## Left for later tasks
 
-- Pre-flight: flag capacities whose registry was never lowered (every column readable),
-  and a record kind a channel declares but the registry lacks (no column readable).
+- Pre-flight: flag a record kind a channel declares but the registry lacks (no column
+  readable). Capacities with no lowered registry are already refused by `Study`.
 - Whether a later revision refits or increments the belief stays with the observer kit.
 - Release versions and snapshot fingerprints (the snapshot path now masks columns and
   recomputes `superseded_by`; the fingerprint should hash the masked view).

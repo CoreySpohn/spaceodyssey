@@ -1,5 +1,7 @@
 """The in-process record-kind registry and its lowering into capacities."""
 
+import dataclasses
+
 import pytest
 
 from spaceodyssey.core import (
@@ -82,3 +84,10 @@ def test_column_readability_by_audience():
     # a kind the registry lacks exposes nothing, and an unlowered caps everything
     assert not payload_columns(caps, 9, Audience.POLICY).any()
     assert payload_columns(Capacities(), 9, Audience.POLICY).all()
+
+
+def test_study_refuses_unregistered_kinds():
+    study = toy.survey_1()
+    bare = dataclasses.replace(study.caps, payload_audience=())
+    with pytest.raises(ValueError, match="no registered record kinds"):
+        dataclasses.replace(study, caps=bare)

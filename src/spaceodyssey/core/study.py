@@ -59,5 +59,15 @@ class Study(eqx.Module):
     objective: AbstractObjective
 
     def __check_init__(self):
-        """Validate the required arithmetic precision."""
+        """Validate the arithmetic precision and that record kinds are registered.
+
+        Payload column audiences come from the registered record kinds. Capacities with
+        no registered kinds would leave every column readable by every audience, so a
+        study refuses them.
+        """
         require_x64()
+        if not self.caps.payload_audience:
+            raise ValueError(
+                "Study capacities have no registered record kinds; lower a registry "
+                "into the capacities so payload columns carry their audiences"
+            )
