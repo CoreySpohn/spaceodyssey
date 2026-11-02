@@ -202,6 +202,18 @@ def test_asset_and_branch_separate_draws_only_when_nonzero():
     )
 
 
+@pytest.mark.parametrize("value", [1, 5, 2**40])
+def test_asset_and_branch_do_not_alias(value):
+    as_asset = key_for(ROOT, **BASE_WITHOUT_OPTIONAL, asset=value)
+    as_branch = key_for(ROOT, **BASE_WITHOUT_OPTIONAL, branch=value)
+    assert not same(as_asset, as_branch)
+    traced = jax.jit(
+        lambda a, b: key_for(ROOT, **BASE_WITHOUT_OPTIONAL, asset=a, branch=b)
+    )
+    assert same(traced(value, 0), as_asset)
+    assert same(traced(0, value), as_branch)
+
+
 def test_keys_trace_under_jit():
     traced = jax.jit(lambda c: key_for(ROOT, **c))
     coords = {n: jnp.asarray(i + 1, dtype=jnp.int64) for i, n in enumerate(COORDS)}

@@ -32,6 +32,9 @@ COORDS = (
     "branch",
 )
 OPTIONAL_COORDS = frozenset({"asset", "branch"})
+# A nonzero optional coordinate folds its tag before its value, so asset=5 and
+# branch=5 give different keys. The tags are arbitrary distinct constants.
+_OPTIONAL_TAGS = {"asset": 0x6173736574, "branch": 0x6272616E6368}
 
 
 class Coupling(eqx.Module):
@@ -85,7 +88,8 @@ def key_for(root, **coords) -> jax.Array:
             if isinstance(x, int) and x == 0:
                 continue
             x = jnp.asarray(x, dtype=jnp.int64)
-            key = jnp.where(x != 0, fold64(key, x), key)
+            tagged = fold64(fold64(key, _OPTIONAL_TAGS[name]), x)
+            key = jnp.where(x != 0, tagged, key)
         else:
             key = fold64(key, x)
     return key
