@@ -8,6 +8,9 @@ from spaceodyssey.core.carry import Trace as Trace
 from spaceodyssey.core.carry import empty_carry as empty_carry
 from spaceodyssey.core.carry import empty_trace as empty_trace
 from spaceodyssey.core.carry import init_carry as init_carry
+from spaceodyssey.core.declarations import Declaration as Declaration
+from spaceodyssey.core.declarations import Need as Need
+from spaceodyssey.core.declarations import declaration_of as declaration_of
 from spaceodyssey.core.enums import ALL_EFFECTS as ALL_EFFECTS
 from spaceodyssey.core.enums import BIG as BIG
 from spaceodyssey.core.enums import EVERYONE as EVERYONE
@@ -83,6 +86,11 @@ from spaceodyssey.core.ledger import AssetTable as AssetTable
 from spaceodyssey.core.ledger import ChannelTable as ChannelTable
 from spaceodyssey.core.ledger import Ledger as Ledger
 from spaceodyssey.core.ledger import fault_tie as fault_tie
+from spaceodyssey.core.preflight import Finding as Finding
+from spaceodyssey.core.preflight import FindingCode as FindingCode
+from spaceodyssey.core.preflight import Severity as Severity
+from spaceodyssey.core.preflight import StudyGraph as StudyGraph
+from spaceodyssey.core.preflight import preflight as preflight
 from spaceodyssey.core.records import LOG_INT_FIELDS as LOG_INT_FIELDS
 from spaceodyssey.core.records import RECORD_INT_FIELDS as RECORD_INT_FIELDS
 from spaceodyssey.core.records import KindRegistry as KindRegistry

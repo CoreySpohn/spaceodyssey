@@ -9,6 +9,7 @@ import jax.random as jr
 import numpy as np
 
 from spaceodyssey.core.capacities import Capacities
+from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import (
     ALL_EFFECTS,
     F64,
@@ -266,6 +267,13 @@ class FixedPlanPolicy(AbstractPolicy):
     stop_at: int = eqx.field(default=-1)
     stop_scope: int = eqx.field(default=Scope.LANE)
     stop_disp: int = eqx.field(default=Disposition.CLOSE)
+
+    def declare(self):
+        """The special stop and the final campaign drain this plan asks for."""
+        stops = [(Scope.CAMPAIGN, Disposition.DRAIN)]
+        if self.stop_at >= 0:
+            stops.append((Scope(self.stop_scope), Disposition(self.stop_disp)))
+        return Declaration(stops=tuple(stops))
 
     def decide(self, pstate, view, study, key):
         """Execute the next plan entry or a declared special effect."""
