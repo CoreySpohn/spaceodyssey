@@ -65,3 +65,12 @@ observer-only revision does not show through a policy snapshot.
 row a fixed delay after the occupancy ends, to the observer only. The observer folds it
 at that tick and the policy never sees it. The module uses only the public registry
 interface; nothing in `spaceodyssey.core` names it.
+
+## Host answers
+
+A host service answers a `Query` with a record of its own kind. `spaceodyssey.studies.oracle`
+registers an `answer` kind whose columns are readable by the policy audience only and a
+toy service that fills them from the snapshot it was asked on. The record's audience is
+that of the snapshot, so it appears in a policy snapshot and not in an observer snapshot:
+a row is visible to an audience only if its own audience names it, as well as being
+released.
