@@ -59,12 +59,16 @@ def test_study_has_no_untyped_fields():
         for _, cls in inspect.getmembers(core, inspect.isclass)
         if cls.__name__.startswith("Abstract")
     }
-    assert len(bases) == 8
+    assert len(bases) == 9
     for cls in bases | {core.Study}:
         annotations = typing.get_type_hints(cls)
-        for field in dataclasses.fields(cls):
-            assert field.name in annotations, (cls, field.name)
-            assert not _is_untyped(annotations[field.name]), (cls, field.name)
+        if dataclasses.is_dataclass(cls):
+            for field in dataclasses.fields(cls):
+                assert field.name in annotations, (cls, field.name)
+                assert not _is_untyped(annotations[field.name]), (cls, field.name)
+        else:  # the host service is a plain host-side class, outside the study
+            for name, annotation in annotations.items():
+                assert not _is_untyped(annotation), (cls, name)
     assert {"key_hook", "handler_table", "n_extra_kinds"}.isdisjoint(
         field.name for field in dataclasses.fields(core.Study)
     )

@@ -69,6 +69,8 @@
   visible row's identity moves it), it follows the decision index, the tick and the release
   version, and release versions count what each audience can read.
 - `test_core.py`: the unsupported-effect test now covers `Allocate` only.
+- `test_contracts.py`: `test_study_has_no_untyped_fields` now counts nine abstract bases;
+  `AbstractHostService` is a plain host-side class, so its annotations are checked directly.
 - `test_schema.py`: the hand-built rows of the compaction test carry a public audience.
 
 ## Rebaselined cases
