@@ -137,6 +137,7 @@ class Trace(eqx.Module):
     channel: jax.Array
     subject: jax.Array
     acquisition_index: jax.Array
+    log_slot: jax.Array  # log row named by a handled release or result
     audience: jax.Array
     n_written: jax.Array
     rec_status: jax.Array
@@ -171,6 +172,7 @@ def empty_trace(caps):
         channel=z,
         subject=z,
         acquisition_index=z,
+        log_slot=z,
         audience=z,
         n_written=z,
         rec_status=z,

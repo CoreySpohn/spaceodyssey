@@ -95,6 +95,7 @@ def advance(carry, root, study, truth, *, wake_fn=wake_by_audience):
         channel=g(ev.channel),
         subject=g(ev.subject),
         acquisition_index=g(ev.acquisition_index),
+        log_slot=g(ev.slot),
         audience=g(ev.audience),
         n_written=g(emit.n_written),
         rec_status=g(rec.status),

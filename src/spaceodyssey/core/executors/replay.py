@@ -6,7 +6,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
-from spaceodyssey.core.enums import Audience, EventKind
+from spaceodyssey.core.enums import Audience, EventKind, RecordStatus
 from spaceodyssey.core.records import LOG_INT_FIELDS, Record, masked_record
 
 
@@ -30,7 +30,8 @@ def replay_belief(study, carry, trace):
     handled release and result steps of the trace). Each acquisition is folded once, in
     release order, through the study's observer; later revisions are not folded. With
     the executor's own observer on the same rows in the same order the result equals
-    `carry.belief` bit for bit.
+    `carry.belief` bit for bit. A release that names no matching log row raises
+    `ValueError`.
     """
     log = dataclasses.replace(
         carry.log,
@@ -42,25 +43,28 @@ def replay_belief(study, carry, trace):
     steps = zip(
         *(
             np.asarray(getattr(trace, n))[handled].tolist()
-            for n in ("tick", "subject", "acquisition_index", "channel")
+            for n in ("log_slot", "tick", "subject", "acquisition_index", "channel")
         ),
         strict=True,
     )
     belief = study.observer.init(study.caps)
     used = np.zeros(log.valid.shape[0], dtype=bool)
     folded = set()
-    for tick, subject, acquisition_index, channel in steps:
-        hit = (
-            log.valid
-            & ~used
-            & (log.accepted_tick == tick)
-            & (log.subject == subject)
-            & (log.acquisition_index == acquisition_index)
-            & (log.channel == channel)
-        )
-        if not hit.any():
+    for i, tick, subject, acquisition_index, channel in steps:
+        if not (
+            0 <= i < len(log.valid)
+            and log.valid[i]
+            and log.subject[i] == subject
+            and log.acquisition_index[i] == acquisition_index
+            and log.channel[i] == channel
+        ):
+            raise ValueError(f"release at tick {tick} matches no log row at slot {i}")
+        if log.status[i] == RecordStatus.UNRELEASED:
             continue
-        i = int(np.argmax(hit))
+        if not used[i] and log.accepted_tick[i] != tick:
+            raise ValueError(
+                f"release at tick {tick} matches no accepted row at slot {i}"
+            )
         used[i] = True
         acquisition = int(log.acquisition_id[i])
         if acquisition in folded:

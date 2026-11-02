@@ -2,14 +2,12 @@
 
 ## a2: release identity during replay
 
-Confirmed; not yet fixed. Two regression tests reproduce the incorrect first
-revision fold and the silently ignored unmatched release. The current Trace has
-no log slot or acquisition/revision identity; its stable event id identifies the
-release event, not the record. Exact matching therefore requires adding a trace
-field in core/carry.py and assigning it in transaction.advance. Those changes
-need coordination because transaction.py is restricted to the decision-key
-function for this branch. The two failing tests remain uncommitted pending that
-coordination; replay code is unchanged.
+Fixed. Trace now records the handled event's log slot, assigned by
+transaction.advance. Replay selects that exact row in release order, checks its
+validity and metadata, and raises ValueError for an unmatched release. The first
+released revision is folded once per acquisition, including revisions released
+out of log order at one tick. Held records remain excluded. Regression tests cover
+the reordered revisions, inconsistent metadata, and invalid or unused log slots.
 
 ## a3: policy coupling
 
@@ -50,3 +48,12 @@ checks. The two new replay checks separately failed as expected.
 After fixes: 150 passed across test_parity_values.py, test_run_status.py,
 test_executors.py, test_schema.py, test_keys.py, and test_parity_corpus.py.
 Formatting, Ruff, domain-word, core-import, and internal-reference checks passed.
+
+Replay regressions before the fix: 2 failed in 4.50s, confirming the wrong
+revision fold and the missing error for an unmatched release.
+
+After the replay fix: 169 passed in 651.19s (0:10:51) across
+test_replay_log.py, test_parity_corpus.py, test_parity_values.py, test_schema.py,
+test_executors.py, test_revisions.py, test_record_statuses.py, and
+test_host_service.py. Formatting, Ruff, domain-word, core-import, and
+internal-reference checks passed.
