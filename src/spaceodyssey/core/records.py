@@ -6,7 +6,128 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from spaceodyssey.core.enums import F64, I64, B, Capacity
+from spaceodyssey.core.capacities import Capacities
+from spaceodyssey.core.enums import EVERYONE, F64, I64, B, Capacity
+
+
+@dataclasses.dataclass(frozen=True)
+class PayloadColumn:
+    """One payload column and the audiences that may read it."""
+
+    name: str
+    audience: int
+
+    def __post_init__(self):
+        """Require a declared, known audience."""
+        if self.audience is None:
+            raise ValueError(f"column {self.name!r} declares no audience")
+        flags = int(self.audience)
+        if flags == 0 or flags & ~int(EVERYONE):
+            raise ValueError(
+                f"column {self.name!r} needs a nonempty audience built from "
+                "Audience flags"
+            )
+        object.__setattr__(self, "audience", flags)
+
+
+@dataclasses.dataclass(frozen=True)
+class RecordKind:
+    """A registered record layout: a name and its payload columns in order."""
+
+    name: str
+    columns: tuple[PayloadColumn, ...]
+
+    def __post_init__(self):
+        """Require typed columns with distinct names."""
+        if not all(isinstance(c, PayloadColumn) for c in self.columns):
+            raise ValueError(f"kind {self.name!r} needs PayloadColumn entries")
+        names = [c.name for c in self.columns]
+        if len(set(names)) != len(names):
+            raise ValueError(f"kind {self.name!r} repeats a column name")
+
+    @property
+    def width(self) -> int:
+        """Number of payload columns."""
+        return len(self.columns)
+
+
+class KindRegistry:
+    """An in-process list of record kinds; a kind's index is its record `kind` value.
+
+    Registering is the only way a layout reaches the carry: `lower` widens
+    `Capacities.payload_width` to the widest kind and records every column's audience.
+    """
+
+    def __init__(self, kinds=()):
+        """Register `kinds` in order."""
+        self._kinds = []
+        for kind in kinds:
+            self.register(kind)
+
+    def register(self, kind):
+        """Add a kind and return its index."""
+        if not isinstance(kind, RecordKind):
+            raise TypeError("register needs a RecordKind")
+        if any(k.name == kind.name for k in self._kinds):
+            raise ValueError(f"kind {kind.name!r} is already registered")
+        self._kinds.append(kind)
+        return len(self._kinds) - 1
+
+    def index(self, name):
+        """Index of the kind registered under `name`."""
+        for i, k in enumerate(self._kinds):
+            if k.name == name:
+                return i
+        raise KeyError(name)
+
+    def __len__(self):
+        """Number of registered kinds."""
+        return len(self._kinds)
+
+    def __getitem__(self, i):
+        """The kind at index `i`."""
+        return self._kinds[i]
+
+    @property
+    def width(self) -> int:
+        """Width of the widest registered kind."""
+        return max((k.width for k in self._kinds), default=0)
+
+    def lower(self, caps=None):
+        """Return `caps` with the payload width and column audiences of this registry.
+
+        The width is the larger of `caps.payload_width` and the widest kind. A column
+        a kind does not declare has no audience and is unreadable.
+        """
+        caps = Capacities() if caps is None else caps
+        width = max(caps.payload_width, self.width)
+        table = tuple(
+            tuple(c.audience for c in k.columns) + (0,) * (width - k.width)
+            for k in self._kinds
+        )
+        return dataclasses.replace(caps, payload_width=width, payload_audience=table)
+
+
+def payload_columns(caps, kind, audience):
+    """Which payload columns of records of `kind` the `audience` may read.
+
+    Returns bool[..., P] shaped like `kind` plus a column axis. A caps with no lowered
+    registry leaves every column readable; a kind index the registry lacks has none.
+    """
+    kind = jnp.asarray(kind, I64)
+    table = caps.payload_audience
+    if not table:
+        return jnp.ones((*kind.shape, caps.payload_width), B)
+    flags = jnp.asarray(table, I64)
+    known = (kind >= 0) & (kind < flags.shape[0])
+    row = flags[jnp.clip(kind, 0, flags.shape[0] - 1)]
+    return ((row & int(audience)) != 0) & known[..., None]
+
+
+def masked_record(rec, caps, audience):
+    """The record as `audience` may read it: unreadable payload columns are zero."""
+    keep = payload_columns(caps, rec.kind, audience)
+    return dataclasses.replace(rec, payload=jnp.where(keep, rec.payload, 0.0))
 
 
 class Record(eqx.Module):
@@ -24,10 +145,11 @@ class Record(eqx.Module):
     status: jax.Array
     phase: jax.Array
     acquisition_id: jax.Array
-    revision: jax.Array  # 0
+    revision: jax.Array  # product revision of the acquisition, 0 for the first
     released_tick: jax.Array  # release tick, -1 until released
-    accepted_tick: jax.Array  # acceptance tick, -1 until folded
-    superseded_by: jax.Array  # -1: supersession is not modeled
+    accepted_tick: jax.Array  # tick the observer accepted it, -1 until then
+    superseded_by: jax.Array  # revision that replaced it, -1 if none
+    audience: jax.Array  # Audience flags the record is released to
     source: jax.Array  # channel id
     vintage: jax.Array  # phase index at admission
     config_id: jax.Array  # 0
@@ -70,6 +192,7 @@ class RecordLog(eqx.Module):
     released_tick: jax.Array
     accepted_tick: jax.Array
     superseded_by: jax.Array
+    audience: jax.Array
     source: jax.Array
     vintage: jax.Array
     config_id: jax.Array

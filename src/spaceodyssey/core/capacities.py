@@ -20,7 +20,10 @@ class Capacities:
     n_channels: int = 3
     n_events: int = 48
     n_log: int = 40
-    payload_width: int = 4
+    payload_width: int = 4  # a floor: `KindRegistry.lower` widens it to the widest kind
+    # Audience flags per record kind and payload column, lowered from the registry.
+    # Empty means no registry was lowered and every column is readable.
+    payload_audience: tuple[tuple[int, ...], ...] = ()
     n_effects: int = 2
     n_pstate: int = 4
     n_an: int = 4
@@ -45,6 +48,8 @@ class Capacities:
             raise ValueError("micro_guard must be below max_micro")
         if not self.max_tick > 0:
             raise ValueError("max_tick must be positive")
+        if any(len(row) != self.payload_width for row in self.payload_audience):
+            raise ValueError("every payload_audience row needs payload_width entries")
         if not self.n_an <= self.n_subjects:
             raise ValueError("n_an must not exceed n_subjects")
         largest = _order_key_py(

@@ -6,8 +6,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from spaceodyssey.core.enums import I64, Audience, B
-from spaceodyssey.core.records import LOG_INT_FIELDS, RecordLog
+from spaceodyssey.core.enums import I64, Audience, B, RecordStatus
+from spaceodyssey.core.records import LOG_INT_FIELDS, RecordLog, payload_columns
 
 
 class MeanBelief(eqx.Module):
@@ -57,13 +57,24 @@ def effects_none(caps):
 
 
 def visible_rows(log, audience):
-    """Select released policy rows or folded observer rows by audience."""
+    """Select released policy rows or accepted observer rows by audience.
+
+    A row held back (`RecordStatus.UNRELEASED`) is never visible.
+    """
     return (
         jnp.where(
             audience == Audience.POLICY, log.released_tick >= 0, log.accepted_tick >= 0
         )
         & log.valid
+        & (log.status != RecordStatus.UNRELEASED)
     )
+
+
+def _superseded_in_view(log, vis):
+    """Revision that replaced each row, counting only rows the audience can see."""
+    same = (log.acquisition_id[:, None] == log.acquisition_id[None, :]) & vis[None, :]
+    newer = same & (log.revision[None, :] > log.revision[:, None])
+    return jnp.max(jnp.where(newer, log.revision[None, :], -1), axis=1)
 
 
 def snapshot_view(carry, audience, caps):
@@ -71,12 +82,20 @@ def snapshot_view(carry, audience, caps):
 
     The stable sort preserves public row positions when private rows are inserted.
     Settlement identities are hidden because event ids reveal private queue activity.
+    A payload column the audience may not read (a scorer-only column, or any column
+    the kind does not declare for it) is zero in every row, and `superseded_by` counts
+    only revisions this audience can see.
     """
-    vis = visible_rows(carry.log, audience)
+    log = carry.log
+    vis = visible_rows(log, audience)
     order = jnp.argsort(~vis, stable=True)
     cols = {}
     for name in (*LOG_INT_FIELDS, "cost", "charged", "payload", "valid"):
-        col = getattr(carry.log, name)
+        col = getattr(log, name)
+        if name == "superseded_by":
+            col = _superseded_in_view(log, vis)
+        if name == "payload":
+            col = jnp.where(payload_columns(caps, log.kind, audience), col, 0.0)
         mask = vis if col.ndim == 1 else vis[:, None]
         cols[name] = jnp.where(mask, col, jnp.zeros_like(col))[order]
     # Settlement ids shift when private events are queued; hide them from policies.

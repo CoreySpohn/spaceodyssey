@@ -74,6 +74,8 @@ class RecordStatus(IntEnum):
     FAILED = 1
     PARTIAL = 2
     CANCELLED = 3
+    NULL = 4  # the acquisition ran and produced no usable value
+    UNRELEASED = 5  # logged but held back: never released, never folded
 
 
 class Purpose(IntEnum):
@@ -125,10 +127,17 @@ class RemainderRule(IntEnum):
 
 
 class Audience(IntFlag):
-    """Integer codes for audience."""
+    """Who may read a record or a payload column.
+
+    A record's audience says who it is released to (the observer always folds what it
+    is released; the policy sees it only with the `POLICY` flag). A payload column's
+    audience says who may read it: `SCORER` alone marks a column that stays in the log
+    for scoring and never reaches a snapshot or the observer.
+    """
 
     OBSERVER = 1
     POLICY = 2
+    SCORER = 4
 
 
 class Capacity(IntFlag):
@@ -155,6 +164,7 @@ class RunStatus(IntEnum):
 
 
 PUBLIC = Audience.OBSERVER | Audience.POLICY
+EVERYONE = Audience.OBSERVER | Audience.POLICY | Audience.SCORER
 
 
 def effect_mask(*kinds):

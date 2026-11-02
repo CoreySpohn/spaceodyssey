@@ -14,6 +14,7 @@ from spaceodyssey.core.enums import (
     F64,
     I64,
     PUBLIC,
+    Audience,
     CoincidentOrder,
     Disposition,
     EffectKind,
@@ -33,11 +34,36 @@ from spaceodyssey.core.kinds import (
     AbstractWorldSource,
 )
 from spaceodyssey.core.ledger import AssetTable, ChannelTable
-from spaceodyssey.core.records import record_none
+from spaceodyssey.core.records import (
+    KindRegistry,
+    PayloadColumn,
+    RecordKind,
+    record_none,
+)
 from spaceodyssey.core.snapshot import EffectTable, MeanBelief, effects_none
 from spaceodyssey.core.study import Agenda, Clock, Study
 
 RECORD_NONE, RECORD_MEASUREMENT, RECORD_AUXILIARY = range(3)
+
+# The measurement layout is what `realize` fills: the value, the raw noise variate and
+# the occupancy fraction. The variate lets anyone who holds it recover the true signal
+# from the value, so it is a scorer-only column.
+MEASUREMENT_KIND = RecordKind(
+    "measurement",
+    (
+        PayloadColumn("value", PUBLIC),
+        PayloadColumn("variate", Audience.SCORER),
+        PayloadColumn("fraction", PUBLIC),
+    ),
+)
+AUXILIARY_KIND = RecordKind("auxiliary", (PayloadColumn("value", PUBLIC),))
+
+
+def toy_registry():
+    """A fresh registry with the toy kinds at their `RECORD_*` indices."""
+    return KindRegistry(
+        (RecordKind("none", ()), MEASUREMENT_KIND, AUXILIARY_KIND),
+    )
 
 
 class ToyDesign(AbstractDesign):
@@ -535,12 +561,14 @@ def forced_effects(caps, study, m, n_dec_max=6):
 def survey_1(caps=None, **overrides):
     """Build a fixed five-acquisition toy study."""
     caps = Capacities() if caps is None else caps
+    if not caps.payload_audience:
+        caps = toy_registry().lower(caps)
     c = caps.n_channels
     channels = ChannelTable(
-        id=jnp.asarray([10, 11, 12][:c], I64),
-        lane=jnp.asarray([0, 1, 2][:c], I64),
-        occupancy_ticks=jnp.asarray([100, 150, 50][:c], I64),
-        latency_ticks=jnp.asarray([20, 20, 0][:c], I64),
+        id=jnp.asarray([10, 11, 12, 13][:c], I64),
+        lane=jnp.asarray([0, 1, 2, 2][:c], I64),
+        occupancy_ticks=jnp.asarray([100, 150, 50, 40][:c], I64),
+        latency_ticks=jnp.asarray([20, 20, 0, 0][:c], I64),
         kind=jnp.full(c, RECORD_MEASUREMENT, I64),
         audience=jnp.full(c, PUBLIC, I64),
         cost=jnp.ones((c, caps.n_resources), F64),
@@ -556,7 +584,7 @@ def survey_1(caps=None, **overrides):
     base = dict(
         caps=caps,
         channels=channels,
-        channel_model=ToyPhotometry(noise=jnp.asarray([0.5, 0.3, 0.8][:c], F64)),
+        channel_model=ToyPhotometry(noise=jnp.asarray([0.5, 0.3, 0.8, 0.4][:c], F64)),
         lane_asset=jnp.asarray([0, 0, 1][: caps.n_lanes], I64),
         transition_ticks=jnp.asarray([10, 10, 5][: caps.n_lanes], I64),
         budget=budget,

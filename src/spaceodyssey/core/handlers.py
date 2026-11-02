@@ -21,7 +21,7 @@ from spaceodyssey.core.enums import (
 from spaceodyssey.core.events import enqueue, where_tree
 from spaceodyssey.core.keys import draw_key
 from spaceodyssey.core.ledger import _resource_rows
-from spaceodyssey.core.records import Record, record_none, write_log
+from spaceodyssey.core.records import Record, masked_record, record_none, write_log
 
 
 def _emit(n, slot):
@@ -107,6 +107,7 @@ def h_done(c, ev, study, truth, root):
         released_tick=jnp.asarray(-1, I64),
         accepted_tick=jnp.asarray(-1, I64),
         superseded_by=jnp.asarray(-1, I64),
+        audience=channels.audience[channel_index],
         source=ev.channel,
         vintage=ev.scope,
         config_id=jnp.asarray(0, I64),
@@ -123,28 +124,53 @@ def h_done(c, ev, study, truth, root):
 
 
 def h_release(c, ev, study, truth, root):
-    """Make a record visible and fold it into the observer, once."""
+    """Make a record visible and fold it into the observer, once per acquisition.
+
+    The observer accepts every released row but folds only the first accepted revision
+    of an acquisition; the policy belief does the same over policy releases. When a
+    later revision is accepted, the earlier rows are marked `superseded_by` it. A row
+    held back (`RecordStatus.UNRELEASED`) is neither released nor accepted.
+    """
     caps = study.caps
     slot = ev.slot
-    rec = _log_rec(c.log, slot)
-    public = (ev.audience & Audience.POLICY) != 0
-    already = c.log.accepted_tick[slot] >= 0
-    folded = study.observer.analyze(study.observer.fold(c.belief, rec, caps))
-    belief = where_tree(~already, folded, c.belief)
+    log = c.log
+    rec = _log_rec(log, slot)
+    held = rec.status == RecordStatus.UNRELEASED
+    public = ((ev.audience & Audience.POLICY) != 0) & ~held
+    already = log.accepted_tick[slot] >= 0
+    others = (
+        log.valid
+        & (log.acquisition_id == rec.acquisition_id)
+        & (jnp.arange(caps.n_log) != slot)
+    )
+    accepted = others & (log.accepted_tick >= 0)
+    obs = masked_record(rec, caps, Audience.OBSERVER)
+    folded = study.observer.analyze(study.observer.fold(c.belief, obs, caps))
+    belief = where_tree(~already & ~held & ~accepted.any(), folded, c.belief)
     # the policy's belief folds only records released to the policy audience, once
-    seen = c.log.released_tick[slot] >= 0
-    pfolded = study.observer.analyze(study.observer.fold(c.pbelief, rec, caps))
-    pbelief = where_tree(public & ~seen, pfolded, c.pbelief)
+    seen = log.released_tick[slot] >= 0
+    pol = masked_record(rec, caps, Audience.POLICY)
+    pfolded = study.observer.analyze(study.observer.fold(c.pbelief, pol, caps))
+    released = others & (log.released_tick >= 0)
+    pbelief = where_tree(public & ~seen & ~released.any(), pfolded, c.pbelief)
+    older = jnp.where(accepted & (log.revision < rec.revision), rec.revision, -1)
+    newer = jnp.max(jnp.where(accepted, log.revision, -1))
+    newer = jnp.where(newer > rec.revision, newer, -1)
+    superseded = jnp.maximum(log.superseded_by, jnp.where(held, -1, older))
+    superseded = superseded.at[slot].set(
+        jnp.where(held, log.superseded_by[slot], jnp.maximum(superseded[slot], newer))
+    )
     log = eqx.tree_at(
-        lambda lg: (lg.released_tick, lg.accepted_tick),
-        c.log,
+        lambda lg: (lg.released_tick, lg.accepted_tick, lg.superseded_by),
+        log,
         (
-            c.log.released_tick.at[slot].set(
-                jnp.where(public, ev.tick, c.log.released_tick[slot])
+            log.released_tick.at[slot].set(
+                jnp.where(public, ev.tick, log.released_tick[slot])
             ),
-            c.log.accepted_tick.at[slot].set(
-                jnp.where(already, c.log.accepted_tick[slot], ev.tick)
+            log.accepted_tick.at[slot].set(
+                jnp.where(already | held, log.accepted_tick[slot], ev.tick)
             ),
+            superseded,
         ),
     )
     c1 = _tree_set(
@@ -167,6 +193,7 @@ def h_process(c, ev, study, truth, root):
     """Handle a process event and release any record it writes."""
     caps = study.caps
     c1, rec = study.process.handle(c, ev, study)
+    rec = dataclasses.replace(rec, audience=jnp.asarray(ev.audience, I64))
     c2, slot = write_log(c1, rec, caps)
     written = c2.n_log > c1.n_log
     c3 = _release_row(c2, written, rec, slot, ev.audience, study)
@@ -214,6 +241,7 @@ def _cancel_lane(
         released_tick=jnp.asarray(-1, I64),
         accepted_tick=jnp.asarray(-1, I64),
         superseded_by=jnp.asarray(-1, I64),
+        audience=channels.audience[channel_index],
         source=c.ev.channel[i],
         vintage=c.ev.scope[i],
         config_id=jnp.asarray(0, I64),
