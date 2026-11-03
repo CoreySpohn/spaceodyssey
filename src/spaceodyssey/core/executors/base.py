@@ -100,6 +100,8 @@ CANONICAL_FIELDS = {
         "valid_until_tick",
         "remainder_rule",
         "disruptive_used",
+        "debited",
+        "refunded",
     ),
     "carry.belief": (
         "mean",

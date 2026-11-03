@@ -183,6 +183,8 @@ ALLOWED = {
         "events.py",
         "return eqx.tree_at(lambda t: tuple(getattr(t, n) for n in names), table, new)",
     ): COLUMN_BY_NAME,
+    ("executors/base.py", "obj = getattr(obj, part)"): COLUMN_BY_NAME,
+    ("executors/base.py", "leaf = np.asarray(getattr(obj, name))"): COLUMN_BY_NAME,
     ("executors/base.py", "pick(getattr(trace, n)).tolist()"): COLUMN_BY_NAME,
     ("executors/base.py", "bool(getattr(carry, n))"): COLUMN_BY_NAME,
     (
