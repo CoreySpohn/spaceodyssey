@@ -114,7 +114,7 @@ def advance(carry, root, study, truth, *, wake_fn=wake_by_audience):
 def phase_at(carry, study):
     """Select the phase after accounting for elapsed boundaries."""
     bounds = study.agenda.phase_until[:-1]
-    if not bounds:
+    if bounds.shape[0] == 0:
         return carry.phase
     passed = jnp.sum(carry.tick >= jnp.asarray(bounds, I64)).astype(I64)
     return jnp.maximum(carry.phase, passed)

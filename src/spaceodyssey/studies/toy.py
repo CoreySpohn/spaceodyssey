@@ -144,6 +144,27 @@ class ToySolveAnalysis(ToyRunningMean):
         return MeanBelief(belief.mean, belief.n, jnp.linalg.solve(a, m + 1.0))
 
 
+def _as_i64(x):
+    return jnp.asarray(x, I64)
+
+
+PLAN_ROWS = 8
+
+
+def _as_plan(plan):
+    """A plan of (subject, channel id) pairs as an integer array of fixed length.
+
+    Unused rows hold -1, so plans of different lengths share one compiled program.
+    """
+    rows = jnp.asarray(plan, I64).reshape(-1, 2)
+    pad = jnp.full((max(PLAN_ROWS - rows.shape[0], 0), 2), -1, I64)
+    return jnp.concatenate([rows, pad])
+
+
+def _plan_length(plan):
+    return jnp.sum(plan[:, 0] >= 0).astype(I64)
+
+
 class NullProcess(AbstractProcess):
     """Process that seeds and writes nothing."""
 
@@ -158,9 +179,9 @@ class HeartbeatProcess(AbstractProcess):
     process audience.
     """
 
-    period_ticks: int
+    period_ticks: jax.Array = eqx.field(converter=_as_i64)
     n_fires: int = eqx.field(static=True)
-    audience: int
+    audience: jax.Array = eqx.field(converter=_as_i64)
     writes: bool = eqx.field(default=False)
 
     def seed(self, carry, caps):
@@ -257,33 +278,35 @@ class FixedPlanPolicy(AbstractPolicy):
     stale). Cancel and Stop act on lane 0.
     """
 
-    plan: tuple[tuple[int, int], ...]
-    wait_at: int = eqx.field(default=-1)
-    wait_ticks: int = eqx.field(default=50)
-    bundle_at: int = eqx.field(default=-1)
-    bundle_ch: int = eqx.field(default=12)
-    cancel_at: int = eqx.field(default=-1)
-    cancel_gen_offset: int = eqx.field(default=0)
-    stop_at: int = eqx.field(default=-1)
-    stop_scope: int = eqx.field(default=Scope.LANE)
-    stop_disp: int = eqx.field(default=Disposition.CLOSE)
+    plan: jax.Array = eqx.field(converter=_as_plan)
+    wait_at: jax.Array = eqx.field(default=-1, converter=_as_i64)
+    wait_ticks: jax.Array = eqx.field(default=50, converter=_as_i64)
+    bundle_at: jax.Array = eqx.field(default=-1, converter=_as_i64)
+    bundle_ch: jax.Array = eqx.field(default=12, converter=_as_i64)
+    cancel_at: jax.Array = eqx.field(default=-1, converter=_as_i64)
+    cancel_gen_offset: jax.Array = eqx.field(default=0, converter=_as_i64)
+    stop_at: jax.Array = eqx.field(default=-1, converter=_as_i64)
+    stop_scope: jax.Array = eqx.field(default=Scope.LANE, converter=_as_i64)
+    stop_disp: jax.Array = eqx.field(default=Disposition.CLOSE, converter=_as_i64)
 
     def declare(self):
         """The special stop and the final campaign drain this plan asks for."""
         stops = [(Scope.CAMPAIGN, Disposition.DRAIN)]
-        if self.stop_at >= 0:
-            stops.append((Scope(self.stop_scope), Disposition(self.stop_disp)))
+        if int(self.stop_at) >= 0:
+            stops.append(
+                (Scope(int(self.stop_scope)), Disposition(int(self.stop_disp)))
+            )
         return Declaration(stops=tuple(stops))
 
     def decide(self, pstate, view, study, key):
         """Execute the next plan entry or a declared special effect."""
         caps = study.caps
         n = view.n_dec
-        n_plan = len(self.plan)
+        n_plan = _plan_length(self.plan)
         pos = pstate[0].astype(I64)
-        subjects = jnp.asarray([p[0] for p in self.plan] or [0], I64)
-        cids = jnp.asarray([p[1] for p in self.plan] or [0], I64)
-        p = jnp.minimum(pos, max(n_plan - 1, 0))
+        subjects = jnp.maximum(self.plan[:, 0], 0)
+        cids = jnp.maximum(self.plan[:, 1], 0)
+        p = jnp.minimum(pos, jnp.maximum(n_plan - 1, 0))
         is_wait = n == self.wait_at
         is_cancel = n == self.cancel_at
         is_stop = n == self.stop_at
@@ -328,6 +351,13 @@ class FixedPlanPolicy(AbstractPolicy):
         caps = study.caps
         n = int(view_np.n_dec)
         pos = int(pstate[0])
+        plan = [row for row in np.asarray(self.plan).tolist() if row[0] >= 0]
+        wait_at, cancel_at = int(self.wait_at), int(self.cancel_at)
+        stop_at, bundle_at = int(self.stop_at), int(self.bundle_at)
+        wait_ticks = int(self.wait_ticks)
+        cancel_gen_offset = int(self.cancel_gen_offset)
+        stop_scope, stop_disp = int(self.stop_scope), int(self.stop_disp)
+        bundle_ch = int(self.bundle_ch)
         kinds = [EffectKind.NONE] * caps.n_effects
         subjects = [0] * caps.n_effects
         channels = [0] * caps.n_effects
@@ -336,35 +366,31 @@ class FixedPlanPolicy(AbstractPolicy):
         disps = [0] * caps.n_effects
         ids = [int(i) for i in np.asarray(study.channels.id)]
         advance_plan = False
-        if n == self.wait_at:
-            kinds[0], ticks[0] = EffectKind.WAIT, int(view_np.tick) + self.wait_ticks
-        elif n == self.cancel_at:
-            kinds[0], ticks[0] = EffectKind.CANCEL, self.cancel_gen_offset
-        elif n == self.stop_at:
-            kinds[0], scopes[0], disps[0] = (
-                EffectKind.STOP,
-                self.stop_scope,
-                self.stop_disp,
-            )
-        elif pos >= len(self.plan):
+        if n == wait_at:
+            kinds[0], ticks[0] = EffectKind.WAIT, int(view_np.tick) + wait_ticks
+        elif n == cancel_at:
+            kinds[0], ticks[0] = EffectKind.CANCEL, cancel_gen_offset
+        elif n == stop_at:
+            kinds[0], scopes[0], disps[0] = EffectKind.STOP, stop_scope, stop_disp
+        elif pos >= len(plan):
             kinds[0], scopes[0], disps[0] = (
                 EffectKind.STOP,
                 Scope.CAMPAIGN,
                 Disposition.DRAIN,
             )
         else:
-            subject, cid = self.plan[pos]
+            subject, cid = plan[pos]
             kinds[0], subjects[0], channels[0] = (
                 EffectKind.OBSERVE,
                 subject,
                 ids.index(cid),
             )
             advance_plan = True
-            if n == self.bundle_at:
+            if n == bundle_at:
                 kinds[1], subjects[1], channels[1] = (
                     EffectKind.OBSERVE,
                     subject,
-                    ids.index(self.bundle_ch),
+                    ids.index(bundle_ch),
                 )
         eff = EffectTable(
             kind=jnp.asarray(kinds, I64),
@@ -389,17 +415,17 @@ class ReactivePolicy(AbstractPolicy):
     extra wakes must not alter the trajectory (leak scenarios).
     """
 
-    plan: tuple[tuple[int, int], ...]
+    plan: jax.Array = eqx.field(converter=_as_plan)
 
     def decide(self, pstate, view, study, key):
         """Advance the plan when the snapshot gains visible rows."""
         caps = study.caps
-        n_plan = len(self.plan)
+        n_plan = _plan_length(self.plan)
         pos = pstate[0].astype(I64)
         fresh = (view.n_dec == 0) | (view.n_rows != pstate[1].astype(I64))
-        subjects = jnp.asarray([p[0] for p in self.plan], I64)
-        cids = jnp.asarray([p[1] for p in self.plan], I64)
-        p = jnp.minimum(pos, n_plan - 1)
+        subjects = jnp.maximum(self.plan[:, 0], 0)
+        cids = jnp.maximum(self.plan[:, 1], 0)
+        p = jnp.minimum(pos, jnp.maximum(n_plan - 1, 0))
         exhausted = pos >= n_plan
         observe = fresh & ~exhausted
         stop = fresh & exhausted
@@ -596,7 +622,7 @@ def survey_1(caps=None, **overrides):
         lane_asset=jnp.asarray([0, 0, 1][: caps.n_lanes], I64),
         transition_ticks=jnp.asarray([10, 10, 5][: caps.n_lanes], I64),
         budget=budget,
-        horizon_tick=1000,
+        horizon_tick=jnp.asarray(1000, I64),
         policies=(FixedPlanPolicy(plan=((0, 10), (1, 10), (0, 10), (1, 10), (0, 10))),),
         phase_until=(1000,),
         process=NullProcess(),

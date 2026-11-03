@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 
 from spaceodyssey.core.capacities import Capacities, require_x64
-from spaceodyssey.core.enums import F64
+from spaceodyssey.core.enums import F64, I64
 from spaceodyssey.core.keys import DEFAULT_COUPLING, Coupling, Fork
 from spaceodyssey.core.kinds import (
     AbstractChannelModel,
@@ -33,8 +33,8 @@ class Agenda(eqx.Module):
     """
 
     policies: tuple[AbstractPolicy, ...]
-    phase_until: tuple[int, ...]
-    permitted_effects: tuple[int, ...]
+    phase_until: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, I64))
+    permitted_effects: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, I64))
 
     def __check_init__(self):
         """Require one mask per phase."""
@@ -51,7 +51,7 @@ class Study(eqx.Module):
     channel_model: AbstractChannelModel
     assets: AssetTable
     budget: jax.Array
-    horizon_tick: int
+    horizon_tick: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, I64))
     agenda: Agenda
     process: AbstractProcess
     observer: AbstractObserver
