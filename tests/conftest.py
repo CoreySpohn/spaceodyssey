@@ -5,7 +5,7 @@ The suite is dominated by XLA compilation. Two settings keep it fast and small:
 - a persistent compilation cache, so separate processes and later runs reuse compiled
   programs (``SPACEODYSSEY_JAX_CACHE`` names another directory, ``off`` disables it);
 - a bound on what a long-lived process keeps: when its resident memory passes
-  ``SPACEODYSSEY_RSS_LIMIT_MB`` (default 3500) and has grown by more than 700 MB since
+  ``SPACEODYSSEY_RSS_LIMIT_MB`` (default 4500) and has grown by more than 1000 MB since
   the last clear, the next test teardown drops the compiled programs.
 """
 
@@ -26,8 +26,8 @@ if _cache != "off":
     jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
     jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 
-RSS_LIMIT = int(os.environ.get("SPACEODYSSEY_RSS_LIMIT_MB", "3500")) * 2**20
-RSS_GROWTH = 700 * 2**20
+RSS_LIMIT = int(os.environ.get("SPACEODYSSEY_RSS_LIMIT_MB", "4500")) * 2**20
+RSS_GROWTH = 1000 * 2**20
 _after_clear = [0]
 
 
