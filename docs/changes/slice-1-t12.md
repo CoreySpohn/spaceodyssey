@@ -65,7 +65,7 @@ the suite library ownership map; no other library implementation was inspected.
 | Implementation and location | Toy prefix | Physics or service represented | Owning library | Why this toy is used; real physics present? |
 | --- | --- | --- | --- | --- |
 | `toy.ToyPhotometry`, measurement channels 10, 11 and 12 (and the unused default fourth row) | `ToyPhotometry`: yes | A noisy scalar measurement and its occupancy fraction | `jaxedith` for count rates and exposure times; `skyscapes` for source spectra; `optixstuff` for detector response | Prescribed dimensionless signals, gain and Gaussian noise isolate keys, release and accounting. There is no photon budget, spectral model, detector model or calibrated exposure calculation. No real physics. |
-| `catalog.catalog_study`, channel 13, realized by `toy.ToyPhotometry` | `ToyPhotometry`: yes; there is no separate catalog model class | A delayed catalog product to an observer audience | `exoverses` for catalog access; `skyscapes` for a JAX scene built from catalog data | A registered record kind, fixed delay and auxiliary sum exercise the open record protocol. No catalog is queried and no astrophysical property is calculated. No real physics. |
+| `catalog.catalog_study`, channel 13, realized by `toy.ToyPhotometry` | `ToyPhotometry`: yes; there is no separate catalog model class | A delayed catalog product to an observer audience | `skyscapes` for catalog access (`skyscapes.io.from_exovista`) and for a JAX scene built from catalog data | A registered record kind, fixed delay and auxiliary sum exercise the open record protocol. No catalog is queried and no astrophysical property is calculated. No real physics. |
 | `oracle.ToyOracleService` | `ToyOracleService`: yes | A host inference answer from released information | `photomancy` for beliefs, inference and evidence | Copies the snapshot mean, sample count and release version. It isolates Query/Result sequencing and audience checks without a posterior fit or scientific likelihood. No real physics. |
 
 All channel-model and service implementation names start with `Toy`. There is
@@ -102,43 +102,12 @@ The only replacement hand history recorded by these sources is the retimed bundl
 
 ## Validation and limits
 
-Validation used the prescribed worktree test runner, with no full-suite run.
-The combined gate and focused core run reported `3 failed, 516 passed in
-1644.35s (0:27:24)`. All 395 focused core tests passed, including every touched
-test file and the replay, fork and latency acceptance files. The three failures
-were confined to new gate assumptions: both fixed-plan wake controls correctly
-failed the named invariant by changing public rows, rather than increasing the
-final wake count; the current private-writer control added 80 wakes, rather than
-the historical 160. The gate now checks the actual named invariant failure and
-separates current coalescing from historical per-event scheduling as described
-above. A subsequent full run reported `1 failed, 131 passed in 1327.07s
-(0:22:07)`: the remaining historical writer control exposed a second protection,
-the release handler clearing its wake flag for an observer-only release. Restoring
-per-event scheduling alone cannot bypass that protection. The historical wake
-mutant now explicitly wakes on every release, while the current controls retain
-the production release handler and coalescing. The four count controls then
-passed together: `4 passed, 122 deselected in 63.96s (0:01:03)`, with a longest
-individual case of 20.38 seconds. A complete final gate run also covers the
-original leak tests after their helper gained the optional executor factory.
-
-All 28 corpus cases were in the `1e-12` go band, with maximum absolute float
-difference `2.220446049250313e-16`; integers matched exactly. The longest individual
-test in the combined run took 37.67 seconds. No slow marker was added.
-
-Final gate and leak-test result: `132 passed in 1370.71s (0:22:50)`.
-This includes all 126 gate cases and six original leak tests. The longest
-individual case took 27.26 seconds, so none requires a slow marker. The final run
-again reported every corpus case in the `1e-12` go band, with the same maximum
-absolute float difference above. Together with the 395 focused core tests, all
-requested checks have passing evidence on this branch.
-
-Ruff check and format, domain-word, core-import and internal-reference checks
-passed. Both core lints scanned all 37 Python files. Changed Python files are
-ASCII; changed documentation has no em dashes or contractions. The five initial
-AST controls failed against an empty scanner before implementation, and concrete
-kind and local-alias regressions also failed before their scanner extensions.
-An independent code review identified the scanner gaps and one helper-extraction
-typo; both were corrected. No runtime implementation changed.
+The final gate run reported `132 passed` (126 gate cases and the six original
+leak tests); the 395 focused core tests also passed. Every corpus case was in the
+`1e-12` go band, with a maximum absolute float difference of
+`2.220446049250313e-16` and exact integers. The longest single case took about
+27 seconds, so no slow marker is used. Ruff, the domain-word, core-import and
+internal-reference checks pass; both core lints scan all 37 Python files.
 
 The gate uses the existing conformance checks with their stated limits. If the
 record log overflowed, exact balance reconstruction and the exact-density half of
