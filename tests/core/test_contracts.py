@@ -112,3 +112,137 @@ def test_collection_preserves_callers_x64_setting():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("ids", [[], [0], [0, 0], [0, 2]])
+def test_gate_rejects_missing_duplicate_or_wrong_worlds(monkeypatch, ids):
+    from types import SimpleNamespace
+
+    from tests import test_slice1_gate as gate
+
+    returned = [SimpleNamespace(world=world) for world in ids]
+    monkeypatch.setattr(gate, "runs", lambda *args: returned)
+    checks = [
+        SimpleNamespace(name=name, passed=True) for name in gate.EXPECTED_INVARIANTS
+    ]
+    monkeypatch.setattr(gate, "check_run", lambda run: checks)
+    with pytest.raises(AssertionError, match="world"):
+        gate.test_corpus_invariants("K3", gate.CORPUS_BY_NAME["baseline"], "host")
+
+
+@pytest.mark.parametrize("annotation", [object, typing.Any, Callable, int | object])
+def test_composed_agenda_escape_is_rejected(monkeypatch, annotation):
+    from spaceodyssey.core.study import Agenda
+
+    monkeypatch.setattr(
+        Agenda, "__annotations__", {**Agenda.__annotations__, "escape": annotation}
+    )
+    with pytest.raises(AssertionError, match="untyped field"):
+        assert_study_typed()
+
+
+@pytest.mark.parametrize(
+    "container",
+    [lambda t: t, lambda t: list[t], lambda t: tuple[t, ...], lambda t: dict[str, t]],
+)
+def test_concrete_field_graph_is_checked_recursively(container):
+    leaf = dataclasses.make_dataclass("ConcreteLeaf", [("escape", object)])
+    middle = dataclasses.make_dataclass(
+        "ConcreteMiddle", [("children", container(leaf))]
+    )
+    root = dataclasses.make_dataclass("CompositionRoot", [("nested", middle)])
+    with pytest.raises(AssertionError, match="untyped field"):
+        assert_typed_fields({root})
+
+
+@pytest.mark.parametrize("executor", ["host", "scan"])
+@pytest.mark.parametrize("mutant", ["measurement", "policy"])
+def test_draw_control_rejects_nan_only_corruption(monkeypatch, executor, mutant):
+    import equinox as eqx
+    import jax.numpy as jnp
+
+    from tests import test_slice1_gate as gate
+    from tests.core import mutants as m
+
+    policy = mutant == "policy"
+    host, scan = (
+        (m.CountKeyHostExecutor, m.CountKeyCompiledExecutor)
+        if policy
+        else (m.MutantHostExecutor, m.MutantCompiledExecutor)
+    )
+    if policy:
+        monkeypatch.setattr(host, "decide", core.HostExecutor.decide)
+    else:
+        monkeypatch.setattr(host, "advance", core.HostExecutor.advance)
+    monkeypatch.setattr(scan, "transition", core.CompiledExecutor.transition)
+
+    def corrupt(original):
+        def run(self, *args, **kwargs):
+            result = original(self, *args, **kwargs)
+            if policy:
+                trace = eqx.tree_at(
+                    lambda t: t.pol_u,
+                    result.trace,
+                    jnp.full_like(result.trace.pol_u, jnp.nan),
+                )
+                return core.RunResult(result.carry, trace)
+            payload = result.carry.log.payload.at[..., 1].set(jnp.nan)
+            carry = eqx.tree_at(lambda c: c.log.payload, result.carry, payload)
+            return core.RunResult(carry, result.trace)
+
+        return run
+
+    monkeypatch.setattr(host, "run", corrupt(core.HostExecutor.run))
+    monkeypatch.setattr(scan, "run", corrupt(core.CompiledExecutor.run))
+    with pytest.raises(AssertionError, match="finite"):
+        gate.test_negative_decision_count_keys(executor, mutant)
+
+
+def test_gate_rejects_broken_replay(monkeypatch):
+    from tests import test_slice1_gate as gate
+    from tests.core import test_replay_log
+
+    check = getattr(gate, "test_replay_acceptance", None)
+    assert callable(check), "gate must run A2 replay"
+    monkeypatch.setattr(
+        test_replay_log,
+        "replay_belief",
+        lambda study, carry, trace: study.observer.init(study.caps),
+    )
+    with pytest.raises(AssertionError):
+        check("A2", gate.CORPUS_BY_NAME["baseline"])
+
+
+@pytest.mark.parametrize(
+    "name, check_id",
+    [("test_fork_acceptance", "A3"), ("test_latency_acceptance", "A4")],
+)
+def test_gate_runs_fork_and_latency(name, check_id):
+    from tests import test_slice1_gate as gate
+
+    check = getattr(gate, name, None)
+    assert callable(check), f"gate must run {check_id}"
+    assert any(
+        mark.name == "parametrize" and check_id in mark.args[1]
+        for mark in check.pytestmark
+    )
+
+
+@pytest.mark.parametrize("policy", [False, True])
+def test_draw_controls_require_multiple_shared_identities(policy):
+    from tests.core import draw_helpers as draws
+
+    compare = draws.compare_policy_draws if policy else draws.compare_draws
+    with pytest.raises(AssertionError, match="matched identities"):
+        compare([], [])
+
+
+def test_typed_graph_handles_cycles_and_static_fields():
+    leaf = dataclasses.make_dataclass(
+        "StaticLeaf", [("escape", object, dataclasses.field(metadata={"static": True}))]
+    )
+    root = dataclasses.make_dataclass("CyclicRoot", [("value", int)])
+    root.__annotations__["cycle"] = root
+    root.__annotations__["static_children"] = tuple[leaf, ...]
+    with pytest.raises(AssertionError, match="untyped field"):
+        assert_typed_fields({root})
