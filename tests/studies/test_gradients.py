@@ -35,8 +35,9 @@ def test_d2_two_world_enumeration_is_unbiased():
     assert est == pytest.approx(truth, rel=1e-12)
 
 
-def test_d2_statistic_shape():
-    r = grad.d2_reinforce_and_enumerated(kinds.d2_study(), *worlds(1024))
+@pytest.mark.parametrize("seed", [0, 1], ids=["root-0", "root-1"])
+def test_d2_statistic_shape(seed):
+    r = grad.d2_reinforce_and_enumerated(kinds.d2_study(), *worlds(1024, seed=seed))
     assert r["n_flip"] > 0 and np.isfinite(r["z"]) and r["se_paired"] > 0
     assert r["all_done"]
 

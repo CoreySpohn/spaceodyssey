@@ -25,8 +25,8 @@ CAPS = Capacities()
 ROOT0 = jr.PRNGKey(0)
 
 
-def worlds(n, caps=CAPS):
-    roots = jax.vmap(lambda i: jr.fold_in(ROOT0, i))(jnp.arange(n))
+def worlds(n, caps=CAPS, *, seed=0):
+    roots = jax.vmap(lambda i: jr.fold_in(jr.PRNGKey(seed), i))(jnp.arange(n))
     truths = jax.vmap(lambda r: kinds.draw_truth(jr.fold_in(r, Purpose.WORLD), caps))(
         roots
     )
