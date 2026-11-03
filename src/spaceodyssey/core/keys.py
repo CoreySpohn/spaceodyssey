@@ -44,7 +44,7 @@ class Coupling(eqx.Module):
     every coordinate separates draws.
     """
 
-    shared: tuple = eqx.field(default=(), static=True)
+    shared: tuple[tuple[int, tuple[str, ...]], ...] = eqx.field(default=(), static=True)
 
     def __check_init__(self):
         """Reject unknown coordinate names and the identity coordinates."""

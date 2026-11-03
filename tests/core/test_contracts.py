@@ -55,22 +55,56 @@ def test_study_has_no_untyped_fields():
     assert_study_typed()
 
 
-@pytest.mark.parametrize(
-    "annotation",
-    [
-        object,
-        typing.Any,
-        Callable,
-        typing.Callable,
-        list[typing.Any],
-        Callable[[typing.Any], int],
-    ],
-)
+_ALIAS = getattr(typing, "TypeAliasType", None)
+ESCAPES = [
+    object,
+    typing.Any,
+    Callable,
+    typing.Callable,
+    list[typing.Any],
+    Callable[[typing.Any], int],
+    typing.TypeVar("Unbounded"),
+    typing.TypeVar("Hidden") | None,
+    tuple,
+    dict,
+    list,
+    set,
+    frozenset,
+    tuple,
+    dict,
+    tuple[dict, ...],
+    typing.TypeVar("Loose", bound=object),
+    typing.TypeVar("Wide", int, object),
+]
+if _ALIAS is not None:
+    ESCAPES.append(_ALIAS("Alias", object))
+    ESCAPES.append(_ALIAS("Nested", list[_ALIAS("Inner", typing.Any)]))
+
+
+@pytest.mark.parametrize("annotation", ESCAPES, ids=repr)
 def test_untyped_fields_are_rejected(annotation):
     assert is_untyped(annotation)
     cls = dataclasses.make_dataclass("AbstractUntyped", [("value", annotation)])
     with pytest.raises(AssertionError, match="untyped field"):
         assert_typed_fields({cls})
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        int,
+        tuple[int, ...],
+        dict[str, float],
+        frozenset[int],
+        typing.TypeVar("Bounded", bound=int),
+        typing.TypeVar("Constrained", int, float),
+    ],
+    ids=repr,
+)
+def test_typed_fields_are_accepted(annotation):
+    assert not is_untyped(annotation)
+    cls = dataclasses.make_dataclass("AbstractTyped", [("value", annotation)])
+    assert_typed_fields({cls})
 
 
 def test_plain_abstract_fields_need_annotations():

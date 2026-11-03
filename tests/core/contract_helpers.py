@@ -13,12 +13,41 @@ CORE = Path(core.__file__).parent
 FOREIGN = {"jax", "jaxlib", "numpy", "equinox", "jaxtyping", "builtins"}
 
 
+BARE_CONTAINERS = (
+    tuple,
+    dict,
+    list,
+    set,
+    frozenset,
+    tuple,
+    dict,
+    list,
+    set,
+    frozenset,
+)
+_ALIAS_TYPE = getattr(typing, "TypeAliasType", None)
+
+
 def is_untyped(annotation):
-    """Find escape annotations even within unions, containers and call signatures."""
+    """Find escape annotations even within unions, containers and call signatures.
+
+    An unbounded TypeVar counts as `Any`, a `type X = ...` alias is read through to its
+    value, and a container written without parameters (`tuple`, `dict`, `list`, `set`,
+    `frozenset`) hides what it holds.
+    """
     if isinstance(annotation, (list, tuple)):
         return any(is_untyped(arg) for arg in annotation)
     if annotation in (object, typing.Any, Callable, typing.Callable):
         return True
+    if any(annotation is bare for bare in BARE_CONTAINERS):
+        return True
+    if isinstance(annotation, typing.TypeVar):
+        bounds = annotation.__constraints__ or (
+            (annotation.__bound__,) if annotation.__bound__ is not None else ()
+        )
+        return not bounds or any(is_untyped(bound) for bound in bounds)
+    if _ALIAS_TYPE is not None and isinstance(annotation, _ALIAS_TYPE):
+        return is_untyped(annotation.__value__)
     return any(is_untyped(arg) for arg in typing.get_args(annotation))
 
 
