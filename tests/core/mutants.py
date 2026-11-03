@@ -3,13 +3,17 @@ import types
 import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
+import numpy as np
 from jax import lax
 
 from spaceodyssey import core
-from spaceodyssey.core import handlers, transaction
+from spaceodyssey.core import Audience, handlers, transaction
+from spaceodyssey.core.enums import RecordStatus
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
+from spaceodyssey.core.executors.replay import _fold, _row
 from spaceodyssey.core.keys import fold64
+from spaceodyssey.core.records import masked_record
 
 
 def _clone(fn, **replacements):
@@ -152,3 +156,33 @@ def _decrementing_step(carry, ev, study, truth, root):
 
 _decrementing_advance = _clone(transaction.advance, step=_decrementing_step)
 decrementing_advance_jit = eqx.filter_jit(_decrementing_advance)
+
+
+def live_belief_replay(study, carry, trace):
+    """A replay that returns the live belief: it passes any equality check."""
+    return carry.belief
+
+
+def initial_belief_replay(study, carry, trace):
+    """A replay that folds nothing."""
+    return study.observer.init(study.caps)
+
+
+def log_order_replay(study, carry, trace):
+    """A replay that folds the first logged revision instead of the first released."""
+    log = carry.log
+    valid = np.asarray(log.valid)
+    status = np.asarray(log.status)
+    audience = np.asarray(log.audience)
+    acquisition = np.asarray(log.acquisition_id)
+    belief = study.observer.init(study.caps)
+    folded = set()
+    for i in range(len(valid)):
+        if not valid[i] or status[i] == RecordStatus.UNRELEASED:
+            continue
+        if not int(audience[i]) & Audience.OBSERVER or int(acquisition[i]) in folded:
+            continue
+        folded.add(int(acquisition[i]))
+        row = masked_record(_row(log, i), study.caps, Audience.OBSERVER)
+        belief = _fold(study, belief, row)
+    return belief

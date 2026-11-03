@@ -4,13 +4,16 @@
 # execution to x64 without changing the caller's process setting at collection.
 import dataclasses
 import re
+import types
 
 import jax
+import numpy as np
 import pytest
 
 from spaceodyssey.core import (
     GO_TOLERANCE,
     KILL_TOLERANCE,
+    Audience,
     CompiledExecutor,
     HostExecutor,
     RunStatus,
@@ -38,7 +41,13 @@ with jax.enable_x64():
     from tests.core.draw_helpers import compare_draws, compare_policy_draws, run_pair
     from tests.core.helpers import worlds
     from tests.core.leak_helpers import historical_leaky_wake, leaky_wake, run_leak
-    from tests.core.mutants import PerWakeHostExecutor, decrementing_advance_jit
+    from tests.core.mutants import (
+        PerWakeHostExecutor,
+        decrementing_advance_jit,
+        initial_belief_replay,
+        live_belief_replay,
+        log_order_replay,
+    )
     from tests.core.parity_helpers import corpus_parity_reports
     from tests.core.record_helpers import with_leaking_layout
     from tests.core.status_helpers import (
@@ -68,6 +77,35 @@ EXPECTED_WORLDS = (0, 1)
 # (two worlds; fewer would mean the comparison no longer reaches the draws).
 MIN_MEASUREMENT_MATCHES = 10
 MIN_POLICY_MATCHES = 12
+# Measured changed draws of the mutants out of those matches, on both executors.
+CHANGED_DRAWS = {"measurement": 8, "policy": 10}
+
+# Independent of the study: the payload columns only the scorer may read, by record
+# kind index (1 is the toy measurement, whose second column is the raw noise variate;
+# 3 is the catalog record of its case). Every other column is readable by everyone.
+SCORER_ONLY_COLUMNS = {"default": {1: (1,)}, "catalog_record": {1: (1,), 3: (1,)}}
+N_KINDS, N_COLUMNS = 4, 4
+
+
+def reference_layout(name):
+    """The layout that judges snapshots, written here and not read from the study."""
+    table = np.full((N_KINDS, N_COLUMNS), 7, dtype=np.int64)
+    for kind, columns in SCORER_ONLY_COLUMNS.get(
+        name, SCORER_ONLY_COLUMNS["default"]
+    ).items():
+        table[kind, list(columns)] = int(Audience.SCORER)
+    return types.SimpleNamespace(payload_audience=table)
+
+
+def corpus_failures(corpus_runs, name):
+    """(world, failed results) of corpus runs judged against the independent layout."""
+    out = []
+    for run in corpus_runs:
+        run = dataclasses.replace(run, reference_caps=reference_layout(name))
+        results = check_run(run)
+        assert tuple(result.name for result in results) == EXPECTED_INVARIANTS
+        out.append((run.world, failures_of(results)))
+    return out
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -107,17 +145,61 @@ def test_corpus_invariants(check, case, executor):
         case.name,
         executor,
     )
-    for run in corpus_runs:
-        results = check_run(run)
-        assert tuple(result.name for result in results) == EXPECTED_INVARIANTS
-        assert not failures_of(results), (case.name, executor, run.world, results)
+    for world, failures in corpus_failures(corpus_runs, case.name):
+        assert not failures, (case.name, executor, world, failures)
+
+
+@pytest.mark.parametrize("executor", EXECUTORS)
+def test_negative_study_layout_leak(executor):
+    """A study whose own layout shows the variate fails against the independent one."""
+    case = CORPUS_BY_NAME["baseline"]
+    leaky = dataclasses.replace(
+        case, make_study=lambda: with_leaking_layout(case.make_study())
+    )
+    (run,) = run_case(leaky, executor, n_worlds=1)
+    ((_, failures),) = corpus_failures([run], "baseline")
+    assert [f.name for f in failures] == ["no_scorer_column_in_snapshot"], failures
 
 
 @pytest.mark.parametrize("check", ["A2"])
 @pytest.mark.parametrize("case", replay_tests.RELEASING, ids=lambda c: c.name)
 def test_replay_acceptance(check, case):
     """The focused A2 check: host-log replay reproduces the belief bit for bit."""
-    replay_tests.test_replay_reproduces_belief_bitwise(case)
+    assert replay_tests.replay_matches_live(case), case.name
+
+
+@pytest.mark.parametrize("check", ["A2"])
+def test_replay_acceptance_controls(check):
+    """Replay follows the log and the release order, so it is not the live belief."""
+    assert replay_tests.replay_follows_the_log()
+    assert replay_tests.reordered_replay_matches()
+
+
+@pytest.mark.parametrize("check", ["A2-negative"])
+class TestReplayNegativeControls:
+    """Each broken replay must fail the check it is meant to fail."""
+
+    def test_real_replay_passes_all_controls(self, check):
+        assert replay_tests.replay_follows_the_log()
+        assert replay_tests.reordered_replay_matches()
+
+    @pytest.mark.parametrize("name", ["baseline", "revision"])
+    def test_replay_that_ignores_the_run_fails(self, check, name):
+        case = CORPUS_BY_NAME[name]
+        assert not replay_tests.replay_matches_live(case, initial_belief_replay)
+
+    def test_replay_returning_the_live_belief_fails(self, check):
+        # it equals the live belief by construction, so only the log edit exposes it
+        assert replay_tests.replay_matches_live(
+            CORPUS_BY_NAME["baseline"], live_belief_replay
+        )
+        assert not replay_tests.replay_follows_the_log(live_belief_replay)
+
+    def test_replay_ignoring_the_log_fails(self, check):
+        assert not replay_tests.replay_follows_the_log(initial_belief_replay)
+
+    def test_replay_in_log_order_fails(self, check):
+        assert not replay_tests.reordered_replay_matches(log_order_replay)
 
 
 @pytest.mark.parametrize("check", ["A3"])
@@ -231,8 +313,9 @@ def test_negative_decision_count_keys(executor, mutant):
     base, other = run_pair(
         name, executor, n_seeds=2, mutant=not policy, policy_mutant=policy
     )
-    _, _, changed = compare(base, other, minimum)
-    assert changed > 0, "draw invariance must fail"
+    matched, _, changed = compare(base, other, minimum)
+    assert matched >= minimum
+    assert changed == CHANGED_DRAWS[mutant], "draw invariance must fail"
 
 
 @pytest.mark.parametrize("executor", EXECUTORS)

@@ -21,20 +21,24 @@ def _bits(belief):
     return [np.asarray(x).tobytes() for x in (belief.mean, belief.n, belief.aux)]
 
 
-@pytest.mark.parametrize("case", RELEASING, ids=lambda c: c.name)
-def test_replay_reproduces_belief_bitwise(case):
+def replay_matches_live(case, replay=None):
+    """True when `replay` reproduces the live belief bit for bit in both worlds."""
+    replay = replay_belief if replay is None else replay
     study = case.make_study()
     truths, roots = worlds(2)
     for w in range(2):
         carry, trace = HostExecutor().run(
             study, index_world(truths, w), roots[w], N_STEPS_CORPUS, **service_of(case)
         )
-        replayed = replay_belief(study, carry, trace)
-        assert _bits(replayed) == _bits(carry.belief), (case.name, w)
-        assert int(jnp.sum(replayed.n)) >= 1
+        replayed = replay(study, carry, trace)
+        if _bits(replayed) != _bits(carry.belief) or int(jnp.sum(replayed.n)) < 1:
+            return False
+    return True
 
 
-def test_replay_depends_on_the_log():
+def replay_follows_the_log(replay=None):
+    """True when editing one logged payload value changes what `replay` returns."""
+    replay = replay_belief if replay is None else replay
     study = CORPUS_BY_NAME["baseline"].make_study()
     truths, roots = worlds(1)
     carry, trace = HostExecutor().run(
@@ -44,7 +48,16 @@ def test_replay_depends_on_the_log():
     edited = dataclasses.replace(
         carry, log=dataclasses.replace(carry.log, payload=payload)
     )
-    assert _bits(replay_belief(study, edited, trace)) != _bits(carry.belief)
+    return _bits(replay(study, edited, trace)) != _bits(replay(study, carry, trace))
+
+
+@pytest.mark.parametrize("case", RELEASING, ids=lambda c: c.name)
+def test_replay_reproduces_belief_bitwise(case):
+    assert replay_matches_live(case), case.name
+
+
+def test_replay_depends_on_the_log():
+    assert replay_follows_the_log()
 
 
 def test_replay_returns_a_belief():
@@ -56,8 +69,8 @@ def test_replay_returns_a_belief():
     assert isinstance(replay_belief(study, carry, trace), MeanBelief)
 
 
-@pytest.fixture
-def reordered_releases():
+def build_reordered_releases():
+    """A run that logs revision 0 first and releases revision 1 first."""
     study = toy.survey_1(policies=(toy.NullPolicy(),))
     truth, root = one_world()
     carry = core.empty_carry(study.caps)
@@ -96,6 +109,18 @@ def reordered_releases():
         traces.append(trace)
     trace = jax.tree.map(lambda *xs: jnp.stack(xs), *traces)
     return study, carry, trace
+
+
+@pytest.fixture
+def reordered_releases():
+    return build_reordered_releases()
+
+
+def reordered_replay_matches(replay=None):
+    """True when `replay` folds the revision that was released first."""
+    replay = replay_belief if replay is None else replay
+    study, carry, trace = build_reordered_releases()
+    return _bits(replay(study, carry, trace)) == _bits(carry.belief)
 
 
 def test_replay_folds_first_released_revision_instead_of_first_logged(
