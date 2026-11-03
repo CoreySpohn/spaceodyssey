@@ -89,11 +89,11 @@ def _fold_key(log, i):
     )
 
 
-def _expected_folds(log, rows, tick):
-    """One key per acquisition id with a row whose `tick` column is set."""
+def _expected_folds(log, rows, ticks):
+    """One key per acquisition id with a row whose `ticks` entry is set."""
     first = {}
     for i in rows:
-        if int(getattr(log, tick)[i]) >= 0:
+        if int(ticks[i]) >= 0:
             first.setdefault(int(log.acquisition_id[i]), _fold_key(log, i))
     return Counter(first.values())
 
@@ -112,12 +112,12 @@ def one_fold_per_acquisition(run):
         failures.append("fold counts were not recorded")
     log = c.log
     rows = _valid_rows(run)
-    sources = (("observer", "accepted_tick"), ("policy", "released_tick"))
-    for (name, tick), (ids, counts) in zip(sources, run.folds, strict=False):
+    sources = (("observer", log.accepted_tick), ("policy", log.released_tick))
+    for (name, ticks), (ids, counts) in zip(sources, run.folds, strict=False):
         got = Counter(
             {int(k): int(n) for k, n in zip(ids, counts, strict=True) if n > 0}
         )
-        want = _expected_folds(log, rows, tick)
+        want = _expected_folds(log, rows, ticks)
         for key in sorted(got):
             if got[key] > 1:
                 failures.append(
