@@ -1,0 +1,3 @@
+from spaceodyssey.core.study import Study
+def dispatch(study):
+    return 123 if isinstance(study, Study) else 0

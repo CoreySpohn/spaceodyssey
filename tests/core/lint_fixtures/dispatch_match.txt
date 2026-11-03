@@ -1,0 +1,4 @@
+def dispatch(study):
+    match study.name:
+        case 'survey_1': return 123
+        case _: return 0

@@ -302,3 +302,104 @@ def test_lint_runs_in_pre_commit():
         assert re.search(hook["files"], "src/spaceodyssey/core/events.py")
         assert not re.search(hook["files"], "src/spaceodyssey/studies/toy.py")
         assert not re.search(hook["files"], "tests/core/lint_fixtures/bad.py")
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "dynamic_importlib",
+        "dynamic_dunder",
+        "dynamic_reexport",
+        "dynamic_spec",
+        "dynamic_loader",
+        "dynamic_alias",
+        "dynamic_unknown",
+    ],
+)
+def test_core_imports_rejects_dynamic_loading(tmp_path, fixture):
+    root, path = fixture_core(tmp_path, (FIXTURES / f"{fixture}.txt").read_text())
+    result = run_lint("check_core_imports.py", "--core-dir", root)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"{path}:" in result.stdout and "dynamic" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    ["getattr", "typename", "match", "class-dict", "format", "helper"],
+)
+def test_dispatch_forms_are_rejected_everywhere(tmp_path, fixture):
+    from tests.core.gate_helpers import study_branches
+
+    source = (FIXTURES / f"dispatch_{fixture}.txt").read_text()
+    root, _ = fixture_core(tmp_path, source, name="nested/dispatch_helper.py")
+    assert study_branches(root), source
+
+
+def test_dispatch_allowlist_has_no_stale_entries():
+    from tests.core.gate_helpers import ALLOWED, stale_allowances
+
+    assert ALLOWED
+    assert stale_allowances(CORE) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'text = "survey-782"\n',
+        'text = f"survey_{number}"\n',
+        "label = study.name\n",
+        "label = campaign.study.name\n",
+        "label = study.channel_model.__class__\n",
+        "label = model.__qualname__\n",
+        "label = getattr(model, attribute)\n",
+        'kind = getattr(model, "kind")\nif kind == selected:\n    pass\n',
+        "match model:\n    case Concrete(): pass\n",
+        "if issubclass(model, Concrete):\n    pass\n",
+        "if isinstance(model, (int, Concrete)):\n    pass\n",
+        "dispatch = {Concrete: handle}\nresult = dispatch[cls]\n",
+        "result = dispatch[Concrete]\n",
+        "result = dispatch.get(Concrete)\n",
+        "from builtins import type as kind_of\nresult = kind_of(model)\n",
+        (
+            "from builtins import isinstance as check\n"
+            "if check(model, Concrete):\n"
+            "    pass\n"
+        ),
+    ],
+)
+def test_dispatch_is_forbidden_without_an_explicit_exception(tmp_path, source):
+    from tests.core.gate_helpers import study_branches
+
+    root, _ = fixture_core(tmp_path, source)
+    assert study_branches(root), source
+
+
+def test_dispatch_allows_only_declared_type_contracts(tmp_path):
+    from tests.core.gate_helpers import study_branches
+
+    source = (
+        "from spaceodyssey.core.enums import Stage as Phase\n"
+        "from spaceodyssey.core.kinds import AbstractPolicy as Policy\n"
+        "if isinstance(value, (int, str, Phase, Policy)):\n    pass\n"
+        'if event.name == "release":\n    pass\n'
+    )
+    root, _ = fixture_core(tmp_path, source)
+    assert study_branches(root) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import runpy\nrunpy.run_path(where)\n",
+        "result = eval(text)\n",
+        "exec(compile(text, 'x', 'exec'))\n",
+        "from builtins import __import__ as load\nload(name)\n",
+        "import pkgutil\n",
+        "module = loader.load_module(name)\n",
+    ],
+)
+def test_core_imports_rejects_other_dynamic_loading_spellings(tmp_path, source):
+    root, path = fixture_core(tmp_path, source)
+    result = run_lint("check_core_imports.py", "--core-dir", root)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"{path}:" in result.stdout and "dynamic" in result.stdout

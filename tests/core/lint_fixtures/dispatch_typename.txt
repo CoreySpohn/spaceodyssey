@@ -1,0 +1,2 @@
+def dispatch(study):
+    return 123 if type(study.channel_model).__name__ == 'ToyPhotometry' else 0

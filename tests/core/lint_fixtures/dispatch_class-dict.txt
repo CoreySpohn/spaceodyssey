@@ -1,0 +1,3 @@
+from spaceodyssey.core.study import Study
+def dispatch(study):
+    return {Study: 123}.get(type(study), 0)
