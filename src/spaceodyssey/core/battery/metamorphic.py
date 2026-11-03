@@ -26,6 +26,8 @@ DRAW_FREE_FLOATS = ("cost", "charged", "balance")
 # Digests of a snapshot or event. They hash ticks and ids, which a relation moves by
 # design, and the fields they summarize are compared directly.
 DIGEST_FIELDS = ("snapshot_fp", "event_fp")
+# Integer fields that hold a stable channel id, which a relabeling maps.
+CHANNEL_ID_FIELDS = ("channel", "source")
 # Log columns that hold a tick (-1 marks an unset one).
 TICK_LOG_FIELDS = (
     "start_tick",
@@ -73,9 +75,11 @@ def relabel_ids(
         ha, hb = canonical_history(ca, ta), canonical_history(cb, tb)
         n_records += ha.n_records
         for name, x in ha.ints.items():
-            if name in DIGEST_FIELDS:
+            # History keys are bare ("channel") or dotted leaf paths ("trace.channel").
+            leaf = name.rsplit(".", 1)[-1]
+            if leaf in DIGEST_FIELDS:
                 continue
-            x = lookup(x) if name == "channel" else x
+            x = lookup(x) if leaf in CHANNEL_ID_FIELDS else x
             if not bits_equal(x, hb.ints[name]):
                 failures.append(f"world {w}: {name} changed under relabeling")
         for name in DRAW_FREE_FLOATS:
