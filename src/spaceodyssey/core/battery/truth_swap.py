@@ -9,6 +9,7 @@ from spaceodyssey.core.battery.result import (
     worlds_of,
 )
 from spaceodyssey.core.enums import Audience, EventKind
+from spaceodyssey.core.records import payload_columns
 
 # Trace fields that carry the observer belief; the rest are actions and event order.
 BELIEF_FIELDS = ("belief_mean", "belief_aux")
@@ -41,11 +42,11 @@ def _release_steps(carry, trace):
     return out
 
 
-def first_truth_dependent_release(run_a, run_b):
+def first_truth_dependent_release(run_a, run_b, caps):
     """Steps of the first released record whose payload differs between two runs.
 
-    Returns (policy_step, any_step) for one world: the first step that releases a
-    differing record to the policy audience and the first that releases one to anyone.
+    Returns (policy_step, observer_step) for one world: the first step that releases a
+    differing masked payload to the policy and the observer, respectively.
     A step is None when no released record differs.
     """
     (ca, ta), (cb, tb) = run_a, run_b
@@ -53,18 +54,35 @@ def first_truth_dependent_release(run_a, run_b):
     policy_step = any_step = None
     for step, slot, audience in _release_steps(ca, ta):
         other = steps_b.get(step, -1)
-        differs = (
-            slot < 0
-            or other < 0
-            or not bits_equal(ca.log.payload[slot], cb.log.payload[other])
-        )
-        if not differs:
-            continue
-        if any_step is None:
+
+        def differs(reader, slot=slot, other=other):
+            if slot < 0 or other < 0:
+                return True
+            left = np.where(
+                payload_columns(caps, ca.log.kind[slot], reader),
+                ca.log.payload[slot],
+                0.0,
+            )
+            right = np.where(
+                payload_columns(caps, cb.log.kind[other], reader),
+                cb.log.payload[other],
+                0.0,
+            )
+            return not bits_equal(left, right)
+
+        if (
+            any_step is None
+            and audience & Audience.OBSERVER
+            and differs(Audience.OBSERVER)
+        ):
             any_step = step
-        if policy_step is None and audience & Audience.POLICY:
+        if (
+            policy_step is None
+            and audience & Audience.POLICY
+            and differs(Audience.POLICY)
+        ):
             policy_step = step
-        if policy_step is not None:
+        if policy_step is not None and any_step is not None:
             break
     return policy_step, any_step
 
@@ -88,8 +106,8 @@ def truth_swap(study, truths_a, truths_b, roots, n_steps, *, executor=None):
     in a way the records can show, `roots` are shared, and every record that carries
     truth is released at a Release step. Until the first released record that differs
     between the two runs, every trace field (event order, effects, admission codes,
-    policy draws) must be bitwise equal, and until the first such record reaches any
-    audience the observer belief must be too. The check fails when no record differs,
+    policy draws) must be bitwise equal, and until the first masked difference reaches
+    the observer its belief must be too. The check fails when no record differs,
     since a swap that changes nothing proves nothing.
     """
     runner = default_executor(executor)
@@ -98,7 +116,7 @@ def truth_swap(study, truths_a, truths_b, roots, n_steps, *, executor=None):
     failures = []
     steps = []
     for w, (wa, wb) in enumerate(zip(worlds_of(run_a), worlds_of(run_b), strict=True)):
-        policy_step, any_step = first_truth_dependent_release(wa, wb)
+        policy_step, any_step = first_truth_dependent_release(wa, wb, study.caps)
         if policy_step is None:
             failures.append(
                 f"world {w}: no truth-dependent record reached the policy audience"

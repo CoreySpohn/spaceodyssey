@@ -64,7 +64,9 @@ def declared_matches_run(study, truths, roots, n_steps):
         for phase, decl in enumerate(declared):
             for need in decl.needs:
                 needs_met.setdefault((phase, need), False)
-                if _need_met(carry, ticks, need):
+                if _need_met(
+                    carry, [t for t in ticks if _phase_of(study, t) == phase], need
+                ):
                     needs_met[(phase, need)] = True
     for (phase, need), met in needs_met.items():
         if not met:

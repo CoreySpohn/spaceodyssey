@@ -49,8 +49,20 @@ def null_reference(
     n_records = [int(np.asarray(c.log.valid).sum()) for c, _ in pairs]
     if min(n_records) < 1:
         failures.append("a null world logged no record, so the check is vacuous")
-    if bool(np.any(np.asarray(run_status(run.carry)) == RunStatus.OVERFLOW)):
-        failures.append("a null run overflowed its capacities")
+    n_folded = [
+        len(
+            set(
+                np.asarray(c.log.acquisition_id)[
+                    np.asarray(c.log.valid) & (np.asarray(c.log.accepted_tick) >= 0)
+                ].tolist()
+            )
+        )
+        for c, _ in pairs
+    ]
+    if min(n_folded) < 1:
+        failures.append("a null world folded no record, so the check is vacuous")
+    if bool(np.any(np.asarray(run_status(run.carry)) != RunStatus.COMPLETE)):
+        failures.append("a null run did not complete, so the check was not exercised")
     if expected is not None:
         wrong = np.flatnonzero(credits != expected)
         if wrong.size:
@@ -68,4 +80,5 @@ def null_reference(
         failures,
         credits=credits.tolist(),
         n_records=n_records,
+        n_folded=n_folded,
     )

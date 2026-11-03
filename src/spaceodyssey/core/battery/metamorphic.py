@@ -15,6 +15,7 @@ from spaceodyssey.core.battery.result import (
     tree_bits_equal,
     worlds_of,
 )
+from spaceodyssey.core.battery.views import DecisionViews, compare_views
 from spaceodyssey.core.carry import init_carry
 from spaceodyssey.core.enums import I64
 from spaceodyssey.core.executors.base import canonical_history
@@ -51,14 +52,24 @@ def relabel_ids(
     if all(old == new for old, new in channel_map.items()):
         raise ValueError("the relabeling changes no id")
     runner = default_executor(executor)
-    a = runner.run_worlds(study, truths, roots, n_steps)
-    b = runner.run_worlds(relabeled, truths, roots, n_steps)
+    va, vb = DecisionViews(), DecisionViews()
+    a = runner.run_worlds(va.instrument(study), truths, roots, n_steps)
+    b = runner.run_worlds(vb.instrument(relabeled), truths, roots, n_steps)
     failures = []
     lookup = np.vectorize(lambda x: channel_map.get(int(x), int(x)), otypes=[np.int64])
     n_records = 0
     for w, ((ca, ta), (cb, tb)) in enumerate(
         zip(worlds_of(a), worlds_of(b), strict=True)
     ):
+        failures += compare_views(
+            va.read(study, roots[w], ta),
+            vb.read(relabeled, roots[w], tb),
+            ca,
+            cb,
+            study.caps,
+            ta,
+            channel_map=channel_map,
+        )
         ha, hb = canonical_history(ca, ta), canonical_history(cb, tb)
         n_records += ha.n_records
         for name, x in ha.ints.items():
@@ -116,15 +127,27 @@ def shift_epoch(study, truths, roots, n_steps, delta_ticks):
     compared.
     """
     zero = jnp.asarray(0, I64)
-    base_carry, base_trace = _scan_from(study, truths, roots, zero, n_steps)
+    va, vb = DecisionViews(), DecisionViews()
+    base_carry, base_trace = _scan_from(
+        va.instrument(study), truths, roots, zero, n_steps
+    )
     moved = shifted_epoch(study, delta_ticks)
     late_carry, late_trace = _scan_from(
-        moved, truths, roots, jnp.asarray(delta_ticks, I64), n_steps
+        vb.instrument(moved), truths, roots, jnp.asarray(delta_ticks, I64), n_steps
     )
     failures = []
     n_records = 0
     for w in range(int(roots.shape[0])):
         pick = lambda tree, w=w: jax.tree_util.tree_map(lambda x: x[w], tree)  # noqa: E731
+        failures += compare_views(
+            va.read(study, roots[w], pick(base_trace)),
+            vb.read(moved, roots[w], pick(late_trace)),
+            pick(base_carry),
+            pick(late_carry),
+            study.caps,
+            pick(base_trace),
+            epoch=delta_ticks,
+        )
         failures += _epoch_world(
             w,
             pick(base_carry),

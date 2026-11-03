@@ -112,7 +112,7 @@ SEEDED = {
     "observer_reads_scorer": (C.F002, lambda: _observer(reads=(SCORER,)), None),
     "decision_before_release": (
         C.C001,
-        lambda: _policy(needs=(Need(10, 0, 50),)),
+        lambda: _policy(needs=(Need(10, 0, 19),)),
         None,
     ),
     "decision_reads_observer_only_channel": (

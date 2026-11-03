@@ -198,8 +198,14 @@ def _records(w, study, truth, root, trunk, side, at, branch, counts):
         same = bits_equal(pay_t[i], pay_s[j])
         if index < at:
             counts["prefix"] += 1
-            if not same:
-                out.append(f"world {w}: prefix record {key} differs across the fork")
+            for name in type(trunk.log).__dataclass_fields__:
+                if not bits_equal(
+                    getattr(trunk.log, name)[i], getattr(side.log, name)[j]
+                ):
+                    out.append(
+                        f"world {w}: prefix record {key} column {name} "
+                        "differs across the fork"
+                    )
             continue
         counts["after"] += 1
         if same != shares:

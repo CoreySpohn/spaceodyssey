@@ -10,6 +10,7 @@ from spaceodyssey.core.battery.result import (
     make_result,
     worlds_of,
 )
+from spaceodyssey.core.battery.views import DecisionViews, compare_views
 from spaceodyssey.core.enums import EventKind, RunStatus
 from spaceodyssey.core.executors.base import run_status
 
@@ -51,7 +52,8 @@ def latency_shift(study, truths, roots, n_steps, *, delay_s=2 * 86400.0, executo
     ticks that do not depend on when records are released (absolute waits), and the
     delay is shorter than the spacing of the plan, so a delayed release never crosses
     the next planned decision. Both runs must finish. Then, after the release steps
-    are set aside, every step (event order, admissions, effects) is bitwise equal;
+    are aligned by their delay, every decision has the same effects and admission
+    codes; steps other than releases are bitwise equal;
     every release, record column and payload is equal except that the release ticks
     move by exactly the delay; the final belief and ledger are bitwise equal; and the
     belief path is the original one delayed by the delay, with at least one update
@@ -62,8 +64,10 @@ def latency_shift(study, truths, roots, n_steps, *, delay_s=2 * 86400.0, executo
     if delay < 1:
         raise ValueError("the delay is shorter than one tick")
     runner = default_executor(executor)
-    base = runner.run_worlds(study, truths, roots, n_steps)
-    late = runner.run_worlds(delayed(study, delay), truths, roots, n_steps)
+    va, vb = DecisionViews(), DecisionViews()
+    moved_study = delayed(study, delay)
+    base = runner.run_worlds(va.instrument(study), truths, roots, n_steps)
+    late = runner.run_worlds(vb.instrument(moved_study), truths, roots, n_steps)
     failures = []
     moved = 0
     for name, run in (("base", base), ("delayed", late)):
@@ -72,6 +76,15 @@ def latency_shift(study, truths, roots, n_steps, *, delay_s=2 * 86400.0, executo
     for w, ((cb, tb), (cl, tl)) in enumerate(
         zip(worlds_of(base), worlds_of(late), strict=True)
     ):
+        failures += compare_views(
+            va.read(study, roots[w], tb),
+            vb.read(moved_study, roots[w], tl),
+            cb,
+            cl,
+            study.caps,
+            tb,
+            delay=delay,
+        )
         failures += _compare_world(w, cb, tb, cl, tl, delay)
         moved += _count_moved_updates(tb, tl)
     if moved == 0 and not failures:
@@ -94,6 +107,13 @@ def _compare_world(w, cb, tb, cl, tl, delay):
     bad = [n for n in a if not bits_equal(a[n], b[n])]
     if bad:
         out.append(f"world {w}: steps other than releases changed in {', '.join(bad)}")
+    wb = np.asarray(tb.handled) & np.asarray(tb.wake)
+    wl = np.asarray(tl.handled) & np.asarray(tl.wake)
+    for name in ("eff_kind", "eff_disruptive", "admit_code"):
+        if not bits_equal(
+            np.asarray(getattr(tb, name))[wb], np.asarray(getattr(tl, name))[wl]
+        ):
+            out.append(f"world {w}: decision {name} changed under the delay")
     rb, rl = log_index(cb), log_index(cl)
     if rb.keys() != rl.keys():
         out.append(f"world {w}: the set of records changed")

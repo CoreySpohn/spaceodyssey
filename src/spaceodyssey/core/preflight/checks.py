@@ -105,8 +105,13 @@ def causality(study: Study, graph: StudyGraph):
                     )
                 )
                 continue
-            ready = need.start_tick + int(table.occupancy_ticks[c])
-            ready += int(table.latency_ticks[c])
+            latency = int(table.latency_ticks[c])
+            completed = need.start_tick + int(table.occupancy_ticks[c]) + latency
+            # A cancel can end an admitted occupancy even during its transition.
+            lane = int(table.lane[c])
+            transition = int(study.assets.transition_ticks[lane])
+            admitted = max(0, need.start_tick - transition)
+            ready = min(completed, admitted + max(latency, 1))
             if ready > need.decide_tick:
                 out.append(
                     Finding(
