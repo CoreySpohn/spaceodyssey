@@ -1,9 +1,10 @@
 # Architecture
 
 ```{note}
-spaceodyssey is in the design stage. This page records the architecture the library is
-being built toward, so early users and contributors can see where each piece will
-land. Interfaces described here will change as the first validation milestones run.
+This page describes the broader mission architecture and legacy APIs. The
+implemented `spaceodyssey.core` package has its own [transaction core guide](core.md),
+including the execution layers, study composition and a runnable example.
+The broader architecture remains under development.
 ```
 
 ## What spaceodyssey is
