@@ -61,6 +61,9 @@ def replay_belief(study, carry, trace):
             raise ValueError(f"release at tick {tick} matches no log row at slot {i}")
         if log.status[i] == RecordStatus.UNRELEASED:
             continue
+        if not int(log.audience[i]) & Audience.OBSERVER:
+            # a row the observer may not read is never folded into its belief
+            continue
         if not used[i] and log.accepted_tick[i] != tick:
             raise ValueError(
                 f"release at tick {tick} matches no accepted row at slot {i}"

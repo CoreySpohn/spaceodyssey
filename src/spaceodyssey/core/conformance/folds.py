@@ -41,13 +41,21 @@ class CountingObserver(AbstractObserver):
     def fold(self, belief, rec, caps):
         """Count this acquisition whenever the caller commits the folded state."""
         value = self.inner.fold(plain(belief), rec, caps)
-        same = belief.ids == rec.acquisition_id
+        # Fold inputs carry no acquisition id, so an acquisition is named by its
+        # channel, subject and per-subject admission index. The channel separates
+        # rows that are not admissions (a service answer) from the acquisitions.
+        key = (
+            jnp.asarray(rec.channel, I64) * (1 << 40)
+            + jnp.asarray(rec.subject, I64) * (1 << 20)
+            + jnp.asarray(rec.acquisition_index, I64)
+        )
+        same = belief.ids == key
         slot = jnp.where(same.any(), jnp.argmax(same), jnp.argmin(belief.counts > 0))
         return CountedBelief(
             value.mean,
             value.n,
             value.aux,
-            belief.ids.at[slot].set(rec.acquisition_id),
+            belief.ids.at[slot].set(key),
             belief.counts.at[slot].add(1),
         )
 
