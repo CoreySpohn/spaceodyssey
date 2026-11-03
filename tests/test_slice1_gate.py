@@ -14,6 +14,7 @@ from spaceodyssey.core import (
     CompiledExecutor,
     HostExecutor,
     RunStatus,
+    battery,
     wake_by_audience,
 )
 from spaceodyssey.core.conformance import EXECUTORS, check_run, failures_of, run_case
@@ -21,16 +22,21 @@ from spaceodyssey.core.conformance.invariants import (
     no_extra_wakes_under_private_events,
     no_scorer_column_in_snapshot,
 )
+from spaceodyssey.core.study import Clock
 from tests.core.contract_helpers import assert_study_typed
-from tests.core.gate_helpers import study_branches
+from tests.core.gate_helpers import stale_allowances, study_branches
 from tests.core.lint_helpers import CORE, FIXTURES, fixture_core, run_lint
 
 with jax.enable_x64():
     from spaceodyssey.studies.conformance import CORPUS, CORPUS_BY_NAME
+    from tests.core import test_fork as fork_tests
+    from tests.core import test_replay_log as replay_tests
     from tests.core.acquisition_helpers import drive
+    from tests.core.battery_helpers import AbsolutePlanPolicy, survey
     from tests.core.conformance_helpers import runs
     from tests.core.corpus import LEAK_SCENARIOS
     from tests.core.draw_helpers import compare_draws, compare_policy_draws, run_pair
+    from tests.core.helpers import worlds
     from tests.core.leak_helpers import historical_leaky_wake, leaky_wake, run_leak
     from tests.core.mutants import PerWakeHostExecutor, decrementing_advance_jit
     from tests.core.parity_helpers import corpus_parity_reports
@@ -56,6 +62,14 @@ EXPECTED_INVARIANTS = (
 )
 
 
+# Independent of the runner: the corpus runs two worlds, numbered from zero.
+EXPECTED_WORLDS = (0, 1)
+# Matched identities the draw controls must compare, from the known fixtures
+# (two worlds; fewer would mean the comparison no longer reaches the draws).
+MIN_MEASUREMENT_MATCHES = 10
+MIN_POLICY_MATCHES = 12
+
+
 @pytest.fixture(scope="module", autouse=True)
 def enable_x64():
     with jax.enable_x64():
@@ -65,6 +79,7 @@ def enable_x64():
 @pytest.mark.parametrize("check", ["K1a"])
 def test_no_study_dispatch(check):
     assert not study_branches(CORE)
+    assert not stale_allowances(CORE)
 
 
 @pytest.mark.parametrize("check", ["K1b"])
@@ -85,10 +100,41 @@ def test_core_boundaries(check, tool):
 @pytest.mark.parametrize("executor", EXECUTORS)
 @pytest.mark.parametrize("case", CORPUS, ids=lambda c: c.name)
 def test_corpus_invariants(check, case, executor):
-    for run in runs(case.name, executor):
+    corpus_runs = runs(case.name, executor)
+    worlds = sorted(run.world for run in corpus_runs)
+    assert worlds == list(EXPECTED_WORLDS), (
+        f"world IDs {worlds} differ from the expected {list(EXPECTED_WORLDS)}",
+        case.name,
+        executor,
+    )
+    for run in corpus_runs:
         results = check_run(run)
         assert tuple(result.name for result in results) == EXPECTED_INVARIANTS
         assert not failures_of(results), (case.name, executor, run.world, results)
+
+
+@pytest.mark.parametrize("check", ["A2"])
+@pytest.mark.parametrize("case", replay_tests.RELEASING, ids=lambda c: c.name)
+def test_replay_acceptance(check, case):
+    """The focused A2 check: host-log replay reproduces the belief bit for bit."""
+    replay_tests.test_replay_reproduces_belief_bitwise(case)
+
+
+@pytest.mark.parametrize("check", ["A3"])
+def test_fork_acceptance(check):
+    """The focused A3 checks: default coupling, then declared coupling."""
+    fork_tests.test_fork(worlds(2))
+    fork_tests.test_fork_shares_later_draws_only_where_declared(worlds(2))
+
+
+@pytest.mark.parametrize("check", ["A4"])
+def test_latency_acceptance(check):
+    """The focused A4 check: a two-day delay moves belief updates only."""
+    study = dataclasses.replace(survey(AbsolutePlanPolicy()), clock=Clock(86400.0))
+    truths, roots = worlds(2)
+    result = battery.latency_shift(study, truths, roots, 40, delay_s=2 * 86400.0)
+    assert result, result.diagnostic
+    assert result.detail["delay_ticks"] == 2 and result.detail["moved"] >= 2
 
 
 @pytest.mark.parametrize("check", ["K4-parity"])
@@ -178,14 +224,15 @@ def test_negative_decision_count_keys(executor, mutant):
     policy = mutant == "policy"
     name = "insert_wait_alongside" if policy else "insert_wait"
     compare = compare_policy_draws if policy else compare_draws
+    minimum = MIN_POLICY_MATCHES if policy else MIN_MEASUREMENT_MATCHES
     base, other = run_pair(name, executor, n_seeds=2)
-    compared, _, changed = compare(base, other)
-    assert compared > 0 and changed == 0
+    _, _, changed = compare(base, other, minimum)
+    assert changed == 0
     base, other = run_pair(
         name, executor, n_seeds=2, mutant=not policy, policy_mutant=policy
     )
-    compared, _, changed = compare(base, other)
-    assert compared > 0 and changed > 0, "draw invariance must fail"
+    _, _, changed = compare(base, other, minimum)
+    assert changed > 0, "draw invariance must fail"
 
 
 @pytest.mark.parametrize("executor", EXECUTORS)
@@ -259,7 +306,7 @@ def test_negative_import_lint(tmp_path, fixture):
         ),
         (
             "transaction.py",
-            "if isinstance(policy, AbstractPolicy):\n    pass\n",
+            "if isinstance(policy, CustomPolicy):\n    pass\n",
             "study-kind",
         ),
     ],
@@ -291,7 +338,7 @@ def test_negative_ast_import_alias(tmp_path):
 
 def test_ast_allows_ordinary_comparisons_and_data_checks(tmp_path):
     (tmp_path / "handlers.py").write_text(
-        'text = "survey_1"\n'
+        'text = "label"\n'
         'if event.name == "release" and isinstance(count, int):\n    pass\n',
         encoding="ascii",
     )

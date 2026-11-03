@@ -14,18 +14,19 @@ or stored hand history changes in this close-out.
 
 ## Acceptance checklist
 
-Results below are for branch `slice-1-t12`. Gate names refer to
+The original results were recorded on `slice-1-t12`; the gate requirements below
+include the review corrections on `fix-gate`. Gate names refer to
 `tests/test_slice1_gate.py`; other paths identify the focused acceptance tests.
 
 | Check | Evidence | Result |
 | --- | --- | --- |
 | A1: histories, records, balances and beliefs agree across executors | `tests/core/test_parity_corpus.py::test_ints_exact_and_floats_in_the_go_band`; gate `test_executor_parity[K4-parity]`, every corpus case, two worlds and each supported host policy form | Pass: all 28 cases in the go band |
-| A2: host-log replay reproduces belief bit for bit | `tests/core/test_replay_log.py::test_replay_reproduces_belief_bitwise`, every non-overflow case | Pass: bitwise replay |
-| A3: a fork preserves unrelated draws and follows declared coupling | `tests/core/test_fork.py::test_fork` and `test_fork_shares_later_draws_only_where_declared`, five acquisitions forked at index 2 | Pass: default and declared coupling |
-| A4: a two-day release delay moves belief updates only on an absolute fixed plan | `tests/core/test_latency_shift.py::test_latency_shift` | Pass: two-day shift |
-| K1: no study dispatch or untyped composition escape | `test_no_study_dispatch[K1a]`, `test_typed_composition[K1b]`, `test_negative_ast`; `test_study_has_no_untyped_fields` discovers every Abstract definition in the core, including unexported classes | Pass: clean core and all seeded AST/annotation controls |
-| K2: core dependencies and vocabulary stay inside their boundaries; toys contain no owned physics | `test_core_boundaries[K2a]`, `test_negative_domain_lint`, `test_negative_import_lint`; channel and service review below | Pass: both lints, all location/import fixtures and ownership review |
-| K3: corpus invariants hold | `test_corpus_invariants[K3]`, all 28 cases, both executors, two worlds each; the returned names must equal the independent ten-name list | Pass: all ten checks over all cases and both executors, with the log-overflow limits below |
+| A2: host-log replay reproduces belief bit for bit | gate `test_replay_acceptance[A2]`, calling the same bitwise check as `tests/core/test_replay_log.py`, every non-overflow case | Pass: bitwise replay |
+| A3: a fork preserves unrelated draws and follows declared coupling | gate `test_fork_acceptance[A3]`, calling both focused fork checks, five acquisitions forked at index 2 | Pass: default and declared coupling |
+| A4: a two-day release delay moves belief updates only on an absolute fixed plan | gate `test_latency_acceptance[A4]`, calling the focused fixed-plan latency check | Pass: two-day shift |
+| K1: no study dispatch or untyped composition escape | `test_no_study_dispatch[K1a]`, `test_typed_composition[K1b]`, `test_negative_ast`; the scan covers every core module with explicit file/line/expression exceptions for structural reflection; annotations are checked recursively from Study and every Abstract definition, including concrete field types and static/container fields | Pass: clean core and all seeded AST/annotation controls |
+| K2: core dependencies and vocabulary stay inside their boundaries; toys contain no owned physics | `test_core_boundaries[K2a]`, `test_negative_domain_lint`, `test_negative_import_lint`; channel and service review below | Pass: both lints, all location/import fixtures, dynamic-loader rejection and ownership-map review |
+| K3: corpus invariants hold | `test_corpus_invariants[K3]`, all 28 cases, both executors, two worlds each; the returned world IDs must be exactly {0, 1}, with no duplicates, before the invariant names are compared to the independent ten-name list | Pass: all ten checks over all cases and both executors, with the log-overflow limits below |
 | K4: executor parity and explicit overflow status | `test_executor_parity[K4-parity]` requires exact integers and floats within `1e-9`, reports the `1e-12` band separately; `test_overflow_status[K4-overflow]` covers queue, stable-id and log exhaustion on both executors | Pass: exact integers, all cases in the go band and all three overflow bits/statuses checked |
 
 The ten required invariant names are `order_keys_monotone`,
@@ -49,24 +50,26 @@ a writer's same-tick process and release on the current host; the historical
 control deliberately retains one wake per event and ignores the release-side
 audience filter. Neither production protection is disabled in the current-executor
 controls. Decision-count mutants
-change shared measurement or policy draws on both executors; the leaking layout
+change finite shared measurement or policy draws on both executors, with at least ten matched measurement identities or twelve matched policy identities across two worlds; NaN-only corruption is rejected; the leaking layout
 fails the hidden-column invariant; the decrement mutant produces an observed
 counter decrement and a non-dense admission sequence; each denied-word location
 and both forbidden-import fixtures produce their own lint diagnostic. The AST
-control plants forbidden comparisons and kind dispatch in temporary Python files.
+controls plant survey strings in expressions, name reads, introspection, dynamic
+attribute access, class patterns, class-keyed maps and non-whitelisted type checks
+in temporary modules, including nested helpers outside the transaction modules.
 
 ## Channel and service ownership review
 
 The inventory covers every channel-model implementation and host service defined
 in `src/spaceodyssey/studies/`. The catalog table is listed separately because it
 uses the same model for a different record kind. Ownership was checked against
-the suite library ownership map; no other library implementation was inspected.
+the suite library ownership map; the searches below are of that map, not of library source trees.
 
-| Implementation and location | Toy prefix | Physics or service represented | Owning library | Why this toy is used; real physics present? |
-| --- | --- | --- | --- | --- |
-| `toy.ToyPhotometry`, measurement channels 10, 11 and 12 (and the unused default fourth row) | `ToyPhotometry`: yes | A noisy scalar measurement and its occupancy fraction | `jaxedith` for count rates and exposure times; `skyscapes` for source spectra; `optixstuff` for detector response | Prescribed dimensionless signals, gain and Gaussian noise isolate keys, release and accounting. There is no photon budget, spectral model, detector model or calibrated exposure calculation. No real physics. |
-| `catalog.catalog_study`, channel 13, realized by `toy.ToyPhotometry` | `ToyPhotometry`: yes; there is no separate catalog model class | A delayed catalog product to an observer audience | `skyscapes` for catalog access (`skyscapes.io.from_exovista`) and for a JAX scene built from catalog data | A registered record kind, fixed delay and auxiliary sum exercise the open record protocol. No catalog is queried and no astrophysical property is calculated. No real physics. |
-| `oracle.ToyOracleService` | `ToyOracleService`: yes | A host inference answer from released information | `photomancy` for beliefs, inference and evidence | Copies the snapshot mean, sample count and release version. It isolates Query/Result sequencing and audience checks without a posterior fit or scientific likelihood. No real physics. |
+| Implementation and location | Toy prefix | Physics or service represented | Owning library | Library-map search performed | Why this toy is used; real physics present? |
+| --- | --- | --- | --- | --- | --- |
+| `toy.ToyPhotometry`, measurement channels 10, 11 and 12 (and the unused default fourth row) | `ToyPhotometry`: yes | A noisy scalar measurement and its occupancy fraction | `jaxedith` for count rates and exposure times; `skyscapes` for source spectra; `optixstuff` for detector response | Searched the map's ETC, Scene and Foundation entries: jaxedith count-rate layers, skyscapes scene/spectral types and optixstuff.detector provide the physical measurement stack, but none is a dimensionless transaction fixture. | Prescribed dimensionless signals, gain and Gaussian noise isolate keys, release and accounting. There is no photon budget, spectral model, detector model or calibrated exposure calculation. No real physics. |
+| `catalog.catalog_study`, channel 13, realized by `toy.ToyPhotometry` | `ToyPhotometry`: yes; there is no separate catalog model class | A delayed catalog product to an observer audience | `skyscapes` for catalog access (`skyscapes.io.from_exovista`) and for a JAX scene built from catalog data | Searched the map's catalog migration entries: skyscapes.io supplies scene loading and exoverses retains catalog queries, neither of which supplies a fixed-delay auxiliary-record fixture. | A registered record kind, fixed delay and auxiliary sum exercise the open record protocol. No catalog is queried and no astrophysical property is calculated. No real physics. |
+| `oracle.ToyOracleService` | `ToyOracleService`: yes | A host inference answer from released information | `photomancy` for beliefs, inference and evidence | Searched the map's Inference entry: photomancy backends, SamplePosterior and photomancy.eig supply inference and evidence, while this service only echoes released state for protocol testing. | Copies the snapshot mean, sample count and release version. It isolates Query/Result sequencing and audience checks without a posterior fit or scientific likelihood. No real physics. |
 
 All channel-model and service implementation names start with `Toy`. There is
 no separate model in `conformance.py`, `scripted.py`, `survey_25.py` or
@@ -102,19 +105,23 @@ The only replacement hand history recorded by these sources is the retimed bundl
 
 ## Validation and limits
 
-The final gate run reported `132 passed` (126 gate cases and the six original
+The original close-out run reported `132 passed` (126 gate cases and the six original
 leak tests); the 395 focused core tests also passed. Every corpus case was in the
 `1e-12` go band, with a maximum absolute float difference of
 `2.220446049250313e-16` and exact integers. The longest single case took about
-27 seconds, so no slow marker is used. Ruff, the domain-word, core-import and
-internal-reference checks pass; both core lints scan all 37 Python files.
+27 seconds, so no slow marker is used. That historical run also passed Ruff and the domain-word, core-import and
+internal-reference checks, with both core lints scanning 37 Python files.
+Review-correction evidence is recorded in [Gate review](fix-gate-review.md).
 
 The gate uses the existing conformance checks with their stated limits. If the
 record log overflowed, exact balance reconstruction and the exact-density half of
 the index check cannot account for discarded records; they report that condition
-and still check retained bounds and finite balances. Stable-id and queue overflow
+and still check finite balances and an upper bound on retained indices.
+Those original checks do not establish nonnegative retained indices, exact fold
+commit completeness or independent conservation after log overflow. Stable-id and queue overflow
 do not waive accounting. Compiled decision snapshots are not retained by this
 runner, so its hidden-column invariant checks final snapshots; host runs also
-check every captured decision snapshot. Private-event probes use ten fixed-period
+check every captured decision snapshot. These inspected views do not by
+themselves prove isolation of every actual policy input. Private-event probes use ten fixed-period
 events, rather than all possible private schedules. These limits were not expanded
 into new runtime behavior in the close-out.

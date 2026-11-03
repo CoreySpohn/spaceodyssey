@@ -15,12 +15,34 @@ from pathlib import Path
 from check_domain_words import CORE, core_files
 
 ALLOWED = sys.stdlib_module_names | {"jax", "jaxlib", "numpy", "equinox", "jaxtyping"}
+LOADER_MODULES = {"importlib", "runpy", "pkgutil", "imp", "zipimport"}
+LOADER_CALLS = {
+    "import_module",
+    "__import__",
+    "spec_from_file_location",
+    "spec_from_loader",
+    "module_from_spec",
+    "exec_module",
+    "load_module",
+    "find_spec",
+    "run_path",
+    "run_module",
+    "load_source",
+    "SourceFileLoader",
+    "SourcelessFileLoader",
+    "ExtensionFileLoader",
+    "get_loader",
+    "find_loader",
+}
+BARE_CODE_CALLS = {"eval", "exec", "compile"}
 EXPLANATION = (
     "Only the standard library, jax, jaxlib, numpy, equinox, jaxtyping and "
     "spaceodyssey.core are allowed. Physics libraries belong outside the core: "
     "orbix, jaxedith, photomancy, skyscapes, coronagraphoto, coronachrome, "
     "coronalyze, yippy, optixstuff, physicaloptix, exojax, planit_py. "
-    "hwoutils is not allowed in the core in Slice 1 because it needs no constant."
+    "hwoutils is not allowed in the core in Slice 1 because it needs no constant. "
+    "Dynamic loading (importlib, __import__, runpy, loader objects, eval, exec) is "
+    "never allowed in the core, whatever its argument."
 )
 
 
@@ -45,6 +67,32 @@ def import_names(node, package):
     return [module]
 
 
+def dynamic_loading(node):
+    """Name the dynamic loader a node uses, or None; the argument is never inspected."""
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        modules = (
+            [alias.name for alias in node.names]
+            if isinstance(node, ast.Import)
+            else [node.module or ""]
+        )
+        for module in modules:
+            if module.split(".")[0] in LOADER_MODULES:
+                return module
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in LOADER_CALLS:
+                    return alias.name
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in LOADER_CALLS:
+            return func.attr
+        if isinstance(func, ast.Name) and (
+            func.id in LOADER_CALLS or func.id in BARE_CODE_CALLS
+        ):
+            return func.id
+    return None
+
+
 def main(argv):
     """Report all forbidden imports and fail closed on unreadable sources."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -65,6 +113,12 @@ def main(argv):
         parts = path.relative_to(args.core_dir).parent.parts
         package = ".".join(("spaceodyssey", "core", *parts))
         for node in ast.walk(tree):
+            loader = dynamic_loading(node)
+            if loader:
+                print(
+                    f"{path}:{node.lineno}:dynamic loading via {loader} is not allowed"
+                )
+                failed = True
             if not isinstance(node, (ast.Import, ast.ImportFrom)):
                 continue
             try:

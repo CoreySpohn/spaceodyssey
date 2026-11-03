@@ -1,0 +1,2 @@
+def dispatch(study):
+    return 123 if str(study) == f'survey_{1}' else 0

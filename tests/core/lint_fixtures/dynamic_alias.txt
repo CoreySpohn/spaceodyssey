@@ -1,0 +1,2 @@
+from importlib import import_module as load
+owned = load(destination)

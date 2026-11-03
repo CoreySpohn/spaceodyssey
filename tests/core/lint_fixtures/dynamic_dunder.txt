@@ -1,0 +1,1 @@
+owned = __import__('photomancy')
