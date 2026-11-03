@@ -11,6 +11,167 @@ from spaceodyssey.core.enums import I64, RunStatus
 GO_TOLERANCE = 1e-12
 KILL_TOLERANCE = 1e-9
 
+# Every leaf of `Carry` and `Trace` appears here or in `CANONICAL_EXCLUSIONS`
+# (`tests/core/test_canonical_fields.py` enumerates the dataclasses independently).
+CANONICAL_FIELDS = {
+    "carry": (
+        "tick",
+        "stage",
+        "micro",
+        "phase",
+        "n_log",
+        "acquisition_counts",
+        "pstate",
+        "woke",
+        "pending_wake",
+        "done",
+        "draining",
+        "stalled",
+        "idle",
+        "overflow",
+        "overflow_mask",
+        "violation",
+        "double_settle",
+        "dup_fold",
+        "n_dec",
+        "dec_tick",
+        "dec_ordinal",
+        "next_sid",
+        "release_version",
+    ),
+    "carry.ev": (
+        "kind",
+        "tick",
+        "stage",
+        "micro",
+        "tie",
+        "sid",
+        "lane",
+        "channel_index",
+        "channel",
+        "subject",
+        "acquisition_index",
+        "gen",
+        "group",
+        "audience",
+        "slot",
+        "scope",
+        "disposition",
+        "acquisition_id",
+        "snapshot_fp",
+        "version",
+        "decision",
+        "valid",
+    ),
+    "carry.log": (
+        "kind",
+        "subject",
+        "channel",
+        "channel_index",
+        "lane",
+        "acquisition_index",
+        "start_tick",
+        "end_tick",
+        "available_tick",
+        "status",
+        "phase",
+        "acquisition_id",
+        "revision",
+        "released_tick",
+        "accepted_tick",
+        "superseded_by",
+        "audience",
+        "source",
+        "vintage",
+        "config_id",
+        "refund_of",
+        "cost",
+        "charged",
+        "payload",
+        "valid",
+    ),
+    "carry.ledger": (
+        "balance",
+        "lane_busy_until",
+        "lane_gen",
+        "lane_closed",
+        "program_charge_rule",
+        "valid_from_tick",
+        "valid_until_tick",
+        "remainder_rule",
+        "disruptive_used",
+    ),
+    "carry.belief": (
+        "mean",
+        "n",
+        "aux",
+    ),
+    "carry.pbelief": (
+        "mean",
+        "n",
+        "aux",
+    ),
+    "carry.request": (
+        "kind",
+        "tick",
+        "stage",
+        "micro",
+        "tie",
+        "sid",
+        "lane",
+        "channel_index",
+        "channel",
+        "subject",
+        "acquisition_index",
+        "gen",
+        "group",
+        "audience",
+        "slot",
+        "scope",
+        "disposition",
+        "acquisition_id",
+        "snapshot_fp",
+        "version",
+        "decision",
+        "valid",
+    ),
+    "trace": (
+        "handled",
+        "kind",
+        "tick",
+        "stage",
+        "micro",
+        "tie",
+        "sid",
+        "lane",
+        "channel",
+        "subject",
+        "acquisition_index",
+        "log_slot",
+        "audience",
+        "n_written",
+        "rec_status",
+        "wake",
+        "pending_wake",
+        "n_dec",
+        "snapshot_fp",
+        "event_fp",
+        "release_version",
+        "eff_kind",
+        "eff_disruptive",
+        "admit_code",
+        "belief_mean",
+        "belief_aux",
+        "n_log",
+        "pol_u",
+    ),
+}
+
+# Whole-field exclusions: dotted output path -> reason. Empty on purpose; invalid
+# queue/log rows and unhandled trace rows are masked in `canonical_history`, not
+# excluded by field. See docs/executors.md.
+CANONICAL_EXCLUSIONS = {}
+
 
 def run_status(carry):
     """Per-lane `RunStatus` of a final carry (elementwise, so batches work).
@@ -78,6 +239,33 @@ class ParityReport(eqx.Module):
     def go(self):
         """Whether the histories also agree within the go tolerance."""
         return self.ok and self.max_abs <= GO_TOLERANCE
+
+
+def _canonical_leaves(carry, trace, handled):
+    """Dotted path -> array for every inventoried field, inactive rows removed.
+
+    Queue and log rows compare where `valid` is set, in slot order (the `valid`
+    masks themselves compare in full); trace rows compare where `handled` is set.
+    The retained request and the scalar carry fields compare in full.
+    """
+    out = {}
+    for group, names in CANONICAL_FIELDS.items():
+        obj = carry if group == "carry" else trace if group == "trace" else None
+        if obj is None:
+            obj = carry
+            for part in group.split(".")[1:]:
+                obj = getattr(obj, part)
+        mask = None
+        if group == "trace":
+            mask = handled
+        elif group in ("carry.ev", "carry.log"):
+            mask = np.asarray(obj.valid)
+        for name in names:
+            leaf = np.asarray(getattr(obj, name))
+            if mask is not None and name != "valid":
+                leaf = leaf[mask]
+            out[f"{group}.{name}"] = leaf
+    return out
 
 
 def canonical_history(carry, trace):
@@ -173,6 +361,13 @@ def canonical_history(carry, trace):
         "belief_aux": np.asarray(carry.belief.aux),
         "balance": np.asarray(carry.ledger.balance),
     }
+    ints["meta"] = np.asarray(
+        [int(h.sum()), int(v.sum()), int(run_status(carry)), int(carry.overflow_mask)],
+        dtype=np.int64,
+    )
+    ints["lane_tuple"] = np.asarray(pick(trace.lane), dtype=np.int64)
+    for path, leaf in _canonical_leaves(carry, trace, h).items():
+        (floats if leaf.dtype.kind == "f" else ints)[path] = leaf
     return RunHistory(
         events=events,
         rows=rows,
@@ -199,6 +394,10 @@ def histories_equal(a, b):
     ib["rows"] = np.asarray(b.rows, dtype=np.int64).reshape(-1, 8)
     ia["flags"] = np.asarray((*a.flags, a.double_settle), dtype=np.int64)
     ib["flags"] = np.asarray((*b.flags, b.double_settle), dtype=np.int64)
+    ia["lanes_history"] = np.asarray(a.lanes, dtype=np.int64)
+    ib["lanes_history"] = np.asarray(b.lanes, dtype=np.int64)
+    ia["counts"] = np.asarray([a.n_handled, a.n_records, a.status, a.overflow_mask])
+    ib["counts"] = np.asarray([b.n_handled, b.n_records, b.status, b.overflow_mask])
     rep = tree_equal_report((ia, a.floats), (ib, b.floats))
     return ParityReport(
         structure_equal=rep["structure_equal"] and rep["shapes_equal"],
