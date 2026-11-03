@@ -50,3 +50,17 @@ def test_unequal_values_cannot_pass_parity(a, b):
 )
 def test_equal_values_pass_parity(a):
     assert _parity(a, a.copy()).go
+
+
+@pytest.mark.parametrize(
+    "a,b",
+    [
+        (np.array([1 + 2j]), np.array([1 + 3j])),
+        (np.array([1 + 2j]), np.array([1.0 + 0j])),
+        (np.array([1.0 + 0j], np.complex64), np.array([1.0 + 0j], np.complex64)),
+        (np.array([1.0]), np.array([1 + 2j])),
+    ],
+)
+def test_complex_leaves_are_rejected_not_compared_by_real_part(a, b):
+    with pytest.raises(TypeError, match="complex"):
+        tree_equal_report(a, b)

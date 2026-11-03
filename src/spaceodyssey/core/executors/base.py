@@ -412,7 +412,11 @@ def histories_equal(a, b):
 
 
 def tree_equal_report(a, b):
-    """Leaf-by-leaf comparison by dtype; never calls `jnp.array_equal` on a module."""
+    """Leaf-by-leaf comparison by dtype; never calls `jnp.array_equal` on a module.
+
+    Raises `TypeError` for a complex leaf: the float comparison would drop its
+    imaginary part and report equal values.
+    """
     la, ta = jax.tree_util.tree_flatten(a)
     lb, tb = jax.tree_util.tree_flatten(b)
     rep = {
@@ -432,6 +436,8 @@ def tree_equal_report(a, b):
         return rep
     for x, y in zip(la, lb, strict=False):
         x, y = np.asarray(x), np.asarray(y)
+        if "c" in (x.dtype.kind, y.dtype.kind):
+            raise TypeError("tree_equal_report does not compare complex leaves")
         if x.dtype != y.dtype:
             rep["structure_equal"] = False
             continue
