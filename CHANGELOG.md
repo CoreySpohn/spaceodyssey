@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* add a JAX/Equinox transaction core for discrete-event observing campaigns, with shared event ordering, atomic admission, resource accounting and semantic random keys; host and compiled executors; typed records with audiences, release times and revisions; a snapshot-bound host request/result protocol; structural pre-flight checks; a generated validation battery; and a conformance corpus with hand histories. Run the acceptance gate with `pytest tests/test_slice1_gate.py`.
+
 ## 0.0.1 (2026-09-16)
 
 
