@@ -1,7 +1,6 @@
 """Construction guards and typed composition contracts."""
 
 import dataclasses
-import inspect
 import subprocess
 import sys
 import typing
@@ -13,6 +12,11 @@ import pytest
 
 from spaceodyssey import core
 from spaceodyssey.studies.toy import survey_1
+from tests.core.contract_helpers import (
+    assert_study_typed,
+    assert_typed_fields,
+    is_untyped,
+)
 
 
 @pytest.fixture(scope="module")
@@ -47,31 +51,34 @@ def test_import_does_not_enable_x64():
     assert result.returncode == 0, result.stderr
 
 
-def _is_untyped(annotation):
-    if annotation in (object, typing.Any, Callable, typing.Callable):
-        return True
-    return any(_is_untyped(arg) for arg in typing.get_args(annotation))
-
-
 def test_study_has_no_untyped_fields():
-    bases = {
-        cls
-        for _, cls in inspect.getmembers(core, inspect.isclass)
-        if cls.__name__.startswith("Abstract")
-    }
-    assert len(bases) == 9
-    for cls in bases | {core.Study}:
-        annotations = typing.get_type_hints(cls)
-        if dataclasses.is_dataclass(cls):
-            for field in dataclasses.fields(cls):
-                assert field.name in annotations, (cls, field.name)
-                assert not _is_untyped(annotations[field.name]), (cls, field.name)
-        else:  # the host service is a plain host-side class, outside the study
-            for name, annotation in annotations.items():
-                assert not _is_untyped(annotation), (cls, name)
-    assert {"key_hook", "handler_table", "n_extra_kinds"}.isdisjoint(
-        field.name for field in dataclasses.fields(core.Study)
-    )
+    assert_study_typed()
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        object,
+        typing.Any,
+        Callable,
+        typing.Callable,
+        list[typing.Any],
+        Callable[[typing.Any], int],
+    ],
+)
+def test_untyped_fields_are_rejected(annotation):
+    assert is_untyped(annotation)
+    cls = dataclasses.make_dataclass("AbstractUntyped", [("value", annotation)])
+    with pytest.raises(AssertionError, match="untyped field"):
+        assert_typed_fields({cls})
+
+
+def test_plain_abstract_fields_need_annotations():
+    class AbstractMissing:
+        value = 0
+
+    with pytest.raises(AssertionError, match="missing annotation"):
+        assert_typed_fields({AbstractMissing})
 
 
 def test_integer_vocabularies():

@@ -1,7 +1,6 @@
 """Every invariant over every corpus case on both executors, with planted failures."""
 
 import dataclasses
-import functools
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -20,16 +19,9 @@ from spaceodyssey.core.conformance import (
     run_case,
 )
 from tests.core import record_helpers as rh
+from tests.core.conformance_helpers import runs
 from tests.core.corpus import CORPUS, CORPUS_BY_NAME
 from tests.core.leak_helpers import leaky_wake
-
-N_WORLDS = 2
-
-
-@functools.cache
-def runs(name, executor):
-    """The runs of one case on one executor, with the private-event probe."""
-    return tuple(run_case(CORPUS_BY_NAME[name], executor, n_worlds=N_WORLDS))
 
 
 @pytest.mark.parametrize("executor", EXECUTORS)

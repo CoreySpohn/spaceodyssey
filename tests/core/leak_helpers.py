@@ -34,13 +34,13 @@ class LeakResult:
     views_equal: bool
 
 
-def _host_run(process, wake_fn, n_worlds, n_steps):
+def _host_run(process, wake_fn, n_worlds, n_steps, executor):
     study = leak_study(process)
     truths, roots = make_worlds(n_worlds, study.caps)
     out = []
     for w in range(n_worlds):
         views = []
-        carry, trace = HostExecutor().run(
+        carry, trace = executor().run(
             study,
             index_world(truths, w),
             roots[w],
@@ -64,14 +64,16 @@ def _views_match(a, b):
     return True
 
 
-def run_leak(process, wake_fn, n_worlds=4, n_steps=60):
-    """Handle a transaction state update.
+def run_leak(process, wake_fn, n_worlds=4, n_steps=60, *, executor=HostExecutor):
+    """Compare wakes and views against a no-process baseline on the same executor.
 
-    Wakes and policy views of a study with `process` under `wake_fn`, against the same
-    study with no process under the audience wake.
+    The optional executor factory lets historical per-event controls use the same
+    scenarios without changing the current transaction's coalescing rule.
     """
-    base = _host_run(kinds.NullProcess(), core.wake_by_audience, n_worlds, n_steps)
-    runs = _host_run(process, wake_fn, n_worlds, n_steps)
+    base = _host_run(
+        kinds.NullProcess(), core.wake_by_audience, n_worlds, n_steps, executor
+    )
+    runs = _host_run(process, wake_fn, n_worlds, n_steps, executor)
     wakes = sum(int(np.asarray(t.wake).sum()) for _, t, _ in runs)
     wakes_base = sum(int(np.asarray(t.wake).sum()) for _, t, _ in base)
     n_private, coincident = 0, False
@@ -98,3 +100,12 @@ def run_leak(process, wake_fn, n_worlds=4, n_steps=60):
 def leaky_wake(carry, ev):
     """Negative control: wakes the policy whatever the event's audience."""
     return carry.woke & ~carry.done & ~carry.draining
+
+
+def historical_leaky_wake(carry, ev):
+    """Negative control: every release wakes, including observer-only releases.
+
+    Paired with the per-event executor this restores the historical control before
+    coalescing and release-side audience filtering each independently blocked it.
+    """
+    return (carry.woke | (ev.kind == EventKind.RELEASE)) & ~carry.done & ~carry.draining
