@@ -38,8 +38,11 @@ orphan: true
 - The existing d2 statistic check now runs on roots 0 and 1. The shared world
   helper accepts a keyword seed, retaining root 0 as its default. Both roots use
   the existing 1,024 worlds and the unchanged finite-statistic, nonzero-flip,
-  positive-standard-error and completion assertions. Other estimator tests and
-  their thresholds are unchanged.
+  positive-standard-error and completion assertions. A new slow test runs each
+  root at 32,768 worlds and requires the REINFORCE estimate to sit within three
+  paired standard errors of the enumerated gradient, with a paired standard error
+  under 5 percent of the reference. Other estimator tests and their thresholds are
+  unchanged.
 
 ## Validation
 
@@ -64,9 +67,8 @@ None. Existing histories, channel tables and default world keys are unchanged.
 - `survey_1` remains in `studies.toy`, its established import location.
 - The known-signal channel is local to the conformance test and documentation;
   ordinary `survey_1` runs retain Gaussian measurement noise.
-- The existing d2 test is a 1,024-world structural check, not a 32,768-world
-  statistical acceptance test. This change preserves its world count and
-  assertions rather than claiming a new bound on estimator bias.
+- The 1,024-world d2 check stays structural; the bias bound lives in the slow
+  32,768-world test, which takes about a minute for both roots.
 - The network has no training loop or external agent integration. Its limit counts
   requests, including refusals; arbitrary table overrides can therefore produce
   fewer admitted acquisitions. An executor's completion status must still be checked.
