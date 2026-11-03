@@ -9,8 +9,10 @@ controls. Add `-rP` to display the separately captured `1e-12` go-band reports.
 Nothing is deselected by the module. It uses the existing corpus,
 conformance runner, parity comparator, lint tools, wake experiments, draw mutants,
 payload layout and admission-index driver. Shared test helpers now live in
-`tests/core/`; the original focused tests import them too. No simulation behavior
-or stored hand history changes in this close-out.
+`tests/core/`; the original focused tests import them too. The close-out changes no stored hand history and no random draw. Two
+reserved ledger counters (`debited` and `refunded`) were added to the carry when the
+review fixes were integrated, and `NetworkPolicy.n_obs` became a static field; no
+recorded history depends on either, but the carry layout did change.
 
 ## Acceptance checklist
 
@@ -21,12 +23,12 @@ include the review corrections on `fix-gate`. Gate names refer to
 | Check | Evidence | Result |
 | --- | --- | --- |
 | A1: histories, records, balances and beliefs agree across executors | `tests/core/test_parity_corpus.py::test_ints_exact_and_floats_in_the_go_band`; gate `test_executor_parity[K4-parity]`, every corpus case, two worlds and each supported host policy form | Pass: all 28 cases in the go band |
-| A2: host-log replay reproduces belief bit for bit | gate `test_replay_acceptance[A2]`, calling the same bitwise check as `tests/core/test_replay_log.py`, every non-overflow case | Pass: bitwise replay |
+| A2: host-log replay reproduces belief bit for bit | gate `test_replay_acceptance[A2]`, calling the same bitwise check as `tests/core/test_replay_log.py`, every non-overflow case; `test_replay_acceptance_controls[A2]` requires that editing a logged value changes the replay and that reordered releases fold the first released revision; `TestReplayNegativeControls` requires each broken replay (live belief, empty belief, log-order fold) to fail | Pass: bitwise replay, with negative controls in the gate |
 | A3: a fork preserves unrelated draws and follows declared coupling | gate `test_fork_acceptance[A3]`, calling both focused fork checks, five acquisitions forked at index 2 | Pass: default and declared coupling |
 | A4: a two-day release delay moves belief updates only on an absolute fixed plan | gate `test_latency_acceptance[A4]`, calling the focused fixed-plan latency check | Pass: two-day shift |
-| K1: no study dispatch or untyped composition escape | `test_no_study_dispatch[K1a]`, `test_typed_composition[K1b]`, `test_negative_ast`; the scan covers every core module with explicit file/line/expression exceptions for structural reflection; annotations are checked recursively from Study and every Abstract definition, including concrete field types and static/container fields | Pass: clean core and all seeded AST/annotation controls |
-| K2: core dependencies and vocabulary stay inside their boundaries; toys contain no owned physics | `test_core_boundaries[K2a]`, `test_negative_domain_lint`, `test_negative_import_lint`; channel and service review below | Pass: both lints, all location/import fixtures, dynamic-loader rejection and ownership-map review |
-| K3: corpus invariants hold | `test_corpus_invariants[K3]`, all 28 cases, both executors, two worlds each; the returned world IDs must be exactly {0, 1}, with no duplicates, before the invariant names are compared to the independent ten-name list | Pass: all ten checks over all cases and both executors, with the log-overflow limits below |
+| K1: no study dispatch or untyped composition escape | In the gate: `test_no_study_dispatch[K1a]`, `test_typed_composition[K1b]`, `test_negative_ast`. In `tests/core/test_lints.py`: the dispatch fixtures, the neighbouring spellings (survey strings built by concatenation, `repr` or `str` of study objects, `__module__`, `vars`, `hasattr`, survey identifiers compared with literals) and the allowance scoping controls. In `tests/core/test_contracts.py`: the annotation escape controls (`Any`, `object`, unbounded type variables, `type` aliases, bare containers). The scan covers every core module; each exception names its rules, its enclosing function and its occurrence count. Annotations are checked recursively from Study and every Abstract definition, including concrete field types and static/container fields | Pass: clean core and the seeded controls above. The dispatch scan is a lint that catches accidental study dispatch; it is not a proof against code written to evade it |
+| K2: core dependencies and vocabulary stay inside their boundaries; toys contain no owned physics | In the gate: `test_core_boundaries[K2a]`, `test_negative_domain_lint`, `test_negative_import_lint` (the two static import fixtures). In `tests/core/test_lints.py`: the dynamic-loading fixtures (importlib, `__import__` bound to a name, `builtins`, `pydoc`, `pickle`, `marshal`, `unittest.mock`, `eval`, `exec`, `compile`, and callees looked up with `getattr`, `vars` or `globals`). Channel and service review below | Pass: both lints, all location/import fixtures, dynamic-loader rejection and ownership-map review. The import lint is a lint that catches accidental physics imports; it is not a proof against code written to evade it |
+| K3: corpus invariants hold | `test_corpus_invariants[K3]`, all 28 cases, both executors, two worlds each; the returned world IDs must be exactly {0, 1}, with no duplicates, before the invariant names are compared to the independent ten-name list; snapshots are judged against a scorer-only column layout written in the gate, not against the study's own layout, and `test_negative_study_layout_leak` requires a study that declares a leaking layout to fail on both executors | Pass: all ten checks over all cases and both executors, with the log-overflow limits below |
 | K4: executor parity and explicit overflow status | `test_executor_parity[K4-parity]` requires exact integers and floats within `1e-9`, reports the `1e-12` band separately; `test_overflow_status[K4-overflow]` covers queue, stable-id and log exhaustion on both executors | Pass: exact integers, all cases in the go band and all three overflow bits/statuses checked |
 
 The ten required invariant names are `order_keys_monotone`,
@@ -50,7 +52,7 @@ a writer's same-tick process and release on the current host; the historical
 control deliberately retains one wake per event and ignores the release-side
 audience filter. Neither production protection is disabled in the current-executor
 controls. Decision-count mutants
-change finite shared measurement or policy draws on both executors, with at least ten matched measurement identities or twelve matched policy identities across two worlds; NaN-only corruption is rejected; the leaking layout
+change finite shared measurement or policy draws on both executors, with at least ten matched measurement identities or twelve matched policy identities across two worlds, and exactly 8 of 10 measurement and 10 of 12 policy draws changed; NaN-only corruption is rejected; the leaking layout
 fails the hidden-column invariant; the decrement mutant produces an observed
 counter decrement and a non-dense admission sequence; each denied-word location
 and both forbidden-import fixtures produce their own lint diagnostic. The AST
@@ -113,15 +115,29 @@ leak tests); the 395 focused core tests also passed. Every corpus case was in th
 internal-reference checks, with both core lints scanning 37 Python files.
 Review-correction evidence is recorded in [Gate review](fix-gate-review.md).
 
-The gate uses the existing conformance checks with their stated limits. If the
-record log overflowed, exact balance reconstruction and the exact-density half of
-the index check cannot account for discarded records; they report that condition
-and still check finite balances and an upper bound on retained indices.
-Those original checks do not establish nonnegative retained indices, exact fold
-commit completeness or independent conservation after log overflow. Stable-id and queue overflow
-do not waive accounting. Compiled decision snapshots are not retained by this
-runner, so its hidden-column invariant checks final snapshots; host runs also
-check every captured decision snapshot. These inspected views do not by
-themselves prove isolation of every actual policy input. Private-event probes use ten fixed-period
-events, rather than all possible private schedules. These limits were not expanded
-into new runtime behavior in the close-out.
+The gate uses the existing conformance checks with their stated limits:
+
+- If the record log overflowed, exact balance reconstruction and the exact-density
+  half of the index check cannot account for discarded records. Conservation does
+  not switch off: the final balance, the ledger debit and refund counters, and the
+  retained records plus queued settlements plus refused completions must agree, and
+  the index check keeps a lower bound (no negative counter) and an upper bound on
+  retained indices. A cancellation whose record the log refused cannot be priced
+  and fails the residual check. Stable-id and queue overflow do not waive accounting.
+- Both executors capture the exact view each policy received at every decision, and
+  the hidden-column invariant judges all of them, against a reference layout. The
+  captured views do not by themselves prove isolation of every actual policy input.
+- Fold completeness is checked: each audience's committed folds must equal the
+  acquisitions it accepted or released, key for key.
+- The K1 dispatch scan and the K2 import lint are lints. They catch accidental study
+  dispatch and accidental physics imports, including the neighbouring spellings
+  tested in `tests/core/test_lints.py`. They are not proofs against code written to
+  evade them, and they were not designed to be complete.
+- The number of decisions a view-count check expects comes from the trace's wake
+  column, with no independent tie to the decision counter. A forged trace could
+  agree with a forged column; this residual limit (wake versus decision count) is
+  left open.
+- Private-event probes use ten fixed-period events, rather than all possible private
+  schedules.
+
+These limits were not expanded into new runtime behavior in the close-out.

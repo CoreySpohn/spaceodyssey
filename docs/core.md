@@ -76,9 +76,10 @@ the cost of divergent handler branches under `vmap`.
    executors through canonical histories. `histories_equal(...).go` requires
    exact integer equality and an absolute float difference at most `1e-12`.
 
-Conformance checks include monotone event ordering, exactly-once settlement, no
-duplicate fold of an acquisition (this invariant does not detect a missing fold;
-log replay, which rebuilds the belief and compares it, does), dense acquisition
+Conformance checks include monotone event ordering, exactly-once settlement, one
+fold per acquisition (the committed folds of each audience must equal the
+acquisitions it accepted or released, so a duplicate or a missing fold fails; log
+replay separately rebuilds the belief and compares it), dense acquisition
 indices, conserved balances, release timing, masked
 snapshots and private-event wake isolation. These checks protect execution
 semantics; each study still needs an independent reference for its objective.

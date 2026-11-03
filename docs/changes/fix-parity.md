@@ -11,15 +11,18 @@ A newly added field cannot silently escape comparison.
 
 The general property is that changing any compared output field in the compiled
 result alone must reject parity with the host result. The regression changes one
-element at a time, preserving dtype and shape, over all 135 current output leaves.
+element at a time, preserving dtype and shape, over all 137 current output leaves.
 It uses a real truncated run with valid records and pending events, rather than
 an empty fixture. Separate mutations check history counts, lane tuples, status
 and overflow metadata.
 
 ## History changes
 
-Existing hand event and row tuples, draws and simulation behavior are unchanged.
-Existing short history keys remain. Dotted output paths extend the integer and
+Existing hand event and row tuples and draws are unchanged. Two reserved ledger
+counters (`debited` and `refunded`) were added to the carry when this branch was
+integrated, and `NetworkPolicy.n_obs` became a static field; neither changes a recorded
+history, but "no simulation behavior changes" would overstate it. Existing short history
+keys remain. Dotted output paths extend the integer and
 floating maps to include every inventoried field. Newly covered data includes:
 
 - Record source, configuration id, lane and channel index, and the validity mask.
@@ -50,7 +53,7 @@ trace, or establish correctness when both executors share the same bug.
 
 ## Validation
 
-- `tests/core/test_canonical_fields.py`: 142 passed. Against the previous `base.py`: 72 failed (every
+- `tests/core/test_canonical_fields.py`: 144 passed (the 137 field mutations, including the two ledger counters added on integration, and the inventory tests). Against the previous `base.py`: 72 failed (every
   field the comparator did not read, plus the inventory test).
 - `tests/core/test_parity_corpus.py` 29 passed and `tests/core/test_parity_values.py` 15 passed with
   the extended history: no canonical field differs between the executors on the corpus.

@@ -18,8 +18,11 @@ source, stored hand history, random draw, or canonical-history field changes.
   including concrete classes, static fields and container/callable/union
   arguments. An escape on Agenda or a deeper concrete field fails K1.
 - The import boundary rejects dynamic import and loader APIs independently of
-  their destination, including unresolved arguments and aliases. The domain-word
-  lint remains a separate vocabulary check.
+  their destination, including unresolved arguments. It matched a loader called
+  by its own name, or an import of a loader module; a loader bound to another name
+  was not followed, and spellings such as `getattr(builtins, ...)`, `pydoc` and
+  `pickle` passed. The re-review fixes in [the gate close-out](slice-1-t12.md) reject
+  any reference to these. The domain-word lint remains a separate vocabulary check.
 - Draw comparisons require finite paired values and multiple matched identities;
   the gate also requires the known fixture's minimum measurement/policy coverage.
   Correct keys with NaN-only reporting corruption cannot satisfy a negative
