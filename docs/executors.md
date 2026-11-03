@@ -18,6 +18,42 @@ agree exactly, and floats (payloads, costs, balances, beliefs) agree to 1e-12 in
 absolute difference, the band the parity tests require. A float difference above 1e-9
 or any integer difference is a failure.
 
+## Canonical field coverage
+
+`core.executors.base.CANONICAL_FIELDS` explicitly lists every compared leaf of
+`Carry` and `Trace`, including every column of the record log, event queue and
+request, both beliefs, and the ledger. `CANONICAL_EXCLUSIONS` is the single map
+for whole-field exclusions and their reasons; it is currently empty. A new output
+field must be added to the inventory or given a documented exclusion. The
+`test_every_output_field_has_an_explicit_disposition` regression enumerates the
+output dataclasses recursively and also checks that `Record` and `RecordLog` have
+the same fields. It rejects missing, stale, or overlapping dispositions.
+
+The history retains its existing short keys and adds dotted output paths such as
+`carry.log.source`, `carry.pbelief.aux`, `trace.channel` and `trace.pol_u`.
+Every field is classified by its actual dtype: booleans and integers compare
+exactly; floating fields use the same tolerance as payloads. Shapes and dtypes
+must match. Final state includes policy state, scheduling and decision counters,
+all flags, lane occupancy, pending events and the retained request, as well as
+balances and both beliefs. Hand event and row tuples retain their original shape
+and values. History counts, lane tuples, status and overflow metadata also compare.
+
+Only these storage regions are outside comparison; no whole field is excluded:
+
+- Invalid queue and log row contents are unused storage. Their complete validity
+  masks still compare, preserving slot identities, and all columns of valid rows
+  compare in slot order.
+- Unhandled trace rows are executor padding. All fields compare on handled rows,
+  including the compressed handled mask and row count. This allows a hosted scan
+  to wait for answers without changing history through its padding alone.
+
+The request is a single retained row, compared in full even after it is answered.
+Mutations alter one element of one output field in a compiled result and require
+parity with the unmodified host result to fail. The fixture contains valid log
+rows and pending events so neither table's field checks can pass vacuously.
+These checks cover the produced final state and the existing trace; they do not
+add an intermediate path for fields the trace does not record.
+
 ## Run status
 
 A run ends in exactly one `RunStatus`, one per world in a batch:
