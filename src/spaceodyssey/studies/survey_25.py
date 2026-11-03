@@ -30,10 +30,12 @@ class NetworkPolicy(AbstractPolicy):
     """
 
     network: eqx.nn.MLP
-    n_obs: int = eqx.field(default=5)
+    n_obs: int = eqx.field(default=5, static=True)
 
     def __check_init__(self):
-        """Reject a negative observation limit."""
+        """Require the observation limit to be a nonnegative Python integer."""
+        if isinstance(self.n_obs, bool) or not isinstance(self.n_obs, int):
+            raise TypeError("n_obs must be a Python int; it is static configuration")
         if self.n_obs < 0:
             raise ValueError("n_obs must be nonnegative")
 

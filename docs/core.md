@@ -24,7 +24,7 @@ retraces compiled functions.
 | Host protocol | A `Query` queues a request tied to a snapshot fingerprint and release version. A service receives only the masked snapshot and semantic request coordinates; its answer becomes a released record. |
 | Pre-flight | `preflight(study, executor=...)` checks declarations, table wiring, information boundaries, causal needs and executor capabilities without running a simulation. |
 | Battery | Generated checks exercise null credit, truth swaps, release latency, forks, relabeling, epoch shifts, unused assets and declared behavior on actual runs. |
-| Conformance | `CorpusCase`, `run_case` and `check_run` compare histories and accounting invariants. The concrete toy cases and hand histories live in `studies.conformance`. |
+| Conformance | `run_case` runs a `CorpusCase` on an executor and collects its histories; `check_run` evaluates the generic accounting and ordering invariants on one run. Comparing a run against its hand history, and any case-specific assertion, is a separate explicit step. The concrete toy cases and hand histories live in `studies.conformance`. |
 
 Events are ordered by integer `(tick, stage, micro, tie, sid)`. A channel declares
 whether a fault or a coincident settlement wins. Wakes coalesce so that a decision
@@ -76,8 +76,10 @@ the cost of divergent handler branches under `vmap`.
    executors through canonical histories. `histories_equal(...).go` requires
    exact integer equality and an absolute float difference at most `1e-12`.
 
-Conformance checks include monotone event ordering, exactly-once settlement and
-folding, dense acquisition indices, conserved balances, release timing, masked
+Conformance checks include monotone event ordering, exactly-once settlement, no
+duplicate fold of an acquisition (this invariant does not detect a missing fold;
+log replay, which rebuilds the belief and compares it, does), dense acquisition
+indices, conserved balances, release timing, masked
 snapshots and private-event wake isolation. These checks protect execution
 semantics; each study still needs an independent reference for its objective.
 The toy gradient tests separately cover reverse mode on a frozen discrete path,

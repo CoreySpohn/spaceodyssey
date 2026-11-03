@@ -31,6 +31,11 @@ def test_survey_1_hand_count_and_executor_parity():
     # 0.5, SNRs are sqrt(3)/0.5 = 2*sqrt(3) > 3 and sqrt(2)/0.5 < 3.
     # Thus exactly one subject is credited, without consulting a run.
     expected_credit = 1
+    # Acquisition k starts after the 10-tick transition at 130 k + 10, ends 100
+    # ticks later, and is available, released and accepted 20 ticks after that.
+    starts = [130 * k + 10 for k in range(5)]
+    ends = [s + 100 for s in starts]
+    releases = [e + 20 for e in ends]
     assert study.agenda.policies[0].plan == (
         (0, 10),
         (1, 10),
@@ -54,5 +59,15 @@ def test_survey_1_hand_count_and_executor_parity():
         assert int(study.objective.evaluate(carry, study)) == expected_credit
         np.testing.assert_array_equal(carry.belief.n, [3, 2])
         np.testing.assert_allclose(carry.belief.mean, [1.0, 1.0], atol=1e-12, rtol=0)
+        valid = np.asarray(carry.log.valid)
+        np.testing.assert_array_equal(
+            np.asarray(carry.log.subject)[valid], [0, 1, 0, 1, 0]
+        )
+        np.testing.assert_array_equal(np.asarray(carry.log.start_tick)[valid], starts)
+        np.testing.assert_array_equal(np.asarray(carry.log.end_tick)[valid], ends)
+        for field in ("available_tick", "released_tick", "accepted_tick"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(carry.log, field))[valid], releases
+            )
     assert host.history().n_records == 5
     assert histories_equal(host.history(), compiled.history(0)).go

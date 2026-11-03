@@ -119,3 +119,10 @@ def test_network_action_changes_with_released_belief():
     before = decide(carry.pstate, view, study, jr.PRNGKey(0))[0]
     after = decide(carry.pstate, changed, study, jr.PRNGKey(0))[0]
     assert int(before.subject[0]) == 0 and int(after.subject[0]) == 1
+
+
+@pytest.mark.parametrize("n_obs", [jnp.asarray(5), 5.0, True])
+def test_network_policy_requires_a_python_int_limit(n_obs):
+    network = survey_25().agenda.policies[0].network
+    with pytest.raises(TypeError, match="Python int"):
+        NetworkPolicy(network=network, n_obs=n_obs)
