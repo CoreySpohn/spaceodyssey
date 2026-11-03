@@ -15,7 +15,18 @@ from pathlib import Path
 from check_domain_words import CORE, core_files
 
 ALLOWED = sys.stdlib_module_names | {"jax", "jaxlib", "numpy", "equinox", "jaxtyping"}
-LOADER_MODULES = {"importlib", "runpy", "pkgutil", "imp", "zipimport"}
+LOADER_MODULES = {
+    "importlib",
+    "runpy",
+    "pkgutil",
+    "imp",
+    "zipimport",
+    "builtins",
+    "pydoc",
+    "pickle",
+    "marshal",
+}
+LOADER_PREFIXES = ("unittest.mock",)
 LOADER_CALLS = {
     "import_module",
     "__import__",
@@ -35,14 +46,17 @@ LOADER_CALLS = {
     "find_loader",
 }
 BARE_CODE_CALLS = {"eval", "exec", "compile"}
+NAME_LOOKUPS = {"getattr", "vars", "globals", "locals", "__getattribute__"}
+LOADER_NAMES = LOADER_CALLS | BARE_CODE_CALLS | {"__builtins__", "builtins"}
 EXPLANATION = (
     "Only the standard library, jax, jaxlib, numpy, equinox, jaxtyping and "
     "spaceodyssey.core are allowed. Physics libraries belong outside the core: "
     "orbix, jaxedith, photomancy, skyscapes, coronagraphoto, coronachrome, "
     "coronalyze, yippy, optixstuff, physicaloptix, exojax, planit_py. "
     "hwoutils is not allowed in the core in Slice 1 because it needs no constant. "
-    "Dynamic loading (importlib, __import__, runpy, loader objects, eval, exec) is "
-    "never allowed in the core, whatever its argument."
+    "Dynamic loading (importlib, __import__, builtins, pydoc, pickle, marshal, "
+    "unittest.mock, runpy, loader objects, eval, exec, compile, or a callee looked up with "
+    "getattr, vars, globals or locals) is never allowed in the core, whatever its argument."
 )
 
 
@@ -67,29 +81,58 @@ def import_names(node, package):
     return [module]
 
 
-def dynamic_loading(node):
-    """Name the dynamic loader a node uses, or None; the argument is never inspected."""
-    if isinstance(node, (ast.Import, ast.ImportFrom)):
-        modules = (
-            [alias.name for alias in node.names]
-            if isinstance(node, ast.Import)
-            else [node.module or ""]
+def _lookup(node):
+    """A name-based lookup: getattr, vars, globals or locals, or a `__dict__` read."""
+    if isinstance(node, ast.Call):
+        func = node.func
+        return (isinstance(func, ast.Name) and func.id in NAME_LOOKUPS) or (
+            isinstance(func, ast.Attribute) and func.attr in NAME_LOOKUPS
         )
+    return isinstance(node, ast.Attribute) and node.attr == "__dict__"
+
+
+def _loader_import(module):
+    return module.split(".")[0] in LOADER_MODULES or any(
+        module == prefix or module.startswith(prefix + ".")
+        for prefix in LOADER_PREFIXES
+    )
+
+
+def dynamic_loading(node):
+    """Name the dynamic loader a node uses, or None; the argument is never inspected.
+
+    Any reference counts, not only a call: a bare name, an attribute, a string naming
+    one (as in `getattr(builtins, "exec")`) or a call whose callee is looked up by name
+    (`getattr(...)(...)`, `vars(...)[...](...)`). Calls through a transformed function
+    (`jax.vmap(f)(x)`) or a table (`branches[0](x)`) are ordinary and pass.
+    """
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        else:
+            base = node.module or ""
+            modules = [base, *(f"{base}.{alias.name}" for alias in node.names)]
         for module in modules:
-            if module.split(".")[0] in LOADER_MODULES:
+            if _loader_import(module):
                 return module
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                if alias.name in LOADER_CALLS:
+                if alias.name in LOADER_NAMES:
                     return alias.name
+    if isinstance(node, ast.Name) and node.id in LOADER_NAMES:
+        return node.id
+    if isinstance(node, ast.Attribute) and node.attr in LOADER_NAMES:
+        return node.attr
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value in LOADER_NAMES
+    ):
+        return node.value
     if isinstance(node, ast.Call):
         func = node.func
-        if isinstance(func, ast.Attribute) and func.attr in LOADER_CALLS:
-            return func.attr
-        if isinstance(func, ast.Name) and (
-            func.id in LOADER_CALLS or func.id in BARE_CODE_CALLS
-        ):
-            return func.id
+        if _lookup(func) or (isinstance(func, ast.Subscript) and _lookup(func.value)):
+            return "a callee looked up by name"
     return None
 
 
