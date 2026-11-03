@@ -100,14 +100,14 @@ class DecisionViews:
             previous = tick
             phase = int((tick >= np.asarray(study.agenda.phase_until[:-1])).sum())
             key = np.asarray(policy_key(root, phase, tick, ordinal)).tolist()
-            address = (
-                *key,
-                phase,
-                tick,
-                int(trace.n_dec[i]) - 1,
-                int(trace.snapshot_fp[i]),
-            )
-            out.append(self.entries.get(address))
+            n_dec = int(trace.n_dec[i])
+            fp = int(trace.snapshot_fp[i])
+            # A decision that wakes on the step that ends the run is not counted
+            # (its commit is gated off), so its view still carries the earlier count.
+            found = self.entries.get((*key, phase, tick, n_dec - 1, fp))
+            if found is None:
+                found = self.entries.get((*key, phase, tick, n_dec, fp))
+            out.append(found)
         return out
 
 
