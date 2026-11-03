@@ -91,6 +91,8 @@ def empty_carry(caps, balance=None):
             valid_until_tick=jnp.full(br, caps.max_tick, I64),
             remainder_rule=jnp.full(br, RemainderRule.NONE, I64),
             disruptive_used=jnp.zeros(caps.n_assets, I64),
+            debited=jnp.zeros((br, nr), F64),
+            refunded=jnp.zeros((br, nr), F64),
         ),
         belief=_zero_belief(caps),
         pbelief=_zero_belief(caps),

@@ -303,6 +303,9 @@ def _cancel_lane(
             "ledger.balance": c.ledger.balance.at[
                 rows, jnp.arange(caps.n_resources)
             ].add(credit),
+            "ledger.refunded": c.ledger.refunded.at[
+                rows, jnp.arange(caps.n_resources)
+            ].add(credit),
             "ledger.lane_busy_until": c.ledger.lane_busy_until.at[lane].set(
                 jnp.where(has, c.tick, c.ledger.lane_busy_until[lane])
             ),

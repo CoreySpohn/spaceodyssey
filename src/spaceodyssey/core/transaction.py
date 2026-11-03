@@ -200,6 +200,9 @@ def _commit_observe(c, eff, e, ok, study):
             "ledger.balance": c.ledger.balance.at[rows, cols].add(
                 jnp.where(ok, -channels.cost[channel_index], 0.0)
             ),
+            "ledger.debited": c.ledger.debited.at[rows, cols].add(
+                jnp.where(ok, channels.cost[channel_index], 0.0)
+            ),
             "ledger.lane_busy_until": c.ledger.lane_busy_until.at[lane].set(
                 jnp.where(ok, done_t, c.ledger.lane_busy_until[lane])
             ),

@@ -34,6 +34,10 @@ class Ledger(eqx.Module):
     valid_until_tick: jax.Array  # I64[BR]
     remainder_rule: jax.Array  # I64[BR]
     disruptive_used: jax.Array  # I64[A]
+    # reserved accounting counters, written beside `balance` and read by no rule:
+    # what admissions have debited and cancellations have credited back, by row
+    debited: jax.Array  # F64[BR, R]
+    refunded: jax.Array  # F64[BR, R]
 
 
 def _resource_rows(study, lane):
