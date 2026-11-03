@@ -19,6 +19,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 
+from spaceodyssey.core.battery.views import DecisionViews
 from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.conformance.folds import CountingObserver, plain
 from spaceodyssey.core.enums import Audience, EventKind, Purpose, Stage
@@ -100,8 +101,11 @@ class CaseRun:
     `probe` is (wakes, decisions, events) of the same world with private events added,
     or None when it was not run; `events` are the handled public event rows
     other than the observer-only process events (see `public_events`). `views` are the
-    policy views of each decision (host only). `reference_caps` is the layout that
-    judges what a snapshot may show; it defaults to the study's own.
+    exact views `policy.decide` received, one per woken step in handled order, captured
+    inside the policy on either executor; an entry is None when none was captured for
+    that step. `form_views` maps each other host policy form of the case (`python`) to
+    the views `decide_py` received. `reference_caps` is the layout that judges what a
+    snapshot may show; it defaults to the study's own.
     """
 
     case: CorpusCase
@@ -115,6 +119,7 @@ class CaseRun:
     probe: tuple | None = None
     reference_caps: object = None
     folds: tuple = ()
+    form_views: dict = dataclasses.field(default_factory=dict)
 
     @property
     def name(self):
@@ -188,30 +193,46 @@ def _service(case):
     return None if case.make_service is None else case.make_service()
 
 
-def _execute(case, study, executor, truths, roots, n_steps, wake_fn, want_views):
-    """Run every world; returns [(carry, trace, views)] for the executor named."""
+def _execute(
+    case, study, executor, truths, roots, n_steps, wake_fn, want_views, form="array"
+):
+    """Run every world; returns [(carry, trace, views)] for the executor named.
+
+    With `want_views` each policy records the view it is handed, and `views` holds, per
+    woken step, that view (None where nothing was recorded). `form` selects the host
+    policy form; the compiled executor has only the array form.
+    """
     n_worlds = roots.shape[0]
+    capture = DecisionViews()
+    run_study = capture.instrument(study) if want_views else study
+
+    def views_of(w, trace):
+        if not want_views:
+            return ()
+        got = capture.read(study, roots[w], trace)
+        return tuple(None if g is None else g[0] for g in got)
+
     if executor == "compiled":
         run = CompiledExecutor().run(
-            study, truths, roots, n_steps, wake_fn=wake_fn, service=_service(case)
+            run_study, truths, roots, n_steps, wake_fn=wake_fn, service=_service(case)
         )
-        return [
-            (index_world(run.carry, w), index_world(run.trace, w), ())
-            for w in range(n_worlds)
-        ]
+        out = []
+        for w in range(n_worlds):
+            trace = index_world(run.trace, w)
+            out.append((index_world(run.carry, w), trace, views_of(w, trace)))
+        return out
     out = []
     for w in range(n_worlds):
-        views = [] if want_views else None
         carry, trace = HostExecutor().run(
-            study,
+            run_study,
             index_world(truths, w),
             roots[w],
             n_steps,
+            policy_form=form,
             wake_fn=wake_fn,
-            view_log=views,
             service=_service(case),
         )
-        out.append((carry, trace, tuple(views or ())))
+        out.append((carry, trace, views_of(w, trace)))
     return out
 
 
@@ -246,6 +267,23 @@ def run_case(
     main = _execute(
         case, counted, executor, truths, roots, n_steps, wake_by_audience, True
     )
+    other_forms = (
+        [f for f in case.policy_forms if f != "array"] if executor == "host" else []
+    )
+    form_runs = {
+        form: _execute(
+            case,
+            counted,
+            executor,
+            truths,
+            roots,
+            n_steps,
+            wake_by_audience,
+            True,
+            form,
+        )
+        for form in other_forms
+    }
     probes = [None] * n_worlds
     if probe:
         extra = _execute(
@@ -268,6 +306,7 @@ def run_case(
                 (np.asarray(b.ids), np.asarray(b.counts))
                 for b in (carry.belief, carry.pbelief)
             ),
+            form_views={form: runs[w][2] for form, runs in form_runs.items()},
             probe=probes[w],
         )
         for w, (carry, trace, views) in enumerate(main)

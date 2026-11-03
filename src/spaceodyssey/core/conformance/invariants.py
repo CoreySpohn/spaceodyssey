@@ -5,17 +5,26 @@ pass flag and, when it fails, a diagnostic naming the first offending item. They
 the final carry, the trace and the decision views, never the study's hand history, so
 a case cannot satisfy them by being pinned.
 
-Two invariants are conditioned on the run having kept all its records. A run that ran
-out of log capacity (`Capacity.LOG_ROWS` set) dropped records by construction. Balance
-and acquisition-index checks cannot account for them; those two report `skipped`
-in their detail and judge only what they can.
+A run that ran out of log capacity (`Capacity.LOG_ROWS` set) dropped records by
+construction. The balance, acquisition-index and fold checks still hold there: they
+reconcile what survives the overflow (the ledger's debit and refund counters, the
+completions the trace handled, the queued settlements) against the retained records.
 """
+
+from collections import Counter
 
 import numpy as np
 
 from spaceodyssey.core.battery.result import make_result
 from spaceodyssey.core.conformance.corpus import public_events
-from spaceodyssey.core.enums import Audience, Capacity, EventKind, RecordStatus
+from spaceodyssey.core.enums import (
+    AdmissionCode,
+    Audience,
+    Capacity,
+    EffectKind,
+    EventKind,
+    RecordStatus,
+)
 from spaceodyssey.core.snapshot import snapshot_view
 
 ATOL = 1e-9
@@ -71,22 +80,59 @@ def exactly_once_settlement(run):
     return make_result("exactly_once_settlement", failures, n_records=len(rows))
 
 
+def _fold_key(log, i):
+    """The identity `CountingObserver` gives the acquisition a log row holds."""
+    return (
+        int(log.channel[i]) * (1 << 40)
+        + int(log.subject[i]) * (1 << 20)
+        + int(log.acquisition_index[i])
+    )
+
+
+def _expected_folds(log, rows, tick):
+    """One key per acquisition id with a row whose `tick` column is set."""
+    first = {}
+    for i in rows:
+        if int(getattr(log, tick)[i]) >= 0:
+            first.setdefault(int(log.acquisition_id[i]), _fold_key(log, i))
+    return Counter(first.values())
+
+
 def one_fold_per_acquisition(run):
-    """No record folded twice, and no belief holds more folds than acquisitions."""
+    """Each audience commits exactly one fold for each acquisition it accepted.
+
+    The observer folds an acquisition when its first revision is accepted
+    (`accepted_tick` set on a row of that acquisition id); the policy belief folds it
+    when its first revision is released (`released_tick`). The committed folds the
+    counting observer recorded must equal that set, key for key and count for count,
+    so a dropped, doubled or misattributed commit fails.
+    """
     c, failures = run.carry, []
-    if not run.folds:
+    if len(run.folds) != 2:
         failures.append("fold counts were not recorded")
-    for audience, (ids, counts) in enumerate(run.folds):
-        repeated = np.flatnonzero(counts > 1)
-        if repeated.size:
-            i = repeated[0]
+    log = c.log
+    rows = _valid_rows(run)
+    sources = (("observer", "accepted_tick"), ("policy", "released_tick"))
+    for (name, tick), (ids, counts) in zip(sources, run.folds, strict=False):
+        got = Counter(
+            {int(k): int(n) for k, n in zip(ids, counts, strict=True) if n > 0}
+        )
+        want = _expected_folds(log, rows, tick)
+        for key in sorted(got):
+            if got[key] > 1:
+                failures.append(
+                    f"{name}: acquisition key {key} folded {got[key]} times"
+                )
+                break
+        if got != want:
+            missing = sorted((want - got).elements())
+            extra = sorted((got - want).elements())
             failures.append(
-                f"audience {audience}: acquisition {ids[i]} folded {counts[i]} times"
+                f"{name}: committed folds differ from accepted acquisitions "
+                f"(missing {missing[:3]}, unexpected {extra[:3]})"
             )
     if bool(c.dup_fold):
         failures.append("dup_fold is set")
-    log = c.log
-    rows = _valid_rows(run)
     done = RecordStatus.COMPLETED
     seen = {
         int(log.acquisition_id[i])
@@ -119,40 +165,88 @@ def _balance_rows(study, lane):
     return (asset, caps.n_assets, caps.n_balance_rows - 1)
 
 
-def balance_conserved(run):
-    """Initial balance minus what was spent equals the final balance, row by row.
-
-    What was spent is the net charge of every logged record (a cancelled acquisition
-    has had its unused cost refunded already) plus the full cost of each acquisition
-    still running when the run ended.
-    """
+def _retained_net_spend(run):
+    """Net charge of the retained records plus full cost of each live occupancy."""
     study, c = run.study, run.carry
     spent = np.zeros(np.asarray(study.budget).shape)
     log, cost = c.log, np.asarray(study.channels.cost)
+    charged = np.asarray(log.charged)
     for i in _valid_rows(run):
         rows = _balance_rows(study, int(log.lane[i]))
         for r, row in enumerate(rows):
-            spent[row, r] += float(np.asarray(log.charged)[i, r])
+            spent[row, r] += float(charged[i, r])
     ev = c.ev
     for i in _pending_settlements(run):
         rows = _balance_rows(study, int(ev.lane[i]))
         for r, row in enumerate(rows):
             spent[row, r] += float(cost[int(ev.channel_index[i]), r])
-    expected = np.asarray(study.budget) - spent
+    return spent
+
+
+def _refused_completions(run):
+    """Full cost of settlements the trace handled whose record the log refused.
+
+    A completion handled with no row written lost its record to log capacity; its
+    debit stands and nothing credits it back. Cancellations are not counted here.
+    """
+    study, t = run.study, run.trace
+    ids = np.asarray(study.channels.id).tolist()
+    cost = np.asarray(study.channels.cost)
+    lost = np.zeros(np.asarray(study.budget).shape)
+    refused = (
+        np.asarray(t.handled)
+        & (np.asarray(t.kind) == EventKind.DONE)
+        & (np.asarray(t.n_written) == 0)
+    )
+    for i in np.flatnonzero(refused):
+        rows = _balance_rows(study, int(t.lane[i]))
+        for r, row in enumerate(rows):
+            lost[row, r] += float(cost[ids.index(int(t.channel[i])), r])
+    return lost
+
+
+def balance_conserved(run):
+    """Initial balance minus what was spent equals the final balance, row by row.
+
+    Three independent accounts must agree, with or without log overflow: the final
+    balance, the ledger's own debit and refund counters, and the retained records plus
+    the settlements still queued. Records the log refused are accounted from the trace
+    (the completions it handled that wrote no row), so exhausting the log does not
+    switch the check off. A cancellation whose record was refused cannot be priced from
+    evidence that survives; such a run fails the residual check rather than passing.
+    """
+    study, c = run.study, run.carry
+    budget = np.asarray(study.budget)
     final = np.asarray(c.ledger.balance)
     if not np.all(np.isfinite(final)):
         return make_result("balance_conserved", ["the final balance is not finite"])
-    if int(c.overflow_mask) & Capacity.LOG_ROWS:
-        return make_result("balance_conserved", [], skipped="overflow")
-    gap = np.abs(final - expected)
     failures = []
+    net = np.asarray(c.ledger.debited) - np.asarray(c.ledger.refunded)
+    gap = np.abs(final - (budget - net))
     if not np.all(np.isfinite(gap) & (gap <= ATOL)):
         row, res = np.unravel_index(int(np.argmax(gap)), gap.shape)
         failures.append(
-            f"balance row {row} resource {res} is {final[row, res]} "
-            f"but initial minus spent is {expected[row, res]}"
+            f"balance row {row} resource {res} is {final[row, res]} but initial "
+            f"minus the ledger's net debits is {budget[row, res] - net[row, res]}"
         )
-    return make_result("balance_conserved", failures, max_gap=float(gap.max()))
+    kept = _retained_net_spend(run)
+    overflowed = bool(int(c.overflow_mask) & Capacity.LOG_ROWS)
+    lost = _refused_completions(run) if overflowed else np.zeros_like(kept)
+    residual = np.abs(net - kept - lost)
+    if not np.all(np.isfinite(residual) & (residual <= ATOL)):
+        row, res = np.unravel_index(int(np.argmax(residual)), residual.shape)
+        failures.append(
+            f"balance row {row} resource {res}: net debits {net[row, res]} but "
+            f"records and queued settlements account for "
+            f"{kept[row, res] + lost[row, res]}"
+        )
+    return make_result(
+        "balance_conserved",
+        failures,
+        max_gap=float(gap.max()),
+        max_residual=float(residual.max()),
+        overflow=overflowed,
+    )
 
 
 def unique_acquisition_id(run):
@@ -171,46 +265,90 @@ def unique_acquisition_id(run):
     return make_result("unique_acquisition_id", failures, n_records=len(seen))
 
 
+def _admission_evidence(run):
+    """Admissions seen outside the counters, as {acquisition id: (subject, index)}.
+
+    An admitted observation queues one completion whose sid is its acquisition id, so
+    the completions the trace handled and the ones still queued name every admission
+    that did not end in a cancellation; a cancelled one is named by its retained
+    partial or failed record. Records a process wrote directly are not admissions.
+    """
+    study, c, t = run.study, run.carry, run.trace
+    named, failures = {}, []
+
+    def note(acq, subject, index, source):
+        if named.setdefault(acq, (subject, index)) != (subject, index):
+            failures.append(
+                f"acquisition {acq} is named {named[acq]} and "
+                f"{(subject, index)} ({source})"
+            )
+
+    done = np.asarray(t.handled) & (np.asarray(t.kind) == EventKind.DONE)
+    for i in np.flatnonzero(done):
+        note(int(t.sid[i]), int(t.subject[i]), int(t.acquisition_index[i]), "trace")
+    ev = c.ev
+    queued = np.asarray(ev.valid) & (np.asarray(ev.kind) == EventKind.DONE)
+    for i in np.flatnonzero(queued):
+        note(int(ev.sid[i]), int(ev.subject[i]), int(ev.acquisition_index[i]), "queue")
+    log = c.log
+    kinds = set(np.asarray(study.channels.kind).tolist())
+    cut = (RecordStatus.PARTIAL, RecordStatus.FAILED)
+    for i in _valid_rows(run):
+        acq = int(log.acquisition_id[i])
+        if int(log.kind[i]) in kinds and (acq in named or int(log.status[i]) in cut):
+            note(acq, int(log.subject[i]), int(log.acquisition_index[i]), "log")
+    return named, failures
+
+
 def dense_acquisition_index(run):
     """Per subject, admitted acquisitions hold the indices 0 to count - 1, each once.
 
-    Acquisitions are the logged records of a kind some channel produces, one per
-    acquisition id (revisions share an index), plus the completions still queued. A
-    subject with a count of zero was never admitted anything and is not judged, so
-    records a process writes directly are left alone.
+    The counters are reconciled with admissions observed independently of them: the
+    observe rows the trace shows admitted must sum to the counters, and every
+    admitted acquisition (see `_admission_evidence`) must hold an index in
+    `[0, count)` of its subject, no two sharing one. Without log overflow the indices
+    must also be exactly `0 .. count - 1`; with it, the cancellation records the log
+    refused may leave gaps, but never an index outside the range. A counter of zero
+    next to an admitted acquisition fails.
     """
-    study, c, failures = run.study, run.carry, []
-    log = c.log
+    c = run.carry
     counts = np.asarray(c.acquisition_counts)
-    kinds = set(np.asarray(study.channels.kind).tolist())
-    held = {}
-    for i in _valid_rows(run):
-        if int(log.kind[i]) in kinds:
-            held.setdefault(
-                int(log.acquisition_id[i]),
-                (int(log.subject[i]), int(log.acquisition_index[i])),
-            )
-    ev = c.ev
-    pending = {
-        ("pending", int(i)): (int(ev.subject[i]), int(ev.acquisition_index[i]))
-        for i in _pending_settlements(run)
-    }
+    failures = []
+    if np.any(counts < 0):
+        failures.append(f"a subject counter is negative: {counts.tolist()}")
+    t = run.trace
+    admitted = int(
+        (
+            (np.asarray(t.eff_kind) == EffectKind.OBSERVE)
+            & (np.asarray(t.admit_code) == AdmissionCode.OK)
+        ).sum()
+    )
+    if admitted != int(counts.sum()):
+        failures.append(
+            f"the trace admitted {admitted} observations but the counters sum to "
+            f"{int(counts.sum())}"
+        )
+    named, naming = _admission_evidence(run)
+    failures += naming
     per_subject = {}
-    for subject, index in [*held.values(), *pending.values()]:
+    for acq, (subject, index) in named.items():
+        if not 0 <= subject < len(counts):
+            failures.append(f"acquisition {acq} names subject {subject}")
+        elif not 0 <= index < int(counts[subject]):
+            failures.append(
+                f"acquisition {acq} of subject {subject} has index {index} "
+                f"with count {int(counts[subject])}"
+            )
         per_subject.setdefault(subject, []).append(index)
-    for subject, count in enumerate(counts):
-        n = int(count)
-        got = per_subject.get(subject, [])
-        if n == 0:
-            continue
+    overflowed = bool(int(c.overflow_mask) & Capacity.LOG_ROWS)
+    for subject, got in sorted(per_subject.items()):
         if len(got) != len(set(got)):
             failures.append(f"subject {subject} repeats an index in {sorted(got)}")
-        elif got and max(got) >= n:
-            failures.append(f"subject {subject} has index {max(got)} with count {n}")
-        elif not (int(c.overflow_mask) & Capacity.LOG_ROWS) and sorted(got) != list(
-            range(n)
-        ):
-            failures.append(f"subject {subject} holds {sorted(got)}, not 0 to {n - 1}")
+    for subject, count in enumerate(counts):
+        n = int(count)
+        got = sorted(per_subject.get(subject, []))
+        if not overflowed and got != list(range(n)):
+            failures.append(f"subject {subject} holds {got}, not 0 to {n - 1}")
     return make_result("dense_acquisition_index", failures, counts=counts.tolist())
 
 
@@ -234,12 +372,30 @@ def _readable_leak(view, table, audience):
     return bool(np.any(np.asarray(view.log.payload)[unreadable] != 0))
 
 
-def no_scorer_column_in_snapshot(run):
-    """No payload column an audience may not read is nonzero in its snapshot.
+def _view_failures(views, expected, table, label):
+    """Hidden-column and capture failures of the views one policy form received."""
+    failures = []
+    if len(views) != expected:
+        failures.append(
+            f"{label}: {len(views)} decision views captured for {expected} decisions"
+        )
+    for n, view in enumerate(views):
+        if view is None:
+            failures.append(f"{label}: decision view {n} was not captured")
+            break
+        if _readable_leak(view, table, Audience.POLICY):
+            failures.append(f"{label}: decision view {n} shows a hidden column")
+            break
+    return failures
 
-    Judged on the snapshot of the final state for the policy and the observer, and on
-    every decision view the run kept, against `reference_caps` (default: the study's
-    own layout).
+
+def no_scorer_column_in_snapshot(run):
+    """No payload column an audience may not read is nonzero in what it was handed.
+
+    Judged on every view `policy.decide` (and `decide_py` on the host) actually
+    received, one for each decision the trace woke, on either executor; and on the
+    snapshot of the final state for the policy and the observer. The reference is
+    `reference_caps` (default: the study's own layout).
     """
     reference = run.study.caps if run.reference_caps is None else run.reference_caps
     table = np.asarray(reference.payload_audience)
@@ -250,10 +406,12 @@ def no_scorer_column_in_snapshot(run):
             failures.append(
                 f"the final {audience.name.lower()} snapshot shows a hidden column"
             )
-    for n, view in enumerate(run.views):
-        if _readable_leak(view, table, Audience.POLICY):
-            failures.append(f"decision view {n} shows a hidden column")
-            break
+    forms = {"array": run.views, **run.form_views}
+    for form in run.case.policy_forms if run.executor == "host" else ("array",):
+        if form not in forms:
+            failures.append(f"{form}: no decision views were captured")
+    for form, views in forms.items():
+        failures += _view_failures(views, run.wakes, table, form)
     return make_result("no_scorer_column_in_snapshot", failures, n_views=len(run.views))
 
 

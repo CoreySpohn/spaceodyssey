@@ -216,4 +216,5 @@ def test_overflow_cases_are_judged_on_what_they_kept():
     from spaceodyssey.core.conformance.invariants import balance_conserved
 
     result = balance_conserved(run)
-    assert result.passed and result.detail.get("skipped") == "overflow"
+    assert result.passed and result.detail["overflow"] is True
+    assert "skipped" not in result.detail

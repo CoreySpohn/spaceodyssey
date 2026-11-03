@@ -49,6 +49,12 @@ class _RecordingPolicy(AbstractPolicy):
         jax.debug.callback(record, key, *words)
         return effects, state, draw
 
+    def decide_py(self, pstate, view_np, study, key):
+        effects, state, draw = self.inner.decide_py(pstate, view_np, study, key)
+        # Host-form policies run eagerly on the exact view the executor built.
+        self.record(key, self.phase, snapshot_fingerprint(view_np), view_np, effects)
+        return effects, state, draw
+
 
 class DecisionViews:
     """Per-run capture, indexed by decision key, ordinal and snapshot identity.

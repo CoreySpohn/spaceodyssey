@@ -69,6 +69,17 @@ also sees supersession only from policy-released revisions. The full identities 
 provenance remain in the stored log for accounting and reconstruction. Observer
 snapshots carry the observer belief; policy snapshots carry the policy belief.
 
+## Accounting counters
+
+The ledger carries two reserved accounting counters, `debited` and `refunded`, each
+shaped like `balance`. An admitted observation adds its channel cost to `debited` on the
+rows it charges, in the same update that lowers `balance`; a live cancellation adds the
+unused cost to `refunded` beside the credit. No rule reads them. They survive a full
+record log, so conservation stays checkable after overflow: the final balance must equal
+the initial balance minus `debited` plus `refunded`, and that net must equal the retained
+records' charges plus the full cost of queued settlements plus the completions the trace
+handled whose record the log refused.
+
 ## A second kind
 
 `spaceodyssey.studies.catalog` defines a delayed catalog row. Its channel releases the
