@@ -20,6 +20,7 @@ import jax.random as jr
 import numpy as np
 
 from spaceodyssey.core.capacities import require_x64
+from spaceodyssey.core.conformance.folds import CountingObserver, plain
 from spaceodyssey.core.enums import Audience, EventKind, Purpose, Stage
 from spaceodyssey.core.events import enqueue, where_tree
 from spaceodyssey.core.executors.base import canonical_history, index_world
@@ -97,7 +98,7 @@ class CaseRun:
     """One world of one case on one executor.
 
     `probe` is (wakes, decisions, events) of the same world with private events added,
-    or None when it was not run; `events` are the handled (tick, stage, kind) rows
+    or None when it was not run; `events` are the handled public event rows
     other than the observer-only process events (see `public_events`). `views` are the
     policy views of each decision (host only). `reference_caps` is the layout that
     judges what a snapshot may show; it defaults to the study's own.
@@ -113,6 +114,7 @@ class CaseRun:
     views: tuple = ()
     probe: tuple | None = None
     reference_caps: object = None
+    folds: tuple = ()
 
     @property
     def name(self):
@@ -131,18 +133,36 @@ class CaseRun:
 
 
 def public_events(trace):
-    """Handled (tick, stage, kind) rows, leaving out observer-only process events."""
+    """Public event columns, with stable ids ranked among handled public rows."""
     handled = np.asarray(trace.handled)
     kind = np.asarray(trace.kind)
     private = (kind == EventKind.PROCESS) & (
         np.asarray(trace.audience) == Audience.OBSERVER
     )
     keep = handled & ~private
+    # Stable ids count private enqueues; compare their public relative order instead.
+    # A coalesced wake can move onto a private row, so it is checked by count above.
+    names = (
+        "tick",
+        "stage",
+        "micro",
+        "tie",
+        "kind",
+        "lane",
+        "channel",
+        "subject",
+        "acquisition_index",
+        "audience",
+        "n_written",
+        "rec_status",
+        "event_fp",
+    )
+    ids = np.asarray(trace.sid)[keep]
+    ranks = np.searchsorted(np.unique(ids), ids).tolist()
     return tuple(
         zip(
-            np.asarray(trace.tick)[keep].tolist(),
-            np.asarray(trace.stage)[keep].tolist(),
-            kind[keep].tolist(),
+            *(np.asarray(getattr(trace, name))[keep].tolist() for name in names),
+            ranks,
             strict=True,
         )
     )
@@ -220,8 +240,11 @@ def run_case(
     require_x64()
     study = case.make_study()
     truths, roots = make_worlds(study, n_worlds)
+    counted = dataclasses.replace(
+        study, observer=CountingObserver(inner=study.observer)
+    )
     main = _execute(
-        case, study, executor, truths, roots, n_steps, wake_by_audience, True
+        case, counted, executor, truths, roots, n_steps, wake_by_audience, True
     )
     probes = [None] * n_worlds
     if probe:
@@ -235,10 +258,16 @@ def run_case(
             executor=executor,
             world=w,
             study=study,
-            carry=carry,
+            carry=dataclasses.replace(
+                carry, belief=plain(carry.belief), pbelief=plain(carry.pbelief)
+            ),
             trace=trace,
             history=canonical_history(carry, trace),
             views=views,
+            folds=tuple(
+                (np.asarray(b.ids), np.asarray(b.counts))
+                for b in (carry.belief, carry.pbelief)
+            ),
             probe=probes[w],
         )
         for w, (carry, trace, views) in enumerate(main)

@@ -521,6 +521,7 @@ HAND_INVARIANTS = {
             == [AdmissionCode.NO_FUNDS] * 2
         ),
         lambda h: h.n_records == 1 and h.ints["acquisition_counts"][0] == 1,
+        lambda h: h.ints["next_sid"] == 3,
         lambda h: h.flags == (True, True, False, False, False),
     ),
     "forbidden_effect": (
@@ -562,6 +563,9 @@ def _catalog_row_is_observer_only(h, tick):
     row = np.flatnonzero(h.ints["channel"] == catalog.CATALOG_CHANNEL_ID)
     return bool(
         len(row) == 1
+        and h.ints["kind"][row[0]] == catalog.register_catalog(kinds.toy_registry())
+        and h.floats["belief_aux"][catalog.CATALOG_AUX_SLOT]
+        == h.floats["payload"][row[0], 0]
         and h.ints["accepted_tick"][row[0]] == tick
         and h.ints["released_tick"][row[0]] == -1
         and h.ints["audience"][row[0]] == Audience.OBSERVER

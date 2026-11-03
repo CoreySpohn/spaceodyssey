@@ -148,6 +148,8 @@ def canonical_history(carry, trace):
         "revision": np.asarray(log.revision)[v],
         "superseded_by": np.asarray(log.superseded_by)[v],
         "audience": np.asarray(log.audience)[v],
+        "kind": np.asarray(log.kind)[v],
+        "next_sid": np.asarray(carry.next_sid),
         "n_log": np.asarray(carry.n_log),
         "acquisition_counts": np.asarray(carry.acquisition_counts),
         "belief_n": np.asarray(carry.belief.n),

@@ -6,16 +6,16 @@ the final carry, the trace and the decision views, never the study's hand histor
 a case cannot satisfy them by being pinned.
 
 Two invariants are conditioned on the run having kept all its records. A run that ran
-out of log capacity (`overflow` set) dropped records by construction, so the balance
-and the acquisition index cannot account for them; those two report `skipped` in their
-detail and judge only what they can.
+out of log capacity (`Capacity.LOG_ROWS` set) dropped records by construction. Balance
+and acquisition-index checks cannot account for them; those two report `skipped`
+in their detail and judge only what they can.
 """
 
 import numpy as np
 
 from spaceodyssey.core.battery.result import make_result
 from spaceodyssey.core.conformance.corpus import public_events
-from spaceodyssey.core.enums import Audience, EventKind, RecordStatus
+from spaceodyssey.core.enums import Audience, Capacity, EventKind, RecordStatus
 from spaceodyssey.core.snapshot import snapshot_view
 
 ATOL = 1e-9
@@ -74,6 +74,15 @@ def exactly_once_settlement(run):
 def one_fold_per_acquisition(run):
     """No record folded twice, and no belief holds more folds than acquisitions."""
     c, failures = run.carry, []
+    if not run.folds:
+        failures.append("fold counts were not recorded")
+    for audience, (ids, counts) in enumerate(run.folds):
+        repeated = np.flatnonzero(counts > 1)
+        if repeated.size:
+            i = repeated[0]
+            failures.append(
+                f"audience {audience}: acquisition {ids[i]} folded {counts[i]} times"
+            )
     if bool(c.dup_fold):
         failures.append("dup_fold is set")
     log = c.log
@@ -131,11 +140,13 @@ def balance_conserved(run):
             spent[row, r] += float(cost[int(ev.channel_index[i]), r])
     expected = np.asarray(study.budget) - spent
     final = np.asarray(c.ledger.balance)
-    if bool(c.overflow):
+    if not np.all(np.isfinite(final)):
+        return make_result("balance_conserved", ["the final balance is not finite"])
+    if int(c.overflow_mask) & Capacity.LOG_ROWS:
         return make_result("balance_conserved", [], skipped="overflow")
     gap = np.abs(final - expected)
     failures = []
-    if gap.max() > ATOL:
+    if not np.all(np.isfinite(gap) & (gap <= ATOL)):
         row, res = np.unravel_index(int(np.argmax(gap)), gap.shape)
         failures.append(
             f"balance row {row} resource {res} is {final[row, res]} "
@@ -187,15 +198,18 @@ def dense_acquisition_index(run):
     per_subject = {}
     for subject, index in [*held.values(), *pending.values()]:
         per_subject.setdefault(subject, []).append(index)
-    for subject, got in sorted(per_subject.items()):
-        n = int(counts[subject])
+    for subject, count in enumerate(counts):
+        n = int(count)
+        got = per_subject.get(subject, [])
         if n == 0:
             continue
         if len(got) != len(set(got)):
             failures.append(f"subject {subject} repeats an index in {sorted(got)}")
-        elif max(got) >= n:
+        elif got and max(got) >= n:
             failures.append(f"subject {subject} has index {max(got)} with count {n}")
-        elif not bool(c.overflow) and sorted(got) != list(range(n)):
+        elif not (int(c.overflow_mask) & Capacity.LOG_ROWS) and sorted(got) != list(
+            range(n)
+        ):
             failures.append(f"subject {subject} holds {sorted(got)}, not 0 to {n - 1}")
     return make_result("dense_acquisition_index", failures, counts=counts.tolist())
 
