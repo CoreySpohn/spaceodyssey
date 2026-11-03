@@ -1,7 +1,8 @@
 """Capture and compare the masked views actually handed to policies."""
 
 import dataclasses
-from collections.abc import Callable
+import itertools
+import weakref
 
 import equinox as eqx
 import jax
@@ -19,9 +20,24 @@ TICKS = {"start_tick", "end_tick", "available_tick", "released_tick", "accepted_
 RELEASE_TICKS = {"available_tick", "released_tick", "accepted_tick"}
 
 
+_CAPTURES = weakref.WeakValueDictionary()
+_CAPTURE_IDS = itertools.count()
+
+
+def _deliver(slot, key, phase, *args):
+    """Hand a recorded decision to the capture that owns `slot`."""
+    _CAPTURES[int(slot)]._record(key, phase, *args)
+
+
 class _RecordingPolicy(AbstractPolicy):
+    """Record what the inner policy sees.
+
+    The capture is named by a traced `slot`, never held as a static callable, so every
+    capture of the same study shares one compiled program.
+    """
+
     inner: AbstractPolicy
-    record: Callable = eqx.field(static=True)
+    slot: jax.Array
     phase: int = eqx.field(static=True)
 
     def decide(self, pstate, view, study, key):
@@ -37,22 +53,23 @@ class _RecordingPolicy(AbstractPolicy):
             for x in leaves
         ]
 
-        def record(key, *values):
+        def record(slot, key, *values):
             restored = [
                 np.asarray(x).view(dtype).reshape(shape)
                 for x, (shape, dtype) in zip(values, specs, strict=True)
             ]
-            self.record(
-                key, self.phase, *jax.tree_util.tree_unflatten(layout, restored)
-            )
+            _deliver(slot, key, phase, *jax.tree_util.tree_unflatten(layout, restored))
 
-        jax.debug.callback(record, key, *words)
+        phase = self.phase
+        jax.debug.callback(record, self.slot, key, *words)
         return effects, state, draw
 
     def decide_py(self, pstate, view_np, study, key):
         effects, state, draw = self.inner.decide_py(pstate, view_np, study, key)
         # Host-form policies run eagerly on the exact view the executor built.
-        self.record(key, self.phase, snapshot_fingerprint(view_np), view_np, effects)
+        _deliver(
+            self.slot, key, self.phase, snapshot_fingerprint(view_np), view_np, effects
+        )
         return effects, state, draw
 
 
@@ -67,6 +84,8 @@ class DecisionViews:
     def __init__(self):
         """Start an empty capture for one run."""
         self.entries = {}
+        self._slot = next(_CAPTURE_IDS)
+        _CAPTURES[self._slot] = self
 
     def _record(self, key, phase, fingerprint, view, effects):
         address = (
@@ -81,7 +100,7 @@ class DecisionViews:
     def instrument(self, study):
         """Wrap policies to record their inputs without changing outputs."""
         policies = tuple(
-            _RecordingPolicy(inner=p, record=self._record, phase=i)
+            _RecordingPolicy(inner=p, slot=jnp.asarray(self._slot, jnp.int32), phase=i)
             for i, p in enumerate(study.agenda.policies)
         )
         return dataclasses.replace(
