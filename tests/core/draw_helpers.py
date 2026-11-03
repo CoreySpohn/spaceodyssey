@@ -94,16 +94,32 @@ def draw_table(world):
     return out
 
 
-def compare_draws(base, other):
-    """(n_compared, n_baseline, n_changed) over the keys both runs hold, all worlds."""
+def _compare_tables(base, other, table, min_matches):
+    """(n_compared, n_baseline, n_changed); compared values must be finite.
+
+    A variate that is NaN on both sides would otherwise count as changed, since
+    NaN != NaN, so a corrupted report could pass for a key-dependence failure.
+    """
     n_cmp = n_base = n_chg = 0
     for b, o in zip(base, other, strict=False):
-        tb, to = draw_table(b), draw_table(o)
+        tb, to = table(b), table(o)
         shared = tb.keys() & to.keys()
+        for k in shared:
+            assert np.isfinite(tb[k]) and np.isfinite(to[k]), (
+                f"draw {k} is not finite: {tb[k]} vs {to[k]}"
+            )
         n_base += len(tb)
         n_cmp += len(shared)
         n_chg += sum(tb[k] != to[k] for k in shared)
+    assert n_cmp >= min_matches, (
+        f"only {n_cmp} matched identities were compared; need {min_matches}"
+    )
     return n_cmp, n_base, n_chg
+
+
+def compare_draws(base, other, min_matches=2):
+    """(n_compared, n_baseline, n_changed) over the keys both runs hold, all worlds."""
+    return _compare_tables(base, other, draw_table, min_matches)
 
 
 def policy_draw_table(world):
@@ -119,16 +135,9 @@ def policy_draw_table(world):
     return out
 
 
-def compare_policy_draws(base, other):
+def compare_policy_draws(base, other, min_matches=2):
     """(n_compared, n_baseline, n_changed) over decisions both runs hold, all worlds."""
-    n_cmp = n_base = n_chg = 0
-    for b, o in zip(base, other, strict=False):
-        tb, to = policy_draw_table(b), policy_draw_table(o)
-        shared = tb.keys() & to.keys()
-        n_base += len(tb)
-        n_cmp += len(shared)
-        n_chg += sum(tb[k] != to[k] for k in shared)
-    return n_cmp, n_base, n_chg
+    return _compare_tables(base, other, policy_draw_table, min_matches)
 
 
 def policy_draws_changed(base, other):
