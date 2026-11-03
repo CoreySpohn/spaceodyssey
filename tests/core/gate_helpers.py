@@ -4,6 +4,7 @@ import ast
 import builtins
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 SURVEY_NAME = re.compile(r"\bsurvey[ _-]*\d+\b", re.IGNORECASE)
 KIND_NAMES = {
@@ -82,14 +83,31 @@ def _study_aliases(tree):
 
 CORE_DIR = Path(__file__).parents[2] / "src/spaceodyssey/core"
 ENUM_BASES = {"Enum", "IntEnum", "IntFlag", "Flag", "StrEnum"}
-INTROSPECTION = {"__name__", "__qualname__", "__class__"}
+INTROSPECTION = {"__name__", "__qualname__", "__class__", "__module__"}
+SURVEY_ATTRIBUTES = {"survey_id", "survey", "label", "study_id"}
+# a survey word that a later piece completes: "survey_" + str(n), "survey_%d"
+SURVEY_FRAGMENT = re.compile(
+    r"\bsurvey[ _-]*$|\bsurvey[ _-]*(%\w|\{[^}]*\})", re.IGNORECASE
+)
+TEXT_OF = {"repr", "str", "format", "ascii"}
 KIND_ATTRIBUTES = {"kind", "name", "type", "study", "channel_model", *INTROSPECTION}
 LOOKUPS = {"get", "pop", "setdefault"}
 CAMEL = re.compile(r"^[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*$")
 
-# Reviewed structural exceptions: (path under the core, stripped source line) -> reason.
-# Keyed on the source text rather than the line number so that edits elsewhere in a
-# file do not silently move or drop an entry. Each entry must still match a hit.
+
+class Allowance(NamedTuple):
+    """One reviewed exception, scoped to the rules it waives and where it sits."""
+
+    reason: str
+    rules: tuple[str, ...]
+    function: str
+    count: int
+
+
+# Reviewed structural exceptions: (path under the core, stripped source line) ->
+# Allowance. An entry waives only the listed rules, only inside the named enclosing
+# function, and only for `count` lines; an identical line elsewhere is still reported.
+# Each entry must still match exactly, so a moved or duplicated line is noticed.
 ENUM_LABEL = "name of a core Purpose enum member, used as a report label"
 COLUMN_BY_NAME = (
     "reads one named column or field of a core pytree (carry, log, trace, table, view "
@@ -105,151 +123,185 @@ SCHEMA_TYPE = (
 )
 
 ALLOWED = {
-    ("battery/fork.py", "out[Purpose(purpose).name] = ("): ENUM_LABEL,
-    ("battery/fork.py", "f.name: jnp.asarray(getattr(log, f.name)[i])"): COLUMN_BY_NAME,
-    ("battery/fork.py", "np.asarray(getattr(trunk, name))[:first],"): COLUMN_BY_NAME,
-    ("battery/fork.py", "np.asarray(getattr(side, name))[:first],"): COLUMN_BY_NAME,
+    ("battery/fork.py", "out[Purpose(purpose).name] = ("): Allowance(
+        ENUM_LABEL, ("study.name",), "key_report", 1
+    ),
+    ("battery/fork.py", "f.name: jnp.asarray(getattr(log, f.name)[i])"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "_log_record", 1
+    ),
+    ("battery/fork.py", "np.asarray(getattr(trunk, name))[:first],"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "_trace_prefix", 1
+    ),
+    ("battery/fork.py", "np.asarray(getattr(side, name))[:first],"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "_trace_prefix", 1
+    ),
     (
         "battery/fork.py",
         "getattr(trunk.log, name)[i], getattr(side.log, name)[j]",
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_records", 1),
     (
         "battery/metamorphic.py",
         "a, b = np.asarray(getattr(tb, name)), np.asarray(getattr(tl, name))",
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_epoch_world", 1),
     (
         "battery/metamorphic.py",
         "a, b = np.asarray(getattr(cb.log, name)), np.asarray(getattr(cl.log, name))",
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_epoch_world", 1),
     (
         "battery/metamorphic.py",
         "if not tree_bits_equal(getattr(cb, name), getattr(cl, name)):",
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_epoch_world", 1),
     (
         "battery/metamorphic.py",
         "if not tree_bits_equal(getattr(ca, name), getattr(cb, name)):",
-    ): COLUMN_BY_NAME,
-    (
-        "battery/replay_latency.py",
-        "n: np.asarray(getattr(trace, n))[keep]",
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "zero_time_asset", 1),
+    ("battery/replay_latency.py", "n: np.asarray(getattr(trace, n))[keep]"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "_non_release", 1
+    ),
     (
         "battery/replay_latency.py",
         "np.asarray(getattr(tb, name))[wb], np.asarray(getattr(tl, name))[wl]",
-    ): COLUMN_BY_NAME,
-    (
-        "battery/replay_latency.py",
-        "np.asarray(getattr(cb.log, name)[i]),",
-    ): COLUMN_BY_NAME,
-    (
-        "battery/replay_latency.py",
-        "np.asarray(getattr(cl.log, name)[j]),",
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_compare_world", 1),
+    ("battery/replay_latency.py", "np.asarray(getattr(cb.log, name)[i]),"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "_compare_world", 1
+    ),
+    ("battery/replay_latency.py", "np.asarray(getattr(cl.log, name)[j]),"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "_compare_world", 1
+    ),
     (
         "battery/replay_latency.py",
         "if not bits_equal(getattr(cb.ledger, name), getattr(cl.ledger, name)):",
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_compare_world", 1),
     (
         "battery/replay_latency.py",
         "if not bits_equal(getattr(cb.belief, name), getattr(cl.belief, name)):",
-    ): COLUMN_BY_NAME,
-    ("battery/result.py", "int(getattr(log, n)[i])"): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_compare_world", 1),
+    ("battery/result.py", "int(getattr(log, n)[i])"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "log_index", 1
+    ),
     (
         "battery/truth_swap.py",
         "a, b = np.asarray(getattr(trace_a, name)), np.asarray(getattr(trace_b, name))",
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_prefix_equal", 1),
     (
         "battery/views.py",
         "hit &= np.asarray(getattr(log, name)) == getattr(view.log, name)[i]",
-    ): COLUMN_BY_NAME,
-    ("battery/views.py", "x = np.asarray(getattr(va, name))"): COLUMN_BY_NAME,
-    ("battery/views.py", "if not bits_equal(x, getattr(vb, name)):"): COLUMN_BY_NAME,
-    ("battery/views.py", "x = np.asarray(getattr(va.log, name))"): COLUMN_BY_NAME,
-    (
-        "battery/views.py",
-        "if not bits_equal(x, getattr(vb.log, name)):",
-    ): COLUMN_BY_NAME,
-    ("carry.py", "o = getattr(o, part)"): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_payload_matches_log", 1),
+    ("battery/views.py", "x = np.asarray(getattr(va, name))"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "compare_views", 1
+    ),
+    ("battery/views.py", "if not bits_equal(x, getattr(vb, name)):"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "compare_views", 1
+    ),
+    ("battery/views.py", "x = np.asarray(getattr(va.log, name))"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "compare_views", 1
+    ),
+    ("battery/views.py", "if not bits_equal(x, getattr(vb.log, name)):"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "compare_views", 1
+    ),
+    ("carry.py", "o = getattr(o, part)"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "_tree_set.getter", 1
+    ),
     (
         "conformance/corpus.py",
         "*(np.asarray(getattr(trace, name))[keep].tolist() for name in names),",
-    ): COLUMN_BY_NAME,
-    ("conformance/invariants.py", "np.asarray(getattr(t, n))[handled]"): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "public_events", 1),
+    ("conformance/invariants.py", "np.asarray(getattr(t, n))[handled]"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "order_keys_monotone", 1
+    ),
     (
         "events.py",
         "getattr(table, n).at[i].set(jnp.where(write, v, getattr(table, n)[i]))",
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_set_row", 1),
     (
         "events.py",
         "return eqx.tree_at(lambda t: tuple(getattr(t, n) for n in names), table, new)",
-    ): COLUMN_BY_NAME,
-    ("executors/base.py", "obj = getattr(obj, part)"): COLUMN_BY_NAME,
-    ("executors/base.py", "leaf = np.asarray(getattr(obj, name))"): COLUMN_BY_NAME,
-    ("executors/base.py", "pick(getattr(trace, n)).tolist()"): COLUMN_BY_NAME,
-    ("executors/base.py", "bool(getattr(carry, n))"): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_set_row", 1),
+    ("executors/base.py", "obj = getattr(obj, part)"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "_canonical_leaves", 1
+    ),
+    ("executors/base.py", "leaf = np.asarray(getattr(obj, name))"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "_canonical_leaves", 1
+    ),
+    ("executors/base.py", "pick(getattr(trace, n)).tolist()"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "canonical_history", 1
+    ),
+    ("executors/base.py", "bool(getattr(carry, n))"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "canonical_history", 1
+    ),
     (
         "executors/replay.py",
         "fields = {n: jnp.asarray(getattr(log, n)[i]) for n in LOG_INT_FIELDS}",
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_row", 1),
     (
         "executors/replay.py",
         "fields.update({n: jnp.asarray(getattr(log, n)[i]) "
         'for n in ("cost", "charged")})',
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_row", 1),
     (
         "executors/replay.py",
         '**{n: np.asarray(getattr(carry.log, n)) for n in (*LOG_INT_FIELDS, "valid")},',
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "replay_belief", 1),
     (
         "executors/replay.py",
         "np.asarray(getattr(trace, n))[handled].tolist()",
-    ): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "replay_belief", 1),
     (
         "handlers.py",
         "**{f.name: getattr(log, f.name)[slot] for f in dataclasses.fields(Record)}",
-    ): COLUMN_BY_NAME,
-    ("records.py", "col = getattr(carry.log, name)"): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_log_rec", 1),
+    ("records.py", "col = getattr(carry.log, name)"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "write_log", 1
+    ),
     (
         "records.py",
         "cols[name] = col.at[s].set(jnp.where(ok, getattr(rec, name), col[s]))",
-    ): COLUMN_BY_NAME,
-    ("snapshot.py", "col = getattr(log, name)"): COLUMN_BY_NAME,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "write_log", 1),
+    ("snapshot.py", "col = getattr(log, name)"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "snapshot_view", 1
+    ),
     (
         "snapshot.py",
         "leaves = [getattr(log, n) for n in LOG_INT_FIELDS] + [log.valid]",
-    ): COLUMN_BY_NAME,
-    ("battery/fork.py", "for name in type(trunk).__dataclass_fields__"): FIELD_WALK,
-    (
-        "battery/fork.py",
-        "for name in type(trunk.log).__dataclass_fields__:",
-    ): FIELD_WALK,
-    (
-        "battery/metamorphic.py",
-        "for name in type(tb).__dataclass_fields__:",
-    ): FIELD_WALK,
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "snapshot_fingerprint", 1),
+    ("battery/fork.py", "for name in type(trunk).__dataclass_fields__"): Allowance(
+        FIELD_WALK, ("introspection",), "_trace_prefix", 1
+    ),
+    ("battery/fork.py", "for name in type(trunk.log).__dataclass_fields__:"): Allowance(
+        FIELD_WALK, ("introspection",), "_records", 1
+    ),
+    ("battery/metamorphic.py", "for name in type(tb).__dataclass_fields__:"): Allowance(
+        FIELD_WALK, ("introspection",), "_epoch_world", 1
+    ),
     (
         "battery/metamorphic.py",
         "for name in type(cb.log).__dataclass_fields__:",
-    ): FIELD_WALK,
-    ("battery/metamorphic.py", "new_assets = type(assets)("): FIELD_WALK,
+    ): Allowance(FIELD_WALK, ("introspection",), "_epoch_world", 1),
+    ("battery/metamorphic.py", "new_assets = type(assets)("): Allowance(
+        FIELD_WALK, ("introspection",), "with_zero_time_asset", 1
+    ),
     (
         "battery/replay_latency.py",
         "for n in type(trace).__dataclass_fields__",
-    ): FIELD_WALK,
+    ): Allowance(FIELD_WALK, ("introspection",), "_non_release", 1),
     (
         "battery/replay_latency.py",
         "for name in type(cb.log).__dataclass_fields__:",
-    ): FIELD_WALK,
+    ): Allowance(FIELD_WALK, ("introspection",), "_compare_world", 1),
     (
         "battery/truth_swap.py",
         "for name in type(trace_a).__dataclass_fields__:",
-    ): FIELD_WALK,
-    ("battery/views.py", "for name in type(va.log).__dataclass_fields__:"): FIELD_WALK,
+    ): Allowance(FIELD_WALK, ("introspection",), "_prefix_equal", 1),
+    ("battery/views.py", "for name in type(va.log).__dataclass_fields__:"): Allowance(
+        FIELD_WALK, ("introspection",), "compare_views", 1
+    ),
     (
         "records.py",
         "if not all(isinstance(c, PayloadColumn) for c in self.columns):",
-    ): SCHEMA_TYPE,
-    ("records.py", "if not isinstance(kind, RecordKind):"): SCHEMA_TYPE,
+    ): Allowance(SCHEMA_TYPE, ("study-kind",), "RecordKind.__post_init__", 1),
+    ("records.py", "if not isinstance(kind, RecordKind):"): Allowance(
+        SCHEMA_TYPE, ("study-kind",), "KindRegistry.register", 1
+    ),
 }
 
 
@@ -341,7 +393,7 @@ def _is_class_key(node, origins):
     return bool(name and CAMEL.match(origins.get(name, name)))
 
 
-def _scan(path, tree, enums, abstract, builtin_types):
+def _scan(path, tree, enums, abstract, builtin_types, kind_names):
     """Yield (line, rule) for every forbidden dispatch form in one module."""
     origins = _origins(tree)
     study_names = _study_aliases(tree)
@@ -356,17 +408,35 @@ def _scan(path, tree, enums, abstract, builtin_types):
         line = getattr(node, "lineno", 0)
         text = _text(node)
         if text is not None and id(node) not in docstrings:
-            if SURVEY_NAME.search(text):
+            if SURVEY_NAME.search(text) or SURVEY_FRAGMENT.search(text):
                 yield line, "survey-name"
+            if text in kind_names:
+                yield line, "kind-name"
         if isinstance(node, ast.Attribute):
             if node.attr == "name" and _study_reference(node.value, study_names):
                 yield line, "study.name"
             if node.attr in INTROSPECTION:
                 yield line, "introspection"
+            if node.attr == "__dict__" and _study_reference(node.value, study_names):
+                yield line, "study-vars"
+        elif isinstance(node, ast.Compare):
+            sides = [node.left, *node.comparators]
+            if any(
+                isinstance(side, ast.Attribute) and side.attr in SURVEY_ATTRIBUTES
+                for side in sides
+            ):
+                yield line, "survey-id"
         elif isinstance(node, ast.Call):
             func = resolved(node.func)
+            studied = any(_study_reference(arg, study_names) for arg in node.args)
             if func == "type":
                 yield line, "introspection"
+            elif func in TEXT_OF and studied:
+                yield line, "study-text"
+            elif func == "vars" and studied:
+                yield line, "study-vars"
+            elif func == "hasattr" and studied:
+                yield line, "study-hasattr"
             elif func == "getattr" and len(node.args) >= 2:
                 attribute = node.args[1]
                 literal = isinstance(attribute, ast.Constant)
@@ -398,38 +468,79 @@ def _scan(path, tree, enums, abstract, builtin_types):
             yield line, "class-dict"
 
 
-def study_branches(root, allowed=ALLOWED):
-    """Return (path, line, rule) for forbidden dispatch in a core tree, failing closed.
+def _functions(tree):
+    """(first line, last line, qualified name) of every function and class."""
+    spans = []
 
-    Everything is forbidden except the exceptions reasoned in ALLOWED, and type tests
-    against builtins, core enums and core Abstract contracts.
-    """
+    def visit(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = prefix + child.name
+                spans.append((child.lineno, child.end_lineno, name))
+                visit(child, name + ".")
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
+    return spans
+
+
+def _enclosing(spans, line):
+    inside = [span for span in spans if span[0] <= line <= span[1]]
+    return max(inside)[2] if inside else "<module>"
+
+
+def _all_hits(root):
+    """(path, relative, line, rule, stripped line text, function) with no exceptions."""
     files = sorted(root.rglob("*.py"))
     assert files, f"no Python sources under {root}"
     enums, abstract = _core_definitions()
     builtin_types = _builtin_types()
+    kind_names = _study_kind_names() - {"Study"}
     hits = []
     for path in files:
         source = path.read_text(encoding="utf-8")
         lines = source.splitlines()
         tree = ast.parse(source, filename=str(path))
+        spans = _functions(tree)
         relative = path.relative_to(root).as_posix()
         for line, rule in sorted(
-            set(_scan(path, tree, enums, abstract, builtin_types))
+            set(_scan(path, tree, enums, abstract, builtin_types, kind_names))
         ):
-            if (relative, lines[line - 1].strip()) in allowed:
-                continue
-            hits.append((path, line, rule))
+            text = lines[line - 1].strip()
+            hits.append((path, relative, line, rule, text, _enclosing(spans, line)))
     return hits
 
 
+def _waived(hits, allowed):
+    """Split hits into (reported, matched lines per allowance key)."""
+    reported, matched = [], {key: set() for key in allowed}
+    for hit in hits:
+        _, relative, line, rule, text, function = hit
+        entry = allowed.get((relative, text))
+        if entry and rule in entry.rules and function == entry.function:
+            if len(matched[(relative, text)] | {line}) <= entry.count:
+                matched[(relative, text)].add(line)
+                continue
+        reported.append(hit)
+    return reported, matched
+
+
+def study_branches(root, allowed=ALLOWED):
+    """Return (path, line, rule) for forbidden dispatch in a core tree, failing closed.
+
+    Everything is forbidden except the exceptions reasoned in ALLOWED, each scoped to
+    its rules, its enclosing function and its occurrence count, and type tests against
+    builtins, core enums and core Abstract contracts. This is a lint for accidental
+    dispatch on a study, not a proof against code written to evade it.
+    """
+    reported, _ = _waived(_all_hits(root), allowed)
+    return [(hit[0], hit[2], hit[3]) for hit in reported]
+
+
 def stale_allowances(root, allowed=ALLOWED):
-    """Allowlist entries that no longer match a forbidden form in the tree."""
-    live = {
-        (
-            path.relative_to(root).as_posix(),
-            path.read_text().splitlines()[line - 1].strip(),
-        )
-        for path, line, _ in study_branches(root, allowed={})
-    }
-    return sorted(set(allowed) - live)
+    """Allowance keys whose rules, function or count no longer match the tree."""
+    _, matched = _waived(_all_hits(root), allowed)
+    return sorted(
+        key for key, lines in matched.items() if len(lines) != allowed[key].count
+    )
