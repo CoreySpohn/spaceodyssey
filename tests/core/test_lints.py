@@ -396,10 +396,107 @@ def test_dispatch_allows_only_declared_type_contracts(tmp_path):
         "from builtins import __import__ as load\nload(name)\n",
         "import pkgutil\n",
         "module = loader.load_module(name)\n",
+        "f = __import__\nowned = f('orbix')\n",
+        "import builtins\nowned = getattr(builtins, '__import__')('orbix')\n",
+        "import builtins\nowned = vars(builtins)['__import__']('orbix')\n",
+        "import builtins\nbuiltins.exec('import orbix')\n",
+        "import pydoc\nowned = pydoc.locate('orbix')\n",
+        "import pickle\nowned = pickle.loads(data)\n",
+        "import unittest.mock as m\nowned = m.patch('orbix.x')\n",
+        "from unittest import mock\n",
+        "import marshal\n",
+        "run = tool.exec\n",
+        "make = obj.compile\n",
+        "owned = globals()['__import__']('orbix')\n",
+        "owned = getattr(module, name)(arg)\n",
+        "owned = sys_modules.__dict__['x'](arg)\n",
     ],
+    ids=lambda s: s.replace("\n", " ; ")[:60],
 )
 def test_core_imports_rejects_other_dynamic_loading_spellings(tmp_path, source):
     root, path = fixture_core(tmp_path, source)
     result = run_lint("check_core_imports.py", "--core-dir", root)
     assert result.returncode == 1, result.stdout + result.stderr
     assert f"{path}:" in result.stdout and "dynamic" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import jax\nout = jax.vmap(one)(xs)\n",
+        "out = branches[0](a, b)\n",
+        "new = type(value)(items)\n",
+        "import re\nout = re.match('a', text)\n",
+    ],
+)
+def test_core_imports_accepts_ordinary_calls_through_calls_and_tables(tmp_path, source):
+    root, _ = fixture_core(tmp_path, source)
+    result = run_lint("check_core_imports.py", "--core-dir", root)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("source", "rule"),
+    [
+        ("ok = study.label == 'survey_' + str(1)\n", "survey-name"),
+        ("ok = study.label == 'survey_' + str(1)\n", "survey-id"),
+        ("name = 'survey_%d' % number\n", "survey-name"),
+        ("name = 'survey_{}'.format(number)\n", "survey-name"),
+        ("ok = 'ToyPhotometry' in repr(study.channel_model)\n", "study-text"),
+        ("ok = 'ToyPhotometry' in label\n", "kind-name"),
+        ("ok = str(jax.tree_util.tree_structure(study)) == text\n", "study-text"),
+        ("ok = study.channel_model.__module__.endswith('toy')\n", "introspection"),
+        ("ok = vars(study)['name'] == other\n", "study-vars"),
+        ("ok = study.channel_model.__dict__ == other\n", "study-vars"),
+        ("ok = hasattr(study.channel_model, 'gain')\n", "study-hasattr"),
+        ("ok = study.survey_id == 25\n", "survey-id"),
+        ("ok = 25 == model.survey_id\n", "survey-id"),
+    ],
+)
+def test_dispatch_neighbouring_spellings_are_rejected(tmp_path, source, rule):
+    from tests.core.gate_helpers import study_branches
+
+    root, _ = fixture_core(tmp_path, source)
+    assert rule in {hit[2] for hit in study_branches(root)}, source
+
+
+def test_allowance_is_scoped_to_rule_function_and_count(tmp_path):
+    import shutil
+
+    from tests.core.gate_helpers import study_branches
+
+    line = "bool(getattr(carry, n))"
+    copy = tmp_path / "core"
+    shutil.copytree(CORE, copy)
+    base = copy / "executors/base.py"
+    assert study_branches(copy) == []
+
+    # the identical line in another function is not exempt
+    original = base.read_text()
+    base.write_text(
+        original + f"\n\ndef other(carry, names):\n    return [{line} for n in names]\n"
+    )
+    assert [hit[2] for hit in study_branches(copy)] == ["dynamic-getattr"]
+
+
+def test_allowance_count_and_rule_are_enforced(tmp_path):
+    from tests.core.gate_helpers import Allowance, stale_allowances, study_branches
+
+    source = (
+        "def walk(carry, n):\n"
+        "    a = getattr(carry, n)\n"
+        "    b = getattr(carry, n)\n"
+        "    return a, b\n"
+    )
+    root, _ = fixture_core(tmp_path, source)
+    key = ("sample.py", "a = getattr(carry, n)")
+    other = ("sample.py", "b = getattr(carry, n)")
+    once = {key: Allowance("test", ("dynamic-getattr",), "walk", 1)}
+    assert [hit[1] for hit in study_branches(root, once)] == [3]
+    both = {**once, other: Allowance("test", ("dynamic-getattr",), "walk", 1)}
+    assert study_branches(root, both) == [] and stale_allowances(root, both) == []
+    wrong_rule = {key: Allowance("test", ("study-kind",), "walk", 1)}
+    assert len(study_branches(root, wrong_rule)) == 2
+    assert stale_allowances(root, wrong_rule) == [key]
+    twice = {key: Allowance("test", ("dynamic-getattr",), "walk", 2)}
+    assert stale_allowances(root, twice) == [key]
