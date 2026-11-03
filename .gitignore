@@ -222,3 +222,6 @@ __marimo__/
 
 # uv lockfile (not committed for this library; see comment above)
 uv.lock
+
+# JAX persistent compilation cache for the test suite
+.jax-cache/

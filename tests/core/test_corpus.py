@@ -6,7 +6,8 @@ import pytest
 
 from spaceodyssey.core.executors.base import histories_equal
 from tests.core.corpus import CORPUS, CORPUS_BY_NAME
-from tests.core.helpers import check_corpus_case, history_of
+from tests.core.helpers import history_of
+from tests.core.parity_helpers import check_corpus_case
 
 
 def test_corpus_has_the_planned_cases():
