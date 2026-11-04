@@ -678,33 +678,44 @@ def test_interval_radius_identical_jit_and_eager(dtype, positive):
             np.testing.assert_array_equal(feasible, expected_feasible)
 
 
-def test_interval_bisection_has_fixed_iteration_count():
+@pytest.mark.parametrize("positive", [True, False])
+def test_interval_bisection_has_fixed_iteration_count(positive):
     from spaceodyssey.gaussian_profile import _INTERVAL_BISECTIONS, _interval_radius
 
     assert _INTERVAL_BISECTIONS == 80
 
-    def scan_lengths(value):
+    def equations(value):
         # Raw jaxprs can expose .jaxpr as themselves, so inspect equations first.
         if hasattr(value, "eqns"):
             for equation in value.eqns:
-                if equation.primitive.name == "scan":
-                    yield equation.params["length"]
-                yield from scan_lengths(equation.params)
+                yield equation
+                yield from equations(equation.params)
         elif hasattr(value, "jaxpr"):
-            yield from scan_lengths(value.jaxpr)
+            yield from equations(value.jaxpr)
         elif hasattr(value, "params"):
-            yield from scan_lengths(value.params)
+            yield from equations(value.params)
         elif isinstance(value, dict):
             for child in value.values():
-                yield from scan_lengths(child)
+                yield from equations(child)
         elif isinstance(value, (tuple, list)):
             for child in value:
-                yield from scan_lengths(child)
+                yield from equations(child)
+
+    def radius(width, sd, alpha):
+        return _interval_radius(width, sd, alpha, positive=positive)
 
     for width, sd, alpha in ((2.0, 0.3, 0.05), (0.01, 0.0001, 1e-9)):
-        program = jax.make_jaxpr(_interval_radius)(width, sd, alpha)
-        # ndtri also contains fixed scans for its polynomial evaluation.
-        assert _INTERVAL_BISECTIONS in scan_lengths(program.jaxpr)
+        program = jax.make_jaxpr(radius)(width, sd, alpha)
+        nested = list(equations(program))
+        assert not any(equation.primitive.name == "while" for equation in nested)
+        # Older ndtri implementations also contain fixed polynomial scans.
+        bisections = [
+            equation.params["length"]
+            for equation in nested
+            if equation.primitive.name == "scan"
+            and equation.params["length"] == _INTERVAL_BISECTIONS
+        ]
+        assert bisections == [_INTERVAL_BISECTIONS]
 
 
 def test_orthogonal_float32_design_uses_closed_form():
@@ -962,6 +973,17 @@ def test_context_dependent_rank_checked_before_posterior_at_integration(monkeypa
     monkeypatch.setattr(gaussian_profile, "_posterior_moments", forbidden)
     with pytest.raises(UnsupportedProfile, match="linearly independent"):
         certificate.integrate(predictive)
+
+
+@pytest.mark.filterwarnings("error")
+@pytest.mark.parametrize("x64", [False, True])
+def test_construction_respects_active_precision_without_warnings(x64):
+    from spaceodyssey import GaussianProfileCertifier
+
+    with jax.enable_x64(x64):
+        model = GaussianModel()
+        profile = profile_for([Claim("x", (Edge("x", 0.0, "above"),), "positive")])
+        GaussianProfileCertifier(profile, model)
 
 
 @pytest.mark.filterwarnings("error")
