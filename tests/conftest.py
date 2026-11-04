@@ -11,12 +11,23 @@ The suite is dominated by XLA compilation. Two settings keep it fast and small:
 
 import ctypes
 import gc
+import importlib.util
 import os
 import sys
 from pathlib import Path
 
 import jax
 import pytest
+from hypothesis import settings
+
+# Released hwoutils versions may not include the optional budget plugin yet.
+pytest_plugins = []
+if importlib.util.find_spec("hwoutils.testbudget") is not None:
+    pytest_plugins.append("hwoutils.testbudget.plugin")
+
+settings.register_profile("quick", max_examples=25, deadline=None)
+settings.register_profile("nightly", max_examples=200, deadline=None)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "quick"))
 
 _cache = os.environ.get(
     "SPACEODYSSEY_JAX_CACHE", str(Path(__file__).parents[1] / ".jax-cache")
