@@ -128,15 +128,16 @@ def _mix(x):
     return x ^ (x >> 31)
 
 
+def _digest_step(h, value):
+    """Reuse one scan body across eager fingerprint calls."""
+    return _mix(h ^ value), None
+
+
 def _digest(a, salt):
     """Order-sensitive 64-bit digest of an integer or boolean array."""
     flat = jnp.ravel(a).astype(I64).astype(jnp.uint64)
     seed = _mix(jnp.asarray(np.uint64(salt), jnp.uint64))
-
-    def chain(h, value):
-        return _mix(h ^ value), None
-
-    h, _ = jax.lax.scan(chain, seed, flat)
+    h, _ = jax.lax.scan(_digest_step, seed, flat)
     return _mix(h ^ jnp.asarray(flat.size, jnp.uint64))
 
 
