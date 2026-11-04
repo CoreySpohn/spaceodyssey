@@ -20,6 +20,8 @@ import jax
 import pytest
 from hypothesis import settings
 
+jax.config.update("jax_enable_x64", True)
+
 # Released hwoutils versions may not include the optional budget plugin yet.
 pytest_plugins = []
 if importlib.util.find_spec("hwoutils.testbudget") is not None:
