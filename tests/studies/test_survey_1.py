@@ -36,12 +36,10 @@ def test_survey_1_hand_count_and_executor_parity():
     starts = [130 * k + 10 for k in range(5)]
     ends = [s + 100 for s in starts]
     releases = [e + 20 for e in ends]
-    assert study.agenda.policies[0].plan == (
-        (0, 10),
-        (1, 10),
-        (0, 10),
-        (1, 10),
-        (0, 10),
+    plan = np.asarray(study.agenda.policies[0].plan)
+    # the plan array is padded with -1 rows; only its real rows are the plan
+    np.testing.assert_array_equal(
+        plan[plan[:, 0] >= 0], [(0, 10), (1, 10), (0, 10), (1, 10), (0, 10)]
     )
     np.testing.assert_array_equal(study.channels.id, [10])
     np.testing.assert_array_equal(study.channels.occupancy_ticks, [100])
