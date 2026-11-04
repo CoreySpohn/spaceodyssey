@@ -17,6 +17,18 @@ extensions = [
 
 autoapi_dirs = ["../src/spaceodyssey"]
 autoapi_ignore = ["**/*version.py"]
+# AutoAPI cannot resolve the ignored generated version module or constants
+# assigned by tuple unpacking (studies.toy.RECORD_AUXILIARY).
+suppress_warnings = ["autoapi.python_import_resolution"]
+# Document each object at its defining module to keep re-export links unambiguous.
+autoapi_options = [
+    "members",
+    "undoc-members",
+    "private-members",
+    "show-inheritance",
+    "show-module-summary",
+    "special-members",
+]
 myst_enable_extensions = ["amsmath", "dollarmath"]
 
 html_theme = "sphinx_book_theme"
@@ -31,6 +43,8 @@ copyright = "2026, Corey Spohn"
 author = "Corey Spohn"
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "jupyter_execute"]
 autodoc_typehints = "description"
+# AutoAPI already indexes fields; Napoleon should render their descriptions only.
+napoleon_use_ivar = True
 html_title = "spaceodyssey - Astronomical analysis and observing campaigns"
 html_theme_options = {
     "repository_url": "https://github.com/CoreySpohn/spaceodyssey",
@@ -38,3 +52,15 @@ html_theme_options = {
     "use_repository_button": True,
     "show_toc_level": 2,
 }
+
+
+def _skip_observe_alias(app, what, name, obj, skip, options):
+    """Keep the observe module and loop.observe function at distinct API targets."""
+    if name == "spaceodyssey.observe" and what == "data":
+        return True
+    return None
+
+
+def setup(app):
+    """Avoid indexing the package alias over the same-named submodule."""
+    app.connect("autoapi-skip-member", _skip_observe_alias)
