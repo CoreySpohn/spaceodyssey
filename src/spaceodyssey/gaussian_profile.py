@@ -263,14 +263,15 @@ class GaussianProfileCertifier(AbstractProfileCertificate):
             )
         model = self.truth_model
         d = len(model.param_names)
+        dtype = jnp.result_type(float)
         context = {
-            name: jax.ShapeDtypeStruct((), float) for name in model.context_names
+            name: jax.ShapeDtypeStruct((), dtype) for name in model.context_names
         }
         context_dependent = False
         for name in self.profile.quantities:
             program = jax.make_jaxpr(
                 lambda theta, ctx, name=name: model.quantities(theta, ctx)[name]
-            )(jax.ShapeDtypeStruct((d,), float), context)
+            )(jax.ShapeDtypeStruct((d,), dtype), context)
             _assert_affine(program.jaxpr, [True] + [False] * len(context))
             needed, _ = _live_inputs(program.jaxpr)
             context_dependent |= any(v in needed for v in program.jaxpr.invars[1:])

@@ -965,7 +965,8 @@ def test_context_dependent_rank_checked_before_posterior_at_integration(monkeypa
 
 
 @pytest.mark.filterwarnings("error")
-def test_zero_covariance_diagonal_is_invalid_without_warnings(monkeypatch):
+@pytest.mark.parametrize("x64", [False, True])
+def test_zero_covariance_diagonal_is_invalid_without_warnings(monkeypatch, x64):
     import spaceodyssey.gaussian_profile as gaussian_profile
     from spaceodyssey import GaussianProfileCertifier
 
@@ -978,9 +979,9 @@ def test_zero_covariance_diagonal_is_invalid_without_warnings(monkeypatch):
     monkeypatch.setattr(
         gaussian_profile, "_posterior_moments", zero_sampling_covariance
     )
-    model = GaussianModel()
-    profile = profile_for([Claim("x", (Edge("x", 0.0, "above"),), "positive")])
-    with np.errstate(divide="raise", invalid="raise"):
+    with jax.enable_x64(x64), np.errstate(divide="raise", invalid="raise"):
+        model = GaussianModel()
+        profile = profile_for([Claim("x", (Edge("x", 0.0, "above"),), "positive")])
         result = GaussianProfileCertifier(profile, model).integrate(
             experiment(model, [[0.1, 0.2]])
         )
