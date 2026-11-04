@@ -33,7 +33,7 @@ def test_x64_guard(composed_study):
             dataclasses.replace(study)
         for executor in (core.CompiledExecutor(), core.HostExecutor()):
             with pytest.raises(RuntimeError, match="requires JAX x64"):
-                executor.run(study, None, None, 1)
+                executor.run(study=study, truths=None, roots=None, n_steps=1)
 
 
 def test_import_does_not_enable_x64():

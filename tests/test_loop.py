@@ -1,10 +1,13 @@
 """Tests for the event-driven mission loop on deterministic doubles."""
 
+from dataclasses import replace
+
 import pytest
 from planit_py.vocabulary import Action, FixedDuration, Mode, StopOnCertificate
 
 from spaceodyssey.belief import MissionBelief
 from spaceodyssey.build import build
+from spaceodyssey.errors import WiringError
 from spaceodyssey.loop import (
     DETECTION_CERTIFICATE,
     MissionState,
@@ -71,6 +74,19 @@ class TestObserve:
 
 class TestStep:
     """One propose-observe-update-certify cycle."""
+
+    @pytest.mark.parametrize("seam", ["observation", "context", "policy", "cost"])
+    def test_missing_required_seam_rejected(self, seam):
+        """Unchosen loop seams fail clearly even when config validation passes."""
+        config = make_config()
+        config = replace(
+            config, choices=tuple((s, c) for s, c in config.choices if s != seam)
+        )
+        mission = make_mission(config=config)
+        universe = draw_universe(mission)
+        state = MissionState(time_d=0.0, ledger=make_ledger(), belief=MissionBelief())
+        with pytest.raises(WiringError, match=f"needs an? {seam} seam choice"):
+            step(mission, universe, state, root=0)
 
     def test_advances_clock_and_logs(self):
         """A step charges realized time plus overhead and logs the record."""

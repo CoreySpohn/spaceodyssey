@@ -6,6 +6,7 @@ import sys
 import pytest
 
 from spaceodyssey import engines
+from spaceodyssey.build import build
 from spaceodyssey.errors import RegistryError
 from spaceodyssey.metrics import YieldSummary
 from tests.doubles import PLANET_TARGETS, build_test_registry, make_config, make_spec
@@ -111,6 +112,9 @@ class TestEndToEnd:
         )
         with pytest.raises(WiringError):
             engines.run(make_spec(), config, seed=0, registry=build_test_registry())
+        mission = build(make_spec(), FidelityConfig.make("sample"))
+        with pytest.raises(ValueError, match="scene"):
+            engines.get_engine("sample")(mission)
 
 
 class TestYieldSummary:

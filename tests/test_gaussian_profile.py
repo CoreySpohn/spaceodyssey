@@ -683,15 +683,23 @@ def test_interval_bisection_has_fixed_iteration_count():
 
     assert _INTERVAL_BISECTIONS == 80
 
-    def scan_lengths(jaxpr):
-        lengths = []
-        for equation in jaxpr.eqns:
-            if equation.primitive.name == "scan":
-                lengths.append(equation.params["length"])
-            for value in equation.params.values():
-                if hasattr(value, "jaxpr"):
-                    lengths.extend(scan_lengths(value.jaxpr))
-        return lengths
+    def scan_lengths(value):
+        # Raw jaxprs can expose .jaxpr as themselves, so inspect equations first.
+        if hasattr(value, "eqns"):
+            for equation in value.eqns:
+                if equation.primitive.name == "scan":
+                    yield equation.params["length"]
+                yield from scan_lengths(equation.params)
+        elif hasattr(value, "jaxpr"):
+            yield from scan_lengths(value.jaxpr)
+        elif hasattr(value, "params"):
+            yield from scan_lengths(value.params)
+        elif isinstance(value, dict):
+            for child in value.values():
+                yield from scan_lengths(child)
+        elif isinstance(value, (tuple, list)):
+            for child in value:
+                yield from scan_lengths(child)
 
     for width, sd, alpha in ((2.0, 0.3, 0.05), (0.01, 0.0001, 1e-9)):
         program = jax.make_jaxpr(_interval_radius)(width, sd, alpha)
@@ -957,7 +965,8 @@ def test_context_dependent_rank_checked_before_posterior_at_integration(monkeypa
 
 
 @pytest.mark.filterwarnings("error")
-def test_zero_covariance_diagonal_is_invalid_without_warnings(monkeypatch):
+@pytest.mark.parametrize("x64", [False, True])
+def test_zero_covariance_diagonal_is_invalid_without_warnings(monkeypatch, x64):
     import spaceodyssey.gaussian_profile as gaussian_profile
     from spaceodyssey import GaussianProfileCertifier
 
@@ -970,9 +979,9 @@ def test_zero_covariance_diagonal_is_invalid_without_warnings(monkeypatch):
     monkeypatch.setattr(
         gaussian_profile, "_posterior_moments", zero_sampling_covariance
     )
-    model = GaussianModel()
-    profile = profile_for([Claim("x", (Edge("x", 0.0, "above"),), "positive")])
-    with np.errstate(divide="raise", invalid="raise"):
+    with jax.enable_x64(x64), np.errstate(divide="raise", invalid="raise"):
+        model = GaussianModel()
+        profile = profile_for([Claim("x", (Edge("x", 0.0, "above"),), "positive")])
         result = GaussianProfileCertifier(profile, model).integrate(
             experiment(model, [[0.1, 0.2]])
         )

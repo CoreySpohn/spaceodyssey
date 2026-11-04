@@ -1,6 +1,7 @@
 """Tests for the event queue: ordering keys, micro placement, overflow, selection."""
 
 import dataclasses
+from types import SimpleNamespace
 
 import equinox as eqx
 import jax
@@ -107,8 +108,19 @@ def test_caps_rejects_key_overflow():
         Capacities(max_sid=2**55)
 
 
-def test_caps_derived_values():
-    caps = Capacities()
+@pytest.mark.parametrize("x64", [False, True])
+def test_caps_derived_values(x64, monkeypatch):
+    # Expose only the public config reader.
+    monkeypatch.setattr(
+        "spaceodyssey.core.capacities.jax",
+        SimpleNamespace(config=SimpleNamespace(read=jax.config.read)),
+    )
+    with jax.enable_x64(x64):
+        if not x64:
+            with pytest.raises(RuntimeError, match="requires JAX x64"):
+                Capacities()
+            return
+        caps = Capacities()
     assert caps.n_balance_rows == caps.n_assets + caps.n_programs + 1
     assert caps.max_tick > 10**12
 

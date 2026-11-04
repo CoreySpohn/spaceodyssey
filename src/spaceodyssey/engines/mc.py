@@ -35,8 +35,14 @@ def run_sample(
 
     Returns:
         The run's YieldSummary.
+
+    Raises:
+        ValueError: When the mission has no truth scene source.
     """
-    universe = mission.truth.scene.draw(stream(seed, 0, 0, Purpose.UNIVERSE))
+    scene = mission.truth.scene
+    if scene is None:
+        raise ValueError("the sample engine needs a truth scene source")
+    universe = scene.draw(stream(seed, 0, 0, Purpose.UNIVERSE))
     state = run_mission(mission, universe, seed=seed, max_epochs=max_epochs)
     return summarize(
         state,

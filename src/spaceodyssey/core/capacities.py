@@ -66,7 +66,7 @@ class Capacities:
 
 def require_x64():
     """Require 64-bit tick arithmetic without changing global JAX settings."""
-    if not jax.config.x64_enabled:
+    if not jax.config.read("jax_enable_x64"):
         raise RuntimeError(
             "spaceodyssey.core requires JAX x64; enable it at startup with "
             'jax.config.update("jax_enable_x64", True).'

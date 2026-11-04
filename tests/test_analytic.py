@@ -1,6 +1,7 @@
 """Tests for the analytic integrate engine and the CertifiedYield report."""
 
 import json
+from dataclasses import replace
 
 import ineedvalidation as vv
 import jax
@@ -10,7 +11,7 @@ import pytest
 from jax.test_util import check_grads
 
 from spaceodyssey import engines, reporting
-from spaceodyssey.build import build
+from spaceodyssey.build import ModelStack, build
 from spaceodyssey.engines import analytic
 from spaceodyssey.engines.analytic import certified_yield, weighted_yields
 from spaceodyssey.errors import OutOfRangeError, WiringError
@@ -241,9 +242,12 @@ class TestIntegrateEngine:
         assert report.in_range == (False, True)
         assert not report.all_in_range
 
-    def test_requires_a_certificate(self):
-        """An integrate run with no certification choice is refused."""
+    @pytest.mark.parametrize("has_certificate", [False, True])
+    def test_requires_a_certificate(self, has_certificate):
+        """Both a compiled certificate and its configuration choice are required."""
         mission = build(make_spec(), FidelityConfig.make("integrate"))
+        if has_certificate:
+            mission = replace(mission, model=ModelStack(certification=make_toy()))
         with pytest.raises(WiringError, match="certification"):
             engines.get_engine("integrate")(
                 mission, predictive=predictive_for([0.5], [4.0]), weights=jnp.ones(1)
