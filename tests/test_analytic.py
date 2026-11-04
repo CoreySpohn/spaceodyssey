@@ -242,15 +242,13 @@ class TestIntegrateEngine:
         assert report.in_range == (False, True)
         assert not report.all_in_range
 
-    @pytest.mark.parametrize(
-        ("has_certificate", "error"), [(False, WiringError), (True, ValueError)]
-    )
-    def test_requires_a_certificate(self, has_certificate, error):
+    @pytest.mark.parametrize("has_certificate", [False, True])
+    def test_requires_a_certificate(self, has_certificate):
         """Both a compiled certificate and its configuration choice are required."""
         mission = build(make_spec(), FidelityConfig.make("integrate"))
         if has_certificate:
             mission = replace(mission, model=ModelStack(certification=make_toy()))
-        with pytest.raises(error, match="certification"):
+        with pytest.raises(WiringError, match="certification"):
             engines.get_engine("integrate")(
                 mission, predictive=predictive_for([0.5], [4.0]), weights=jnp.ones(1)
             )

@@ -48,8 +48,7 @@ def run_integrate(
         bounds extend only total_intervals, and fm stays separate.
 
     Raises:
-        WiringError: When no certificate is configured.
-        ValueError: When the mission has no certification configuration choice.
+        WiringError: When no certificate or certification choice is configured.
         OutOfRangeError: When ``strict`` and a planet is out of range.
     """
     certificate = mission.model.certification
@@ -57,7 +56,7 @@ def run_integrate(
         raise WiringError("the integrate engine needs a certification seam choice")
     choice = mission.config.choice("certification")
     if choice is None:
-        raise ValueError("the integrate engine needs a certification seam choice")
+        raise WiringError("the integrate engine needs a certification seam choice")
     if isinstance(certificate, AbstractProfileCertificate):
         certificate.validate_predictive(predictive)
     outcome = certificate.integrate(predictive)
