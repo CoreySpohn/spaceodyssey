@@ -225,3 +225,8 @@ uv.lock
 
 # JAX persistent compilation cache for the test suite
 .jax-cache/
+
+# Local tools and caches
+.claude/
+.jax_cache/
+.DS_Store

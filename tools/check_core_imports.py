@@ -55,8 +55,9 @@ EXPLANATION = (
     "coronalyze, yippy, optixstuff, physicaloptix, exojax, planit_py. "
     "hwoutils is not allowed in the core in Slice 1 because it needs no constant. "
     "Dynamic loading (importlib, __import__, builtins, pydoc, pickle, marshal, "
-    "unittest.mock, runpy, loader objects, eval, exec, compile, or a callee looked up with "
-    "getattr, vars, globals or locals) is never allowed in the core, whatever its argument."
+    "unittest.mock, runpy, loader objects, eval, exec, compile, or a callee looked up "
+    "with getattr, vars, globals or locals) is never allowed in the core, "
+    "whatever its argument."
 )
 
 
