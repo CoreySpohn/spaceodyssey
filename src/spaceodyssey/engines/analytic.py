@@ -49,11 +49,15 @@ def run_integrate(
 
     Raises:
         WiringError: When no certificate is configured.
+        ValueError: When the mission has no certification configuration choice.
         OutOfRangeError: When ``strict`` and a planet is out of range.
     """
     certificate = mission.model.certification
     if certificate is None:
         raise WiringError("the integrate engine needs a certification seam choice")
+    choice = mission.config.choice("certification")
+    if choice is None:
+        raise ValueError("the integrate engine needs a certification seam choice")
     if isinstance(certificate, AbstractProfileCertificate):
         certificate.validate_predictive(predictive)
     outcome = certificate.integrate(predictive)
@@ -62,7 +66,7 @@ def run_integrate(
             raise WiringError("outcome profile_hash does not match certificate profile")
     if strict:
         outcome.raise_if_out_of_range()
-    name = mission.config.choice("certification").model_ref.name
+    name = choice.model_ref.name
     return certified_yield(
         outcome, weights, certificate=name, confidence=confidence, systematic=systematic
     )
