@@ -1,5 +1,10 @@
 # Test suite speed and memory
 
+This is the historical speed-pass report. The follow-up
+[resident-memory report](suite-memory.md) supersedes its cache watermarks and run
+guidance. Use one process for the quick tier and one process per slow file when
+enforcing the 6 GB process budget.
+
 ## What was slow
 
 Nearly all test time is JAX tracing and XLA compilation. Each distinct program class

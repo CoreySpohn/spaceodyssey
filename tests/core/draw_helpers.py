@@ -1,6 +1,7 @@
 import dataclasses
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
@@ -38,8 +39,12 @@ class WaitingReactivePolicy(kinds.ReactivePolicy):
     schedule of every other decision is unchanged. `wait_at` of -1 adds nothing.
     """
 
-    wait_at: int = eqx.field(default=-1)
-    wait_ticks: int = eqx.field(default=7)
+    wait_at: jax.Array = eqx.field(
+        default=-1, converter=lambda x: jnp.asarray(x, jnp.int64)
+    )
+    wait_ticks: jax.Array = eqx.field(
+        default=7, converter=lambda x: jnp.asarray(x, jnp.int64)
+    )
 
     def decide(self, pstate, view, study, key):
         eff, ps, _ = super().decide(pstate, view, study, key)

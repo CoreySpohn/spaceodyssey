@@ -4,9 +4,12 @@ The suite is dominated by XLA compilation. Two settings keep it fast and small:
 
 - a persistent compilation cache, so separate processes and later runs reuse compiled
   programs (``SPACEODYSSEY_JAX_CACHE`` names another directory, ``off`` disables it);
-- a bound on what a long-lived process keeps: when its resident memory passes
-  ``SPACEODYSSEY_RSS_LIMIT_MB`` (default 4500) and has grown by more than 1000 MB since
-  the last clear, the next test teardown drops the compiled programs.
+- fixed cache watermarks: test teardown clears when RSS exceeds
+  ``SPACEODYSSEY_RSS_LIMIT_MB`` (default 3500 MiB), or live heap allocations exceed
+  half that limit. On macOS, malloc's live bytes exclude freed pages it still keeps
+  resident; elsewhere RSS is the fallback. This retains useful executables without
+  letting the cache budget grow with allocator retention. Cleanup and the next
+  compile both need headroom below the 6 GB process budget.
 """
 
 import ctypes
@@ -37,9 +40,7 @@ if _cache != "off":
     jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
     jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 
-RSS_LIMIT = int(os.environ.get("SPACEODYSSEY_RSS_LIMIT_MB", "4500")) * 2**20
-RSS_GROWTH = 1000 * 2**20
-_after_clear = [0]
+RSS_LIMIT = int(os.environ.get("SPACEODYSSEY_RSS_LIMIT_MB", "3500")) * 2**20
 
 
 class _TaskInfo(ctypes.Structure):
@@ -47,6 +48,15 @@ class _TaskInfo(ctypes.Structure):
         ("virtual_size", ctypes.c_uint64),
         ("resident_size", ctypes.c_uint64),
         ("rest", ctypes.c_uint8 * 80),
+    ]
+
+
+class _MallocStatistics(ctypes.Structure):
+    _fields_ = [
+        ("blocks_in_use", ctypes.c_uint),
+        ("size_in_use", ctypes.c_size_t),
+        ("max_size_in_use", ctypes.c_size_t),
+        ("size_allocated", ctypes.c_size_t),
     ]
 
 
@@ -66,7 +76,7 @@ def _rss_bytes():
 
 
 def _release_freed_memory():
-    """Hand freed allocator pages back to the system (macOS keeps them otherwise)."""
+    """Request release of freed allocator pages where supported."""
     if sys.platform == "darwin":
         try:
             ctypes.CDLL("/usr/lib/libSystem.B.dylib").malloc_zone_pressure_relief(0, 0)
@@ -74,16 +84,30 @@ def _release_freed_memory():
             pass
 
 
+def _heap_bytes(fallback):
+    """Live malloc bytes across all macOS zones, excluding retained free pages."""
+    if sys.platform == "darwin":
+        try:
+            stats = _MallocStatistics()
+            read = ctypes.CDLL("/usr/lib/libSystem.B.dylib").malloc_zone_statistics
+            read.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MallocStatistics)]
+            read.restype = None
+            read(None, ctypes.byref(stats))
+            return stats.size_in_use or fallback
+        except (OSError, AttributeError):
+            pass
+    return fallback
+
+
 @pytest.fixture(autouse=True)
 def bound_resident_memory():
     """Drop compiled programs between tests when the process has grown too large."""
     yield
     rss = _rss_bytes()
-    if rss > RSS_LIMIT and rss - _after_clear[0] > RSS_GROWTH:
+    if rss > RSS_LIMIT or _heap_bytes(rss) > RSS_LIMIT // 2:
         jax.clear_caches()
         gc.collect()
         _release_freed_memory()
-        _after_clear[0] = _rss_bytes()
 
 
 @pytest.fixture
@@ -100,9 +124,9 @@ def save_viz_png():
     return save
 
 
-# Files whose tests each compile a distinct compiled-executor program (10 to 30 s
-# per program class, cold). The full suite and the gate run them; `-m "not slow"`
-# skips them.
+# Files that exercise expensive program variants. Use one pytest process per file
+# when enforcing the memory budget; `-m "not slow"` excludes them. The default
+# collection keeps every check.
 SLOW_FILES = frozenset(
     {
         "test_slice1_gate.py",
@@ -117,6 +141,7 @@ SLOW_FILES = frozenset(
         "test_metamorphic.py",
         "test_host_service.py",
         "test_draws.py",
+        "test_replay_log.py",
         "test_visible_relations.py",
         "test_battery_guards.py",
         "test_invariant_mutants.py",
