@@ -87,3 +87,51 @@ def save_viz_png():
             result.fig.savefig(path / f"{name}.png", dpi=70)
 
     return save
+
+
+# Files whose tests each compile a distinct compiled-executor program (10 to 30 s
+# per program class, cold). The full suite and the gate run them; `-m "not slow"`
+# skips them.
+SLOW_FILES = frozenset(
+    {
+        "test_slice1_gate.py",
+        "test_corpus_invariants.py",
+        "test_parity_corpus.py",
+        "test_corpus.py",
+        "test_scorer_columns.py",
+        "test_acquisition_index.py",
+        "test_query_ordering.py",
+        "test_executors.py",
+        "test_revisions.py",
+        "test_metamorphic.py",
+        "test_host_service.py",
+        "test_draws.py",
+        "test_visible_relations.py",
+        "test_battery_guards.py",
+        "test_invariant_mutants.py",
+        "test_run_status.py",
+        "test_conformance_guards.py",
+        "test_gradients.py",
+        "test_fork.py",
+        "test_latency_shift.py",
+        "test_truth_swap.py",
+        "test_null_reference.py",
+        "test_contracts.py",
+        "test_audience_firewall.py",
+        "test_admission_rules.py",
+        "test_leak.py",
+        "test_second_kind.py",
+        "test_canonical_fields.py",
+        "test_survey_25.py",
+    }
+)
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        if item.path.name in SLOW_FILES:
+            item.add_marker(pytest.mark.slow)
+        if item.path.name == "test_slice1_gate.py":
+            # with `-n 2 --dist loadgroup` each worker compiles one executor family
+            family = "compiled" if "compiled" in item.name else "host"
+            item.add_marker(pytest.mark.xdist_group(family))

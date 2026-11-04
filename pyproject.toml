@@ -76,7 +76,7 @@ packages = ["src/spaceodyssey"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: Monte Carlo checks; skip with -m 'not slow'"]
+markers = ["slow: compile-heavy or Monte Carlo tests (see SLOW_FILES in tests/conftest.py); skip with -m 'not slow'"]
 
 [tool.ineedvalidation]
 library = "spaceodyssey"
