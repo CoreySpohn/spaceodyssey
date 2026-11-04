@@ -80,7 +80,7 @@ def test_coordinates_default_to_zero():
 
 
 def test_unknown_coordinate_is_rejected():
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises((TypeError, ValueError), match="step"):
         key_for(ROOT, step=3)
 
 
@@ -189,6 +189,8 @@ def test_coupling_rejects_unknown_names():
         sch.Coupling(shared=((Purpose.POLICY, ("step",)),))
     with pytest.raises(ValueError):
         sch.Coupling(shared=((Purpose.POLICY, ("tick",)),))
+    with pytest.raises(ValueError):
+        sch.Coupling(shared=((Purpose.POLICY, ("ordinal",)),))
 
 
 def test_asset_and_branch_separate_draws_only_when_nonzero():
