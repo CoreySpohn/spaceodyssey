@@ -216,13 +216,21 @@ class TestRangeFlag:
         assert bool(jnp.all(jnp.isfinite(outcome.p_pos)))
 
     def test_jit_equals_eager(self):
-        """The compiled and eager outcomes agree bitwise."""
+        """The compiled and eager outcomes agree to a few float64 ULPs.
+
+        XLA fuses eager and compiled graphs differently, so bitwise equality is
+        not guaranteed across JAX versions (JAX 0.9 differs by about 3 ULPs).
+        """
         toy = make_toy()
         predictive = predictive_for([0.1, 0.4, 0.9], [2.0, 6.0, 10.0])
         eager = toy.integrate(predictive)
         compiled = jax.jit(toy.integrate)(predictive)
-        np.testing.assert_array_equal(np.asarray(eager.p_pos), compiled.p_pos)
-        np.testing.assert_array_equal(np.asarray(eager.p_neg), compiled.p_neg)
+        np.testing.assert_array_max_ulp(
+            np.asarray(eager.p_pos), np.asarray(compiled.p_pos), maxulp=4
+        )
+        np.testing.assert_array_max_ulp(
+            np.asarray(eager.p_neg), np.asarray(compiled.p_neg), maxulp=4
+        )
 
 
 class TestSeamConformance:
