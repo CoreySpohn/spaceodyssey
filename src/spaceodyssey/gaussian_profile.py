@@ -114,7 +114,9 @@ def _assert_affine(jaxpr, dependent):
         ]
         name = equation.primitive.name
         if name in ("jit", "pjit"):
-            outputs = _assert_affine(equation.params["jaxpr"].jaxpr, inputs)
+            # A closed jaxpr on older JAX, an open one on JAX 0.12 and later.
+            inner = equation.params["jaxpr"]
+            outputs = _assert_affine(getattr(inner, "jaxpr", inner), inputs)
         else:
             depends = any(inputs)
             safe = (
