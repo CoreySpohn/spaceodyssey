@@ -19,6 +19,12 @@ from spaceodyssey.core.kinds import (
 from spaceodyssey.core.ledger import AssetTable, ChannelTable
 
 
+def _as_horizon_tick(value):
+    """Check precision before converting the study horizon to integer ticks."""
+    require_x64()
+    return jnp.asarray(value, I64)
+
+
 class Clock(eqx.Module):
     """Duration in seconds of one integer tick."""
 
@@ -51,7 +57,7 @@ class Study(eqx.Module):
     channel_model: AbstractChannelModel
     assets: AssetTable
     budget: jax.Array
-    horizon_tick: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, I64))
+    horizon_tick: jax.Array = eqx.field(converter=_as_horizon_tick)
     agenda: Agenda
     process: AbstractProcess
     observer: AbstractObserver

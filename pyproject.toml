@@ -79,6 +79,11 @@ version-file = "src/spaceodyssey/_version.py"
 packages = ["src/spaceodyssey"]
 
 [tool.pytest.ini_options]
+filterwarnings = [
+    "error",
+    # tol-colors initializes colormaps with set_bad, pending deprecation in Matplotlib 3.11.
+    'ignore:The set_bad function will be deprecated in a future version\.:PendingDeprecationWarning:tol_colors$',
+]
 testpaths = ["tests"]
 markers = [
     "slow: compile-heavy or Monte Carlo tests (see SLOW_FILES in tests/conftest.py); skip with -m 'not slow'",

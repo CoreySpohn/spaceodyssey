@@ -186,7 +186,7 @@ def plot_certification_curve(
                 },
             )
         )
-    artists["fill"] = ep.spans(
+    artists["fill"] = ep.shade_intervals(
         x,
         ~in_range,
         ax=ax,

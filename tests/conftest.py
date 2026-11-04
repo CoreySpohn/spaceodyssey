@@ -23,7 +23,23 @@ import jax
 import pytest
 from hypothesis import settings
 
-jax.config.update("jax_enable_x64", True)
+
+class _X64Module(pytest.Module):
+    def _getobj(self):
+        with jax.enable_x64():
+            return super()._getobj()
+
+
+def pytest_pycollect_makemodule(module_path, parent):
+    return _X64Module.from_parent(parent, path=module_path)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def enable_x64():
+    """Enable full precision for tests without changing the caller's setting."""
+    with jax.enable_x64():
+        yield
+
 
 # Released hwoutils versions may not include the optional budget plugin yet.
 pytest_plugins = []

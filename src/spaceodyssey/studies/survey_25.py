@@ -15,6 +15,15 @@ from spaceodyssey.core.snapshot import effects_none
 from spaceodyssey.studies.toy import survey_1
 
 
+def _observation_limit(value):
+    """Validate the observation limit before storing it as static configuration."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("n_obs must be a Python int; it is static configuration")
+    if value < 0:
+        raise ValueError("n_obs must be nonnegative")
+    return value
+
+
 class NetworkPolicy(AbstractPolicy):
     """Choose a subject/channel pair with an MLP, then drain after `n_obs` decisions.
 
@@ -30,14 +39,7 @@ class NetworkPolicy(AbstractPolicy):
     """
 
     network: eqx.nn.MLP
-    n_obs: int = eqx.field(default=5, static=True)
-
-    def __check_init__(self):
-        """Require the observation limit to be a nonnegative Python integer."""
-        if isinstance(self.n_obs, bool) or not isinstance(self.n_obs, int):
-            raise TypeError("n_obs must be a Python int; it is static configuration")
-        if self.n_obs < 0:
-            raise ValueError("n_obs must be nonnegative")
+    n_obs: int = eqx.field(default=5, static=True, converter=_observation_limit)
 
     def declare(self):
         """Declare observation effects and the closing campaign drain."""

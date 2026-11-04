@@ -66,7 +66,7 @@ def plot_claim_posterior(
         hist_kw: Bar styling overrides routed to eyepiece.hist_fill bar_kw.
         edge_kw: Line overrides routed to eyepiece.ref_line for each threshold.
         truth_kw: Line overrides for truth references, solid by default.
-        region_kw: Fill overrides routed to eyepiece.spans, one intersection
+        region_kw: Fill overrides routed to eyepiece.shade_intervals, one intersection
             per claim on the displayed quantity.
         text_kw: Text overrides for titles and the risk/verdict block.
 
@@ -169,7 +169,7 @@ def plot_claim_posterior(
             ax.set_ylim(ylim)
         artists["hist"].append(bars)
         artists["fill"].append(
-            ep.spans(
+            ep.shade_intervals(
                 intervals=panel["intervals"],
                 ax=ax,
                 color=ep.neutral(COUNTED_REGION_LEVEL),
