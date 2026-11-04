@@ -22,17 +22,9 @@ dependencies = [
     "jax",
     "jaxlib",
     "scipy",
-    "hwoutils",
-    "optixstuff",
-    "yippy",
-    "orbix",
-    "skyscapes",
-    "jaxedith",
+    "numpy",
     "photomancy",
     "planit-py",
-    "coronagraphoto",
-    "coronachrome",
-    "coronalyze",
 ]
 
 [project.urls]
@@ -42,15 +34,27 @@ Documentation = "https://spaceodyssey.readthedocs.io"
 [project.optional-dependencies]
 retrieval = ["exojax"]
 optics = ["physicaloptix"]
-viz = ["eyepiece>=0.10.0"]
+viz = ["eyepiece>=0.10.0", "matplotlib"]
 dev = ["pre-commit"]
-test = ["pytest", "nox", "hypothesis", "pytest-cov", "ineedvalidation>=1.1", "spaceodyssey[viz]"]
+test = [
+    "pytest",
+    "hypothesis",
+    "pytest-cov",
+    "pytest-xdist",
+    "pytest-testmon",
+    "pytest-markdown-docs",
+    "pytest-timeout",
+    "pytest-fail-slow",
+    "ineedvalidation>=1.1",
+    "hwoutils",
+    "skyscapes",
+    "spaceodyssey[viz]",
+]
 docs = [
     "myst-nb",
     "sphinx-autoapi",
     "sphinx-book-theme",
     "sphinx",
-    "sphinx_autodoc_typehints",
     "ipython",
     "matplotlib",
     "spaceodyssey[viz]",
@@ -76,7 +80,10 @@ packages = ["src/spaceodyssey"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: compile-heavy or Monte Carlo tests (see SLOW_FILES in tests/conftest.py); skip with -m 'not slow'"]
+markers = [
+    "slow: compile-heavy or Monte Carlo tests (see SLOW_FILES in tests/conftest.py); skip with -m 'not slow'",
+    "medium: tests with a 30-second default time budget",
+]
 
 [tool.ineedvalidation]
 library = "spaceodyssey"
@@ -102,3 +109,29 @@ library = "spaceodyssey"
 "tests/test_viz_extract.py" = { case = "visualization", evidence = "code-verification" }
 "tests/test_viz_plots.py" = { case = "visualization", evidence = "code-verification" }
 "tests/" = { case = "mission-loop", evidence = "code-verification" }
+
+[tool.testbudget]
+library = "spaceodyssey"
+mode = "report"
+unit_s = 5
+medium_s = 30
+slow_s = 300
+
+[tool.deptry]
+known_first_party = ["spaceodyssey"]
+optional_dependencies_dev_groups = ["dev", "docs", "test"]
+
+[tool.deptry.per_rule_ignores]
+# JAX loads its compiled backend; keep it explicitly installed.
+DEP002 = [
+    "jaxlib",
+    # Opt-in companion tools for user adapters, advertised in the library-stack diagram.
+    "exojax",
+    "physicaloptix",
+]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.src]
+include = ["src/spaceodyssey"]
