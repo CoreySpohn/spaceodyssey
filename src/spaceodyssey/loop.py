@@ -19,6 +19,7 @@ from spaceodyssey.account import Ledger
 from spaceodyssey.belief import MissionBelief
 from spaceodyssey.build import Mission, TruthStack
 from spaceodyssey.data import Observation
+from spaceodyssey.errors import WiringError
 from spaceodyssey.rng import Purpose, stream
 from spaceodyssey.universe import Universe
 
@@ -62,12 +63,16 @@ def observe(truth: TruthStack, universe: Universe, action: Action, key) -> Obser
         will charge.
 
     Raises:
+        WiringError: When no observation seam is configured.
         NotImplementedError: For adaptive integration policies; executing
             those requires certificate evaluation inside the integration,
             which arrives with the adaptive-stopping work.
     """
+    observation = truth.observation
+    if observation is None:
+        raise WiringError("the mission loop needs an observation seam choice")
     scene = universe.systems.get(action.target_id)
-    dataset = truth.observation.predictive(scene, action).sample(key)
+    dataset = observation.predictive(scene, action).sample(key)
     integration = action.integration
     if isinstance(integration, FixedDuration):
         duration_d = integration.duration_d
@@ -100,12 +105,22 @@ def step(
         The next loop state.
 
     Raises:
+        WiringError: When no context, policy, or cost seam is configured.
         RuntimeError: If the executed action charges no time; the loop would
             otherwise never advance.
     """
     model = mission.model
-    ctx = model.context.context(None, state.time_d)
-    action = model.policy.propose(state.belief, ctx, model.cost)
+    context = model.context
+    if context is None:
+        raise WiringError("the mission loop needs a context seam choice")
+    policy = model.policy
+    if policy is None:
+        raise WiringError("the mission loop needs a policy seam choice")
+    cost = model.cost
+    if cost is None:
+        raise WiringError("the mission loop needs a cost seam choice")
+    ctx = context.context(None, state.time_d)
+    action = policy.propose(state.belief, ctx, cost)
     key = stream(root, action.target_id, state.epoch_index, Purpose.MEASUREMENT)
     obs = observe(mission.truth, universe, action, key)
     belief = state.belief.record(obs)
@@ -119,7 +134,7 @@ def step(
             DETECTION_CERTIFICATE,
             certificate.update(previous, obs.dataset),
         )
-    costs = model.cost.realized(action, ctx, obs.duration_d)
+    costs = cost.realized(action, ctx, obs.duration_d)
     time_cost = float(costs.get("time_d", 0.0))
     if time_cost <= 0.0:
         raise RuntimeError(
