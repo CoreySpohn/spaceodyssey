@@ -47,8 +47,8 @@ class HostExecutor(AbstractExecutor):
     def run(
         self,
         study,
-        truth,
-        root,
+        truths,
+        roots,
         n_steps,
         *,
         policy_form="array",
@@ -68,7 +68,7 @@ class HostExecutor(AbstractExecutor):
         require_x64()
         adv = lambda c, r, s, t: self.advance(c, r, s, t, wake_fn=wake_fn)  # noqa: E731
         dec, adm, close, fin = self.decide, _adm, _close, _fin
-        carry = _init(study, truth)
+        carry = _init(study, truths)
         caps = study.caps
         if n_steps == 0:
             trace = jax.tree_util.tree_map(
@@ -77,7 +77,7 @@ class HostExecutor(AbstractExecutor):
             return RunResult(carry, trace)
         traces = []
         for _ in range(n_steps):
-            carry, trace, wake = adv(carry, root, study, truth)
+            carry, trace, wake = adv(carry, roots, study, truths)
             if bool(wake):
                 if view_log is not None:
                     view_log.append(
@@ -86,7 +86,7 @@ class HostExecutor(AbstractExecutor):
                         )
                     )
                 if policy_form == "array":
-                    eff, pstate, u = dec(carry, root, study)
+                    eff, pstate, u = dec(carry, roots, study)
                 else:
                     view = snapshot_view(carry, Audience.POLICY, caps)
                     view_np = jax.tree_util.tree_map(np.asarray, view)
@@ -96,7 +96,7 @@ class HostExecutor(AbstractExecutor):
                         if ph != int(carry.phase)
                         else np.asarray(carry.pstate)
                     )
-                    key = decision_key(carry, root, study)
+                    key = decision_key(carry, roots, study)
                     eff, pstate, u = study.agenda.policies[ph].decide_py(
                         ps, view_np, study, key
                     )
