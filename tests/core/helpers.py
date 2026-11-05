@@ -85,14 +85,20 @@ def after_decision_1_bundle(study=None):
     return study, c
 
 
-def handle_event(c, study, truth, root, kind, **fields):
-    """Enqueue one row at the current position and run its handler."""
+@eqx.filter_jit
+def _handle_event(c, study, truth, root, kind, fields):
     c = sch.enqueue(
         c, True, kind=kind, tick=c.tick, stage=Stage.ADMIT, caps=study.caps, **fields
     )
     c, ev, _ = sch.select_next(c, study.caps)
     c, _, _ = core.step(c, ev, study, truth, root)
     return c
+
+
+def handle_event(c, study, truth, root, kind, **fields):
+    """Enqueue, select and handle one row with a reusable compiled program."""
+    fields = {name: jnp.asarray(value, jnp.int64) for name, value in fields.items()}
+    return _handle_event(c, study, truth, root, jnp.asarray(kind, jnp.int64), fields)
 
 
 def pending_done_row(c, lane):

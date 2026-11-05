@@ -9,7 +9,9 @@ The suite is dominated by XLA compilation. Two settings keep it fast and small:
   half that limit. On macOS, malloc's live bytes exclude freed pages it still keeps
   resident; elsewhere RSS is the fallback. This retains useful executables without
   letting the cache budget grow with allocator retention. Cleanup and the next
-  compile both need headroom below the 6 GB process budget.
+  compile both need headroom below the 6 GB process budget. Release freed allocator
+  pages before rechecking either watermark, so retention alone does not evict
+  programs when live heap accounting falls back to RSS.
 """
 
 import ctypes
@@ -84,6 +86,14 @@ def _release_freed_memory():
             ctypes.CDLL("/usr/lib/libSystem.B.dylib").malloc_zone_pressure_relief(0, 0)
         except (OSError, AttributeError):
             pass
+    elif sys.platform.startswith("linux"):
+        try:
+            trim = ctypes.CDLL(None).malloc_trim
+            trim.argtypes = [ctypes.c_size_t]
+            trim.restype = ctypes.c_int
+            trim(0)
+        except (OSError, AttributeError):
+            pass
 
 
 def _heap_bytes(fallback):
@@ -106,6 +116,9 @@ def bound_resident_memory():
     """Drop compiled programs between tests when the process has grown too large."""
     yield
     rss = _rss_bytes()
+    if rss > RSS_LIMIT or _heap_bytes(rss) > RSS_LIMIT // 2:
+        _release_freed_memory()
+        rss = _rss_bytes()
     if rss > RSS_LIMIT or _heap_bytes(rss) > RSS_LIMIT // 2:
         jax.clear_caches()
         gc.collect()

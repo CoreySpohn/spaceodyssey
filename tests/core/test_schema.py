@@ -40,12 +40,18 @@ def carry_at(caps=CAPS, **fields):
     )
 
 
+_enqueue_j = eqx.filter_jit(sch.enqueue)
+
+
 def enqueue_j(c, ok, caps=CAPS, **kw):
-    return eqx.filter_jit(lambda c_: sch.enqueue(c_, ok, caps=caps, **kw))(c)
+    # Row values vary, but their shapes and the queue program do not.
+    fields = {name: jnp.asarray(value, jnp.int64) for name, value in kw.items()}
+    return _enqueue_j(c, jnp.asarray(ok), caps=caps, **fields)
 
 
+@eqx.filter_jit
 def select_next_j(c, caps=CAPS):
-    return eqx.filter_jit(lambda c_: sch.select_next(c_, caps))(c)
+    return sch.select_next(c, caps)
 
 
 def row(c, i=0):
@@ -231,8 +237,9 @@ def some_rec(caps=CAPS, value0=1.0, **kw):
     return r
 
 
+@eqx.filter_jit
 def write_log_j(c, rec, caps=CAPS):
-    return eqx.filter_jit(lambda c_, r_: sch.write_log(c_, r_, caps))(c, rec)
+    return sch.write_log(c, rec, caps)
 
 
 def carry_with_log_full(caps):
@@ -262,8 +269,9 @@ def log_with_rows(rows, caps=CAPS):
     return c
 
 
+@eqx.filter_jit
 def compact_view_j(c, audience, caps=CAPS):
-    return eqx.filter_jit(lambda c_: sch.snapshot_view(c_, audience, caps))(c)
+    return sch.snapshot_view(c, audience, caps)
 
 
 def test_write_log_full_sets_overflow_and_skips():

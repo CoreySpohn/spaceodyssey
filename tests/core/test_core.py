@@ -54,6 +54,12 @@ def carry0(study=STUDY, truth=TRUTH):
     return eqx.filter_jit(core.init_carry)(study, truth)
 
 
+@pytest.fixture(scope="module")
+def bundle_state():
+    """The shared immutable starting point for the cancel and stop checks."""
+    return after_decision_1_bundle()
+
+
 def ev_of_kind(kind):
     c = carry0()
     ev = jax.tree_util.tree_map(lambda a: a[0], c.ev)
@@ -157,8 +163,8 @@ def test_gain_enters_measurement():
 # ---- cancel, stop, abort, phases --------------------------------------
 
 
-def test_stale_cancel_no_effect():
-    study, c = after_decision_1_bundle()
+def test_stale_cancel_no_effect(bundle_state):
+    study, c = bundle_state
     c2 = handle_event(
         c,
         study,
@@ -172,8 +178,8 @@ def test_stale_cancel_no_effect():
     assert sch.tree_equal_report(c.ledger, c2.ledger)["max_abs"] == 0
 
 
-def test_live_cancel_partial_fraction():
-    study, c = after_decision_1_bundle()
+def test_live_cancel_partial_fraction(bundle_state):
+    study, c = bundle_state
     c2 = handle_event(
         c, study, TRUTH, ROOT, EventKind.CANCEL, lane=0, gen=int(c.ledger.lane_gen[0])
     )
@@ -197,8 +203,8 @@ def test_live_cancel_partial_fraction():
     assert any(int(c2.ev.tick[i]) == 205 for i in released_tick)
 
 
-def test_abort_writes_partial_once():
-    study, c = after_decision_1_bundle()
+def test_abort_writes_partial_once(bundle_state):
+    study, c = bundle_state
     c2 = handle_event(
         c,
         study,
@@ -217,8 +223,8 @@ def test_abort_writes_partial_once():
 @pytest.mark.parametrize(
     "scope", [Scope.LANE, Scope.ASSET, Scope.PROGRAM, Scope.CAMPAIGN]
 )
-def test_close_refuses_new_admissions(scope):
-    study, c = after_decision_1_bundle()
+def test_close_refuses_new_admissions(scope, bundle_state):
+    study, c = bundle_state
     c = handle_event(
         c,
         study,
@@ -234,8 +240,8 @@ def test_close_refuses_new_admissions(scope):
     )
 
 
-def test_close_scope_membership():
-    study, c = after_decision_1_bundle()
+def test_close_scope_membership(bundle_state):
+    study, c = bundle_state
     lane_only = handle_event(
         c,
         study,
@@ -271,8 +277,8 @@ def test_close_scope_membership():
     assert all(bool(x) for x in program.ledger.lane_closed)
 
 
-def test_abort_by_scope_cancels_only_lanes_in_scope():
-    study, c = after_decision_1_bundle()
+def test_abort_by_scope_cancels_only_lanes_in_scope(bundle_state):
+    study, c = bundle_state
     lane2 = handle_event(
         c,
         study,
@@ -297,8 +303,8 @@ def test_abort_by_scope_cancels_only_lanes_in_scope():
     assert int(lane0.n_log) == int(c.n_log) + 1 and not bool(lane0.done)
 
 
-def test_drain_sets_done_when_scope_empty():
-    study, c = after_decision_1_bundle()
+def test_drain_sets_done_when_scope_empty(bundle_state):
+    study, c = bundle_state
     c = handle_event(
         c,
         study,
@@ -314,8 +320,8 @@ def test_drain_sets_done_when_scope_empty():
     assert int(c.n_log) == 3  # the running occupancy completed and settled
 
 
-def test_drain_does_not_wake_the_policy():
-    study, c = after_decision_1_bundle()
+def test_drain_does_not_wake_the_policy(bundle_state):
+    study, c = bundle_state
     c = handle_event(
         c,
         study,
@@ -341,10 +347,10 @@ def test_every_hand_study_reproduces_its_history():
 # ---- firewall, zero latency, stale completions -------------------
 
 
-def test_done_stops_all_writes():
-    study, c = after_decision_1_bundle()
+def test_done_stops_all_writes(bundle_state):
+    study, c = bundle_state
     c = eqx.tree_at(lambda x: x.done, c, jnp.asarray(True))
-    c2, _ = transition_j(c, 0, ROOT, study, TRUTH)
+    c2, _ = transition_j(c, jnp.asarray(0), ROOT, study, TRUTH)
     r = sch.tree_equal_report(c, c2)
     assert r["max_abs"] == 0 and r["max_int_diff"] == 0 and r["structure_equal"]
 
@@ -406,8 +412,8 @@ def test_zero_latency_abort_does_not_violate():
     assert not bool(c2.violation) and bool(c2.done)
 
 
-def test_cancel_bumps_lane_generation():
-    study, c = after_decision_1_bundle()
+def test_cancel_bumps_lane_generation(bundle_state):
+    study, c = bundle_state
     g = int(c.ledger.lane_gen[0])
     c2 = handle_event(c, study, TRUTH, ROOT, EventKind.CANCEL, lane=0, gen=g)
     assert int(c2.ledger.lane_gen[0]) == g + 1
@@ -429,8 +435,8 @@ def _done_row(c, **kw):
     return fields
 
 
-def test_stale_completion_settles_nothing():
-    study, c = after_decision_1_bundle()
+def test_stale_completion_settles_nothing(bundle_state):
+    study, c = bundle_state
     g = int(c.ledger.lane_gen[0])
     n_rel = int(jnp.sum(c.ev.valid & (c.ev.kind == EventKind.RELEASE)))
     c2 = handle_event(c, study, TRUTH, ROOT, EventKind.DONE, gen=g - 1, **_done_row(c))
@@ -442,8 +448,8 @@ def test_stale_completion_settles_nothing():
     assert int(jnp.sum(c3.ev.valid & (c3.ev.kind == EventKind.RELEASE))) == n_rel + 1
 
 
-def test_cancelled_occupancy_never_completes():
-    study, c = after_decision_1_bundle()
+def test_cancelled_occupancy_never_completes(bundle_state):
+    study, c = bundle_state
     c2 = handle_event(
         c, study, TRUTH, ROOT, EventKind.CANCEL, lane=0, gen=int(c.ledger.lane_gen[0])
     )
@@ -467,8 +473,8 @@ def _release_at(c, tick):
     return (c.tick == tick) & (c.stage == Stage.RELEASE)
 
 
-def test_partial_draw_key_ignores_status():
-    study, c = after_decision_1_bundle()
+def test_partial_draw_key_ignores_status(bundle_state):
+    study, c = bundle_state
     full = run_until(
         kinds.survey_1(policies=(frozen(bundle_at=1),)), lambda x: x.n_log >= 3
     )
@@ -506,8 +512,8 @@ def test_phase_switch_changes_policy_at_boundary():
     assert [int(p) for p in cs.phase] == [1, 1, 1]
 
 
-def test_cancel_partial_joins_observer_not_belief_mean():
-    study, c = after_decision_1_bundle()
+def test_cancel_partial_joins_observer_not_belief_mean(bundle_state):
+    study, c = bundle_state
     c = handle_event(
         c, study, TRUTH, ROOT, EventKind.CANCEL, lane=0, gen=int(c.ledger.lane_gen[0])
     )
@@ -524,8 +530,8 @@ def test_cancel_partial_joins_observer_not_belief_mean():
     )
 
 
-def test_abort_partial_is_never_released_or_folded():
-    study, c = after_decision_1_bundle()
+def test_abort_partial_is_never_released_or_folded(bundle_state):
+    study, c = bundle_state
     n_before, p_before = c.belief.n, c.pbelief.n
     c2 = handle_event(
         c,
