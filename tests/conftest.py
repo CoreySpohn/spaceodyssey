@@ -173,6 +173,7 @@ SLOW_FILES = frozenset(
         "test_leak.py",
         "test_second_kind.py",
         "test_canonical_fields.py",
+        "test_golden_histories.py",
         "test_survey_25.py",
     }
 )
