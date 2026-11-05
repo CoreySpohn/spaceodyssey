@@ -2,9 +2,12 @@
 
 import dataclasses
 
+import equinox as eqx
+import jax
 import jax.numpy as jnp
 from jax import lax
 
+from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.carry import _tree_set, empty_trace
 from spaceodyssey.core.enums import (
     I64,
@@ -19,7 +22,7 @@ from spaceodyssey.core.enums import (
 from spaceodyssey.core.events import enqueue, order_key, select_next, where_tree
 from spaceodyssey.core.handlers import step
 from spaceodyssey.core.keys import policy_key
-from spaceodyssey.core.ledger import _resource_rows
+from spaceodyssey.core.ledger import AssetTable, ChannelTable, _resource_rows
 from spaceodyssey.core.snapshot import snapshot_fingerprint, snapshot_view
 
 
@@ -138,7 +141,7 @@ def decision_key(carry, root, study):
 
 def decide(carry, root, study):
     """Run the policy of the current phase on the policy-audience view."""
-    view = snapshot_view(carry, Audience.POLICY, study.caps)
+    view = eqx.filter_jit(snapshot_view)(carry, Audience.POLICY, study.caps)
     ph = phase_at(carry, study)
     pstate = jnp.where(ph != carry.phase, jnp.zeros_like(carry.pstate), carry.pstate)
     key = decision_key(carry, root, study)
@@ -158,7 +161,9 @@ def decide(carry, root, study):
 
 def decision_fingerprint(carry, study):
     """Fingerprint of the snapshot the policy reads at the current state."""
-    return snapshot_fingerprint(snapshot_view(carry, Audience.POLICY, study.caps))
+    return eqx.filter_jit(snapshot_fingerprint)(
+        eqx.filter_jit(snapshot_view)(carry, Audience.POLICY, study.caps)
+    )
 
 
 def mask_effects(effects, wake):
@@ -283,6 +288,16 @@ def _group_code(c, eff, member, study):
     return first
 
 
+class _AdmissionInputs(eqx.Module):
+    """Admission inputs independent of policy and model implementations."""
+
+    caps: Capacities = eqx.field(static=True)
+    assets: AssetTable
+    channels: ChannelTable
+    horizon_tick: jax.Array
+
+
+@eqx.filter_jit
 def _admit_rows(c, eff, mask, study, fp):
     """Admit the rows of one decision, Observe rows of one group in or out whole."""
     caps = study.caps
@@ -307,10 +322,12 @@ def _admit_rows(c, eff, mask, study, fp):
                 for f in range(n)
             ]
         )
-        gcode = _group_code(c, eff, member, study)
+        gcode = eqx.filter_jit(_group_code)(c, eff, member, study)
         ok = gcode == AdmissionCode.OK
         for f in range(n):
-            c = _commit_observe(c, eff, f, member[f] & ok, study)
+            c = eqx.filter_jit(_commit_observe)(
+                c, eff, jnp.asarray(f, I64), member[f] & ok, study
+            )
             out[f] = jnp.where(member[f], gcode, out[f])
         decided = decided | member
         t = c.tick
@@ -430,7 +447,10 @@ def admit(carry, effects, study, snapshot_fp=None):
     any_eff = active(carry) & (supported & _permitted(mask, effects.kind)).any()
     c = _tree_set(carry, stage=jnp.where(any_eff, Stage.ADMIT, carry.stage))
     c = _tree_set(c, phase=jnp.where(any_eff, phase, c.phase))
-    return _admit_rows(c, effects, mask, study, fp)
+    inputs = _AdmissionInputs(
+        study.caps, study.assets, study.channels, study.horizon_tick
+    )
+    return _admit_rows(c, effects, mask, inputs, fp)
 
 
 def close_decision(carry, effects, pstate, wake, study):

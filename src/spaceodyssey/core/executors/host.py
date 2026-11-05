@@ -82,13 +82,14 @@ class HostExecutor(AbstractExecutor):
                 if view_log is not None:
                     view_log.append(
                         jax.tree_util.tree_map(
-                            np.asarray, snapshot_view(carry, Audience.POLICY, caps)
+                            np.asarray,
+                            eqx.filter_jit(snapshot_view)(carry, Audience.POLICY, caps),
                         )
                     )
                 if policy_form == "array":
                     eff, pstate, u = dec(carry, roots, study)
                 else:
-                    view = snapshot_view(carry, Audience.POLICY, caps)
+                    view = eqx.filter_jit(snapshot_view)(carry, Audience.POLICY, caps)
                     view_np = jax.tree_util.tree_map(np.asarray, view)
                     ph = int(phase_at(carry, study))
                     ps = (

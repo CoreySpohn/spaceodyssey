@@ -121,7 +121,9 @@ def h_done(c, ev, study, truth, root):
         charged=channels.cost[channel_index],
         valid=~dup & ~stale,
     )
-    rec = _realize_rec(c, study, truth, root, base, jnp.asarray(1.0, F64))
+    rec = eqx.filter_jit(_realize_rec)(
+        c, study, truth, root, base, jnp.asarray(1.0, F64)
+    )
     c1 = _tree_set(c, double_settle=c.double_settle | dup)
     c2, slot = write_log(c1, rec, caps)
     written = c2.n_log > c1.n_log
@@ -289,7 +291,7 @@ def _cancel_lane(
         charged=channels.cost[channel_index] * spent,
         valid=has,
     )
-    rec = _realize_rec(c, study, truth, root, base, frac)
+    rec = eqx.filter_jit(_realize_rec)(c, study, truth, root, base, frac)
     rows = _resource_rows(study, lane)
     credit = jnp.where(has, channels.cost[channel_index] * (1.0 - spent), 0.0)
     c1 = _tree_set(
@@ -323,7 +325,9 @@ def _cancel_lane(
 def h_cancel(c, ev, study, truth, root):
     """A Cancel is live only if its generation is the lane's current one."""
     live = ev.gen == c.ledger.lane_gen[ev.lane]
-    c1, n, slot, rec = _cancel_lane(c, study, truth, root, ev.lane, live)
+    c1, n, slot, rec = eqx.filter_jit(_cancel_lane)(
+        c, study, truth, root, ev.lane, live
+    )
     return c1, _emit(n, slot), rec
 
 
@@ -335,7 +339,7 @@ def h_fault(c, ev, study, truth, root):
     coincident order, applied by the event queue.
     """
     live = ev.gen == c.ledger.lane_gen[ev.lane]
-    c1, n, slot, rec = _cancel_lane(
+    c1, n, slot, rec = eqx.filter_jit(_cancel_lane)(
         c, study, truth, root, ev.lane, live, RecordStatus.FAILED, False
     )
     return c1, _emit(n, slot), rec
@@ -364,20 +368,26 @@ def h_stop(c, ev, study, truth, root):
             "draining": c.draining | (campaign & drain),
         },
     )
-    n_total = jnp.asarray(0, I64)
-    slot = jnp.asarray(0, I64)
-    rec = record_none(caps)
-    for lane in range(caps.n_lanes):
-        c1, n, s, r = _cancel_lane(
-            c1, study, truth, root, jnp.asarray(lane, I64), in_scope[lane] & abort
+
+    def cancel(lane, state):
+        carry, n_total, slot, rec = state
+        carry, n, s, r = eqx.filter_jit(_cancel_lane)(
+            carry, study, truth, root, jnp.asarray(lane, I64), in_scope[lane] & abort
         )
-        n_total = n_total + n
-        slot = jnp.where(n > 0, s, slot)
-        rec = where_tree(n > 0, r, rec)
+        return carry, n_total + n, jnp.where(n > 0, s, slot), where_tree(n > 0, r, rec)
+
+    # Trace one lane body while preserving the sequential cancellation order.
+    c1, n_total, slot, rec = lax.fori_loop(
+        0,
+        caps.n_lanes,
+        cancel,
+        (c1, jnp.asarray(0, I64), jnp.asarray(0, I64), record_none(caps)),
+    )
     c2 = _tree_set(c1, done=c1.done | (campaign & abort))
     return c2, _emit(n_total, slot), rec
 
 
+@eqx.filter_jit
 def step(carry, ev, study, truth, root):
     """The transition for one event: lax.switch over `HANDLERS` by event kind."""
     table = HANDLERS
