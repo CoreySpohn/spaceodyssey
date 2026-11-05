@@ -1,6 +1,7 @@
 """Posterior certification probabilities under linear Gaussian experiments."""
 
 from dataclasses import replace
+from functools import cache
 from typing import ClassVar
 
 import equinox as eqx
@@ -422,6 +423,25 @@ def _interval_support_probability(sd, width):
     return _normal_mass(0.05, sd, lower[0], upper[0])
 
 
+@cache
+def _interval_radius_function(positive):
+    """Share the scalar radius function across finite-difference and batch checks."""
+    from spaceodyssey.gaussian_profile import _interval_radius
+
+    def radius(sd, width):
+        return _interval_radius(width, sd, 0.05, positive=positive)[0]
+
+    return radius
+
+
+@cache
+def _gradient_programs(function):
+    """Retain distinct eager, JIT, vmap, and JIT-vmap evaluation paths."""
+    gradient = jax.grad(function, argnums=(0, 1))
+    batched = jax.vmap(gradient)
+    return gradient, jax.jit(gradient), batched, jax.jit(batched)
+
+
 def _central_gradient(function, sd, width):
     values = np.array([sd, width], dtype=np.float64)
     gradient = []
@@ -568,14 +588,10 @@ def test_empty_interval_does_not_poison_feasible_support_gradient():
 @pytest.mark.parametrize("sd, width", [(0.3, 2.0), (0.2, 1.0), (0.08, 0.5)])
 @pytest.mark.parametrize("positive", [True, False])
 def test_interval_radius_gradient_matches_finite_difference(sd, width, positive):
-    from spaceodyssey.gaussian_profile import _interval_radius
-
     with jax.enable_x64():
-
-        def radius(sd, width):
-            return _interval_radius(width, sd, 0.05, positive=positive)[0]
-
-        gradient = jax.grad(radius, argnums=(0, 1))(sd, width)
+        sd, width = np.float64(sd), np.float64(width)
+        radius = _interval_radius_function(positive)
+        gradient = _gradient_programs(radius)[0](sd, width)
         np.testing.assert_allclose(
             gradient, _central_gradient(radius, sd, width), rtol=1e-5, atol=0
         )
@@ -584,7 +600,8 @@ def test_interval_radius_gradient_matches_finite_difference(sd, width, positive)
 @pytest.mark.parametrize("sd, width", [(0.3, 2.0), (0.2, 1.0), (0.08, 0.5)])
 def test_interval_support_gradient_matches_finite_difference(sd, width):
     with jax.enable_x64():
-        gradient = jax.grad(_interval_support_probability, argnums=(0, 1))(sd, width)
+        sd, width = np.float64(sd), np.float64(width)
+        gradient = _gradient_programs(_interval_support_probability)[0](sd, width)
         np.testing.assert_allclose(
             gradient,
             _central_gradient(_interval_support_probability, sd, width),
@@ -595,17 +612,12 @@ def test_interval_support_gradient_matches_finite_difference(sd, width):
 
 @pytest.mark.parametrize("positive", [True, False])
 def test_interval_gradients_jit_and_vmap(positive):
-    from spaceodyssey.gaussian_profile import _interval_radius
-
     with jax.enable_x64():
         scales = jnp.array([0.3, 0.2, 0.08])
         widths = jnp.array([2.0, 1.0, 0.5])
-
-        def radius(sd, width):
-            return _interval_radius(width, sd, 0.05, positive=positive)[0]
-
+        radius = _interval_radius_function(positive)
         for function in (radius, _interval_support_probability):
-            gradient = jax.grad(function, argnums=(0, 1))
+            _, compiled, batched, compiled_batch = _gradient_programs(function)
             expected = np.array(
                 [
                     _central_gradient(function, float(sd), float(width))
@@ -613,14 +625,14 @@ def test_interval_gradients_jit_and_vmap(positive):
                 ]
             ).T
             np.testing.assert_allclose(
-                jax.jit(gradient)(scales[0], widths[0]),
+                compiled(scales[0], widths[0]),
                 expected[:, 0],
                 rtol=1e-5,
                 atol=0,
             )
-            for batched in (jax.vmap(gradient), jax.jit(jax.vmap(gradient))):
+            for evaluate in (batched, compiled_batch):
                 np.testing.assert_allclose(
-                    batched(scales, widths), expected, rtol=1e-5, atol=0
+                    evaluate(scales, widths), expected, rtol=1e-5, atol=0
                 )
 
 
@@ -632,11 +644,9 @@ def test_infeasible_interval_tangents_do_not_leak(positive):
         scales = jnp.array([0.3, 1.0, 0.2])
         widths = jnp.array([2.0, 0.001, 1.0])
 
-        def radius(sd, width):
-            return _interval_radius(width, sd, 0.05, positive=positive)[0]
-
-        gradient = jax.grad(radius, argnums=(0, 1))
-        batched = jax.jit(jax.vmap(gradient))(scales, widths)
+        radius = _interval_radius_function(positive)
+        gradient, _, _, compiled_batch = _gradient_programs(radius)
+        batched = compiled_batch(scales, widths)
         assert np.all(np.isfinite(batched))
         np.testing.assert_array_equal(np.asarray(batched)[:, 1], 0.0)
         for i in (0, 2):

@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
+import pytest
 
 from spaceodyssey.core import Capacities, CompiledExecutor, HostExecutor
 from spaceodyssey.core.executors.base import histories_equal, index_world
@@ -17,6 +18,8 @@ class ToyKnownSignal(ToyPhotometry):
         return design.gain * truth.signal[subject], jnp.asarray(0.0, jnp.float64)
 
 
+# The distinct one-lane known-signal host/compiled parity program runs nightly.
+@pytest.mark.slow
 def test_survey_1_hand_count_and_executor_parity():
     caps = Capacities(n_assets=1, n_lanes=1, n_channels=1, n_subjects=2, n_an=2)
     study = survey_1(caps=caps, channel_model=ToyKnownSignal(noise=jnp.array([0.5])))

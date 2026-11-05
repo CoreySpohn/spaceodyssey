@@ -19,20 +19,16 @@ from spaceodyssey.core.executors.base import (
     index_world,
 )
 from spaceodyssey.core.executors.compiled import CompiledExecutor
-from spaceodyssey.core.executors.host import HostExecutor
-from spaceodyssey.studies import toy as kinds
-from tests.core.helpers import CAPS, worlds
+from tests.core.helpers import CAPS, baseline_host_run, hand_run, worlds
 
 N_STEPS = 40
 
 
 @pytest.fixture(scope="module")
 def runs():
-    study = kinds.survey_1()
-    truths, roots = worlds(1)
-    cs, ts = CompiledExecutor().run(study, truths, roots, N_STEPS)
+    study, host, _ = baseline_host_run()
+    cs, ts = hand_run("baseline")
     scan = (index_world(cs, 0), index_world(ts, 0))
-    host = HostExecutor().run(study, index_world(truths, 0), roots[0], N_STEPS)
     return study, scan, tuple(host)
 
 
@@ -116,10 +112,14 @@ def perturbed(study, name):
         )
     if name == "AssetTable.freeze_ticks":
         return eqx.tree_at(
-            lambda s: s.assets.freeze_ticks, study, jnp.full(CAPS.n_assets, 500)
+            lambda s: s.assets.freeze_ticks,
+            study,
+            jnp.full_like(study.assets.freeze_ticks, 500),
         )
     return eqx.tree_at(
-        lambda s: s.assets.disruptive_resource, study, jnp.full(CAPS.n_assets, 1)
+        lambda s: s.assets.disruptive_resource,
+        study,
+        jnp.full_like(study.assets.disruptive_resource, 1),
     )
 
 

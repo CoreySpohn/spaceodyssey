@@ -1,6 +1,8 @@
 """Shared builders for the core and executor tests (not a test file)."""
 
 import dataclasses
+import functools
+import inspect
 
 import equinox as eqx
 import jax
@@ -16,13 +18,15 @@ from spaceodyssey.core.executors.base import (
     index_world,
 )
 from spaceodyssey.core.executors.compiled import CompiledExecutor
+from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.studies import toy as kinds
-from tests.core.corpus import frozen
+from tests.core.corpus import HAND_STUDIES, frozen
 
 CAPS = Capacities()
 ROOT0 = jr.PRNGKey(0)
 
 
+@functools.cache
 def worlds(n, caps=CAPS, *, seed=0):
     roots = jax.vmap(lambda i: jr.fold_in(jr.PRNGKey(seed), i))(jnp.arange(n))
     truths = jax.vmap(lambda r: kinds.draw_truth(jr.fold_in(r, Purpose.WORLD), caps))(
@@ -47,6 +51,23 @@ def history_of(study, n_steps=40, w=0):
     truths, roots = worlds(w + 1)
     cs, ts = CompiledExecutor().run(study, truths, roots, n_steps)
     return canonical_history(index_world(cs, w), index_world(ts, w))
+
+
+@functools.cache
+def hand_run(name):
+    """Share hand-study runs; the phase boundary checks also exercise batching."""
+    n_worlds = 2 if name == "phase_switch" else 1
+    return CompiledExecutor().run(HAND_STUDIES[name](), *worlds(n_worlds), 40)
+
+
+@functools.cache
+def baseline_host_run():
+    """The baseline host run and its decision views, shared by record checks."""
+    study = kinds.survey_1()
+    truth, root = one_world()
+    views = []
+    run = HostExecutor().run(study, truth, root, 40, view_log=views)
+    return study, run, views
 
 
 transition_j = eqx.filter_jit(core.transition)
@@ -76,9 +97,15 @@ def continue_until(c, study, truth, root, pred, max_steps=60):
     raise AssertionError("predicate never held")
 
 
+@functools.cache
+def _default_bundle_state():
+    return after_decision_1_bundle(kinds.survey_1(policies=(frozen(bundle_at=1),)))
+
+
 def after_decision_1_bundle(study=None):
     """State just after the 185 Release: lane 0 running subject 1, lane 2 done."""
-    study = study or kinds.survey_1(policies=(frozen(bundle_at=1),))
+    if study is None:
+        return _default_bundle_state()
     c = run_until(
         study, lambda c: (c.tick == 185) & (c.stage == Stage.ADMIT) & (c.n_dec == 3)
     )
@@ -95,9 +122,20 @@ def _handle_event(c, study, truth, root, kind, fields):
     return c
 
 
+_EVENT_DEFAULTS = {
+    name: parameter.default
+    for name, parameter in inspect.signature(sch.enqueue).parameters.items()
+    if parameter.default is not inspect.Parameter.empty
+}
+
+
 def handle_event(c, study, truth, root, kind, **fields):
     """Enqueue, select and handle one row with a reusable compiled program."""
-    fields = {name: jnp.asarray(value, jnp.int64) for name, value in fields.items()}
+    # An omitted default and an explicit value must have the same pytree signature.
+    fields = {
+        name: jnp.asarray(value, jnp.int64)
+        for name, value in (_EVENT_DEFAULTS | fields).items()
+    }
     return _handle_event(c, study, truth, root, jnp.asarray(kind, jnp.int64), fields)
 
 

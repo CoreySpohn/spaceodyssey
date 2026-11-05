@@ -10,35 +10,23 @@ import numpy as np
 
 from spaceodyssey.core import (
     Audience,
-    CompiledExecutor,
     HostExecutor,
     canonical_history,
     index_world,
     snapshot_fingerprint,
     snapshot_view,
 )
-from spaceodyssey.studies import catalog, toy
+from spaceodyssey.studies import catalog
 from tests.core.corpus import frozen
-from tests.core.helpers import N_STEPS_CORPUS, worlds
+from tests.core.helpers import (
+    N_STEPS_CORPUS,
+    baseline_host_run,
+    hand_run,
+    worlds,
+)
 
 fingerprint_j = eqx.filter_jit(snapshot_fingerprint)
 PLAN = ((0, 10), (0, catalog.CATALOG_CHANNEL_ID), (1, 10), (0, 10), (1, 10))
-
-
-@functools.cache
-def _baseline():
-    study = toy.survey_1()
-    truths, roots = worlds(1)
-    views, effects = [], []
-    carry, trace = HostExecutor().run(
-        study,
-        index_world(truths, 0),
-        roots[0],
-        N_STEPS_CORPUS,
-        view_log=views,
-        effects_log=effects,
-    )
-    return study, truths, roots, carry, trace, views
 
 
 @functools.cache
@@ -56,7 +44,8 @@ def _fp(carry, study, audience=Audience.POLICY):
 
 
 def test_snapshot_fingerprint_recorded():
-    study, truths, roots, carry, trace, views = _baseline()
+    _, baseline, views = baseline_host_run()
+    carry, trace = baseline
     woke = np.asarray(trace.wake)
     fps = np.asarray(trace.snapshot_fp)
     assert woke.sum() == len(views) == 6
@@ -69,7 +58,7 @@ def test_snapshot_fingerprint_recorded():
     # the history carries it, and the compiled executor records the same values
     h = canonical_history(carry, trace)
     assert np.array_equal(h.ints["snapshot_fp"][h.ints["wake"] == 1], fps[woke])
-    run = CompiledExecutor().run(study, truths, roots, N_STEPS_CORPUS)
+    run = hand_run("baseline")
     assert np.array_equal(run.history(0).ints["snapshot_fp"], h.ints["snapshot_fp"])
 
 
@@ -107,7 +96,8 @@ def test_the_fingerprint_hashes_the_masked_view_not_the_raw_log():
 
 
 def test_the_fingerprint_follows_the_release_version_and_the_decision():
-    study, _, _, carry, _, _ = _baseline()
+    study, run, _ = baseline_host_run()
+    carry = run.carry
     base = _fp(carry, study)
     for name, value in (("n_dec", carry.n_dec + 1), ("tick", carry.tick + 1)):
         assert _fp(dataclasses.replace(carry, **{name: value}), study) != base

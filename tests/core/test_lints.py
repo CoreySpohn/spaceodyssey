@@ -15,7 +15,21 @@ from tests.core.lint_helpers import (
     REPO,
     fixture_core,
     run_lint,
+    run_lint_subprocess,
 )
+
+
+@pytest.mark.parametrize("tool", ["check_domain_words.py", "check_core_imports.py"])
+@pytest.mark.parametrize("source", ["value = 0\n", "import orbix\nplanet = 0\n"])
+def test_loaded_lint_matches_the_command_line(tmp_path, tool, source):
+    root, _ = fixture_core(tmp_path, source)
+    loaded = run_lint(tool, "--core-dir", root)
+    command = run_lint_subprocess(tool, "--core-dir", root)
+    assert (loaded.returncode, loaded.stdout, loaded.stderr) == (
+        command.returncode,
+        command.stdout,
+        command.stderr,
+    )
 
 
 @pytest.mark.parametrize(

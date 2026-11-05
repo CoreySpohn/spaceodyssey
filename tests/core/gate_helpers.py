@@ -2,6 +2,7 @@
 
 import ast
 import builtins
+import functools
 import re
 from pathlib import Path
 from typing import NamedTuple
@@ -24,6 +25,7 @@ def _symbol(node):
     return node.id if isinstance(node, ast.Name) else getattr(node, "attr", None)
 
 
+@functools.cache
 def _study_kind_names():
     """Find concrete kind descendants without importing domain implementations."""
     source = Path(__file__).parents[2] / "src/spaceodyssey"
@@ -305,6 +307,7 @@ ALLOWED = {
 }
 
 
+@functools.cache
 def _core_definitions():
     """Names of core enums and Abstract base classes, found without importing."""
     classes = [

@@ -1,6 +1,7 @@
 """The six statuses, the five identities and the provenance of a record."""
 
 import numpy as np
+import pytest
 
 from spaceodyssey.core import (
     CompiledExecutor,
@@ -12,8 +13,7 @@ from spaceodyssey.core import (
 )
 from spaceodyssey.core.enums import Audience, RecordStatus
 from spaceodyssey.studies import toy
-from tests.core.corpus import CORPUS_BY_NAME
-from tests.core.helpers import N_STEPS_CORPUS, one_world, worlds
+from tests.core.helpers import N_STEPS_CORPUS, baseline_host_run, worlds
 from tests.core.record_helpers import scripted_study
 
 STATUSES = (
@@ -33,7 +33,8 @@ def test_there_are_six_statuses():
     }  # fmt: skip
 
 
-def _run_scripted():
+@pytest.fixture(scope="module")
+def scripted_run():
     study = scripted_study(
         ticks=(10, 20, 30, 40, 50, 60),
         values=(1.0, 2.0, 3.0, 4.0, 5.0, 6.0),
@@ -47,8 +48,8 @@ def _run_scripted():
     return study, carry, trace, truths, roots
 
 
-def test_every_status_is_logged_and_only_completed_values_are_folded():
-    _study, carry, _, _, _ = _run_scripted()
+def test_every_status_is_logged_and_only_completed_values_are_folded(scripted_run):
+    _study, carry, _, _, _ = scripted_run
     log = carry.log
     n = int(carry.n_log)
     assert n == 6
@@ -59,8 +60,8 @@ def test_every_status_is_logged_and_only_completed_values_are_folded():
     assert int(carry.pbelief.n[0]) == 1
 
 
-def test_a_held_record_is_never_released_or_accepted():
-    study, carry, _, _, _ = _run_scripted()
+def test_a_held_record_is_never_released_or_accepted(scripted_run):
+    study, carry, _, _, _ = scripted_run
     held = int(RecordStatus.UNRELEASED)
     row = np.asarray(carry.log.status)[:6] == held
     assert row.sum() == 1
@@ -73,14 +74,14 @@ def test_a_held_record_is_never_released_or_accepted():
         assert held not in np.asarray(view.log.status)[:5]
 
 
-def test_null_is_released_like_any_completed_row():
-    study, carry, _, _, _ = _run_scripted()
+def test_null_is_released_like_any_completed_row(scripted_run):
+    study, carry, _, _, _ = scripted_run
     view = snapshot_view(carry, Audience.POLICY, study.caps)
     assert int(RecordStatus.NULL) in np.asarray(view.log.status)[: int(view.n_rows)]
 
 
-def test_statuses_agree_between_executors_and_replay():
-    study, carry, trace, truths, roots = _run_scripted()
+def test_statuses_agree_between_executors_and_replay(scripted_run):
+    study, carry, trace, truths, roots = scripted_run
     cs, _ = CompiledExecutor().run(study, truths, roots, N_STEPS_CORPUS)
     compiled = index_world(cs, 0)
     assert np.array_equal(np.asarray(compiled.log.status), np.asarray(carry.log.status))
@@ -90,9 +91,8 @@ def test_statuses_agree_between_executors_and_replay():
 
 
 def test_identities_and_provenance_of_a_settled_record():
-    study = CORPUS_BY_NAME["baseline"].make_study()
-    truth, root = one_world()
-    carry, trace = HostExecutor().run(study, truth, root, N_STEPS_CORPUS)
+    study, run, _ = baseline_host_run()
+    carry, trace = run
     n = int(carry.n_log)
     log = carry.log
     ids = np.asarray(log.acquisition_id)[:n]

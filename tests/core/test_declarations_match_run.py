@@ -1,16 +1,43 @@
 """The stops and needs a policy declares match what a run emits."""
 
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from spaceodyssey.core import battery
 from spaceodyssey.core.declarations import Declaration, Need
 from spaceodyssey.core.enums import Disposition, Scope
-from tests.core.battery_helpers import PLAN, StatedPlan, survey
+from spaceodyssey.studies.toy import FixedPlanPolicy
+from tests.core.battery_helpers import PLAN, survey
 from tests.core.corpus import CORPUS_BY_NAME
 from tests.core.helpers import worlds
 
 N_STEPS = 40
 DRAIN = (Scope.CAMPAIGN, Disposition.DRAIN)
+
+
+class DeclaredPlan(FixedPlanPolicy):
+    """Declaration values are leaves so the unchanged plan shares one program."""
+
+    declared_stops: jax.Array = eqx.field(kw_only=True)
+    declared_needs: jax.Array = eqx.field(kw_only=True)
+
+    def declare(self):
+        """Reconstruct the host-side declaration from its numeric rows."""
+        return Declaration(
+            stops=tuple(
+                (Scope(int(scope)), Disposition(int(disposition)))
+                for scope, disposition in np.asarray(self.declared_stops)
+                if scope >= 0
+            ),
+            needs=tuple(
+                Need(*map(int, row))
+                for row in np.asarray(self.declared_needs)
+                if row[0] >= 0
+            ),
+        )
 
 
 @pytest.fixture(scope="module")
@@ -24,7 +51,18 @@ def run(study, inputs):
 
 
 def stated(**declared):
-    return survey(StatedPlan(plan=PLAN, stated=Declaration(**declared)))
+    declaration = Declaration(**declared)
+    policy = DeclaredPlan(
+        plan=PLAN,
+        declared_stops=jnp.asarray(declaration.stops or ((-1, -1),), jnp.int64),
+        declared_needs=jnp.asarray(
+            [(n.channel_id, n.start_tick, n.decide_tick) for n in declaration.needs]
+            or [(-1, -1, -1)],
+            jnp.int64,
+        ),
+    )
+    assert policy.declare() == declaration
+    return survey(policy)
 
 
 def test_the_plan_declares_the_stop_it_emits(inputs):

@@ -33,8 +33,8 @@ from tests.core.helpers import (
     after_decision_1_bundle,
     continue_until,
     effects_of,
+    hand_run,
     handle_event,
-    history_of,
     log_row,
     observe_effect,
     one_world,
@@ -338,10 +338,10 @@ def test_drain_does_not_wake_the_policy(bundle_state):
 
 
 def test_every_hand_study_reproduces_its_history():
-    for name, make in HAND_STUDIES.items():
+    for name in HAND_STUDIES:
         if name not in HAND_HISTORIES:
             continue
-        assert history_of(make()).events == HAND_HISTORIES[name], name
+        assert hand_run(name).history(0).events == HAND_HISTORIES[name], name
 
 
 # ---- firewall, zero latency, stale completions -------------------
@@ -379,7 +379,9 @@ def test_zero_latency_cancel_does_not_violate():
     study = kinds.survey_1(policies=(frozen(plan=((0, 12), (1, 10))),))
     c = run_until(study, lambda c: c.n_dec >= 1)
     c = eqx.tree_at(
-        lambda x: (x.tick, x.stage), c, (jnp.asarray(30), jnp.asarray(Stage.ADMIT))
+        lambda x: (x.tick, x.stage),
+        c,
+        (jnp.asarray(30, c.tick.dtype), jnp.asarray(Stage.ADMIT, c.stage.dtype)),
     )
     c2 = handle_event(
         c, study, TRUTH, ROOT, EventKind.CANCEL, lane=2, gen=int(c.ledger.lane_gen[2])
@@ -397,7 +399,9 @@ def test_zero_latency_abort_does_not_violate():
     study = kinds.survey_1(policies=(frozen(plan=((0, 12), (1, 10))),))
     c = run_until(study, lambda c: c.n_dec >= 1)
     c = eqx.tree_at(
-        lambda x: (x.tick, x.stage), c, (jnp.asarray(30), jnp.asarray(Stage.ADMIT))
+        lambda x: (x.tick, x.stage),
+        c,
+        (jnp.asarray(30, c.tick.dtype), jnp.asarray(Stage.ADMIT, c.stage.dtype)),
     )
     c2 = handle_event(
         c,
@@ -496,9 +500,8 @@ def test_partial_draw_key_ignores_status(bundle_state):
 
 
 def test_phase_switch_changes_policy_at_boundary():
-    study = HAND_STUDIES["phase_switch"]()
-    cs, ts = CompiledExecutor().run(study, *worlds(3), 40)
-    for w in range(3):
+    cs, ts = hand_run("phase_switch")
+    for w in range(2):
         h = canonical_history(index_world(cs, w), index_world(ts, w))
         assert h.ints["phase"].tolist() == [0, 0, 0, 1, 1]
         assert h.ints["vintage"].tolist() == [0, 0, 0, 1, 1]
@@ -509,7 +512,7 @@ def test_phase_switch_changes_policy_at_boundary():
             445,
         )
         assert h.ints["acquisition_index"][3] == 2
-    assert [int(p) for p in cs.phase] == [1, 1, 1]
+    assert [int(p) for p in cs.phase] == [1, 1]
 
 
 def test_cancel_partial_joins_observer_not_belief_mean(bundle_state):
@@ -555,6 +558,8 @@ def test_abort_partial_is_never_released_or_folded(bundle_state):
     assert int(c3.n_log) == int(c2.n_log)
 
 
+# The distinct adaptive-policy program and six-world drain check run nightly.
+@pytest.mark.slow
 def test_threshold_stop_policy_drains_after_threshold():
     study = kinds.survey_1(policies=(kinds.ThresholdStopPolicy(stop_snr=3.0),))
     cs, ts = CompiledExecutor().run(study, *worlds(6), 80)
