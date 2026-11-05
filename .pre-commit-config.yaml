@@ -29,7 +29,7 @@ repos:
         exclude: ^tests/(doubles|core/((acquisition|battery|conformance|contract|draw|gate|leak|lint|parity|record|status)_helpers|helpers|corpus|gradients|mutants|preflight_cases))\.py$
       - id: end-of-file-fixer
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.18
+    rev: v0.17.3
     hooks:
       - id: ruff-check
         args: [--fix]
