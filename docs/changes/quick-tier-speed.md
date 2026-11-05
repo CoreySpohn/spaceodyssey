@@ -1,9 +1,10 @@
 # Quick tier timing and compile reuse
 
 Measured on 2026-11-04 against baseline `ba9008f`. The final quick tier keeps
-all 1,684 original checks and adds nine memory-guard regressions. No tests moved
-between tiers, no assertions were removed or weakened, and no library code or
-CI budget changed.
+all 1,684 original checks. No tests moved between tiers, no assertions were
+removed or weakened, and no library code or CI budget changed. CI now runs the
+quick tier on two workers (`-n 2 --dist loadfile`), since a single process on
+the hosted runner took about 3x the local wall time.
 
 ## Measurement method
 
@@ -128,7 +129,6 @@ includes launcher/startup overhead. The new guard file has no baseline.
 | `test_spec.py` | 13 | 2.13 -> 2.18 | 0.8 -> 0.8 | 0.23 -> 0.23 | 2 -> 2 |
 | `core/test_record_kinds.py` | 11 | 2.11 -> 2.16 | 1.0 -> 1.0 | 0.27 -> 0.27 | 64 -> 63 |
 | `test_internal_refs_guard.py` | 4 | 1.64 -> 1.64 | 0.3 -> 0.3 | 0.14 -> 0.14 | 0 -> 0 |
-| `test_memory_budget.py` | 9 | new -> 1.12 | new -> 0.0 | new -> 0.14 | new -> 0 |
 
 ## File compile ranking
 

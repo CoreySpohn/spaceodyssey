@@ -87,7 +87,9 @@ jobs:
 
       - name: Quick tier
         run: |
-          pytest tests/ -m "not slow" -ra --tb=short \
+          # Two workers, one file each: the quick tier is compile-bound and a
+          # single process runs about 3x slower here than on a laptop.
+          pytest tests/ -m "not slow" -n 2 --dist loadfile -ra --tb=short \
             --timeout=300 --fail-slow=60s \
             --durations=15 --durations-min=1.0 \
             --junitxml=junit-quick.xml
