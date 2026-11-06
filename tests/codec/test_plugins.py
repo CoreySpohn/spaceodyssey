@@ -173,6 +173,13 @@ def _twice_from_two_distributions():
     ]
 
 
+def _one_class_under_two_ids():
+    return [
+        Entry("spaceodyssey.design", "toy.gain@1", toy.ToyDesign, Dist("alpha")),
+        Entry("spaceodyssey.design", "toy.other@1", toy.ToyDesign, Dist("beta")),
+    ]
+
+
 @pytest.mark.parametrize(
     ("entries", "words"),
     [
@@ -181,6 +188,7 @@ def _twice_from_two_distributions():
         ([Entry("spaceodyssey.design", "toy.gain", toy.ToyDesign)], ("<id>@",)),
         ([Entry("spaceodyssey.policy", "toy.gain@1", toy.ToyDesign)], ("Policy",)),
         ([Entry("spaceodyssey.core", "study@1", Clock)], ("core kinds",)),
+        (_one_class_under_two_ids(), ("toy.gain", "toy.other", "alpha", "beta")),
     ],
     ids=[
         "duplicate",
@@ -188,13 +196,14 @@ def _twice_from_two_distributions():
         "no-version",
         "wrong-family",
         "core-rebound",
+        "class-under-two-ids",
     ],
 )
 def test_bad_registration_is_refused(entries, words):
-    """Fails if one id registered by two distributions is accepted or the error
-    does not name both, or if an entry point with an unknown family, a name without
-    a version, a class of another family, or a core entry bound to another class is
-    accepted.
+    """Fails if one id registered by two distributions, or one class under two ids,
+    is accepted or the error does not name both entries and distributions, or if an
+    entry point with an unknown family, a name without a version, a class of
+    another family, or a core entry bound to another class is accepted.
     """
     with pytest.raises(RegistrationError) as err:
         kinds_from_entry_points(entries)

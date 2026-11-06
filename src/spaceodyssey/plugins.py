@@ -65,11 +65,12 @@ def kinds_from_entry_points(entries):
     Entries outside the `spaceodyssey.` groups are ignored. A group naming no
     family, a malformed name, an object that fails to load, a class of the wrong
     family or version, a core entry that differs from `CORE_KINDS`, and one
-    `(group, id)` registered twice (naming both entries and their distributions)
-    each raise `RegistrationError`.
+    `(group, id)` registered twice or one class registered under two ids (naming
+    both entries and their distributions) each raise `RegistrationError`.
     """
     kinds = {}
     seen = {}
+    bound = {}
     for entry in entries:
         if not entry.group.startswith(GROUP_PREFIX):
             continue
@@ -96,7 +97,14 @@ def kinds_from_entry_points(entries):
             cls = entry.load()
         except (ImportError, AttributeError) as err:
             raise RegistrationError(f"{_origin(entry)}: cannot load: {err}") from err
-        kinds[ref] = _checked(entry, ref, cls)
+        cls = _checked(entry, ref, cls)
+        if cls in bound:
+            raise RegistrationError(
+                f"{cls.__module__}.{cls.__qualname__} is registered under two ids: "
+                f"{_origin(bound[cls])} and {_origin(entry)}"
+            )
+        bound[cls] = entry
+        kinds[ref] = cls
     return kinds
 
 
