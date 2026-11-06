@@ -233,7 +233,7 @@ def test_hand_count_and_variance_budget(observatory):
     where QE is applied, and the collecting area is pi (D/2)^2 (1 - OBSCURED). Also
     fails if a component is dropped from the variance, if the background multiplier
     is not applied, or if the floor is not (t * leakage / ppfact)^2. A zero-length
-    interval has zero counts, zero variance and SNR 0 (not NaN).
+    interval has zero counts, zero variance, SNR 0 and a finite centroid (not NaN).
     """
     spec = DetectorSpec.fixture(quantum_efficiency=1.0, dqe=1.0)
     scene = toy_scene()
@@ -267,6 +267,7 @@ def test_hand_count_and_variance_budget(observatory):
         assert bool(budget.in_field)
         empty = report.predict(theta, ScienceInterval(interval.midpoint_jd, 0.0))
         assert float(empty.planet) == float(empty.variance) == float(empty.snr) == 0.0
+        assert np.isfinite(empty.ra_arcsec) and np.isfinite(empty.dec_arcsec)
     # Control: a raw area fraction as the linear obscuration overstates the area.
     raw = SimplePrimary(DIAMETER_M, OBSCURED).area_m2
     assert raw / report.optical_path.primary.area_m2 - 1.0 > 0.1

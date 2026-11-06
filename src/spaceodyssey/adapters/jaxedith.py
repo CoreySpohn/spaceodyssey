@@ -36,6 +36,9 @@ Declared conventions:
   value of `zodi_fn_ayo` (one zodi seen face-on at equivalent insolation).
 - Thermal emission is evaluated with the declared `eps_warm_T_cold` (0 switches it
   off whatever the temperature).
+- Detector quantum efficiency enters only where jaxedith applies it. A jaxedith that
+  does not multiply photon rates by the detector QE gives photon counts through the
+  optics; the adapter does not apply QE itself, so it is never applied twice.
 - The background variance multiplier `bg_multiplier` is declared (1 for one roll with
   a known mean subtracted). The systematic floor is `leakage / ppfact` and is off
   for an infinite `ppfact`. The exozodi floor is off.
@@ -663,7 +666,7 @@ class SummaryReport(eqx.Module):
         flux_w = w * r.planet
         total_w = jnp.sum(flux_w)
         safe = jnp.where(total_w > 0, total_w, 1.0)
-        mean_w = w / jnp.sum(w)
+        mean_w = self.weights / jnp.sum(self.weights)
         # Flux-weighted centroid; a planet with no counts falls back to the time mean.
         ra, dec = (
             jnp.where(total_w > 0, jnp.sum(flux_w * x) / safe, jnp.sum(mean_w * x))
