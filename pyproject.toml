@@ -31,6 +31,60 @@ dependencies = [
 Repository = "https://github.com/CoreySpohn/spaceodyssey"
 Documentation = "https://spaceodyssey.readthedocs.io"
 
+# Kinds a study document can name: group spaceodyssey.<family>, name <id>@<version>.
+[project.entry-points."spaceodyssey.core"]
+"study@1" = "spaceodyssey.core.study:Study"
+"clock@1" = "spaceodyssey.core.study:Clock"
+"agenda@1" = "spaceodyssey.core.study:Agenda"
+"channel_table@1" = "spaceodyssey.core.ledger:ChannelTable"
+"asset_table@1" = "spaceodyssey.core.ledger:AssetTable"
+"capacities@1" = "spaceodyssey.core.capacities:Capacities"
+"coupling@1" = "spaceodyssey.core.keys:Coupling"
+"fork@1" = "spaceodyssey.core.keys:Fork"
+"effect_table@1" = "spaceodyssey.core.snapshot:EffectTable"
+"stage@1" = "spaceodyssey.core.enums:Stage"
+"event_kind@1" = "spaceodyssey.core.enums:EventKind"
+"effect_kind@1" = "spaceodyssey.core.enums:EffectKind"
+"scope@1" = "spaceodyssey.core.enums:Scope"
+"disposition@1" = "spaceodyssey.core.enums:Disposition"
+"record_status@1" = "spaceodyssey.core.enums:RecordStatus"
+"purpose@1" = "spaceodyssey.core.enums:Purpose"
+"admission_code@1" = "spaceodyssey.core.enums:AdmissionCode"
+"coincident_order@1" = "spaceodyssey.core.enums:CoincidentOrder"
+"charge_rule@1" = "spaceodyssey.core.enums:ChargeRule"
+"remainder_rule@1" = "spaceodyssey.core.enums:RemainderRule"
+"audience@1" = "spaceodyssey.core.enums:Audience"
+"capacity@1" = "spaceodyssey.core.enums:Capacity"
+"run_status@1" = "spaceodyssey.core.enums:RunStatus"
+
+[project.entry-points."spaceodyssey.observer"]
+"toy.running_mean@1" = "spaceodyssey.studies.toy:ToyRunningMean"
+"catalog.observer@1" = "spaceodyssey.studies.catalog:CatalogObserver"
+
+[project.entry-points."spaceodyssey.policy"]
+"toy.fixed_plan@1" = "spaceodyssey.studies.toy:FixedPlanPolicy"
+"toy.threshold_stop@1" = "spaceodyssey.studies.toy:ThresholdStopPolicy"
+"toy.spin_wait@1" = "spaceodyssey.studies.toy:SpinWaitPolicy"
+"toy.null@1" = "spaceodyssey.studies.toy:NullPolicy"
+"oracle.query@1" = "spaceodyssey.studies.oracle:QueryPolicy"
+
+[project.entry-points."spaceodyssey.process"]
+"toy.null@1" = "spaceodyssey.studies.toy:NullProcess"
+"toy.heartbeat@1" = "spaceodyssey.studies.toy:HeartbeatProcess"
+"scripted.records@1" = "spaceodyssey.studies.scripted:ScriptedRecords"
+
+[project.entry-points."spaceodyssey.world_source"]
+"toy.uniform_signal@1" = "spaceodyssey.studies.toy:ToyWorldSource"
+
+[project.entry-points."spaceodyssey.channel_model"]
+"toy.photometry@1" = "spaceodyssey.studies.toy:ToyPhotometry"
+
+[project.entry-points."spaceodyssey.design"]
+"toy.gain@1" = "spaceodyssey.studies.toy:ToyDesign"
+
+[project.entry-points."spaceodyssey.objective"]
+"toy.threshold@1" = "spaceodyssey.studies.toy:ToyObjective"
+
 [project.optional-dependencies]
 retrieval = ["exojax>=2.5"]
 optics = ["physicaloptix>=2.3"]
