@@ -4,7 +4,7 @@
   "note": "Library revisions the fixtures and anchors were generated against. Revisions are provenance, not an install requirement; floors are the oldest versions that carry every interface the adapters call.",
   "libraries": {
     "orbix": {"revision": "e0f615739c897945a3549dbf8acc7f761cb03d71", "floor": "3.0.0", "role": "Keplerian orbits, Kepler solver, L2 halo orbit, keepout"},
-    "photomancy": {"revision": "dc1d0deaef830a2e2d91716f7ce29092a776bfd3", "floor": "0.4.1.dev0", "role": "orbit prior with planet-scale sites (sample_planet_scale, unreleased after 0.4.0)"},
+    "photomancy": {"revision": "dc1d0deaef830a2e2d91716f7ce29092a776bfd3", "floor": "0.4.1.dev0", "role": "orbit prior with planet-scale sites (sample_planet_scale, unreleased after 0.4.0; installed in CI from the sibling pin at this revision until a release carries it)"},
     "skyscapes": {"revision": "28232bf44c38f93dffe27715b36599f0ce923eb6", "floor": "2.1.0", "role": "Star, BlackbodyStar, Planet, System, LambertianPhysicalModel"},
     "hwoutils": {"revision": "6767088c192fa1ce6bb81d596678cb3db149c005", "floor": "1.10.0", "role": "constants and conversions"},
     "yippy": {"revision": "8e2cea989eb54c7107330a5a2cf9dc76ef80c792", "floor": "2.11.0", "role": "pinned response package loader"},

@@ -25,6 +25,7 @@ from spaceodyssey.core.enums import Audience
 ROOT = Path(__file__).parents[2]
 PAGE = ROOT / "docs" / "profiles" / "first-summary-v1.md"
 MANIFEST = json.loads((Path(__file__).parent / "fixture_manifest.json").read_text())
+SIBLING_PINS = (ROOT / ".github" / "sibling-pins.txt").read_text()
 PROFILE = load_profile()
 
 # The record envelope's payload columns, in record order.
@@ -127,16 +128,21 @@ def test_manifest_pins_every_consumed_library_and_the_response():
     """Fails if a consumed library is unpinned, below its floor, or the pins disagree.
 
     Every library the physical adapters import has a 40-hex revision and a
-    version floor the installed package meets; the manifest's response pin is the
-    profile's and is yippy's catalog entry for its release.
+    version floor the installed package meets. A floor that is not yet released
+    (a development version) is installed from the sibling pin at exactly the
+    manifest revision. The manifest's response pin is the profile's and is
+    yippy's catalog entry for its release.
     """
     from yippy import datasets
 
+    pins = dict(re.findall(r"^(\S+) @ git\+\S+@([0-9a-f]{40})$", SIBLING_PINS, re.M))
     for name in ("orbix", "photomancy", "skyscapes", "hwoutils", "yippy"):
         entry = MANIFEST["libraries"][name]
         assert re.fullmatch("[0-9a-f]{40}", entry["revision"]), name
         installed = Version(importlib.metadata.version(name))
         assert installed >= Version(entry["floor"]), (name, installed)
+        if Version(entry["floor"]).is_devrelease:
+            assert pins.get(name) == entry["revision"], (name, pins)
     data = MANIFEST["data"]
     response = PROFILE["response"]
     assert (data["package"], data["release"], data["digest"]) == (

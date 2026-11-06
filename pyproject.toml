@@ -143,10 +143,15 @@ filterwarnings = [
     "error",
     # tol-colors initializes colormaps with set_bad, pending deprecation in Matplotlib 3.11.
     'ignore:The set_bad function will be deprecated in a future version\.:PendingDeprecationWarning:tol_colors$',
-    # skyscapes scenes import ExoJAX, which redirects HAPI's import output to an unclosed /dev/null stream.
+    # ExoJAX 2.5.0 (imported by skyscapes scenes) redirects HAPI's import output to an
+    # unclosed /dev/null stream; upstream code, not fixable here.
     "ignore:unclosed file.*name='/dev/null':ResourceWarning:exojax[.]database[.]_common[.]hitranapi$",
-    # HAPI, ExoJAX and Vaex (imported by skyscapes) use invalid escapes in non-raw strings on a cold import.
-    'ignore:invalid escape sequence:SyntaxWarning:.*[/]site-packages[/](hapi[/]hapi|(exojax|vaex)[/].*)$',
+    # Invalid escapes in non-raw strings, emitted once on a cold (uncompiled) import by
+    # hitran-api 1.3.0.0 (hapi/hapi.py), ExoJAX 2.5.0 (the seven modules listed) and
+    # vaex-core 4.19.0 / vaex-viz 0.6.0 (functions.py, viz/contour.py, viz/mpl.py).
+    'ignore:invalid escape sequence:SyntaxWarning:.*[/]site-packages[/]hapi[/]hapi$',
+    'ignore:invalid escape sequence:SyntaxWarning:.*[/]site-packages[/]exojax[/](atm[/]atmprof|database[/]core_atom[/]broadening|database[/]mie|opacity[/]_common[/]lsd|rt[/]toon|rt[/]twostream|utils[/]isotopes)$',
+    'ignore:invalid escape sequence:SyntaxWarning:.*[/]site-packages[/]vaex[/](functions|viz[/]contour|viz[/]mpl)$',
 ]
 testpaths = ["tests"]
 markers = [

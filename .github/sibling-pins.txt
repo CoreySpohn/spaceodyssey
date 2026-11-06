@@ -1,3 +1,4 @@
 # Unreleased sibling libraries, applied as uv overrides so each is installed at a pinned main
 # commit whatever version bounds other packages declare (a breaking change waiting for its
 # release tag reports the old major version). Move a pin deliberately; drop it once PyPI covers it.
+photomancy @ git+https://github.com/CoreySpohn/photomancy@dc1d0deaef830a2e2d91716f7ce29092a776bfd3

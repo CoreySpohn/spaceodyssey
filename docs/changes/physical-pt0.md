@@ -82,3 +82,16 @@ drifts from the table, are both killed.
   NaN, so the payload stays finite.
 - The response origin rule is marked provisional on the page: the public yield
   standard's text was not checked.
+
+## Review fixes
+
+- photomancy 0.4.0 has no `sample_planet_scale`, so `.github/sibling-pins.txt` now pins
+  photomancy main at `dc1d0deaef830a2e2d91716f7ce29092a776bfd3`, the manifest revision.
+  The manifest test checks that a development-version floor is installed from the
+  sibling pin at exactly that revision (a wrong pin revision fails it). Once a photomancy
+  release carries the prior-only model, the floor moves to that release, the pin is
+  dropped and the dependency floor is raised.
+- The SyntaxWarning filters are narrowed to the modules that emit on a cold import:
+  hitran-api 1.3.0.0 `hapi/hapi`, seven ExoJAX 2.5.0 modules, and three vaex-core
+  4.19.0 / vaex-viz 0.6.0 modules; both new filter comments record the package
+  versions. A cold import with an empty bytecode cache passes under the narrowed filters.
