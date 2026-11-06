@@ -94,6 +94,9 @@ DELETED_NAMES = frozenset(
     }
 )
 
+# Generic removed root exports are checked when qualified, not in bare prose.
+DELETED_ROOT_NAMES = DELETED_NAMES | {"Ledger", "Mission", "build", "run"}
+
 SKIP_DIRS = frozenset(
     {
         ".git",
@@ -112,7 +115,8 @@ SKIP_DIRS = frozenset(
 )
 # These two files list the deleted names on purpose.
 SELF = frozenset({"test_slice2_gate.py", "test_docs_names.py"})
-TEXT_SUFFIXES = frozenset({".md", ".rst", ".txt", ".toml", ".yml", ".yaml", ".cfg"})
+PROSE_SUFFIXES = frozenset({".md", ".rst", ".txt"})
+TEXT_SUFFIXES = PROSE_SUFFIXES | {".toml", ".yml", ".yaml", ".cfg"}
 CODE_SUFFIXES = frozenset({".py", ".ipynb"})
 
 # Files that a scan of this repository must reach, and how many Python files it
@@ -171,9 +175,18 @@ def _resolve(node: ast.ImportFrom, rel: Path) -> list[str] | None:
 
 
 def python_hits(source: str, rel: Path, valid: set[str]) -> list[str]:
-    """Deleted modules or names that Python source imports or names in a string."""
+    """Deleted imports, package attributes and module strings in Python source."""
     hits = []
-    for node in ast.walk(ast.parse(source)):
+    tree = ast.parse(source)
+    package_aliases = {
+        alias.asname or PACKAGE
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == PACKAGE
+        or (alias.name.startswith(f"{PACKAGE}.") and alias.asname is None)
+    }
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 parts = alias.name.split(".")
@@ -194,6 +207,13 @@ def python_hits(source: str, rel: Path, valid: set[str]) -> list[str]:
                 for alias in node.names:
                     if alias.name != "*" and alias.name not in valid:
                         hits.append(f"{PACKAGE}.{alias.name}")
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in package_aliases
+            and node.attr in DELETED_ROOT_NAMES | DELETED_MODULES
+        ):
+            hits.append(f"{PACKAGE}.{node.attr}")
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             parts = node.value.split(":")[0].split(".")
             if (
@@ -217,18 +237,23 @@ def text_hits(text: str, valid: set[str]) -> list[str]:
 
 
 def entry_point_hits(text: str, root: Path) -> list[str]:
-    """Entry-point and script targets in a pyproject file that name a missing module."""
+    """Entry-point and script targets naming missing modules or removed root names."""
     hits = []
     project = tomllib.loads(text).get("project", {})
     groups = list(project.get("entry-points", {}).values())
     groups.append(project.get("scripts", {}))
     for group in groups:
         for target in group.values():
-            module = str(target).split(":")[0].split(".")
+            module_name, _, attr = str(target).partition(":")
+            module = module_name.split(".")
             if module[0] != PACKAGE:
                 continue
             base = root / "src" / Path(*module)
             if module[1:2] and module[1] in DELETED_MODULES:
+                hits.append(str(target))
+            elif module == [PACKAGE] and attr.split(".")[0] in (
+                DELETED_ROOT_NAMES | DELETED_MODULES
+            ):
                 hits.append(str(target))
             elif not (base.with_suffix(".py").exists() or base.is_dir()):
                 hits.append(str(target))
@@ -242,7 +267,7 @@ def _notebook_code(text: str) -> str:
 
 def is_history(rel: Path) -> bool:
     """Historical prose that names deleted modules on purpose: change records."""
-    return rel.parts[:2] == ("docs", "changes") and rel.suffix in TEXT_SUFFIXES
+    return rel.parts[:2] == ("docs", "changes") and rel.suffix in PROSE_SUFFIXES
 
 
 def scan_repo(root: Path, *, min_python: int = MIN_PYTHON_FILES, sentinels=SENTINELS):
@@ -306,6 +331,15 @@ VIOLATIONS = {
     "tests/test_from.py": "from spaceodyssey.spec import MissionSpec\n",
     "tests/test_package.py": "from spaceodyssey import registry\n",
     "tests/test_root_name.py": "from spaceodyssey import Ledger, Mission, run\n",
+    "tests/test_root_attribute.py": "import spaceodyssey\nspaceodyssey.Mission\n",
+    "tests/test_alias_attribute.py": "import spaceodyssey as so; so.Mission\n",
+    "tests/test_module_attribute.py": (
+        "import spaceodyssey\nspaceodyssey.registry.REGISTRY\n"
+    ),
+    "tests/test_alias_module_attribute.py": (
+        "import spaceodyssey as so\nso.registry.REGISTRY\n"
+    ),
+    "tests/test_alias_function_attribute.py": "import spaceodyssey as so\nso.run\n",
     "tests/test_string.py": (
         "import importlib\nimportlib.import_module('spaceodyssey.wiring')\n"
     ),
@@ -315,6 +349,13 @@ VIOLATIONS = {
     "docs/guide.md": "```python\nfrom spaceodyssey.engines import analytic\n```\n",
     "docs/root.md": "```python\nfrom spaceodyssey import build, core\n```\n",
     "docs/changes/broken.py": "import spaceodyssey.registry\n",
+    "docs/changes/pyproject.toml": (
+        "[project.entry-points.'spaceodyssey.core']\n"
+        "'reg@1' = 'spaceodyssey.registry:Registry'\n"
+    ),
+    "docs/changes/broken.yaml": "target: spaceodyssey.registry:Registry\n",
+    "docs/changes/broken.yml": "target: spaceodyssey.registry:Registry\n",
+    "docs/changes/broken.cfg": "target = spaceodyssey.registry:Registry\n",
     "docs/changes/broken.ipynb": json.dumps(
         {
             "cells": [
@@ -326,8 +367,20 @@ VIOLATIONS = {
     "pyproject.toml": (
         "[project.entry-points.'spaceodyssey.core']\n"
         "'reg@1' = 'spaceodyssey.registry:Registry'\n"
+    ),
+    "missing/pyproject.toml": (
+        "[project.entry-points.'spaceodyssey.core']\n"
         "'gone@1' = 'spaceodyssey.core.missing:Thing'\n"
     ),
+    "root-name/pyproject.toml": (
+        "[project.entry-points.'spaceodyssey.core']\n"
+        "'mission@1' = 'spaceodyssey:Mission'\n"
+    ),
+    "root-module/pyproject.toml": (
+        "[project.entry-points.'spaceodyssey.core']\n"
+        "'reg@1' = 'spaceodyssey:registry.REGISTRY'\n"
+    ),
+    "root-script/pyproject.toml": "[project.scripts]\nrun = 'spaceodyssey:run'\n",
 }
 
 
@@ -346,10 +399,22 @@ def test_scan_ignores_history_prose_and_valid_imports(tmp_path):
         {
             **SENTINEL_FILES,
             "docs/changes/history.md": "`spaceodyssey.registry` was removed.\n",
+            "docs/changes/history.rst": "spaceodyssey.registry was removed.\n",
+            "docs/changes/history.txt": "spaceodyssey.registry was removed.\n",
             "tests/test_ok.py": (
                 "from spaceodyssey import core\nfrom spaceodyssey.core import study\n"
+                "import spaceodyssey\nspaceodyssey.core\n"
+                "import spaceodyssey as so\nso.core\nso.__version__\n"
+                "import spaceodyssey.core as core\ncore.run\n"
+                "other.Mission\n"
             ),
             "src/spaceodyssey/core/sibling.py": "from . import study\n",
+            "valid/pyproject.toml": (
+                "[project.entry-points.'spaceodyssey.core']\n"
+                "'core@1' = 'spaceodyssey:core.study'\n"
+                "'study@1' = 'spaceodyssey.core.study:Study'\n"
+                "'external@1' = 'other:Mission'\n"
+            ),
         },
     )
     assert scan_repo(tmp_path, min_python=1) == {}

@@ -131,3 +131,17 @@ The first-commit run was the most contended. In report mode the test-budget plug
 the second commit; the first-commit run also flagged `test_gain_enters_measurement` and
 `test_statuses_agree_between_executors_and_replay` under load. The CI quick tier is read
 from the job summary after the merge to main: the CI workflow does not run on a branch push.
+
+## Post-merge follow-ups
+
+- The import gate tracks package aliases and checks removed root attributes and
+  entry-point object paths. Negative controls cover direct and aliased attributes,
+  removed root names and modules after the colon, and script targets.
+- Only `.md`, `.rst` and `.txt` change records are exempt. Negative controls cover
+  a `docs/changes/pyproject.toml` entry point to `spaceodyssey.registry:Registry`,
+  YAML and other configuration files; Python and notebooks remain scanned.
+- The docs gate shares the removed root-name inventory with the import gate,
+  including `Mission` and `Ledger`, and checks qualified forms. A method-docstring
+  control covers `Construct a spaceodyssey.Mission with a Ledger.`
+- The yield-summary JSON round trip fills every list field, including nonempty
+  wrong-certified targets, so replacing a serialized list with `[]` fails.

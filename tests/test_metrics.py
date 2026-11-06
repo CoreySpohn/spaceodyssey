@@ -19,6 +19,7 @@ class TestYieldSummary:
             false_certified_targets=(3,),
             epochs=6,
             resources_spent=(("time_d", 6.6),),
+            wrong_certified_targets=(1,),
         )
         assert YieldSummary.from_json(summary.to_json()) == summary
         assert summary.false_certifications == 1

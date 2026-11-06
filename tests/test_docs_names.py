@@ -9,6 +9,7 @@ import pytest
 from tests.test_slice2_gate import (
     DELETED_MODULES,
     DELETED_NAMES,
+    DELETED_ROOT_NAMES,
     PACKAGE,
     REPO,
     SELF,
@@ -57,10 +58,16 @@ def docstrings(path: Path) -> str:
 
 
 def deleted_name_pattern():
-    modules = "|".join(sorted(DELETED_MODULES))
+    qualified = "|".join(sorted(DELETED_MODULES | DELETED_ROOT_NAMES))
     names = "|".join(sorted(DELETED_NAMES))
+    # Root-only type names can also be ordinary prose or surviving core types.
+    root_types = "|".join(
+        sorted(n for n in DELETED_ROOT_NAMES - DELETED_NAMES if n[0].isupper())
+    )
     return re.compile(
-        rf"spaceodyssey\.(?:{modules})\b|\b(?:{names})\b|" + "|".join(EXTRA_PATTERNS)
+        rf"\bspaceodyssey\.(?:{qualified})\b|\b(?:{names})\b|"
+        rf"\b(?:a|an)\s+(?:{root_types})\b|`{{1,2}}(?:{root_types})`{{1,2}}|"
+        + "|".join(EXTRA_PATTERNS)
     )
 
 
@@ -129,6 +136,16 @@ def _make_root(tmp_path, extra):
         ("docs/diagram.d2", "label: 'MissionSpec, seam registries'"),
         ("src/spaceodyssey/dist.py", '"""Engines use the Registry."""\n'),
         ("src/spaceodyssey/extra.py", 'def f():\n    """Calls run_mission."""\n'),
+        (
+            "src/spaceodyssey/method.py",
+            "class Example:\n    def make(self):\n"
+            '        """Construct a spaceodyssey.Mission with a Ledger."""\n',
+        ),
+        ("docs/mission.md", "Construct a Mission."),
+        ("docs/ledger.md", "Construct a spaceodyssey.Ledger."),
+        ("docs/bare-ledger.md", "Construct a Ledger."),
+        ("docs/root-type.md", "Use `Mission`."),
+        ("docs/run.md", "Call spaceodyssey.run."),
     ],
 )
 def test_scan_finds_each_kind(tmp_path, name, text):
@@ -139,7 +156,15 @@ def test_scan_finds_each_kind(tmp_path, name, text):
 
 def test_scan_passes_clean_docs_and_requires_coverage(tmp_path):
     """Fails if clean docs are flagged or a root without the docs passes."""
-    root = _make_root(tmp_path / "ok", {"docs/guide.md": "build the core\n"})
+    root = _make_root(
+        tmp_path / "ok",
+        {
+            "docs/guide.md": (
+                "Mission planning: build the core and run it.\n"
+                "Use spaceodyssey.core.ledger.Ledger for accounting.\n"
+            )
+        },
+    )
     assert scan_docs(root) == {}
     (tmp_path / "empty" / "src" / PACKAGE).mkdir(parents=True)
     with pytest.raises(AssertionError):
