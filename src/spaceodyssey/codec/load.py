@@ -47,13 +47,14 @@ _NULL_OK = contextvars.ContextVar("null_ok", default=frozenset())
 
 
 @contextlib.contextmanager
-def tolerating_null_arrays(names):
-    """Let the fields called `names` hold `None` where an array is annotated.
+def tolerating_null_arrays(fields):
+    """Let `(class, field name)` pairs hold `None` where an array is annotated.
 
     Pre-flight uses it so a missing value reaches the structural checks, which
-    report it with a code, instead of stopping the load.
+    report it with a code, instead of stopping the load. Only the named fields of
+    exactly the named classes are exempt.
     """
-    token = _NULL_OK.set(frozenset(names))
+    token = _NULL_OK.set(frozenset(fields))
     try:
         yield
     finally:
@@ -203,10 +204,10 @@ def _decode_kind(node, path, table):
             value = version
         elif migrated is None:
             value = decode(node[field.name], where, table)
-            _check_field(field, value, where)
+            _check_field(cls, field, value, where)
         else:
             value = migrated[field.name]
-            _check_field(field, value, where if field.name in node else path)
+            _check_field(cls, field, value, where if field.name in node else path)
         values[field.name] = value
         object.__setattr__(obj, field.name, value)
     try:
@@ -239,9 +240,9 @@ def _migrated(node, ref, stored, path, table):
 _CHECK_ERRORS = (ValueError, TypeError, AttributeError, IndexError, KeyError)
 
 
-def _check_field(field, value, path):
+def _check_field(cls, field, value, path):
     """Refuse a value its converter would change or its annotation does not fit."""
-    if value is None and field.name in _NULL_OK.get():
+    if value is None and (cls, field.name) in _NULL_OK.get():
         return
     if field.type is jax.Array and not isinstance(value, (jax.Array, np.ndarray)):
         raise DocumentError(

@@ -5,6 +5,8 @@ import dataclasses
 import json
 import sys
 
+import equinox as eqx
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -33,6 +35,7 @@ from tests.codec.test_document import TOY_KINDS
 from tests.core.preflight_cases import (
     DOC_KINDS,
     DocChannelModel,
+    DocObjective,
     DocObserver,
     DocPolicy,
 )
@@ -194,8 +197,8 @@ CASES = {
     "X001": (
         FindingCode.X001,
         x001,
-        "/study/agenda/policies/0/effects/0",
-        _is(int(EffectKind.ALLOCATE)),
+        "/study/agenda/policies/0/effects",
+        _is([int(EffectKind.ALLOCATE)]),
     ),
     "X002": (
         FindingCode.X002,
@@ -569,8 +572,8 @@ VARIANTS = {
     "X001-requires": (
         FindingCode.X001,
         _variant_x001_requires,
-        "/study/agenda/policies/0/requires/0",
-        _is("gradients"),
+        "/study/agenda/policies/0/requires",
+        _is(["gradients"]),
     ),
     "X001-executors": (
         FindingCode.X001,
@@ -774,3 +777,163 @@ def test_an_incomplete_binding_does_not_hide_a_hash_mismatch():
         "/run/refit/compiled/model_hash",
         "/run/refit/host",
     ]
+
+
+# ---- second review: identity from the finding, not from values ---------------------
+
+
+ALLOCATE = int(EffectKind.ALLOCATE)
+
+
+def test_repeated_needs_on_one_channel_point_at_the_offending_entry():
+    """Fails if a finding is attributed to an earlier entry that shares its channel
+    id, or if three identical reads give anything but three entries.
+    """
+    doc = _policy_doc(needs=((10, 0, 500), (10, 0, 19)))
+    found = _find(doc, None)
+    assert [(f.code, f.pointer) for f in found] == [
+        ("C001", "/study/agenda/policies/0/needs/1")
+    ]
+    doc = _doc(toy.survey_1(observer=DocObserver(reads=("truth",) * 3)))
+    found = _find(doc, None)
+    assert [(f.code, f.pointer) for f in found] == [
+        ("F001", f"/study/observer/reads/{i}") for i in range(3)
+    ]
+
+
+def test_an_effect_number_shared_with_another_value_is_not_confused():
+    """Fails if an unsupported effect is located at an equal number in another field
+    of the same component.
+    """
+    doc = _policy_doc(needs=((ALLOCATE, 0, 500),), effects=(ALLOCATE,))
+    pointers = {f.pointer for f in _find(doc, None) if f.code == FindingCode.X001}
+    assert pointers == {"/study/agenda/policies/0/effects"}
+
+
+def test_a_requirement_name_with_escapes_is_located():
+    """Fails if a requirement is found from the printed message, which loses an
+    escaped name.
+    """
+    doc = _policy_doc(requires=("a\\b'c",))
+    found = _find(doc, {"executor": "host"})
+    assert [(f.code, f.pointer) for f in found] == [
+        ("X001", "/study/agenda/policies/0/requires")
+    ]
+
+
+@pytest.mark.parametrize("executor", [[], {}, 3, None, "gpu"])
+def test_a_malformed_executor_is_a_binding_finding(executor):
+    """Fails if a non-string executor raises, or is not reported at /run/executor."""
+    found = _find(_policy_doc(), {"executor": executor})
+    assert [(f.code, f.pointer) for f in found] == [("D003", "/run/executor")]
+
+
+def test_hash_is_checked_whatever_else_is_wrong():
+    """Fails if an unknown kind hides a wrong content hash."""
+    doc, _ = d001(True)
+    doc["content_hash"] = "0" * 64
+    found = _find(doc, None)
+    assert sorted((str(f.code), f.pointer) for f in found) == [
+        ("D001", "/study/observer/$kind"),
+        ("L001", "/content_hash"),
+    ]
+
+
+def test_a_study_document_object_is_checked_as_the_loader_reads_it():
+    """Fails if an object that load_study accepts, with a raw NaN in it, is reported
+    as broken because it was serialized first.
+    """
+    doc = _doc(toy.survey_1())
+    doc["study"]["clock"]["tick_length_s"]["data"] = float("nan")
+    obj = StudyDocument(study=doc["study"])
+    load_study(obj, RESOLVER)
+    assert preflight_document(obj, RESOLVER) == []
+
+
+@pytest.mark.parametrize(
+    ("poke", "where"),
+    [
+        (
+            lambda d: d["study"]["clock"]["tick_length_s"].update(data=float("nan")),
+            "/study/clock/tick_length_s/data",
+        ),
+        (lambda d: d["study"].update(extra={1, 2}), "/study/extra"),
+        (lambda d: d["study"].update(extra={1: 2}), "/study/extra"),
+    ],
+    ids=["nan", "set", "int-key"],
+)
+def test_a_parsed_object_that_is_not_json_is_a_load_finding(poke, where):
+    """Fails if a parsed object with a non-JSON value raises instead of giving L001."""
+    doc = _doc(toy.survey_1())
+    poke(doc)
+    found = preflight_document(doc, RESOLVER)
+    assert [(f.code, f.pointer) for f in found] == [("L001", where)]
+
+
+class OrderLikeModel(toy.ToyPhotometry):
+    """A plugin channel model with a required array field named like the table's."""
+
+    coincident_order: jax.Array = eqx.field(kw_only=True)
+
+
+def test_null_tolerance_is_only_for_the_channel_table():
+    """Fails if a plugin field of the same name, encoded null, passes pre-flight
+    while load_study refuses it.
+    """
+    kinds = KindResolver(
+        {**TOY_KINDS, ("channel_model", "test.order_like", 1): OrderLikeModel}
+    )
+    noise = toy.survey_1().channel_model.noise
+    study = toy.survey_1(
+        channel_model=OrderLikeModel(noise=noise, coincident_order=jnp.zeros(3))
+    )
+    doc = json.loads(dump_study(study, kinds).to_json())
+    doc.pop("content_hash")
+    doc["study"]["channel_model"]["coincident_order"] = None
+    with pytest.raises(DocumentError):
+        load_study(json.dumps(doc), kinds)
+    found = preflight_document(json.dumps(doc), kinds)
+    assert [(f.code, f.pointer) for f in found] == [
+        ("L001", "/study/channel_model/coincident_order")
+    ]
+
+
+def test_container_tag_indices_beyond_the_first_are_followed():
+    """Fails if the second element of a `$list` is located as the first."""
+    study = toy.survey_1(
+        policies=(DocPolicy(), DocPolicy(reads=("truth",))), phase_until=(300, 1000)
+    )
+    doc = _doc(study)
+    doc["study"]["agenda"]["policies"] = {"$list": doc["study"]["agenda"]["policies"]}
+    found = _find(doc, None)
+    assert [(f.code, f.pointer) for f in found] == [
+        ("F001", "/study/agenda/policies/$list/1/reads/0")
+    ]
+
+
+def test_objective_and_observer_are_in_the_service_inventory():
+    """Fails if a component other than the policies and channel model is skipped."""
+    objective = DocObjective(threshold=3.0, effects=(QUERY,))
+    found = _find(_doc(_with(toy.survey_1(), objective=objective)), {})
+    assert [(f.code, f.pointer) for f in found] == [("D003", "/run")]
+    assert "objective" in found[0].message
+
+
+def test_binding_edge_cases_the_first_tests_missed():
+    """Fails if a null service version passes, if a host binding without its kind
+    hides a hash mismatch, or if a nested repeated key is not refused.
+    """
+    run = _run(compiled_hash=8)
+    run["service"]["version"] = None
+    del run["refit"]["host"]["kind"]
+    found = _find(_policy_doc(effects=(QUERY,)), run)
+    assert sorted(f.pointer for f in found) == [
+        "/run/refit/compiled/model_hash",
+        "/run/refit/host",
+        "/run/service/version",
+    ]
+    text = json.dumps(_doc(toy.survey_1()))
+    nested = text.replace('"clock": {', '"clock": {"$kind": ["core", "clock", 1], ', 1)
+    assert nested != text
+    found = preflight_document(nested, RESOLVER)
+    assert [(f.code, f.pointer) for f in found] == [("L001", "/study/clock/$kind")]

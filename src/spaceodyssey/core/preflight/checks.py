@@ -41,6 +41,13 @@ def _components(study):
     return pairs
 
 
+def _slot(name):
+    """(slot, index) of a component name: `policy[2]` is the policy slot, index 2."""
+    if name.startswith("policy["):
+        return "policy", int(name[len("policy[") : -1])
+    return name, None
+
+
 def firewall(graph: StudyGraph):
     """F001 and F002: what an observer-side node may read."""
     out = []
@@ -49,6 +56,8 @@ def firewall(graph: StudyGraph):
         if reader.side != Side.OBSERVER:
             continue
         path = f"{edge.reader} <- {edge.source}"
+        slot, index = _slot(edge.reader)
+        where = dict(subject=slot, index=index, member="reads", entry=edge.entry)
         if source.side == Side.SCORER:
             out.append(
                 Finding(
@@ -58,6 +67,7 @@ def firewall(graph: StudyGraph):
                     f"{edge.reader} reads the scorer {edge.source}",
                     "remove the read; the scorer joins credits to truth, "
                     "never the reverse",
+                    **where,
                 )
             )
         elif source.side == Side.TRUTH and not source.crossing:
@@ -68,6 +78,7 @@ def firewall(graph: StudyGraph):
                     path,
                     f"{edge.reader} reads {edge.source} outside a measure crossing",
                     "route the read through a channel that realizes it as a record",
+                    **where,
                 )
             )
     return out
@@ -79,8 +90,9 @@ def causality(study: Study, graph: StudyGraph):
     table = study.channels
     ids = np.asarray(table.id).tolist()
     for i, policy in enumerate(study.agenda.policies):
-        for need in declaration_of(policy).needs:
+        for j, need in enumerate(declaration_of(policy).needs):
             path = f"policy[{i}] <- channel id {need.channel_id}"
+            where = dict(subject="policy", index=i, member="needs", entry=(j,))
             if need.channel_id not in ids:
                 out.append(
                     Finding(
@@ -89,6 +101,7 @@ def causality(study: Study, graph: StudyGraph):
                         path,
                         f"the channel table has no channel {need.channel_id}",
                         "read a channel the study declares",
+                        **where,
                     )
                 )
                 continue
@@ -102,6 +115,7 @@ def causality(study: Study, graph: StudyGraph):
                         f"channel {need.channel_id} is never released to the policy",
                         "release the channel to the policy audience, or read a "
                         "different channel",
+                        **where,
                     )
                 )
                 continue
@@ -121,6 +135,7 @@ def causality(study: Study, graph: StudyGraph):
                         f"the product is released no earlier than tick {ready} but "
                         f"the decision is at tick {need.decide_tick}",
                         "decide later, or read an earlier product",
+                        **where,
                     )
                 )
     return out
@@ -141,6 +156,8 @@ def keys(graph: StudyGraph):
                     node.name,
                     f"draws are not keyed by {', '.join(missing)}",
                     "key every draw by its stable ids; see spaceodyssey.core.keys",
+                    subject=node.slot,
+                    member="key_coords",
                 )
             )
         elif node.kind == NodeKind.MEASURE:
@@ -154,6 +171,9 @@ def keys(graph: StudyGraph):
                         f"same key coordinates as {seen[signature]}; the draws "
                         "would be correlated",
                         "give each channel its own id",
+                        subject="channels",
+                        member="id",
+                        entry=node.entry,
                     )
                 )
             else:
@@ -171,6 +191,7 @@ def capability(study: Study, executor: str | None = None):
     out = []
     for path, component in _components(study):
         decl = declaration_of(component)
+        slot, index = _slot(path)
         for kind in sorted(decl.effects, key=int):
             if EffectKind(kind) not in SUPPORTED_EFFECTS:
                 out.append(
@@ -181,6 +202,9 @@ def capability(study: Study, executor: str | None = None):
                         f"asks for {EffectKind(kind).name.capitalize()}, which no "
                         "executor supports",
                         "remove the effect; admission answers it as unsupported",
+                        subject=slot,
+                        index=index,
+                        member="effects",
                     )
                 )
         provided = set().union(*(EXECUTOR_CAPABILITIES[e] for e in chosen))
@@ -193,6 +217,9 @@ def capability(study: Study, executor: str | None = None):
                     f"requires {name!r}, which the selected executor "
                     f"({', '.join(sorted(chosen))}) does not provide",
                     "choose an executor that provides it, or drop the requirement",
+                    subject=slot,
+                    index=index,
+                    member="requires",
                 )
             )
         if not chosen & decl.executors:
@@ -204,6 +231,9 @@ def capability(study: Study, executor: str | None = None):
                     f"runs only on {', '.join(sorted(decl.executors))}, "
                     f"not on {', '.join(sorted(chosen))}",
                     "select an executor the component supports",
+                    subject=slot,
+                    index=index,
+                    member="executors",
                 )
             )
     return out
@@ -213,7 +243,7 @@ def reserved(study: Study):
     """X002: reserved fields hold their defaults."""
     out = []
 
-    def flag(path, what):
+    def flag(path, what, subject, member, index=None, entry=()):
         out.append(
             Finding(
                 FindingCode.X002,
@@ -221,19 +251,36 @@ def reserved(study: Study):
                 path,
                 f"reserved field set to {what}; no rule reads it yet",
                 "restore the default; the field is ignored until a rule reads it",
+                subject=subject,
+                index=index,
+                member=member,
+                entry=entry,
             )
         )
 
     ch, assets = study.channels, study.assets
-    if not np.array_equal(np.asarray(ch.charge), np.asarray(ch.cost)):
-        flag("channels.charge", "a value that differs from cost")
-    if np.any(np.asarray(assets.freeze_ticks) != 0):
-        flag("assets.freeze_ticks", "a nonzero horizon")
-    if np.any(np.asarray(assets.disruptive_resource) != -1):
-        flag("assets.disruptive_resource", "a resource row")
+    charge, cost = np.asarray(ch.charge), np.asarray(ch.cost)
+    if not np.array_equal(charge, cost):
+        differs = np.argwhere(charge != cost) if charge.shape == cost.shape else []
+        entry = tuple(int(n) for n in differs[0]) if len(differs) else ()
+        flag(
+            "channels.charge",
+            "a value that differs from cost",
+            "channels",
+            "charge",
+            entry=entry,
+        )
+    for name, column, default, what in (
+        ("freeze_ticks", assets.freeze_ticks, 0, "a nonzero horizon"),
+        ("disruptive_resource", assets.disruptive_resource, -1, "a resource row"),
+    ):
+        found = np.argwhere(np.asarray(column) != default)
+        if len(found):
+            entry = tuple(int(n) for n in found[0])
+            flag(f"assets.{name}", what, "assets", name, entry=entry)
     for i, policy in enumerate(study.agenda.policies):
         if declaration_of(policy).disruptive:
-            flag(f"policy[{i}]", "a disruptive effect")
+            flag(f"policy[{i}]", "a disruptive effect", "policy", "disruptive", index=i)
     return out
 
 
@@ -241,7 +288,7 @@ def stops(study: Study):
     """T001: a drain below campaign scope behaves as a close."""
     out = []
     for i, policy in enumerate(study.agenda.policies):
-        for scope, disposition in declaration_of(policy).stops:
+        for j, (scope, disposition) in enumerate(declaration_of(policy).stops):
             if disposition == Disposition.DRAIN and scope != Scope.CAMPAIGN:
                 out.append(
                     Finding(
@@ -250,6 +297,10 @@ def stops(study: Study):
                         f"policy[{i}]",
                         f"Drain at {Scope(scope).name.lower()} scope behaves as Close",
                         "ask for Close, or stop at campaign scope",
+                        subject="policy",
+                        index=i,
+                        member="stops",
+                        entry=(j,),
                     )
                 )
     return out
@@ -264,6 +315,11 @@ def channels(study: Study):
     valid = {int(v) for v in CoincidentOrder}
     values = None if order is None else np.asarray(order)
     if values is None or values.shape != (n,) or not set(values.tolist()) <= valid:
+        invalid = ()
+        if values is not None and values.shape == (n,):
+            invalid = (
+                next(i for i, v in enumerate(values.tolist()) if v not in valid),
+            )
         out.append(
             Finding(
                 FindingCode.T002,
@@ -271,6 +327,9 @@ def channels(study: Study):
                 "channels.coincident_order",
                 "every channel needs a coincident order of its own",
                 "set SETTLE_FIRST or FAULT_FIRST per channel; there is no default",
+                subject="channels",
+                member="coincident_order",
+                entry=invalid,
             )
         )
     known = len(study.caps.payload_audience)
@@ -284,6 +343,9 @@ def channels(study: Study):
                     f"channel {i} declares record kind {kind}, but the registry "
                     f"holds {known} kinds",
                     "register the kind and lower the registry into the capacities",
+                    subject="channels",
+                    member="kind",
+                    entry=(i,),
                 )
             )
     return out

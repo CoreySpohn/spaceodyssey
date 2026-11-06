@@ -46,30 +46,23 @@ and `model_hash` an integer or a non-empty string. Pointers into the record star
 """
 
 import dataclasses
-import enum
-import re
+import math
 from enum import StrEnum
-
-import numpy as np
 
 from spaceodyssey.codec.document import (
     DOCUMENT_KEYS,
     FORMAT,
     DocumentError,
     StudyDocument,
-    canonical_json,
     check_schema_version,
     parse_text,
     pointer,
 )
-from spaceodyssey.codec.kinds import RegistrationError, as_resolver, is_version_field
+from spaceodyssey.codec.kinds import RegistrationError, as_resolver
 from spaceodyssey.codec.load import load_study, tolerating_null_arrays
-from spaceodyssey.core.declarations import (
-    EXECUTORS,
-    SUPPORTED_EFFECTS,
-    declaration_of,
-)
-from spaceodyssey.core.enums import CoincidentOrder, Disposition, EffectKind, Scope
+from spaceodyssey.core.declarations import EXECUTORS, declaration_of
+from spaceodyssey.core.enums import EffectKind
+from spaceodyssey.core.ledger import ChannelTable
 from spaceodyssey.core.preflight import Finding, FindingCode, Severity
 from spaceodyssey.core.preflight import preflight as preflight_study
 from spaceodyssey.core.preflight.checks import _components
@@ -89,8 +82,12 @@ def _object(value):
     return isinstance(value, dict)
 
 
-def _hash(value):
+def _is_hash(value):
     return type(value) is int or _text(value)
+
+
+def _executor(value):
+    return isinstance(value, str) and value in EXECUTORS
 
 
 _SERVICE_SCHEMA = (
@@ -98,10 +95,7 @@ _SERVICE_SCHEMA = (
     ("version", _version, "a positive integer"),
     ("configuration", _object, "an object"),
 )
-_REFIT_SCHEMA = (*_SERVICE_SCHEMA, ("model_hash", _hash, "an integer or a string"))
-_COMPONENTS = frozenset(
-    {"world_source", "process", "channel_model", "observer", "objective", "design"}
-)
+_REFIT_SCHEMA = (*_SERVICE_SCHEMA, ("model_hash", _is_hash, "an integer or a string"))
 
 
 class DocumentCode(StrEnum):
@@ -185,10 +179,10 @@ def preflight_document(document, kinds=None, *, run=None, executor=None):
         found += _record(run)
         if executor is None and isinstance(run, dict):
             chosen = run.get("executor")
-            executor = chosen if chosen in EXECUTORS else None
+            executor = chosen if _executor(chosen) else None
+    found += _check_hash(data)
     study = None
     if decodable:
-        found += _hash(data)
         study, failure = _decoded(data, resolver)
         found += failure
     if study is not None:
@@ -216,18 +210,39 @@ def _ordered(found):
 
 
 def _parsed(document):
-    """The document as a parsed JSON object.
+    """The document as a JSON object, validated as the loader validates it.
 
-    Duplicate keys and non-finite numbers are refused as the loader refuses them.
+    Text goes through the loader's parser: malformed JSON, a repeated key and a
+    non-finite number are refused with a pointer. A `StudyDocument` is read as it is,
+    as `load_study` reads it, with no stored hash. A parsed object is copied, and a
+    value JSON cannot hold (a set, a non-string key, a non-finite number) is refused
+    with a pointer.
     """
     if isinstance(document, StudyDocument):
-        document = document.to_json()
-    elif not isinstance(document, str):
-        document = canonical_json(document)
-    data = parse_text(document)
+        return {
+            "format": FORMAT,
+            "schema_version": document.schema_version,
+            "study": document.study,
+        }
+    data = parse_text(document) if isinstance(document, str) else _json(document)
     if not isinstance(data, dict):
         raise DocumentError("a document is a JSON object", "")
     return data
+
+
+def _json(value, path=()):
+    """A copy of a parsed JSON value, refusing what JSON cannot hold."""
+    if isinstance(value, dict):
+        if not all(type(k) is str for k in value):
+            raise DocumentError("an object needs string keys", pointer(path))
+        return {k: _json(v, (*path, k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json(v, (*path, i)) for i, v in enumerate(value)]
+    if type(value) is float and not math.isfinite(value):
+        raise DocumentError("a number is not finite; write a $float tag", pointer(path))
+    if value is None or type(value) in (bool, int, float, str):
+        return value
+    raise DocumentError(f"{type(value).__name__} is not a JSON value", pointer(path))
 
 
 def _from_error(err, fix=None):
@@ -252,7 +267,7 @@ def _envelope(data):
     return out, not out
 
 
-def _hash(data):
+def _check_hash(data):
     """`L001` when a stored content hash differs from the document's canonical hash."""
     stored = data.get("content_hash")
     version = data["schema_version"]
@@ -271,7 +286,7 @@ def _decoded(data, resolver):
     """The loaded study, or the `L001` of the failure; a null order loads."""
     doc = StudyDocument(study=data["study"], schema_version=data["schema_version"])
     try:
-        with tolerating_null_arrays(("coincident_order",)):
+        with tolerating_null_arrays([(ChannelTable, "coincident_order")]):
             return load_study(doc, resolver), []
     except DocumentError as err:
         return None, [_from_error(err)]
@@ -315,21 +330,43 @@ def _is_ref(ref):
 
 def _in_memory(study, doc_study, executor):
     """The core findings on `study`, each at the pointer of its offending value."""
-    seen = {}
-    out = []
-    for item in preflight_study(study, executor):
-        tokens = _logical(item, study, seen)
-        out.append(
-            DocumentFinding(
-                item.code,
-                item.severity,
-                pointer(_follow(doc_study, tokens, ("study",))),
-                item.message,
-                item.fix,
-                in_memory=item,
-            )
+    return [
+        DocumentFinding(
+            item.code,
+            item.severity,
+            pointer(_follow(doc_study, _tokens(item, study), ("study",))),
+            item.message,
+            item.fix,
+            in_memory=item,
         )
-    return out
+        for item in preflight_study(study, executor)
+    ]
+
+
+def _tokens(item, study):
+    """The logical path (field names and indices) a finding's locator names.
+
+    The slot is a field of the study (the policy slot is `agenda.policies`). The member
+    and entry are followed only when the slot has a field of that name, which is how a
+    component that stores what it declares is located; a component that computes its
+    declaration is located at the slot.
+    """
+    if not item.subject:
+        return ()
+    if item.subject == "policy":
+        tokens = ("agenda", "policies", item.index)
+        slot = study.agenda.policies[item.index]
+    else:
+        tokens = (item.subject,)
+        slot = getattr(study, item.subject)
+    names = (
+        {f.name for f in dataclasses.fields(slot)}
+        if dataclasses.is_dataclass(slot)
+        else ()
+    )
+    if item.member in names:
+        tokens += (item.member, *item.entry)
+    return tokens
 
 
 def _step(node, token, path):
@@ -367,193 +404,6 @@ def _follow(node, tokens, path):
     return path
 
 
-def _walk(value, path=()):
-    """(path, node) for every field, element and entry below `value`, depth first."""
-    if dataclasses.is_dataclass(value) and not isinstance(value, (type, enum.Enum)):
-        for field in dataclasses.fields(value):
-            if is_version_field(type(value), field.name):
-                continue
-            child = getattr(value, field.name)
-            yield (*path, field.name), child
-            yield from _walk(child, (*path, field.name))
-    elif type(value) in (tuple, list):
-        for i, child in enumerate(value):
-            yield (*path, i), child
-            yield from _walk(child, (*path, i))
-    elif type(value) is dict:
-        for key, child in value.items():
-            yield (*path, key), child
-            yield from _walk(child, (*path, key))
-
-
-def _where(study, name):
-    """(logical path, component) of a component name used by the core findings."""
-    if name.startswith("policy["):
-        i = _index(name)
-        return ("agenda", "policies", i), study.agenda.policies[i]
-    return (name,), getattr(study, name)
-
-
-def _inside(study, name, test, in_sequence=False):
-    """The path of the first value under a component that satisfies `test`.
-
-    With `in_sequence`, a match that is an element of a tuple or list is preferred.
-    Without any match the component's own path is returned.
-    """
-    base, component = _where(study, name)
-    first = None
-    for path, node in _walk(component, base):
-        if test(node):
-            if not in_sequence or type(path[-1]) is int:
-                return path
-            first = first or path
-    return first or base
-
-
-def _is_seq(value):
-    return type(value) in (tuple, list)
-
-
-def _int_like(value, number):
-    return isinstance(value, int) and not isinstance(value, bool) and value == number
-
-
-def _next(seen, key):
-    """How many findings of this kind came before: the position of this one."""
-    seen[key] = seen.get(key, -1) + 1
-    return seen[key]
-
-
-def _index(name):
-    """The integer in `name[3]`."""
-    return int(name[name.index("[") + 1 : -1])
-
-
-def _logical(item, study, seen):
-    """The logical path (field names and indices) of the value a finding is about."""
-    code, head = item.code, item.path.split(" <- ")[0]
-    if code in (FindingCode.F001, FindingCode.F002):
-        needle = "truth" if code == FindingCode.F001 else "scorer"
-        return _inside(study, head, lambda v: v == needle and type(v) is str, True)
-    if code == FindingCode.C001:
-        return _need(item, head, study, seen)
-    if code == FindingCode.K001:
-        name = {"world": "world_source", "process": "process"}.get(head)
-        name = name or "channel_model"
-        coords = tuple(declaration_of(_where(study, name)[1]).key_coords)
-        return _inside(study, name, lambda v: _is_seq(v) and tuple(v) == coords)
-    if code == FindingCode.K002:
-        return ("channels", "id", _index(head))
-    if code == FindingCode.R001:
-        return ("channels", "kind", _index(head))
-    if code == FindingCode.X001:
-        return _capability(item, head, study, seen)
-    if code == FindingCode.X002:
-        return _reserved(head, study)
-    if code == FindingCode.T001:
-        return _drain(head, study, seen)
-    if code == FindingCode.T002:
-        return _order(study)
-    return _where(study, head)[0]
-
-
-def _need(item, head, study, seen):
-    """The `needs` entry a C001 is about, found by its channel id and position."""
-    cid = int(item.path.rsplit(" ", 1)[1])
-    policy = _where(study, head)[1]
-    needs = [n for n in declaration_of(policy).needs if n.channel_id == cid]
-    k = _next(seen, (head, "need", cid))
-    if k >= len(needs):
-        return _where(study, head)[0]
-    want = (needs[k].channel_id, needs[k].start_tick, needs[k].decide_tick)
-
-    def triple(v):
-        return _is_seq(v) and len(v) == 3 and tuple(int(x) for x in v) == want
-
-    return _inside(study, head, triple)
-
-
-def _capability(item, head, study, seen):
-    """The effect, requirement or executor set an X001 is about."""
-    decl = declaration_of(_where(study, head)[1])
-    message = item.message
-    if message.startswith("asks for"):
-        bad = [
-            k
-            for k in sorted(decl.effects, key=int)
-            if EffectKind(k) not in SUPPORTED_EFFECTS
-        ]
-        k = _next(seen, (head, "effect"))
-        if k < len(bad):
-            return _inside(study, head, lambda v: _int_like(v, int(bad[k])), True)
-    elif message.startswith("requires"):
-        found = re.match(r"requires (['\"])(.*?)\1", message)
-        if found:
-            name = found.group(2)
-            return _inside(study, head, lambda v: v == name and type(v) is str, True)
-    elif message.startswith("runs only on"):
-        names = set(decl.executors)
-        return _inside(
-            study,
-            head,
-            lambda v: _is_seq(v) and v and set(v) == names and all(map(_is_text, v)),
-        )
-    return _where(study, head)[0]
-
-
-def _is_text(value):
-    return type(value) is str
-
-
-def _reserved(head, study):
-    """The first element of a reserved column that breaks its rule, or the field."""
-    if head.startswith("policy["):
-        return _inside(study, head, lambda v: v is True)
-    table, column = head.split(".")
-    ch, assets = study.channels, study.assets
-    if head == "channels.charge":
-        a, b = np.asarray(ch.charge), np.asarray(ch.cost)
-        bad = np.argwhere(a != b) if a.shape == b.shape else []
-    else:
-        value = 0 if column == "freeze_ticks" else -1
-        bad = np.argwhere(np.asarray(getattr(assets, column)) != value)
-    tokens = (table, column)
-    return (*tokens, *map(int, bad[0])) if len(bad) else tokens
-
-
-def _drain(head, study, seen):
-    """The `stops` pair a T001 is about, found by its position among the drains."""
-    policy = _where(study, head)[1]
-    pairs = [
-        (int(scope), int(disposition))
-        for scope, disposition in declaration_of(policy).stops
-        if disposition == Disposition.DRAIN and scope != Scope.CAMPAIGN
-    ]
-    k = _next(seen, (head, "drain"))
-    if k >= len(pairs):
-        return _where(study, head)[0]
-
-    def pair(v):
-        ok = _is_seq(v) and len(v) == 2 and all(isinstance(x, int) for x in v)
-        return ok and (int(v[0]), int(v[1])) == pairs[k]
-
-    return _inside(study, head, pair)
-
-
-def _order(study):
-    """The first coincident order outside the enum, or the field."""
-    table = study.channels
-    field = ("channels", "coincident_order")
-    if table.coincident_order is None:
-        return field
-    values = np.asarray(table.coincident_order)
-    n = np.asarray(table.id).shape[0]
-    if values.shape != (n,):
-        return field
-    bad = np.flatnonzero(~np.isin(values, [int(v) for v in CoincidentOrder]))
-    return (*field, int(bad[0])) if len(bad) else field
-
-
 # ---- the run record -------------------------------------------------------------
 
 
@@ -569,7 +419,7 @@ def _record(run):
     if not isinstance(run, dict):
         flag(pointer((RUN_KEY,)), "the run record is not an object", "write an object")
         return out
-    if "executor" in run and run["executor"] not in EXECUTORS:
+    if "executor" in run and not _executor(run["executor"]):
         flag(
             pointer((RUN_KEY, "executor")),
             f"executor {run['executor']!r} is not one of {sorted(EXECUTORS)}",

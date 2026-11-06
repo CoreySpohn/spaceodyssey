@@ -110,11 +110,21 @@ class DocChannelModel(toy.ToyPhotometry):
         )
 
 
+class DocObjective(toy.ToyObjective):
+    """An objective whose declared effects a document states."""
+
+    effects: tuple = _field(())
+
+    def declare(self):
+        return Declaration(effects=frozenset(EffectKind(e) for e in self.effects))
+
+
 # The document kinds, to add to a resolver's mapping.
 DOC_KINDS = {
     ("observer", "test.doc_observer", 1): DocObserver,
     ("policy", "test.doc_policy", 1): DocPolicy,
     ("channel_model", "test.doc_photometry", 1): DocChannelModel,
+    ("objective", "test.doc_objective", 1): DocObjective,
 }
 
 

@@ -7,8 +7,8 @@ orphan: true
 `spaceodyssey.codec.preflight_document` runs every pre-flight check on a JSON study
 document and returns all findings, each with the JSON pointer of the offending value.
 It reports the ten in-memory codes with the same code the core gives, and the three
-document codes `D001`, `D002` and `D003`. No file under `core/` changed and no run
-behavior changed.
+document codes `D001`, `D002` and `D003`. The core change is one addition: a finding
+carries a structured locator (see "How a finding is located"). No run behavior changed.
 
 ## Commits
 
@@ -19,6 +19,8 @@ On `slice2-t6` (first version):
 
 On `slice2-t6-r`, the same two commits cherry-picked onto the main that followed, then
 the review fixes (see "Review fixes").
+A second review then led to `fix(preflight): carry a locator on core findings and
+close the document-validation gaps` on the same branch.
 
 ## Interface
 
@@ -84,7 +86,7 @@ Every pointer names the value itself and resolves in the document.
 | `C001` | a decision reads a product not yet released to it | the need: `/study/agenda/policies/<i>/needs/<j>` |
 | `K001` | draws without stable-id coordinates | the coordinates: `/study/channel_model/key_coords` |
 | `K002` | two measures with identical key coordinates | the repeated id: `/study/channels/id/data/<i>` |
-| `X001` | a capability or effect the selected executor does not provide | the effect, requirement or executor list: `.../effects/<j>`, `.../requires/<j>`, `.../executors` |
+| `X001` | a capability or effect the selected executor does not provide | the member: `.../effects`, `.../requires` or `.../executors` |
 | `X002` | a reserved field set to a non-default value | the first offending element: `/study/channels/charge/data/<r>/<c>`, `/study/assets/freeze_ticks/data/<i>`, `/study/assets/disruptive_resource/data/<i>`, or the policy's `.../disruptive` |
 | `T001` | a drain below campaign scope | the pair: `/study/agenda/policies/<i>/stops/<j>` |
 | `T002` | a channel with no valid coincident order | the first order outside the enum, `/study/channels/coincident_order/data/<i>`; the field when null or of the wrong shape |
@@ -93,17 +95,29 @@ Every pointer names the value itself and resolves in the document.
 | `D002` | a schema version newer than the loader | `/schema_version` |
 | `D003` | a binding missing or ill-typed, no service for a `Query`, or refit model hashes that differ | `/run`, a binding, a member such as `/run/service/kind`, or `/run/refit/compiled/model_hash` |
 
-How a declaration is located: the value is found in the decoded component (the string
-`"truth"` among its fields, the need triple, the key-coordinate tuple, the effect
-number, the drain pair, the executor set), then followed through the document's own
-encoding. A field written as `{"$list": [...]}`, `{"$dict": [...]}` or an array gets
-the pointer that holds it (`/study/agenda/policies/$list/0/reads/$list/0`). The
-follow stops at the deepest value the encoding holds, so a declaration a class computes
-instead of storing points at the component, and every pointer resolves. The core
-finding carries no source position, so the match is by value, and a repeated finding of
-one kind in one component is matched by position (the second drain to the second pair).
-The X001 kind is read from the start of the core message (`asks for`, `requires`, `runs
-only on`).
+### How a finding is located
+
+A core `Finding` carries a locator beside its human `path`: `subject`, the slot of the
+study it is about (`observer`, `policy`, `channel_model`, `channels`, `assets`, ...);
+`index`, the position within a slot that holds a sequence (the policy); `member`, the
+field of that slot; and `entry`, the offending item inside the member, one integer per
+axis. Each check sets it where it makes the finding (the read, need, drain or table
+element it examined), so a repeated declaration is told apart by its position and
+nothing is matched by value or read from the message. The locator is plain strings and
+integers; the core knows nothing of JSON.
+
+The codec maps the locator to a document pointer. The subject is a field of the study (the
+policy slot is `agenda.policies[index]`); the member and entry are followed when the
+slot has a field of that name, which is how a component that stores what it declares is
+located. The path is followed through the document's own encoding, so a field written as
+`{"$list": [...]}`, `{"$dict": [...]}` or an array gets the pointer that holds it
+(`/study/agenda/policies/$list/1/reads/0`). A component that computes its declaration
+has no such field, and its findings point at the component. The follow stops at the
+deepest value the encoding holds, so every pointer resolves.
+
+Members the core holds as sets (effects, requirements, executors) have no position, so
+their findings point at the member, `/study/agenda/policies/0/requires`, not at an
+element.
 
 An in-memory finding keeps its code, severity, message and fix; only the path becomes a
 pointer. K001 is raised once per channel by the core, so a channel model that omits a
@@ -155,12 +169,18 @@ around the same record and these names stay.
   caller that wants installed plugin kinds passes `installed_resolver()`.
 - Document content is reported, not raised (`L001`), so a caller always gets the
   independent findings with the failure.
-- A `null` coincident order is tolerated by the pre-flight decode only; `load_study`
-  still refuses it.
+- A `null` coincident order is tolerated by the pre-flight decode only, and only for
+  `ChannelTable.coincident_order`; `load_study` still refuses it, and a plugin field of
+  the same name is not exempt.
+- Validation is shared with the loader: text goes through its parser, a `StudyDocument`
+  is read as it is (no re-serialization, no stored hash), and a parsed object is checked
+  for values JSON cannot hold. The content hash is checked whenever the study and a
+  schema version exist, even when the study cannot decode.
 
 ## Tests
 
-`tests/codec/test_preflight_json.py` (71 cases), unit tier:
+`tests/codec/test_preflight_json.py` (88 cases) and `tests/core/test_preflight.py`
+(a locator per seeded code), unit tier:
 
 - `test_seeded_document_reports_its_code_at_the_offending_value`: 14 cases, one seeded
   document per code (`D003` twice). Each asserts the one code, the exact pointer, that
@@ -219,7 +239,28 @@ test for each:
 - A broken registration raised a plain `ValueError`; it is a `RegistrationError` with
   its cause.
 
+## Second review fixes
+
+A second review found two P1 and three P2 gaps, each with a test that was run against
+the previous code first (12 of the new cases failed there; the rest strengthen cases a
+mutant survived):
+
+- Null tolerance covered any field named `coincident_order`; it is now
+  `ChannelTable.coincident_order` only.
+- Value matching mis-pointed repeated entries (`needs=((10,0,500),(10,0,19))` pointed at
+  the first) and could raise (`reads=("truth",) * 3`); the structured locator replaces
+  it. X001 no longer reads message prose, so an escaped requirement name is located.
+- A non-string executor (`[]`, `{}`) raised `TypeError`; it is a `D003` at
+  `/run/executor`.
+- The content hash was checked only for decodable documents; a `StudyDocument` was
+  re-serialized, so a raw NaN the loader accepts was reported as broken; a parsed object
+  with a non-JSON value raised `ValueError`. All three now follow the loader (see
+  Decisions).
+- Added cases for `$list` indices beyond the first, the objective in the service
+  inventory, a null service version, a hash mismatch beside a binding with no `kind`,
+  and a nested repeated key.
+
 ## Timing
 
-The 71 cases run in 1.9 s together; the slowest is 0.07 s. Pre-flight loads and checks a
+The pre-flight cases run in about 2 s together; the slowest is under 0.1 s. Pre-flight loads and checks a
 study and never compiles it.

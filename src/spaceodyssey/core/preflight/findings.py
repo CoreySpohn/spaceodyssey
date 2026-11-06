@@ -28,13 +28,26 @@ class FindingCode(StrEnum):
 
 @dataclasses.dataclass(frozen=True)
 class Finding:
-    """One structural finding: a code, where it is, what it says and how to fix it."""
+    """One structural finding: a code, where it is, what it says and how to fix it.
+
+    `path` is for people. The locator is for tools: `subject` names the slot of the
+    study the finding is about (`observer`, `policy`, `channel_model`, `channels`,
+    `assets`, and so on), `index` the position within a slot that holds a sequence
+    (the policy), `member` the field of that slot, and `entry` the position of the
+    offending item within the member (one integer per axis). Each is empty when the
+    finding does not narrow that far, and a finding never names an item it did not
+    check.
+    """
 
     code: FindingCode
     severity: Severity
     path: str
     message: str
     fix: str
+    subject: str = ""
+    index: int | None = None
+    member: str = ""
+    entry: tuple[int, ...] = ()
 
     def __str__(self) -> str:
         """One line plus the fix hint."""

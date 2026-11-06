@@ -46,14 +46,20 @@ class Node:
     key_coords: tuple[str, ...] = ()
     required_coords: tuple[str, ...] = ()  # stable-id coordinates its draws need
     channel_id: int | None = None
+    slot: str = ""  # the study slot whose declaration keys its draws
+    entry: tuple[int, ...] = ()  # its position in a table, for a channel
 
 
 @dataclasses.dataclass(frozen=True)
 class Edge:
-    """The reader takes input from the source."""
+    """The reader takes input from the source.
+
+    `entry` is the position of the declared read the edge comes from, if any.
+    """
 
     reader: str
     source: str
+    entry: tuple[int, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -80,6 +86,7 @@ class StudyGraph:
                 Side.TRUTH,
                 key_coords=world.key_coords,
                 required_coords=("world",),
+                slot="world_source",
             )
         )
         process = declaration_of(study.process)
@@ -91,6 +98,7 @@ class StudyGraph:
                 crossing=True,
                 key_coords=process.key_coords,
                 required_coords=("world",),
+                slot="process",
             )
         )
         model = declaration_of(study.channel_model)
@@ -106,6 +114,8 @@ class StudyGraph:
                     key_coords=model.key_coords,
                     required_coords=("subject", "channel", "acquisition_index"),
                     channel_id=int(cid),
+                    slot="channel_model",
+                    entry=(i,),
                 )
             )
             edges.append(Edge(f"channel[{i}]", "world"))
@@ -129,6 +139,7 @@ class StudyGraph:
         reading = {"observer": study.observer}
         reading.update({f"policy[{i}]": p for i, p in enumerate(study.agenda.policies)})
         for name, component in reading.items():
-            for read in declaration_of(component).reads:
-                edges.append(Edge(name, "world" if read == TRUTH else "objective"))
+            for j, read in enumerate(declaration_of(component).reads):
+                source = "world" if read == TRUTH else "objective"
+                edges.append(Edge(name, source, (j,)))
         return cls(nodes, tuple(edges))
