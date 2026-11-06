@@ -1,14 +1,16 @@
-"""Observers and the shared batch of worlds for the observer kit (not a test file).
+"""Observers and the shared batches of worlds for the observer kit (not a test file).
 
 The kit study is the toy survey with four subjects observed twice each on channels
 of one noise level, so a flat-prior Gaussian posterior with that noise is exact.
 Subjects 0 and 2 are observed on channel 11 before channel 10: their release order
 is not their canonical order. The log holds exactly the eight records.
 
-One compiled run of the running mean over 2,000 worlds is the measurement batch.
-Every other observer's beliefs over the same records come from `replay_beliefs`:
-the plan reads no belief, so the records do not depend on the observer. The batch
-is checked once against a replay of its own observer.
+Two batches of the running mean serve every observer: four worlds on the host
+executor for the exact checks, and 2,000 worlds on the compiled executor for
+calibration and margins (both slow tier: one executor compile alone is over the
+unit budget). Other observers' beliefs over the same records come from
+`replay_beliefs`: the plan reads no belief, so the records do not depend on the
+observer. Each batch is checked once against a replay of its own observer.
 """
 
 import dataclasses
@@ -25,6 +27,7 @@ from spaceodyssey.core import (
     F64,
     GO_TOLERANCE,
     CompiledExecutor,
+    HostExecutor,
     MeanBelief,
     ObserverCapabilities,
     RunResult,
@@ -36,6 +39,7 @@ from spaceodyssey.studies import toy
 
 NOISE = 0.5
 N_WORLDS = 2000
+HOST_WORLDS = 4
 N_STEPS = 24
 REFIT = ObserverCapabilities(refit=True, refit_kinds=("measurement",))
 PLAN = ((0, 11), (1, 10), (2, 11), (3, 10), (0, 10), (1, 11), (2, 10), (3, 11))
@@ -65,6 +69,7 @@ class RefitSample(toy.ToySampleObserver):
     margin = 0.1
     seeds = (0,)
     standard_error = 0.02
+    stochastic_leaves = ("sample",)
 
     def capabilities(self):
         return REFIT
@@ -113,18 +118,23 @@ class MeanMutant(RefitMean):
     - `noop_install`: `install` returns the belief unchanged.
     - `canonical_bug`: a refit adds one to its mean when its first counting row is
       not its subject's first acquisition, which only canonical order produces.
+    - `tick_aux`: a fold adds the record's `accepted_tick` to `aux[1]`, so its
+      belief depends on the record's metadata as the handler presented it.
     """
 
     ignore_odd: jax.Array = _flag()
     late_twice: jax.Array = _flag()
     noop_install: jax.Array = _flag()
     canonical_bug: jax.Array = _flag()
+    tick_aux: jax.Array = _flag()
 
     def fold(self, belief, rec, caps, key=None):
         folded = super().fold(belief, rec, caps, key=key)
         ignored = self.ignore_odd & (rec.acquisition_index % 2 == 1)
         mean = jnp.where(ignored, belief.mean, folded.mean)
-        return MeanBelief(mean, folded.n, folded.aux)
+        tick = jnp.where(self.tick_aux & rec.valid, rec.accepted_tick, 0)
+        aux = folded.aux.at[1].add(tick.astype(F64))
+        return MeanBelief(mean, folded.n, aux)
 
     def refit(self, belief0, rows, caps, key, row_keys):
         fitted = super().refit(belief0, rows, caps, key, row_keys)
@@ -157,6 +167,11 @@ class SampleMutant(ResampleSample):
       ones, so the errors cancel when pooled over subjects.
     - `corrupt_install`: `install` adds 100 to the next subject's draw.
     - `nan_sample`: every fold's posterior draw is NaN.
+    - `canonical_mean`: a refit adds 100 to its (deterministic) mean when its first
+      counting row is not its subject's first acquisition (canonical order only).
+    - `wide_refit`: a refit's draw has twice the posterior's standard deviation.
+    - `stale_install`: `install` leaves the subject's mean as it was.
+    - `leak_install`: `install` adds 100 to the next subject's mean.
     """
 
     late_twice: jax.Array = _flag()
@@ -164,6 +179,10 @@ class SampleMutant(ResampleSample):
     cancelling: jax.Array = _flag()
     corrupt_install: jax.Array = _flag()
     nan_sample: jax.Array = _flag()
+    canonical_mean: jax.Array = _flag()
+    wide_refit: jax.Array = _flag()
+    stale_install: jax.Array = _flag()
+    leak_install: jax.Array = _flag()
 
     def fold(self, belief, rec, caps, key=None):
         folded = super().fold(belief, rec, caps, key=key)
@@ -177,21 +196,33 @@ class SampleMutant(ResampleSample):
             fold_last_again(self, fitted, rows, caps, row_keys),
             fitted,
         )
-        subject = rows.subject[jnp.argmax(rows.valid)]
+        first = jnp.argmax(rows.valid)
+        subject = rows.subject[first]
         shift = jnp.where(self.cancelling, jnp.where(subject % 2 == 0, 1.0, -1.0), 0.0)
-        sample = fitted.sample.at[subject].add(shift)
+        spread = fitted.sample[subject] - fitted.mean[subject]
+        wide = jnp.where(self.wide_refit, spread, 0.0)
+        sample = fitted.sample.at[subject].add(shift + wide)
         sample = jnp.where(self.nan_refit, jnp.nan, sample)
-        return dataclasses.replace(fitted, sample=sample)
+        late = rows.valid.any() & (rows.acquisition_index[first] > 0)
+        bump = jnp.where(self.canonical_mean & late, 100.0, 0.0)
+        mean = fitted.mean.at[subject].add(bump)
+        return dataclasses.replace(fitted, sample=sample, mean=mean)
 
     def install(self, belief, fitted, subject):
         put = super().install(belief, fitted, subject)
         other = (subject + 1) % put.sample.shape[0]
         bump = jnp.where(self.corrupt_install, 100.0, 0.0)
-        return dataclasses.replace(put, sample=put.sample.at[other].add(bump))
+        stale = jnp.where(self.stale_install, belief.mean[subject], put.mean[subject])
+        mean = put.mean.at[subject].set(stale)
+        mean = mean.at[other].add(jnp.where(self.leak_install, 100.0, 0.0))
+        return dataclasses.replace(
+            put, sample=put.sample.at[other].add(bump), mean=mean
+        )
 
 
 OBSERVERS = {
-    "mean": RefitMean(),
+    # the mutant with every fault off, so its mutants share the batch's programs
+    "mean": MeanMutant(),
     "sample": RefitSample(noise=NOISE),
     "ignores_half": MeanMutant(ignore_odd=True),
     "nan_sample": SampleMutant(noise=NOISE, nan_sample=True),
@@ -212,16 +243,8 @@ def kit_study(observer):
     )
 
 
-@functools.cache
-def kit_batch():
-    """`(study, run, truths, roots)` of the running mean over 2,000 worlds.
-
-    Raises `AssertionError` if a replay of the running mean does not reproduce the
-    run's beliefs, which every replayed observer relies on.
-    """
-    study = kit_study(OBSERVERS["mean"])
-    truths, roots = make_worlds(study, N_WORLDS)
-    run = CompiledExecutor().run(study, truths, roots, N_STEPS)
+def _checked(study, run, roots):
+    """`run`, after a replay of its own observer reproduces its beliefs."""
     replayed = replay_beliefs(study, run, roots)
     for got, want in zip(
         jax.tree_util.tree_leaves(replayed),
@@ -229,15 +252,33 @@ def kit_batch():
         strict=True,
     ):
         np.testing.assert_allclose(got, want, rtol=0, atol=GO_TOLERANCE)
-    return study, run, truths, roots
+    return run
 
 
 @functools.cache
-def kit_run(name):
-    """`(study, run, truths, roots)` of a named observer over the shared batch."""
+def kit_batch(source):
+    """`(study, run, truths, roots)` of the running mean: "host" or "compiled".
+
+    The host batch is four worlds, the compiled batch 2,000. Raises
+    `AssertionError` if a replay of the running mean does not reproduce the run's
+    beliefs, which every replayed observer relies on.
+    """
+    study = kit_study(OBSERVERS["mean"])
+    n_worlds = HOST_WORLDS if source == "host" else N_WORLDS
+    truths, roots = make_worlds(study, n_worlds)
+    if source == "host":
+        run = HostExecutor().run_worlds(study, truths, roots, N_STEPS)
+    else:
+        run = CompiledExecutor().run(study, truths, roots, N_STEPS)
+    return study, _checked(study, run, roots), truths, roots
+
+
+@functools.cache
+def kit_run(name, source="compiled"):
+    """`(study, run, truths, roots)` of a named observer over a shared batch."""
     if name == "mean":
-        return kit_batch()
-    _, batch, truths, roots = kit_batch()
+        return kit_batch(source)
+    _, batch, truths, roots = kit_batch(source)
     observer = OBSERVERS[name]
     study = kit_study(observer)
     belief, summary = replay_beliefs(study, batch, roots)
