@@ -15,6 +15,14 @@ The defaults keep every Slice 1 history unchanged: all 112 golden digests match.
 1. `feat(core): observer refit, summary and install methods; folds take their inference key`
 2. `test(core): observer contract and fold-key invariance`
 3. `docs(changes): record Slice 2 T1b observer contract`
+4. `feat(core)!: observer fold and fold_summary take key=; keyed, padding-safe refit over refit_rows` (review fixes 1 to 4, and the release marker of fix 6)
+5. `test(core): keyed promotion parity, analysis boundary, padding gradients and retraction`
+6. `fix(core): refit_rows reads the log without a dynamic attribute read` (the
+   Slice 1 gate's dispatch scan refused the first version's `getattr` over column
+   names; the rows now come from the sorted log's leaves, and
+   `test_canonical_fields.py` now requires `Record` and `RecordLog` to list their
+   columns in one order, which that relies on)
+7. `docs(changes): T1b review fixes, release notes and refit result size`
 
 ## The observer contract
 
@@ -27,7 +35,7 @@ The defaults keep every Slice 1 history unchanged: all 112 golden digests match.
 | `fold` | `fold(belief, rec, caps, key=None) -> belief` | none (abstract) |
 | `fold_summary` | `fold_summary(summary, rec, caps, key=None) -> summary` | `analyze(fold(summary, rec, caps, key=key))` |
 | `summary` | `summary(belief) -> summary` | identity |
-| `refit` | `refit(belief0, rows, caps, key) -> belief` | folds and analyzes each valid row in order |
+| `refit` | `refit(belief0, rows, caps, key, row_keys) -> belief` | folds each valid row in order with its fold key, analyzing between folds |
 | `install` | `install(belief, fitted, subject) -> belief` | none (raises) |
 | `install_summary` | `install_summary(summary, fitted, subject) -> summary` | `analyze(install(summary, fitted, subject))` |
 | `analyze` | `analyze(belief) -> belief` | identity |
@@ -46,15 +54,42 @@ The defaults keep every Slice 1 history unchanged: all 112 golden digests match.
   position or private event enters it (D3). The key is computed from the unmasked
   log row; masking changes no identity field. An observer that draws nothing
   ignores it.
-- **`refit` takes `caps`.** The spec table writes `refit(belief0, rows, key)`. The
-  settled signature is `refit(belief0, rows, caps, key)`: the default refit folds,
-  and `fold` needs the capacities, as every other method that reads records does.
-  `belief0` is the starting belief (normally `init(caps)`), `rows` a `Record` with a
-  leading row axis holding one subject's revision set in canonical order, masked for
-  the audience, with `valid` false on padding rows, and `key` the subject's refit key
-  (T4b's `refit_key`). The default keys each row by `draw_key(key, row,
-  Purpose.INFERENCE)` and masks padding itself, so an exact incremental observer
-  refits to the belief folding gave.
+- **`refit` takes `caps` and the row keys.** The spec table writes `refit(belief0,
+  rows, key)`. The settled signature is `refit(belief0, rows, caps, key,
+  row_keys)`. The default refit folds, and `fold` needs the capacities, as every
+  other method that reads records does. `belief0` is the starting belief (normally
+  `init(caps)`). `rows` is a `Record` with a leading row axis as
+  `records.refit_rows` selects it (below). `row_keys` holds each row's fold key,
+  `keys.fold_keys(root, rows, study)`: the world root key with the study's fork and
+  coupling, exactly the keys the incremental folds of the same rows received, so a
+  sampling observer refits bit for bit to its incremental belief over the same rows
+  in the same order. `key` is the subject's refit key (T4b's `refit_key`), kept
+  separate for an observer whose refit draws beyond its row folds; the default does
+  not read it.
+- **Refit analysis boundary.** `refit` returns before the final analysis, like
+  `fold`, and the default analyzes between folds as the incremental path does, so
+  `analyze(refit(...))` equals folding the rows one by one even when `analyze` is
+  not idempotent.
+- **Padding.** Before a row that does not count is folded (and the result
+  discarded), the default replaces it with the first counting row marked invalid,
+  so a fold that divides by a padding value cannot put a NaN into a gradient. A
+  refit with no counting row returns `belief0`; its discarded fold then sees a
+  padding row, so an observer whose fold is singular at a zero payload should not be
+  differentiated through an empty refit.
+- **Row selection.** `records.refit_rows(log, caps, audience, subject)` selects the
+  rows: for each acquisition of the subject it takes the latest revision the
+  audience has received (accepted by the observer, released to the policy) first,
+  and that row counts only when its kind is in `caps.refit_kinds` and its status in
+  `caps.refit_statuses`, so a correction with an unlisted status retracts the
+  acquisition. Counting rows come first in canonical order (channel, acquisition
+  index, revision) with `valid` true; the rest follow with `valid` false; all are
+  masked for the audience. T4a truncates to `rows_per_subject` and T4b adds the
+  pedigree; the selection rule is fixed here.
+- **Order.** Refit rows are in canonical order, incremental folds in release order.
+  The two agree for an order-insensitive observer; for an order-sensitive one
+  (the sampling observer's last draw), promotion parity holds when the rows are
+  given in release order, which is how the parity test feeds them. Whether the kit's
+  promotion-parity check (T3a) uses canonical or release order is a T3a decision.
 - **`install` and `summary`.** `install(belief, fitted, subject)` writes the
   subject's part of a refit belief into the current one; it has no default, since
   which leaves are per subject is the observer's knowledge. For the policy, D2's
@@ -64,6 +99,12 @@ The defaults keep every Slice 1 history unchanged: all 112 golden digests match.
   that is neither incremental nor refit-capable, `refit_kinds` that are empty when
   `refit` is true or present when it is false, a repeated kind and an unknown
   status. `refit_kinds` are registered record-kind names.
+- **Refit result size.** The current contract: `refit` returns a belief of
+  `belief0`'s full shape, every subject's leaves included, and `install` takes the
+  subject's part. A boundary batched over audiences and subjects
+  (`[2, n_subjects, ...]`) therefore holds `n_subjects` full beliefs per audience,
+  quadratic in `n_subjects`. The open alternative is a per-subject slice type,
+  declared in the layout, that `refit` returns and `install` consumes. T4a decides.
 - **Projections** stay `eqx.Module` callables or module-level functions (answer 3);
   `BeliefLayout.project_summary` is kept (answer 2); every caller passes the layout
   (answer 4).
@@ -101,14 +142,33 @@ The defaults keep every Slice 1 history unchanged: all 112 golden digests match.
 
 ## Public API
 
-New in `spaceodyssey.core`: `ObserverCapabilities`, `fold_key`, `lower_refit`; in
-`spaceodyssey.studies.toy`: `ToySampleObserver`, `SampleBelief`, `project_sample`.
-`AbstractObserver.fold` and `fold_summary` gain `key=None`, and the core now calls
-them with `key=`, so an observer subclass whose `fold` does not accept `key` breaks.
-`KindRegistry.lower` gains `observer`, `RecordKind` gains `derived`, `Capacities`
-gains four fields, and `replay_belief` gains `root`, all with defaults. The library
-is below 1.0, so the commit is `feat(core)` without a breaking marker, and its
-subject names the fold-key change.
+New in `spaceodyssey.core`: `ObserverCapabilities`, `fold_key`, `fold_keys`,
+`lower_refit`, `refit_rows`; in `spaceodyssey.studies.toy`: `ToySampleObserver`,
+`SampleBelief`, `project_sample`. `KindRegistry.lower` gains `observer`,
+`RecordKind` gains `derived`, `Capacities` gains four fields, and `replay_belief`
+gains `root`, all with defaults.
+
+Breaking: the core now calls `fold` and `fold_summary` with `key=`, so an observer
+subclass that overrides either without a `key` parameter raises `TypeError`.
+Migration, for release notes:
+
+```python
+class MyObserver(AbstractObserver):
+    def fold(self, belief, rec, caps, key=None):
+        ...
+
+    def fold_summary(self, summary, rec, caps, key=None):
+        ...
+```
+
+An observer that draws nothing ignores `key`; one that calls `super().fold` passes
+`key=key` on. A subclass that overrides `refit` takes `refit(self, belief0, rows,
+caps, key, row_keys)`.
+
+Release labelling: commit 4 carries the breaking marker, `feat(core)!:`. The
+release-please configuration sets `bump-minor-pre-major`, so on 0.x the marker
+bumps the minor version (0.1.0 to 0.2.0) and lists the change under breaking
+changes, without graduating the library to 1.0.
 
 ## Tests
 
@@ -144,7 +204,22 @@ Changed:
 - The two source-patching mutants (`test_conformance_guards.py`) name the new fold
   call and assert it is present; five test observers accept `key`.
 
-Retired: none. Net: 13 quick tests, 3 slow tests.
+Added by the review fixes (`test_observer_contract.py`, unit tier, 5 tests): keyed
+promotion parity of the sampling observer against the run's incremental belief,
+bitwise, with padding before and between rows and the last row valid, and with a
+reversed order and a dropped final row as controls; the analysis boundary under a
+non-idempotent analysis; finite, exact gradients of a refit batched over both
+audiences whose fold divides by padding values; the retraction rule of
+`refit_rows` (a failed correction retracts, a completed one replaces, the policy
+reads only what it received), two cases. Retired: the first refit test
+(`test_default_refit_then_install_equals_the_incremental_belief`), which the
+keyed parity test subsumes; the reviewer showed it passed with the final row
+dropped or the rows reversed. Each fix was checked against a mutant: the original
+refit, a refit that analyzes after its last fold, one without the padding stand-in,
+one that drops the final counting row, one that reverses the rows, and a selection
+without the current-revision rule each fail at least one of these tests.
+
+Retired: one (above). Net: 17 quick tests, 3 slow tests.
 
 The deciding tests `test_corpus_invariants`, `test_parity_values`,
 `test_slice1_gate` and `test_golden_histories` pass with the golden manifest
@@ -179,5 +254,12 @@ After rebasing onto `bd3ff31` (T2, Agenda levels; no conflicts), the deciding
 tests, the golden manifest, the contract, draw, lint, layout, conformance-guard and
 Agenda-level files pass: 663 tests, manifest unchanged.
 
-Actual time spent: about 1 hour of wall time, of which about 40 minutes was spent
-waiting on the full suite and the timing runs.
+After the review fixes: the deciding tests, the golden manifest (unchanged), the
+contract, draw, lint, layout, conformance-guard, replay and revision files pass
+(703 tests), with the gate's dispatch scan and its allowance test passing after
+commit 6 (500 tests in the rerun of the gate, lint, contract and canonical-field
+files).
+
+Actual time spent: about 1 hour of wall time for the task and 45 minutes for the
+review fixes, of which about 40 minutes and 20 minutes were spent
+waiting on test runs.
