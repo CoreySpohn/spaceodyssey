@@ -15,12 +15,14 @@ golden history moved.
 1. `feat(core): keyed replay with refresh and roots on run results`
 2. `test(core): replay with refresh on both executors, corrections, queries, truncation and mutants`
 3. `docs(changes): record Slice 2 T4c keyed replay`
+4. Review fixes: `fix(core): replay folds, ids, phase and refusals`,
+   `test(core): quick-tier replay and refusal regressions`, and a docs update.
 
 ## What changed
 
 - **`replay_run(run, roots, carry, trace, *, refit=None, executor=None)`** in
   `core/executors/replay.py`, exported from `spaceodyssey.core` with its result type
-  `Replayed(belief, pbelief, checkpoints, products)`. `run` is a loaded run (its
+  `Replayed(belief, pbelief, checkpoints, products, refused, unfinished, overflow_mask)`. `run` is a loaded run (its
   `study` and its `refit` boundary, or the boundary of the named executor) or a study
   with `refit=` given. The name differs from the spec's `replay_beliefs` because the
   observer kit already exports a different `replay_beliefs(study, run, roots)`.
@@ -41,9 +43,23 @@ golden history moved.
 - **Final check.** The replayed `belief` and `pbelief` leaves equal the run's: ints
   exactly, floats within the kill tolerance. Any mismatch raises `ValueError` naming it.
 - **`RunResult.roots`** holds the world root keys of the run (both executors).
-- **Seeded fields.** The trace holds neither the internal id of a product row nor the
-  phase, so the replay reads those two (and the vintage) from the run's row and checks
-  every other column.
+- **Fold-time rows.** An incremental fold receives the row as the handler saw it:
+  `accepted_tick`, `released_tick` and `superseded_by` are rebuilt from the preceding
+  trace steps (unset until the release stamps them; the policy fold sees the
+  `superseded_by` of the higher revisions released so far).
+- **Phase and ids.** The phase is rebuilt from the woken steps and the run's phase
+  bounds, so a product row's `phase` and `vintage` are checked, not read. The reserved
+  `acquisition_id` of a product row is checked to be above every earlier row id, to
+  rise consecutively through the checkpoint and to be held by no other row. The first
+  id is still seeded from the run's row: the trace carries no allocator state
+  (`next_sid`). A per-step `next_sid` in the trace would make replay fully independent
+  of the run's rows; it is not added here and needs a decision.
+- **Refusals.** A checkpoint refused for rows, ids or log room replays as a refusal:
+  `Replayed.refused` lists `(ordinal, capacity bits)`, `unfinished` is true only for a
+  hold with no completion, and `overflow_mask` is the run's. A refusal the replay
+  reaches that the run did not raise is an error. A derived-row correction refused with
+  `INVALID_CORRECTION` replays with neither field set and the bit in `overflow_mask`.
+  The replay seeds a refused checkpoint's allocator with the run's final `next_sid`.
 
 ## Tests
 
@@ -64,13 +80,21 @@ which replays the corpus `refresh` case (the case the older replay tests skip). 
 conformance invariants take a canonical history only, with no boundary, so the corpus
 check lives with the replay tests rather than as an invariant.
 
-The spec planned 5 quick tests. All of these need a run on an executor, so none fits the
-quick tier; two same-tick corrections are interpreted as corrections released at the
-checkpoint tick (before its stage) and at the following tick.
+Three further slow cases: incremental folds that read the three lifecycle fields (host
+and compiled; a replay that folds the final row fails), and an `INVALID_CORRECTION`
+replay reported distinctly from a refusal or a cut.
 
-Remaining case, not covered: a correction released at a stage after the checkpoint on
-the checkpoint's own tick (an `ADMIT`-stage `Query` result), which falls in the next
-checkpoint; T4a covers its scheduling but not its replay.
+`tests/core/test_replay_refresh_quick.py` (quick tier, about 2 s cold, no executor run)
+replays a hand-built log: one subject, one row per subject, four log rows, revision 0
+released, a checkpoint with two product rows from a boundary that writes the request key
+into the mean, then revision 1 released at the checkpoint tick's `ADMIT` stage. Cases:
+the control; both mutants (final `superseded_by`, a key from the log length); corrupted
+product id, duplicated id, phase and vintage; refusals for exhausted ids and a full log;
+a run cut on a hold.
+
+No corpus case that reads its key was added: the corpus histories are goldens, and a
+key-reading boundary needs new hand rows, which would move them. The key is covered by
+the quick key-reading boundary and the slow `ResampleSample` mutant.
 
 ## Timing
 
@@ -79,7 +103,7 @@ cases are the first run of each study structure (8 to 22 s, compile), the rest u
 (the second run of a structure and every replay: 0.05 to 0.4 s). Replay itself adds
 about 0.4 s cold and 0.05 s warm per world.
 
-Full suite (`-n 2 --dist loadfile`, four threads, `tests/codec/test_entry_points_installed.py`
+Full suite after the review fixes: see the report. Earlier full suite (`-n 2 --dist loadfile`, four threads, `tests/codec/test_entry_points_installed.py`
 deselected): 3081 passed in 1956 s, on a machine busy with other jobs (about 15 min was
 expected on an idle one). Lints: ruff check and format, the dispatch lints in
 `test_lints.py`, internal references.
