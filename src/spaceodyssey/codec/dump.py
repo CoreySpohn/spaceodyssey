@@ -7,13 +7,8 @@ import math
 import jax
 import numpy as np
 
-from spaceodyssey.codec.document import (
-    DocumentError,
-    KindTable,
-    StudyDocument,
-    is_version_field,
-    pointer,
-)
+from spaceodyssey.codec.document import DocumentError, StudyDocument, pointer
+from spaceodyssey.codec.kinds import as_resolver, is_version_field
 from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.study import Study
 
@@ -40,16 +35,17 @@ ARRAY_DTYPES = frozenset(
 def dump_study(study, kinds=None):
     """Encode `study` as a `StudyDocument`.
 
-    `kinds` maps `(group, id, version)` to each class the study holds beyond the
-    core's own types (`CORE_KINDS`). Every field of every module is written, static
-    and dynamic alike, with exact Python types and array dtypes, so `load_study`
-    rebuilds an equal pytree. A value of a type the document has no form for (a
-    function, a set, a complex array) raises `DocumentError` naming its pointer.
+    `kinds` is a `KindResolver`, or a mapping of `(group, id, version)` to each
+    class the study holds beyond the core's own types (`CORE_KINDS`). Every field
+    of every module is written, static and dynamic alike, with exact Python types
+    and array dtypes, so `load_study` rebuilds an equal pytree. A value of a type
+    the document has no form for (a function, a set, a complex array) raises
+    `DocumentError` naming its pointer.
     """
     require_x64()
     if not isinstance(study, Study):
         raise TypeError(f"dump_study needs a Study, not {type(study).__name__}")
-    return StudyDocument(study=encode(study, ("study",), KindTable(kinds)))
+    return StudyDocument(study=encode(study, ("study",), as_resolver(kinds)))
 
 
 def encode(value, path, table):

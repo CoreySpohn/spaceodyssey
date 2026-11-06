@@ -29,10 +29,10 @@ written as the one tag whatever its sign or payload bits. Floats narrower than 6
 bits are written as the exact float64 value of each element. An array in a
 non-native byte order is refused rather than silently converted.
 
-A kind reference names a class by `(group, id, version)` through a mapping the
-caller passes (`kinds`); `CORE_KINDS` holds the core's own types and is always
-included. A class field named `version` is the kind version: it is not written
-among the fields, and loading sets it from the reference.
+A kind reference names a class by `(group, id, version)` through a
+`KindResolver` (`spaceodyssey.codec.kinds`). A class field named `version` is the
+kind version: it is not written among the fields, and loading sets it to the
+registered version, after migrating the fields of an older one.
 
 Canonical JSON sorts the keys of every JSON object, uses no whitespace, escapes
 non-ASCII characters and refuses non-finite numbers (bare NaN or Infinity, or a
@@ -42,49 +42,12 @@ part of the content and of the hash.
 """
 
 import dataclasses
-import enum
 import hashlib
 import json
 import math
-from collections.abc import Mapping
-
-from spaceodyssey.core import enums
-from spaceodyssey.core.capacities import Capacities
-from spaceodyssey.core.keys import Coupling, Fork
-from spaceodyssey.core.ledger import AssetTable, ChannelTable
-from spaceodyssey.core.snapshot import EffectTable
-from spaceodyssey.core.study import Agenda, Clock, Study
 
 FORMAT = "spaceodyssey.study"
 SCHEMA_VERSION = 1
-
-KindRef = tuple[str, str, int]
-
-CORE_KINDS: Mapping[KindRef, type] = {
-    ("core", "study", 1): Study,
-    ("core", "clock", 1): Clock,
-    ("core", "agenda", 1): Agenda,
-    ("core", "channel_table", 1): ChannelTable,
-    ("core", "asset_table", 1): AssetTable,
-    ("core", "capacities", 1): Capacities,
-    ("core", "coupling", 1): Coupling,
-    ("core", "fork", 1): Fork,
-    ("core", "effect_table", 1): EffectTable,
-    ("core", "stage", 1): enums.Stage,
-    ("core", "event_kind", 1): enums.EventKind,
-    ("core", "effect_kind", 1): enums.EffectKind,
-    ("core", "scope", 1): enums.Scope,
-    ("core", "disposition", 1): enums.Disposition,
-    ("core", "record_status", 1): enums.RecordStatus,
-    ("core", "purpose", 1): enums.Purpose,
-    ("core", "admission_code", 1): enums.AdmissionCode,
-    ("core", "coincident_order", 1): enums.CoincidentOrder,
-    ("core", "charge_rule", 1): enums.ChargeRule,
-    ("core", "remainder_rule", 1): enums.RemainderRule,
-    ("core", "audience", 1): enums.Audience,
-    ("core", "capacity", 1): enums.Capacity,
-    ("core", "run_status", 1): enums.RunStatus,
-}
 
 _DOCUMENT_KEYS = frozenset({"format", "schema_version", "study", "content_hash"})
 
@@ -95,7 +58,7 @@ class DocumentError(ValueError):
     `pointer` is the JSON pointer (RFC 6901) of the offending value in the
     document, or `None` when no single value is at fault. `code` is the pre-flight
     code the error corresponds to, when there is one: `D001` for an unknown kind
-    reference, `D002` for a schema version newer than this loader.
+    id or version, `D002` for a schema version newer than this loader.
     """
 
     def __init__(self, message, pointer=None, code=None):
@@ -122,89 +85,6 @@ def canonical_json(value):
         ensure_ascii=True,
         allow_nan=False,
     )
-
-
-def is_kind_class(cls):
-    """Whether `$kind` may name `cls`: a dataclass (or module) type, not an enum."""
-    return (
-        isinstance(cls, type)
-        and dataclasses.is_dataclass(cls)
-        and not issubclass(cls, enum.Enum)
-    )
-
-
-def is_version_field(cls, name):
-    """Whether field `name` of a kind class is the kind version."""
-    return (
-        name == "version" and isinstance(cls, type) and not issubclass(cls, enum.Enum)
-    )
-
-
-class KindTable:
-    """Kind references both ways: `CORE_KINDS` plus the caller's mapping.
-
-    `kinds` maps `(group, id, version)` to a class. A key that repeats a core key
-    with another class is refused. One class may appear under several versions; an
-    instance picks the one equal to its `version` field.
-    """
-
-    def __init__(self, kinds=None):
-        """Merge the caller's mapping over the core kinds."""
-        table = dict(CORE_KINDS)
-        for ref, cls in (kinds or {}).items():
-            ref = _check_ref(ref)
-            if table.get(ref, cls) is not cls:
-                raise ValueError(f"kind {list(ref)} is already bound to another class")
-            table[ref] = cls
-        self._by_ref = table
-
-    def resolve(self, ref, path):
-        """The class a reference names; an unknown reference is `D001`."""
-        try:
-            return self._by_ref[ref]
-        except KeyError:
-            raise DocumentError(
-                f"unknown kind {list(ref)}", pointer(path), code="D001"
-            ) from None
-
-    def ref_of(self, value, path):
-        """The reference of an instance's class, chosen by its version field."""
-        cls = type(value)
-        refs = [ref for ref, c in self._by_ref.items() if c is cls]
-        version = _version_of(value)
-        if version is not None:
-            refs = [ref for ref in refs if ref[2] == version]
-        if len(refs) != 1:
-            name = f"{cls.__module__}.{cls.__qualname__}"
-            detail = "no" if not refs else "more than one"
-            suffix = "" if version is None else f" at version {version}"
-            raise DocumentError(
-                f"{detail} kind is bound to {name}{suffix}", pointer(path)
-            )
-        return refs[0]
-
-
-def _version_of(value):
-    """The `version` field of a dataclass instance, or `None` if it has none."""
-    if isinstance(value, enum.Enum) or not dataclasses.is_dataclass(value):
-        return None
-    if not any(f.name == "version" for f in dataclasses.fields(value)):
-        return None
-    return value.version
-
-
-def _check_ref(ref):
-    """A kind reference as a `(str, str, int)` tuple."""
-    ok = (
-        isinstance(ref, (tuple, list))
-        and len(ref) == 3
-        and isinstance(ref[0], str)
-        and isinstance(ref[1], str)
-        and type(ref[2]) is int
-    )
-    if not ok:
-        raise ValueError(f"a kind reference is (group, id, version), not {ref!r}")
-    return tuple(ref)
 
 
 @dataclasses.dataclass(frozen=True, eq=False)

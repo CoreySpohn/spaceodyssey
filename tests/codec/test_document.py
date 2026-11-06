@@ -35,7 +35,7 @@ class LabelledDesign(AbstractDesign):
         object.__setattr__(self, "n_labels", len(self.labels))
 
 
-# T5a resolves kinds through an explicit mapping; entry points replace it later.
+# Unit tests pass an explicit mapping; the installed entry points have their own test.
 TOY_KINDS = {
     ("observer", "toy.running_mean", 1): toy.ToyRunningMean,
     ("policy", "toy.fixed_plan", 1): toy.FixedPlanPolicy,
@@ -255,6 +255,10 @@ def _edit_hash(doc):
     doc["content_hash"] = "0" * 64
 
 
+def _newer_schema(doc):
+    doc["schema_version"] = 2
+
+
 def _put(*path_and_value):
     """An edit that sets the value at a path of keys in the study."""
     *path, value = path_and_value
@@ -274,6 +278,7 @@ def _put(*path_and_value):
         (_set_budget_shape, "/study/budget/data", None),
         (_drop_a_level, "/study/agenda", None),
         (_unknown_observer, "/study/observer/$kind", "D001"),
+        (_newer_schema, "/schema_version", "D002"),
         (_edit_hash, "/content_hash", None),
         (_put("clock", "tick_length_s", "hello"), "/study/clock/tick_length_s", None),
         (
@@ -298,6 +303,7 @@ def _put(*path_and_value):
         "data-shape",
         "module-check",
         "unknown-kind",
+        "newer-schema",
         "edited-hash",
         "string-for-float",
         "float-for-int-tick",
@@ -310,9 +316,9 @@ def _put(*path_and_value):
 def test_bad_document_fails_with_a_pointer(edit, where, code):
     """Fails if a bad document loads, or fails without the pointer of the offending
     value: data that does not match its declared shape, a field that breaks its
-    module's check, an unknown kind, a hand-edited hash, a value its converter
-    would coerce (a string clock, a fractional tick), a tuple where an array is
-    expected, or a tag naming the wrong category of class.
+    module's check, an unknown kind, a newer schema version, a hand-edited hash, a
+    value its converter would coerce (a string clock, a fractional tick), a tuple
+    where an array is expected, or a tag naming the wrong category of class.
     """
     doc = json.loads(dump_study(toy.survey_1(), TOY_KINDS).to_json())
     doc.pop("content_hash")  # a document without a hash loads unchecked
