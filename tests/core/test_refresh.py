@@ -161,6 +161,11 @@ def test_next_grid_tick_never_wraps_near_the_int64_limit():
     assert bool(_grid_position(half, 2**62, Stage.ANALYZE)[2])
     assert not bool(_grid_position(half, 2**62, Stage.ADMIT)[2])
     assert int(next_grid_tick(half, 2**62 + 1, Stage.SETTLE)[0]) == big
+    # the ordinal increment past ANALYZE at the last tick must not wrap
+    tick, k, fits = _grid_position(RefreshSchedule(1, 0), big, Stage.ADMIT)
+    assert not bool(fits) and int(tick) == big and int(k) >= 0
+    tick, k, fits = _grid_position(RefreshSchedule(1, 0), big, Stage.ANALYZE)
+    assert bool(fits) and int(tick) == big and int(k) == big
 
 
 def test_overflowing_checkpoint_sets_the_grid_tick_overflow():

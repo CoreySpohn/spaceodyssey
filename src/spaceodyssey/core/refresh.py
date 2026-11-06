@@ -101,9 +101,11 @@ def _grid_position(schedule, tick, stage):
     gap = jnp.maximum(tick - offset, 0)
     k = gap // every + (gap % every != 0).astype(I64)
     on_grid = (tick >= offset) & (gap % every == 0)
-    k = k + (on_grid & (stage > Stage.ANALYZE)).astype(I64)
+    bump = on_grid & (stage > Stage.ANALYZE)
     room = jnp.maximum(big - offset, 0) // every
-    fits = k <= room
+    # k + bump <= room, tested before the increment so it cannot wrap
+    fits = (k < room) | ((k == room) & ~bump)
+    k = k + (bump & (k < big)).astype(I64)
     at = offset + jnp.where(fits, k, 0) * every
     return jnp.where(fits, at, big), k, fits
 
