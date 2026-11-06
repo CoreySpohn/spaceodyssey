@@ -185,7 +185,7 @@ def _phase_after(phase, tick, bounds):
 def _check_ids(carry, first, count, ordinal):
     """The reserved internal ids of a checkpoint are fresh and unique.
 
-    Each is above the id of every row written before the checkpoint (the allocator only
+    Each is above the id of every row written before the checkpoint (the id counter only
     advances) and held by no other row of the log. Consecutive order is checked with the
     rows themselves.
     """
@@ -209,7 +209,7 @@ def _check_products(new, carry, first, count, ordinal):
     """The rows a replayed checkpoint wrote equal the run's rows at the same slots.
 
     Every column, the payload and the pedigree must match. The first internal id is
-    the one the run reserved (the trace does not hold the allocator), so its freshness
+    the one the run reserved (the trace does not hold the id counter), so its freshness
     is checked separately (`_check_ids`).
     """
     for slot in range(first, first + count):
@@ -433,9 +433,9 @@ def _hold(study, carry, roots, boundary, at, state):
     belief, pbelief, dirty, accepted, released, phase = state
     ordinal, n_log = at["acquisition_index"], at["n_log"]
     log = carry.log
-    # The allocator is not in the trace: a checkpoint that wrote rows reserved ids from
+    # The id counter is not in the trace: a checkpoint that wrote rows reserved ids from
     # the first of them; one that wrote none (refused) is seeded with the run's final
-    # allocator, which any refusal for lack of ids is consistent with.
+    # id counter, which any refusal for lack of ids is consistent with.
     ahead = n_log < log.valid.shape[0] and bool(log.valid[n_log])
     next_sid = vars(log)["acquisition_id"][n_log] if ahead else carry.next_sid
     held = dataclasses.replace(
