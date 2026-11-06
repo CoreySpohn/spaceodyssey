@@ -336,8 +336,13 @@ class CountBudget(eqx.Module):
 
     @property
     def snr(self):
-        """Expected planet counts over the square root of the total variance."""
-        return self.planet / jnp.sqrt(self.variance)
+        """Expected planet counts over the square root of the total variance.
+
+        Zero for an interval with no variance (a zero-duration interval).
+        """
+        variance = self.variance
+        safe = jnp.where(variance > 0, variance, 1.0)
+        return jnp.where(variance > 0, self.planet / jnp.sqrt(safe), 0.0)
 
 
 class PreparedScene(eqx.Module):

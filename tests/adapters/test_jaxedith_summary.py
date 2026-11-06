@@ -232,7 +232,8 @@ def test_hand_count_and_variance_budget(observatory):
     90 degrees), the detector has QE 1 and dQE 1 so the budget does not depend on
     where QE is applied, and the collecting area is pi (D/2)^2 (1 - OBSCURED). Also
     fails if a component is dropped from the variance, if the background multiplier
-    is not applied, or if the floor is not (t * leakage / ppfact)^2.
+    is not applied, or if the floor is not (t * leakage / ppfact)^2. A zero-length
+    interval has zero counts, zero variance and SNR 0 (not NaN).
     """
     spec = DetectorSpec.fixture(quantum_efficiency=1.0, dqe=1.0)
     scene = toy_scene()
@@ -240,7 +241,8 @@ def test_hand_count_and_variance_budget(observatory):
     interval = ScienceInterval.from_start(EPOCH_JD + 120.0, 7200.0)
     for k, ppfact in ((1.0, math.inf), (2.0, 30.0)):
         report = toy_report(observatory, spec=spec, bg_multiplier=k, ppfact=ppfact)
-        budget = report.predict(face_on(a_au, Rp_au=Rp_au, Ag=Ag), interval)
+        theta = face_on(a_au, Rp_au=Rp_au, Ag=Ag)
+        budget = report.predict(theta, interval)
         times = np.asarray(report.node_times_jd(interval))
         rates = hand_rates(report, scene, a_au, Ag * Rp_au**2, times, ppfact=ppfact)
         w = np.asarray(report.weights) * 0.5 * 7200.0
@@ -263,6 +265,8 @@ def test_hand_count_and_variance_budget(observatory):
         assert float(budget.thermal) == 0.0
         assert int(budget.cadence) == CADENCE_CODES["photon_counting_legacy"]
         assert bool(budget.in_field)
+        empty = report.predict(theta, ScienceInterval(interval.midpoint_jd, 0.0))
+        assert float(empty.planet) == float(empty.variance) == float(empty.snr) == 0.0
     # Control: a raw area fraction as the linear obscuration overstates the area.
     raw = SimplePrimary(DIAMETER_M, OBSCURED).area_m2
     assert raw / report.optical_path.primary.area_m2 - 1.0 > 0.1
