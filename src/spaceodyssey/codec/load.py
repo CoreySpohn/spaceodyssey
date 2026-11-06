@@ -8,6 +8,7 @@ dataclass), and an error it raises is reported at the module's pointer.
 """
 
 import dataclasses
+import enum
 import math
 
 import equinox as eqx
@@ -20,6 +21,7 @@ from spaceodyssey.codec.document import (
     KindTable,
     StudyDocument,
     check_schema_version,
+    is_kind_class,
     is_version_field,
     pointer,
 )
@@ -77,12 +79,7 @@ def decode(node, path, table):
     if tag == "$dict":
         return _decode_dict(body, (*path, tag), table)
     if tag == "$enum":
-        cls = table.resolve(_ref(body, (*path, tag)), (*path, tag))
-        value = decode(node.get("value"), (*path, "value"), table)
-        try:
-            return cls(value)
-        except (ValueError, TypeError) as err:
-            raise DocumentError(str(err), pointer((*path, "value"))) from err
+        return _decode_enum(node, path, table)
     raise DocumentError(f"unknown tag {tag}", pointer(path))
 
 
@@ -98,6 +95,28 @@ def _decode_dict(body, path, table):
             raise DocumentError(f"key {pair[0]!r} repeats", pointer((*path, i, 0)))
         out[pair[0]] = decode(pair[1], (*path, i, 1), table)
     return out
+
+
+def _decode_enum(node, path, table):
+    """An enum member from its class reference and its value."""
+    cls = table.resolve(_ref(node["$enum"], (*path, "$enum")), (*path, "$enum"))
+    if not (isinstance(cls, type) and issubclass(cls, enum.Enum)):
+        raise DocumentError(
+            f"{cls.__qualname__} is not an enum", pointer((*path, "$enum"))
+        )
+    if "value" not in node:
+        raise DocumentError("an $enum needs a value", pointer(path))
+    value = decode(node["value"], (*path, "value"), table)
+    try:
+        member = cls(value)
+    except (ValueError, TypeError) as err:
+        raise DocumentError(str(err), pointer((*path, "value"))) from err
+    if type(member.value) is not type(value):
+        raise DocumentError(
+            f"{cls.__qualname__} values are {type(member.value).__name__}",
+            pointer((*path, "value")),
+        )
+    return member
 
 
 def _only(node, allowed, path):
@@ -132,6 +151,11 @@ def _decode_kind(node, path, table):
     """Rebuild a module or dataclass from its fields, then validate it."""
     ref = _ref(node["$kind"], (*path, "$kind"))
     cls = table.resolve(ref, (*path, "$kind"))
+    if not is_kind_class(cls):
+        raise DocumentError(
+            f"{cls.__qualname__} is not a module or dataclass",
+            pointer((*path, "$kind")),
+        )
     fields = [f.name for f in dataclasses.fields(cls)]
     stored = [n for n in fields if not is_version_field(cls, n)]
     _only(node, {"$kind", *stored}, path)

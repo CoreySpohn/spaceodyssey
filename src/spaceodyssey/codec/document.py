@@ -124,6 +124,15 @@ def canonical_json(value):
     )
 
 
+def is_kind_class(cls):
+    """Whether `$kind` may name `cls`: a dataclass (or module) type, not an enum."""
+    return (
+        isinstance(cls, type)
+        and dataclasses.is_dataclass(cls)
+        and not issubclass(cls, enum.Enum)
+    )
+
+
 def is_version_field(cls, name):
     """Whether field `name` of a kind class is the kind version."""
     return (

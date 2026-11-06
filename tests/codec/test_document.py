@@ -232,6 +232,19 @@ def _edit_hash(doc):
     doc["content_hash"] = "0" * 64
 
 
+def _put(*path_and_value):
+    """An edit that sets the value at a path of keys in the study."""
+    *path, value = path_and_value
+
+    def edit(doc):
+        node = doc["study"]
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+
+    return edit
+
+
 @pytest.mark.parametrize(
     ("edit", "where", "code"),
     [
@@ -239,13 +252,33 @@ def _edit_hash(doc):
         (_drop_a_level, "/study/agenda", None),
         (_unknown_observer, "/study/observer/$kind", "D001"),
         (_edit_hash, "/content_hash", None),
+        (
+            _put("observer", {"$enum": ["core", "clock", 1], "value": 1.0}),
+            "/study/observer/$enum",
+            None,
+        ),
+        (
+            _put("observer", {"$kind": ["core", "audience", 1]}),
+            "/study/observer/$kind",
+            None,
+        ),
+        (_put("observer", {"$enum": ["core", "stage", 1]}), "/study/observer", None),
     ],
-    ids=["data-shape", "module-check", "unknown-kind", "edited-hash"],
+    ids=[
+        "data-shape",
+        "module-check",
+        "unknown-kind",
+        "edited-hash",
+        "enum-tag-on-module",
+        "kind-tag-on-enum",
+        "enum-without-value",
+    ],
 )
 def test_bad_document_fails_with_a_pointer(edit, where, code):
-    """Fails if a declared shape that does not match the data, a field that breaks
-    its module's check, an unknown kind or a hand-edited hash loads, or fails
-    without the pointer of the offending value.
+    """Fails if a bad document loads, or fails without the pointer of the offending
+    value: data that does not match its declared shape, a field that breaks its
+    module's check, an unknown kind, a hand-edited hash, or a tag naming the wrong
+    category of class.
     """
     doc = json.loads(dump_study(toy.survey_1(), TOY_KINDS).to_json())
     doc.pop("content_hash")  # a document without a hash loads unchecked
