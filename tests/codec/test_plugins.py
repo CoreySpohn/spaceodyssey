@@ -79,6 +79,20 @@ class MisnamedGain(LogGain):
         return dict(params)
 
 
+class FactoryVersion(AbstractDesign):
+    """A design whose version comes from a factory, not a default."""
+
+    gain: jax.Array
+    version: int = eqx.field(default_factory=lambda: 2, kw_only=True)
+
+
+class TextVersion(AbstractDesign):
+    """A design whose version default is not an integer."""
+
+    gain: jax.Array
+    version: int = eqx.field(default="2", kw_only=True)
+
+
 def gain_v2(cls):
     """The toy kinds with `toy.gain` registered at version 2 as `cls`."""
     kinds = {k: v for k, v in TOY_KINDS.items() if k[:2] != ("design", "toy.gain")}
@@ -166,7 +180,6 @@ def _twice_from_two_distributions():
         ([Entry("spaceodyssey.widget", "toy.gain@1", toy.ToyDesign)], ("family",)),
         ([Entry("spaceodyssey.design", "toy.gain", toy.ToyDesign)], ("<id>@",)),
         ([Entry("spaceodyssey.policy", "toy.gain@1", toy.ToyDesign)], ("Policy",)),
-        ([Entry("spaceodyssey.design", "toy.gain@2", toy.ToyDesign)], ("defaults",)),
         ([Entry("spaceodyssey.core", "study@1", Clock)], ("core kinds",)),
     ],
     ids=[
@@ -174,20 +187,40 @@ def _twice_from_two_distributions():
         "unknown-family",
         "no-version",
         "wrong-family",
-        "version-mismatch",
         "core-rebound",
     ],
 )
 def test_bad_registration_is_refused(entries, words):
     """Fails if one id registered by two distributions is accepted or the error
     does not name both, or if an entry point with an unknown family, a name without
-    a version, a class of another family, a version its class does not declare, or
-    a core entry bound to another class is accepted.
+    a version, a class of another family, or a core entry bound to another class is
+    accepted.
     """
     with pytest.raises(RegistrationError) as err:
         kinds_from_entry_points(entries)
     for word in words:
         assert word in str(err.value)
+
+
+@pytest.mark.parametrize("api", ["resolver", "entry_points"])
+@pytest.mark.parametrize(
+    ("cls", "version"),
+    [(toy.ToyDesign, 2), (FactoryVersion, 7), (TextVersion, 2)],
+    ids=["mismatch", "factory", "not-an-integer"],
+)
+def test_version_must_be_a_matching_integer_default(api, cls, version):
+    """Fails if either registration path accepts a kind whose version differs from
+    its class's `version` default, or whose `version` field has no positive integer
+    default (a factory or a string), which leaves a default instance that cannot
+    be dumped at its registered reference.
+    """
+    if api == "resolver":
+        with pytest.raises(ValueError, match="version"):
+            KindResolver({("design", "toy.gain", version): cls})
+    else:
+        entry = Entry("spaceodyssey.design", f"toy.gain@{version}", cls)
+        with pytest.raises(RegistrationError, match="version"):
+            kinds_from_entry_points([entry])
 
 
 @pytest.mark.parametrize(
