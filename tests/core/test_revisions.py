@@ -57,11 +57,11 @@ def test_a_revision_that_arrives_first_is_the_one_folded():
     assert int(carry.belief.n[0]) == 1 and float(carry.belief.mean[0]) == 9.0
 
 
-def test_revision_zero_alone_is_not_superseded():
-    _, carry, _, _ = _run((0, 0), (2.0, 9.0))
-    # two rows of one acquisition at the same revision are not a supersession
-    assert list(np.asarray(carry.log.superseded_by)[:2]) == [-1, -1]
-    assert int(carry.belief.n[0]) == 1
+def test_a_repeated_scripted_revision_is_refused_at_construction():
+    # two rows of one acquisition at one revision are not a correction; the handler's
+    # behavior for them is checked in test_derived_corrections
+    with pytest.raises(ValueError, match=r"\(7001, 0\)"):
+        _run((0, 0), (2.0, 9.0))
 
 
 def test_observer_only_revisions_do_not_reach_the_policy():

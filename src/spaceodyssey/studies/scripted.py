@@ -43,6 +43,19 @@ class ScriptedRecords(AbstractProcess):
     statuses: tuple[int, ...] = eqx.field(static=True)
     audience: int = eqx.field(default=PUBLIC)
     channel: int = eqx.field(default=SCRIPTED_CHANNEL, static=True)
+    # the kind of each fire's record; empty means every record is a measurement
+    kinds: tuple[int, ...] = eqx.field(default=(), static=True)
+
+    def __check_init__(self):
+        """Refuse two fires that name one (scripted id, revision) pair."""
+        seen = set()
+        for pair in zip(self.ids, self.revisions, strict=True):
+            if pair in seen:
+                raise ValueError(
+                    f"scripted records repeat (id, revision) = {pair}; a correction "
+                    "needs a distinct revision of its acquisition"
+                )
+            seen.add(pair)
 
     def declare(self):
         """The record channel this process writes on, for pre-flight."""
@@ -94,7 +107,11 @@ class ScriptedRecords(AbstractProcess):
         )
         rec = dataclasses.replace(
             base,
-            kind=jnp.asarray(toy.RECORD_MEASUREMENT, I64),
+            kind=(
+                pick(self.kinds, I64)
+                if self.kinds
+                else jnp.asarray(toy.RECORD_MEASUREMENT, I64)
+            ),
             channel=jnp.asarray(self.channel, I64),
             acquisition_index=index,
             start_tick=ev.tick,

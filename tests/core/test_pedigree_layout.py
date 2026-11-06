@@ -172,7 +172,8 @@ def test_fingerprint_covers_the_pedigree_and_width_zero_is_unchanged():
     # a width-0 column adds nothing: the digest equals one over the other leaves
     slim = dataclasses.replace(caps, rows_per_subject=0, refit_lanes=0, product_width=0)
     empty = jnp.zeros((slim.n_log, 0), I64)
-    assert fp(_view(slim, empty)) == fp(_view(slim, empty))
+    # pinned from the digest over the leaves a Slice 1 view always had
+    assert fp(_view(slim, empty)) == 5814203023881743964
 
 
 def test_a_derived_row_never_supersedes_a_source_row():
@@ -201,3 +202,37 @@ def test_a_derived_row_never_supersedes_a_source_row():
     counts, replaced = revision_set(source, caps, Audience.OBSERVER, 0)
     assert not bool(counts[0]) and bool(counts[1]) and int(replaced[0]) == 1
     assert int(_superseded_in_view(source, vis, caps)[0]) == 1
+
+
+def test_committed_pedigrees_are_exact_per_audience():
+    """Gather, boundary and commit on a hand log: the product column per audience."""
+    from spaceodyssey.core import init_carry
+    from spaceodyssey.core.events import empty_event_row
+    from spaceodyssey.core.refresh import answer_refresh
+    from tests.core.helpers import one_world
+    from tests.core.refresh_helpers import masked
+
+    study = refresh_study()
+    caps = study.caps
+    truth, root = one_world()
+    carry = init_carry(study, truth)
+    carry = dataclasses.replace(
+        carry,
+        log=_hand_log(caps),
+        n_log=jnp.asarray(4, I64),
+        next_sid=jnp.asarray(10, I64),
+        refresh_dirty=jnp.ones_like(carry.refresh_dirty),
+        refresh=dataclasses.replace(
+            empty_event_row(), valid=jnp.asarray(True), tick=jnp.asarray(100, I64)
+        ),
+    )
+    out = answer_refresh(carry, root, study, masked())
+    # subject 0 writes its observer row then its policy row, after the four source rows
+    observer = pedigree_of(out.log, 4)
+    policy = pedigree_of(out.log, 5)
+    assert observer == (
+        int(Audience.OBSERVER),
+        0,
+        ((10, 1, 0), (10, 3, 0), (11, 0, 0), (12, 2, 0)),
+    )
+    assert policy == (int(Audience.POLICY), 0, ((10, 3, 0), (12, 2, 0)))

@@ -151,6 +151,9 @@ class Capacity(IntFlag):
     LOG_ROWS = 4
     REFIT_ROWS = 8  # a subject had more counting rows than `rows_per_subject`
     GRID_TICK = 16  # the next checkpoint tick is beyond `Capacities.max_tick`
+    # A refusal, not a capacity: a row reused the acquisition id of a logged row with a
+    # derived kind on either side, which a correction may not do.
+    INVALID_CORRECTION = 32
 
 
 class RunStatus(IntEnum):

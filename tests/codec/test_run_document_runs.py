@@ -114,23 +114,20 @@ def _service_binding():
 
 
 @pytest.mark.parametrize("executor", ["host", "compiled"])
-# The refresh case needs a refit boundary: its reload is covered by the run-document
-# tests with a bound boundary above.
-@pytest.mark.parametrize(
-    "case", [c for c in CORPUS if c.make_refit is None], ids=lambda c: c.name
-)
+@pytest.mark.parametrize("case", CORPUS, ids=lambda c: c.name)
 def test_every_corpus_run_reloads_to_the_same_hash_and_history(case, executor):
     study = case.make_study()
     registry = _registry_of(study.caps)
-    assert int(study.refresh.every_ticks) == 0  # no case needs a refit boundary
+    refit = None if case.make_refit is None else case.make_refit()
     service = None if case.make_service is None else case.make_service()
-    table = _service_binding()
+    table = bindings()
     doc = dump_run(
         study,
         registry,
         executor=executor,
         bindings=table,
         service=service,
+        refit=refit,
         kinds=TOY_KINDS,
     )
     run = load_run(doc.to_json(), table, TOY_KINDS)
@@ -140,6 +137,7 @@ def test_every_corpus_run_reloads_to_the_same_hash_and_history(case, executor):
         executor=run.executor,
         bindings=table,
         service=run.make_service(),
+        refit=run.refit or None,
         kinds=TOY_KINDS,
     )
     assert again.content_hash == doc.content_hash
@@ -151,6 +149,7 @@ def test_every_corpus_run_reloads_to_the_same_hash_and_history(case, executor):
         roots,
         N_CASE_STEPS,
         service=None if case.make_service is None else case.make_service(),
+        refit=refit,
     )
     reloaded = run.execute(truths, roots, N_CASE_STEPS)
     for w in range(2):

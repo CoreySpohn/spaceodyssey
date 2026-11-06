@@ -283,8 +283,18 @@ def write_log(carry, rec, caps):
 
     A full log sets `overflow` (bit `Capacity.LOG_ROWS`), skips the write and returns
     the clamped slot; the caller checks `n_log` before enqueueing a Release for the row.
+
+    A row that reuses the acquisition id of a logged row is a correction, and a
+    correction may not involve a derived kind: a derived row never corrects or is
+    corrected. Such a row is refused (not logged, no release) and sets `overflow` with
+    the `Capacity.INVALID_CORRECTION` bit, a refusal that is not a capacity.
     """
-    ok = rec.valid & (carry.n_log < caps.n_log)
+    bad = jnp.asarray(False)
+    if caps.derived_kinds:
+        old = carry.log.valid & (carry.log.acquisition_id == rec.acquisition_id)
+        mine = derived_rows(rec, caps)
+        bad = rec.valid & (old & (derived_rows(carry.log, caps) | mine)).any()
+    ok = rec.valid & ~bad & (carry.n_log < caps.n_log)
     s = jnp.minimum(carry.n_log, caps.n_log - 1)
     cols = {}
     for name in (*LOG_INT_FIELDS, "cost", "charged", "payload"):
@@ -299,7 +309,9 @@ def write_log(carry, rec, caps):
             log,
             carry.n_log + ok.astype(I64),
             carry.overflow | (rec.valid & ~ok),
-            carry.overflow_mask | jnp.where(rec.valid & ~ok, Capacity.LOG_ROWS, 0),
+            carry.overflow_mask
+            | jnp.where(bad, Capacity.INVALID_CORRECTION, 0)
+            | jnp.where(rec.valid & ~ok & ~bad, Capacity.LOG_ROWS, 0),
         ),
     )
     return out, s

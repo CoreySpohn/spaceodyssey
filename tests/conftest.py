@@ -163,6 +163,8 @@ SLOW_FILES = frozenset(
         "test_revisions.py",
         # runs: pedigree rows, producer-local indices and an index mutant on the host
         "test_pedigree.py",
+        # runs on both executors and the release handler with derived kinds
+        "test_derived_corrections.py",
         "test_metamorphic.py",
         "test_host_service.py",
         "test_draws.py",

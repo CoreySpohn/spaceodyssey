@@ -117,6 +117,26 @@ change. Lints: ruff check and format, core imports, domain words, internal refer
   still finds its original, replay over a derived measurement kind. The run-document
   corpus reload skips the `refresh` case, which needs a bound refit boundary.
 
+## Review fixes, round two
+
+- **Refused corrections.** `write_log` refuses a row that reuses the acquisition id of
+  a logged row when a derived kind is on either side (derived to derived, source to
+  derived, derived to source). The row is not logged and not released, and the world
+  sets `overflow` with the new `Capacity.INVALID_CORRECTION` bit (value 32). It is a
+  refusal, not a capacity, and the run reports `OVERFLOW`. No pre-flight code covers
+  it: a scripted process names its record kinds at construction, but no existing
+  K-code is about record kinds, so the check is at run time only.
+- **Scripted pairs.** `ScriptedRecords` raises `ValueError` naming the pair when two
+  fires share a (scripted id, revision). It takes an optional per-fire `kinds`.
+- **Tests.** `test_derived_corrections.py` (slow): both directions on both executors,
+  controls with no derived involvement, the uniqueness check, and direct release tests
+  for source then derived and derived then source in both arrival orders (expecting
+  `superseded_by` of `[-1, -1]`, with a source-only control). A quick hand-log test runs
+  gather, boundary and commit and asserts the exact product column per audience
+  (observer four triples, policy two). The width-0 fingerprint is pinned to a value.
+  The run-document corpus reload now covers the `refresh` case through its
+  `make_refit` boundary and a binding for the observer's own refit kernel.
+
 ## Remaining
 
 - Repeated `Query` answers on one channel (a policy asking twice) are covered by the

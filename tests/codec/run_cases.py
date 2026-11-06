@@ -9,7 +9,11 @@ all at once.
 import functools
 
 from spaceodyssey.codec import BindingKind, Bindings
-from spaceodyssey.core.refresh import HostLoopRefit, MaskedBatchRefit
+from spaceodyssey.core.refresh import (
+    HostLoopRefit,
+    MaskedBatchRefit,
+    observer_refit_kernel,
+)
 from spaceodyssey.studies import oracle, toy
 from tests.codec.test_document import TOY_KINDS
 from tests.core.refresh_helpers import oracle_refresh_study
@@ -44,6 +48,19 @@ def _masked_kind():
     )
 
 
+def _observer_kernel_kind():
+    """The boundary the refresh corpus case uses: the observer's own refit kernel."""
+    return BindingKind(
+        "toy.observer_refit",
+        1,
+        matches=lambda obj: (
+            type(obj) is MaskedBatchRefit and obj.kernel is observer_refit_kernel
+        ),
+        describe=lambda obj, registry: {"n_diag": obj.n_diag},
+        build=lambda config, registry: MaskedBatchRefit(n_diag=config["n_diag"]),
+    )
+
+
 def _host_loop_kind():
     return BindingKind(
         "toy.refit_fit",
@@ -58,7 +75,9 @@ def _host_loop_kind():
 
 def bindings():
     """The service and boundary kinds the run uses."""
-    return Bindings((_service_kind(), _masked_kind(), _host_loop_kind()))
+    return Bindings(
+        (_service_kind(), _masked_kind(), _host_loop_kind(), _observer_kernel_kind())
+    )
 
 
 def boundary():
