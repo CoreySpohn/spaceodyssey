@@ -16,6 +16,8 @@ is refused:
 Every failure is a `DocumentError` at the pointer of the field or module.
 """
 
+import contextlib
+import contextvars
 import dataclasses
 import enum
 import math
@@ -39,6 +41,24 @@ from spaceodyssey.core.study import Study
 _FLOAT_TAGS = {"nan": math.nan, "inf": math.inf, "-inf": -math.inf}
 _ARRAY_KEYS = frozenset({"$array", "shape", "data", "weak", "type"})
 _WEAK_ZEROS = {"int64": 0, "float64": 0.0}
+
+
+_NULL_OK = contextvars.ContextVar("null_ok", default=frozenset())
+
+
+@contextlib.contextmanager
+def tolerating_null_arrays(fields):
+    """Let `(class, field name)` pairs hold `None` where an array is annotated.
+
+    Pre-flight uses it so a missing value reaches the structural checks, which
+    report it with a code, instead of stopping the load. Only the named fields of
+    exactly the named classes are exempt.
+    """
+    token = _NULL_OK.set(frozenset(fields))
+    try:
+        yield
+    finally:
+        _NULL_OK.reset(token)
 
 
 def load_study(document, kinds=None):
@@ -184,10 +204,10 @@ def _decode_kind(node, path, table):
             value = version
         elif migrated is None:
             value = decode(node[field.name], where, table)
-            _check_field(field, value, where)
+            _check_field(cls, field, value, where)
         else:
             value = migrated[field.name]
-            _check_field(field, value, where if field.name in node else path)
+            _check_field(cls, field, value, where if field.name in node else path)
         values[field.name] = value
         object.__setattr__(obj, field.name, value)
     try:
@@ -220,8 +240,10 @@ def _migrated(node, ref, stored, path, table):
 _CHECK_ERRORS = (ValueError, TypeError, AttributeError, IndexError, KeyError)
 
 
-def _check_field(field, value, path):
+def _check_field(cls, field, value, path):
     """Refuse a value its converter would change or its annotation does not fit."""
+    if value is None and (cls, field.name) in _NULL_OK.get():
+        return
     if field.type is jax.Array and not isinstance(value, (jax.Array, np.ndarray)):
         raise DocumentError(
             f"field {field.name!r} holds an array, not a {type(value).__name__}",

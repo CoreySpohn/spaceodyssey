@@ -1,5 +1,7 @@
 """Pre-flight: every code catches its seeded mistake and passes the correct studies."""
 
+import dataclasses
+
 import pytest
 
 from spaceodyssey import core
@@ -127,3 +129,76 @@ def test_preflight_reports_counts(capsys):
     assert exercised == set(FindingCode)
     with capsys.disabled():
         print(out, end="")
+
+
+# name -> (subject, index, member, entry) every finding of the seeded study carries
+LOCATORS = {
+    "observer_reads_truth": ("observer", None, "reads", (0,)),
+    "policy_reads_truth": ("policy", 0, "reads", (0,)),
+    "observer_reads_scorer": ("observer", None, "reads", (0,)),
+    "decision_before_release": ("policy", 0, "needs", (0,)),
+    "decision_reads_observer_only_channel": ("policy", 0, "needs", (0,)),
+    "draws_without_acquisition_index": ("channel_model", None, "key_coords", ()),
+    "world_draw_without_world": ("world_source", None, "key_coords", ()),
+    "duplicate_channel_ids": ("channels", None, "id", (1,)),
+    "allocate": ("policy", 0, "effects", ()),
+    "gradients_on_host": ("policy", 0, "requires", ()),
+    "host_only_policy_on_compiled": ("policy", 0, "executors", ()),
+    "charge_differs_from_cost": ("channels", None, "charge", (0, 0)),
+    "frozen_horizon": ("assets", None, "freeze_ticks", (0,)),
+    "disruptive_resource": ("assets", None, "disruptive_resource", (0,)),
+    "disruptive_effect": ("policy", 0, "disruptive", ()),
+    "drain_below_campaign": ("policy", 0, "stops", (1,)),
+    "channel_without_order": ("channels", None, "coincident_order", ()),
+    "channel_order_out_of_range": ("channels", None, "coincident_order", (2,)),
+    "channel_kind_unregistered": ("channels", None, "kind", (2,)),
+}
+
+
+def locator(finding):
+    return (finding.subject, finding.index, finding.member, finding.entry)
+
+
+def test_every_seeded_mistake_has_an_expected_locator():
+    assert set(LOCATORS) == set(SEEDED)
+
+
+@pytest.mark.parametrize("name", sorted(SEEDED))
+def test_finding_carries_the_locator_of_its_value(name):
+    """Fails if a finding names the wrong slot, policy, member or entry, or none."""
+    _, make, executor = SEEDED[name]
+    found = preflight(make(), executor)
+    assert found
+    assert {locator(f) for f in found} == {LOCATORS[name]}
+
+
+@pytest.mark.parametrize("name", ["duplicate_channel_ids", "charge_differs_from_cost"])
+def test_table_locators_name_a_real_field_of_the_slot(name):
+    """Fails if a table finding names a slot or field the study does not have."""
+    study = SEEDED[name][1]()
+    finding = preflight(study)[0]
+    slot = getattr(study, finding.subject)
+    assert finding.member in {f.name for f in dataclasses.fields(slot)}
+
+
+def test_repeated_declarations_are_told_apart_by_entry():
+    """Fails if repeated reads, needs or drains share one entry, so a tool cannot say
+    which of them offends.
+    """
+    from spaceodyssey.core.declarations import TRUTH, Declaration, Need
+    from spaceodyssey.core.enums import Disposition, Scope
+    from tests.core.preflight_cases import _observer, _policy
+
+    reads = preflight(_observer(reads=(TRUTH, TRUTH, TRUTH)))
+    assert [f.entry for f in reads] == [(0,), (1,), (2,)]
+    needs = preflight(_policy(needs=(Need(10, 0, 500), Need(10, 0, 19))))
+    assert [(str(f.code), f.entry) for f in needs] == [("C001", (1,))]
+    stops = ((Scope.CAMPAIGN, Disposition.DRAIN), (Scope.LANE, Disposition.DRAIN))
+    assert [f.entry for f in preflight(_policy(stops=stops))] == [(1,)]
+    assert Declaration().reads == ()
+
+
+def test_a_finding_that_does_not_narrow_has_an_empty_locator():
+    """Fails if a hand-built finding does not default to no locator."""
+    finding = core.Finding(FindingCode.T001, Severity.WARNING, "p", "m", "f")
+    assert locator(finding) == ("", None, "", ())
