@@ -957,18 +957,15 @@ def _corrected_slots(log, caps, subject, exclude=()):
     counting rows sort by channel, acquisition index and revision.
     """
     col = {
-        name: np.asarray(getattr(log, name))
-        for name in (
-            "valid",
-            "accepted_tick",
-            "subject",
-            "kind",
-            "status",
-            "acquisition_id",
-            "revision",
-            "channel",
-            "acquisition_index",
-        )
+        "valid": np.asarray(log.valid),
+        "accepted_tick": np.asarray(log.accepted_tick),
+        "subject": np.asarray(log.subject),
+        "kind": np.asarray(log.kind),
+        "status": np.asarray(log.status),
+        "acquisition_id": np.asarray(log.acquisition_id),
+        "revision": np.asarray(log.revision),
+        "channel": np.asarray(log.channel),
+        "acquisition_index": np.asarray(log.acquisition_index),
     }
     out = tuple(caps.derived_kinds) + tuple(exclude)
     mine = (
@@ -1047,8 +1044,8 @@ def _unfinished(run):
     done = (status == RunStatus.COMPLETE) | (status == RunStatus.IDLE)
     if done.all():
         return None
-    bad = sorted({RunStatus(int(x)).name for x in status[~done]})
-    return f"a run stopped early ({', '.join(bad)}): its last refresh may be unread"
+    bad = sorted({int(x) for x in status[~done]})
+    return f"a run stopped early (status {bad}): its last refresh may be unread"
 
 
 def _refit_comparison(name, study, run, roots, picks, exclude=()):
