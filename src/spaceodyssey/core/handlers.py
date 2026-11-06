@@ -161,11 +161,16 @@ def h_release(c, ev, study, truth, root):
     key = fold_key(root, rec, study)
     # An observer that is not incremental changes only by refresh: nothing folds.
     incremental = study.observer.capabilities().incremental
+    # a derived record (a product or a declared summary) is accepted and released like
+    # any row but never folded: a product cannot count its own source data
+    derived = jnp.isin(rec.kind, jnp.asarray(caps.derived_kinds, I64))
     belief = c.belief
     if incremental:
         folded = study.observer.analyze(
             study.observer.fold(c.belief, obs, caps, key=key)
         )
+        if caps.derived_kinds:
+            folded = where_tree(~derived, folded, c.belief)
         belief = where_tree(to_observer & ~already & ~accepted.any(), folded, c.belief)
     # the policy summary folds only records released to the policy audience, once
     seen = log.released_tick[slot] >= 0
@@ -182,6 +187,8 @@ def h_release(c, ev, study, truth, root):
     pbelief = c.pbelief
     if incremental:
         pfolded = study.observer.fold_summary(c.pbelief, pol, caps, key=key)
+        if caps.derived_kinds:
+            pfolded = where_tree(~derived, pfolded, c.pbelief)
         pbelief = where_tree(public & ~seen & ~released.any(), pfolded, c.pbelief)
     older = jnp.where(accepted & (log.revision < rec.revision), rec.revision, -1)
     newer = jnp.max(jnp.where(accepted, log.revision, -1))

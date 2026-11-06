@@ -14,7 +14,10 @@ from spaceodyssey.studies import toy
 from tests.core.corpus import CORPUS, CORPUS_BY_NAME
 from tests.core.helpers import N_STEPS_CORPUS, advance_j, one_world, service_of, worlds
 
-RELEASING = [c for c in CORPUS if not c.name.startswith("overflow")]
+# A refresh case's belief comes from installs, not release folds: replay folds only.
+RELEASING = [
+    c for c in CORPUS if not c.name.startswith("overflow") and c.make_refit is None
+]
 
 
 def _bits(belief):

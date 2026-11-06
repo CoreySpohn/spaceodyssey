@@ -44,7 +44,8 @@ class CorpusCase:
     in handled order, and `hand_rows` the per-row (lane, subject, acquisition_index,
     n_written, wake), when given. `invariants` are checks on the canonical history
     that belong to this case alone. A study that asks the host a question sets
-    `make_service`, which builds a fresh answerer for each run.
+    `make_service`, which builds a fresh answerer for each run; a study that
+    checkpoints sets `make_refit`, which builds the refit boundary the same way.
     """
 
     name: str
@@ -55,6 +56,7 @@ class CorpusCase:
     policy_forms: tuple = ("array", "python")
     hand_rows: tuple | None = None
     make_service: Callable | None = None
+    make_refit: Callable | None = None
 
 
 class PrivateProbe(AbstractProcess):
@@ -193,6 +195,10 @@ def _service(case):
     return None if case.make_service is None else case.make_service()
 
 
+def _refit(case):
+    return None if case.make_refit is None else case.make_refit()
+
+
 def _execute(
     case, study, executor, truths, roots, n_steps, wake_fn, want_views, form="array"
 ):
@@ -214,7 +220,13 @@ def _execute(
 
     if executor == "compiled":
         run = CompiledExecutor().run(
-            run_study, truths, roots, n_steps, wake_fn=wake_fn, service=_service(case)
+            run_study,
+            truths,
+            roots,
+            n_steps,
+            wake_fn=wake_fn,
+            service=_service(case),
+            refit=_refit(case),
         )
         out = []
         for w in range(n_worlds):
@@ -231,6 +243,7 @@ def _execute(
             policy_form=form,
             wake_fn=wake_fn,
             service=_service(case),
+            refit=_refit(case),
         )
         out.append((carry, trace, views_of(w, trace)))
     return out

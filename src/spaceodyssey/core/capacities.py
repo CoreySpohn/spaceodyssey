@@ -7,6 +7,20 @@ import jax
 from spaceodyssey.core.enums import BIG, N_STAGES, N_TIES
 from spaceodyssey.core.events import _order_key_py
 
+PEDIGREE_HEAD = 3  # audience, refit status, row count
+PEDIGREE_TRIPLE = 3  # channel, acquisition index, revision
+
+
+def pedigree_width(rows_per_subject):
+    """Columns of a pedigree that names up to `rows_per_subject` counting rows.
+
+    Zero when the refresh protocol is off (`rows_per_subject == 0`), so a Slice 1
+    study carries a zero-size product column.
+    """
+    if rows_per_subject <= 0:
+        return 0
+    return PEDIGREE_HEAD + PEDIGREE_TRIPLE * rows_per_subject
+
 
 @dataclasses.dataclass(frozen=True)
 class Capacities:
@@ -35,6 +49,11 @@ class Capacities:
     # protocol structurally) and the world lanes of one masked refit call.
     rows_per_subject: int = 0
     refit_lanes: int = 0
+    # Columns of the pedigree on a product row (`RecordLog.product`): audience, refit
+    # status and row count, then one (channel, acquisition index, revision) triple per
+    # counting row. Zero without the refresh protocol; with it, zero means the width
+    # `pedigree_width(rows_per_subject)`, which is the least a protocol study needs.
+    product_width: int = 0
     n_effects: int = 2
     n_pstate: int = 4
     n_an: int = 4
@@ -61,8 +80,18 @@ class Capacities:
             raise ValueError("max_tick must be positive")
         if any(len(row) != self.payload_width for row in self.payload_audience):
             raise ValueError("every payload_audience row needs payload_width entries")
-        if self.rows_per_subject < 0 or self.refit_lanes < 0:
-            raise ValueError("rows_per_subject and refit_lanes must not be negative")
+        if self.rows_per_subject < 0 or self.refit_lanes < 0 or self.product_width < 0:
+            raise ValueError(
+                "rows_per_subject, refit_lanes and product_width must not be negative"
+            )
+        need = pedigree_width(self.rows_per_subject)
+        if self.rows_per_subject > 0 and self.product_width == 0:
+            object.__setattr__(self, "product_width", need)
+        if self.product_width < need:
+            raise ValueError(
+                f"product_width {self.product_width} is below the pedigree width "
+                f"{need} that rows_per_subject {self.rows_per_subject} needs"
+            )
         if not self.n_an <= self.n_subjects:
             raise ValueError("n_an must not exceed n_subjects")
         largest = _order_key_py(

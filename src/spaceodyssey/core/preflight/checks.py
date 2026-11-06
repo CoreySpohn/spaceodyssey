@@ -181,6 +181,67 @@ def keys(graph: StudyGraph):
     return out
 
 
+def record_channels(study: Study):
+    """K002: admission, scripted, service and product channels are disjoint.
+
+    A record's channel is part of its identity and of every key drawn for it, so two
+    producers writing on one channel id would share identities. The owners, in order:
+    the admission channels of the channel table, the channel a process writes scripted
+    records on, the service channel each policy asks a `Query` on, and the two product
+    channels of the refresh protocol (when it is on). Two admission channels with one id
+    are `keys`' finding; here a channel id used by a later owner than an earlier one is
+    reported at the later one, with the earlier one named.
+    """
+    owned = {}  # channel id -> name of its first owner
+    for i, cid in enumerate(np.asarray(study.channels.id).tolist()):
+        owned.setdefault(int(cid), f"admission channel {i}")
+    out = []
+
+    def claim(channel, name, **where):
+        channel = int(channel)
+        if channel in owned:
+            out.append(
+                Finding(
+                    FindingCode.K002,
+                    ERROR,
+                    name,
+                    f"channel id {channel} is already the {owned[channel]}; records "
+                    "of two producers would share an identity",
+                    "give admission, scripted, service and product channels "
+                    "disjoint ids",
+                    **where,
+                )
+            )
+        else:
+            owned[channel] = name
+
+    for channel in declaration_of(study.process).channels:
+        claim(channel, "scripted channel of the process", subject="process")
+    for i, policy in enumerate(study.agenda.policies):
+        for channel in declaration_of(policy).channels:
+            claim(
+                channel,
+                f"service channel of policy[{i}]",
+                subject="policy",
+                index=i,
+            )
+    if study.caps.rows_per_subject > 0:
+        sched = study.refresh
+        claim(
+            sched.observer_channel,
+            "observer product channel",
+            subject="refresh",
+            member="observer_channel",
+        )
+        claim(
+            sched.policy_channel,
+            "policy product channel",
+            subject="refresh",
+            member="policy_channel",
+        )
+    return out
+
+
 def capability(study: Study, executor: str | None = None):
     """X001: effects and capabilities the selected executors do not provide.
 
@@ -358,6 +419,7 @@ def preflight(study: Study, executor: str | None = None) -> list[Finding]:
         *firewall(graph),
         *causality(study, graph),
         *keys(graph),
+        *record_channels(study),
         *capability(study, executor),
         *reserved(study),
         *stops(study),

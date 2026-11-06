@@ -159,6 +159,34 @@ def _leaking_layout(run):
     return dataclasses.replace(run, study=study, reference_caps=run.study.caps)
 
 
+def _first_product_slot(run):
+    from spaceodyssey.core.conformance.invariants import _product_slots
+
+    return int(_product_slots(run)[0])
+
+
+def _wrong_pedigree(run):
+    slot = _first_product_slot(run)
+    product = run.carry.log.product
+    return planted(
+        run, lambda c: c.log.product, product.at[slot, 4].add(1)
+    )  # a triple's acquisition index
+
+
+def _dropped_pedigree_row(run):
+    slot = _first_product_slot(run)
+    product = run.carry.log.product
+    return planted(run, lambda c: c.log.product, product.at[slot, 2].add(-1))
+
+
+def _wrong_recorded_status(run):
+    return planted(run, lambda c: c.refresh_status, run.carry.refresh_status + 3)
+
+
+def _wrong_product_channel(run):
+    return _log_set(run, "channel", _first_product_slot(run), 5)
+
+
 PLANTED = {
     "order_keys_monotone": (_swap_order,),
     "exactly_once_settlement": (_double_settle, _same_id),
@@ -169,6 +197,11 @@ PLANTED = {
     "dense_acquisition_index": (_index_gap, _repeated_index),
     "release_not_before_available": (_early_release,),
     "no_scorer_column_in_snapshot": (_leaking_layout,),
+}
+# invariants that only mean something on a refresh-bearing case
+ON_REFRESH = {
+    "refit_inputs_equal_revision_set": (_wrong_pedigree, _dropped_pedigree_row),
+    "installs_match_product_rows": (_wrong_recorded_status, _wrong_product_channel),
 }
 
 
@@ -183,9 +216,20 @@ def test_each_invariant_catches_its_planted_violation(name, executor):
         assert not result.passed and result.diagnostic, (name, plant.__name__)
 
 
+@pytest.mark.parametrize("executor", EXECUTORS)
+@pytest.mark.parametrize("name", sorted(ON_REFRESH))
+def test_refresh_invariants_catch_their_planted_violation(name, executor):
+    inv = next(f for f in INVARIANTS if f.__name__ == name)
+    run = runs("refresh", executor)[0]
+    assert inv(run), "the unplanted run must pass"
+    for plant in ON_REFRESH[name]:
+        result = inv(plant(run))
+        assert not result.passed and result.diagnostic, (name, plant.__name__)
+
+
 def test_every_invariant_has_a_planted_violation_or_a_mutant():
     # the wake invariant's negative control is a wake rule that ignores audience
-    assert {f.__name__ for f in INVARIANTS} == set(PLANTED) | {
+    assert {f.__name__ for f in INVARIANTS} == set(PLANTED) | set(ON_REFRESH) | {
         "no_extra_wakes_under_private_events"
     }
 

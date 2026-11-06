@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from spaceodyssey.core.capacities import Capacities
+from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, Audience, EffectKind
 from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.service import AbstractHostService
@@ -65,6 +66,10 @@ class QueryPolicy(AbstractPolicy):
     query_at: int = eqx.field(default=1)
     subject: int = eqx.field(default=0)
     service: int = eqx.field(default=0)
+
+    def declare(self):
+        """The service channel the answer is recorded on, for pre-flight."""
+        return Declaration(channels=(int(self.service),))
 
     def decide(self, pstate, view, study, key):
         """Ask at the chosen decision, otherwise act as the plan does."""

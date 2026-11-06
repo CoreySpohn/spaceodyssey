@@ -63,6 +63,9 @@ class Declaration:
     requires: frozenset = frozenset()  # executor capabilities it needs
     executors: frozenset = EXECUTORS  # executors it runs on
     disruptive: bool = False  # asks to break a frozen horizon (reserved)
+    # record channel ids it writes outside admission: the channel a process writes its
+    # records on, or the service channel a policy asks a `Query` on
+    channels: tuple[int, ...] = ()
 
     def __post_init__(self):
         """Reject unknown names so a typo cannot read as a clean declaration."""

@@ -86,6 +86,9 @@ def commit_result(carry, payload, kind, study):
         subject=req.subject,
         channel=req.channel_index,
         channel_index=req.channel_index,
+        # producer-local identity, kept across answers: the service channel and the
+        # index of the decision that asked, which private events do not move
+        acquisition_index=req.decision,
         start_tick=req.tick,
         end_tick=req.tick,
         available_tick=req.tick,
@@ -119,6 +122,7 @@ def commit_result(carry, payload, kind, study):
         subject=req.subject,
         channel_index=req.channel_index,
         channel=req.channel_index,
+        acquisition_index=req.decision,
         group=req.group,
         audience=req.audience,
         slot=slot,

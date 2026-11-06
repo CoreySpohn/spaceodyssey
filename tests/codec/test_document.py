@@ -38,6 +38,7 @@ class LabelledDesign(AbstractDesign):
 # Unit tests pass an explicit mapping; the installed entry points have their own test.
 TOY_KINDS = {
     ("observer", "toy.running_mean", 1): toy.ToyRunningMean,
+    ("observer", "toy.refit_mean", 1): toy.ToyRefitMean,
     ("policy", "toy.fixed_plan", 1): toy.FixedPlanPolicy,
     ("policy", "toy.threshold_stop", 1): toy.ThresholdStopPolicy,
     ("process", "toy.null", 1): toy.NullProcess,

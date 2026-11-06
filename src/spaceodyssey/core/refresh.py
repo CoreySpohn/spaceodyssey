@@ -360,6 +360,29 @@ def _product_record(c, study, a, s, status, n_rows, valid, request):
     )
 
 
+def pedigree_words(request, a, s, status, caps):
+    """The pedigree column of the product row of audience `a` and subject `s`.
+
+    Audience flag, refit status and row count, then the `(channel, acquisition index,
+    revision)` triples of the counting rows the entry was computed from, in canonical
+    order, zero padded to `Capacities.product_width`. The rows are the request's, the
+    revision set the boundary read.
+    """
+    rows = jax.tree_util.tree_map(lambda x: x[a, s], request.rows)
+    ok = rows.valid
+    triples = jnp.stack([rows.channel, rows.acquisition_index, rows.revision], axis=1)
+    triples = jnp.where(ok[:, None], triples, 0).astype(I64).reshape(-1)
+    head = jnp.stack(
+        [
+            jnp.asarray(int(AUDIENCES[a]), I64),
+            jnp.asarray(status, I64),
+            ok.sum().astype(I64),
+        ]
+    )
+    words = jnp.concatenate([head, triples])
+    return jnp.pad(words, (0, caps.product_width - words.shape[0]))
+
+
 def commit_refresh(carry, request, result, study):
     """Install a boundary's answer into a frozen world, then release the hold.
 
@@ -415,8 +438,13 @@ def commit_refresh(carry, request, result, study):
             before = c.n_log
             c, slot = write_log(c, rec, caps)
             wrote = c.n_log > before
+            pedigree = pedigree_words(request, a, s, status, caps)
+            product = c.log.product.at[slot].set(
+                jnp.where(wrote, pedigree, c.log.product[slot])
+            )
             c = _tree_set(
                 c,
+                **{"log.product": product},
                 next_sid=c.next_sid + wrote.astype(I64),
                 release_version=c.release_version.at[a].add(wrote.astype(I64)),
                 refresh_dirty=c.refresh_dirty.at[a, s].set(

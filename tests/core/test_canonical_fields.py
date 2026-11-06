@@ -77,8 +77,10 @@ def test_every_output_field_has_an_explicit_disposition():
     # A newly added record column must reach the log, then canonical comparison;
     # `refit_rows` also relies on the two classes listing their columns in one order.
     assert [f.name for f in dataclasses.fields(Record)] == [
-        f.name for f in dataclasses.fields(RecordLog)
+        f.name for f in dataclasses.fields(RecordLog)[:-1]
     ]
+    # the pedigree column is the log's alone, and last
+    assert dataclasses.fields(RecordLog)[-1].name == "product"
 
 
 def _perturb(tree, parts):
