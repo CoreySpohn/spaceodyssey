@@ -11,6 +11,8 @@ import equinox as eqx
 import jax.numpy as jnp
 
 from spaceodyssey.core.declarations import (
+    DRAW_COORDS,
+    EXECUTORS,
     HOST,
     SCORER,
     TRUTH,
@@ -54,6 +56,62 @@ class StatedWorld(toy.ToyWorldSource):
 
     def declare(self):
         return self.stated
+
+
+def _field(default):
+    return eqx.field(static=True, default=default, kw_only=True)
+
+
+class DocObserver(toy.ToyRunningMean):
+    """An observer whose declaration is plain data, so a document can state it."""
+
+    reads: tuple = _field(())
+
+    def declare(self):
+        return Declaration(reads=self.reads)
+
+
+class DocPolicy(toy.NullPolicy):
+    """A policy whose declaration is plain data: `needs` holds (channel id, start
+    tick, decide tick) triples, `stops` (scope, disposition) pairs and `effects`
+    effect-kind numbers.
+    """
+
+    reads: tuple = _field(())
+    needs: tuple = _field(())
+    stops: tuple = _field(())
+    effects: tuple = _field(())
+    requires: tuple = _field(())
+    executors: tuple = _field(tuple(sorted(EXECUTORS)))
+    disruptive: bool = _field(False)
+
+    def declare(self):
+        return Declaration(
+            reads=self.reads,
+            needs=tuple(Need(*n) for n in self.needs),
+            stops=tuple((Scope(a), Disposition(b)) for a, b in self.stops),
+            effects=frozenset(EffectKind(e) for e in self.effects),
+            requires=frozenset(self.requires),
+            executors=frozenset(self.executors),
+            disruptive=self.disruptive,
+        )
+
+
+class DocChannelModel(toy.ToyPhotometry):
+    """A channel model whose key coordinates a document states."""
+
+    key_coords: tuple = _field(DRAW_COORDS)
+
+    def declare(self):
+        return Declaration(key_coords=self.key_coords)
+
+
+# The document kinds, to add to a resolver's mapping.
+DOC_KINDS = {
+    ("observer", "test.doc_observer", 1): DocObserver,
+    ("policy", "test.doc_policy", 1): DocPolicy,
+    ("channel_model", "test.doc_photometry", 1): DocChannelModel,
+}
 
 
 def _replace(study, **fields):
