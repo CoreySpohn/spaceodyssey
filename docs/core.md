@@ -24,7 +24,7 @@ retraces compiled functions.
 | Host protocol | A `Query` queues a request tied to a snapshot fingerprint and release version. A service receives only the masked snapshot and semantic request coordinates; its answer becomes a released record. |
 | Pre-flight | `preflight(study, executor=...)` checks declarations, table wiring, information boundaries, causal needs and executor capabilities without running a simulation. |
 | Battery | Generated checks exercise null credit, truth swaps, release latency, forks, relabeling, epoch shifts, unused assets and declared behavior on actual runs. |
-| Conformance | `run_case` runs a `CorpusCase` on an executor and collects its histories; `check_run` evaluates the generic accounting and ordering invariants on one run. Comparing a run against its hand history, and any case-specific assertion, is a separate explicit step. The concrete toy cases and hand histories live in `studies.conformance`. |
+| Conformance | `run_case` runs a `CorpusCase` on an executor and collects its histories; `check_run` evaluates the generic accounting and ordering invariants on one run. Comparing a run against its hand history, and any case-specific assertion, is a separate explicit step. The concrete toy cases and hand histories live in `studies.conformance`. The observer kit (`check_calibration`, `check_folded_once`, `check_promotion_parity`, `check_declared_margins`) runs any observer through calibration, single folding, promotion parity in release order and its declared statistical margin. |
 
 Events are ordered by integer `(tick, stage, micro, tie, sid)`. A channel declares
 whether a fault or a coincident settlement wins. Wakes coalesce so that a decision

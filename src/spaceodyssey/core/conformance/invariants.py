@@ -17,6 +17,7 @@ import numpy as np
 
 from spaceodyssey.core.battery.result import make_result
 from spaceodyssey.core.conformance.corpus import public_events
+from spaceodyssey.core.conformance.observer_kit import double_fold_failures
 from spaceodyssey.core.enums import (
     AdmissionCode,
     Audience,
@@ -131,8 +132,7 @@ def one_fold_per_acquisition(run):
                 f"{name}: committed folds differ from accepted acquisitions "
                 f"(missing {missing[:3]}, unexpected {extra[:3]})"
             )
-    if bool(c.dup_fold):
-        failures.append("dup_fold is set")
+    failures += double_fold_failures(c)
     done = RecordStatus.COMPLETED
     seen = {
         int(log.acquisition_id[i])

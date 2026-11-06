@@ -1,6 +1,7 @@
 """Kinds."""
 
 import dataclasses
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -70,7 +71,20 @@ class AbstractObserver(eqx.Module):
     `fold_summary` folds and analyzes, `install_summary` installs and analyzes, the
     layout is the `MeanBelief` layout of `init`, and `refit` folds the rows in
     order. `install` has no default: a refit-capable observer defines it.
+
+    Promotion parity (`conformance.observer_kit`) holds an observer's refit to its
+    incremental belief. An exact observer, the default, matches within the parity
+    tolerances. A statistical observer, whose refit draws a different sample of the
+    same posterior, sets the class attribute `statistical` and declares, also as
+    class attributes, the equivalence `margin` of its trace projection, the `seeds`
+    of its refit keys and the Monte Carlo `standard_error` the margin was sized
+    against; the kit refuses a statistical observer without them.
     """
+
+    statistical: ClassVar[bool] = False
+    margin: ClassVar[float | None] = None
+    seeds: ClassVar[tuple[int, ...]] = ()
+    standard_error: ClassVar[float | None] = None
 
     version: int = eqx.field(default=1, kw_only=True)
 
