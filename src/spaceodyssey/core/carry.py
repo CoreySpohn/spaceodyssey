@@ -37,8 +37,8 @@ class Carry(eqx.Module):
     log: RecordLog
     n_log: jax.Array
     ledger: Ledger
-    belief: object  # the observer's full belief (`BeliefLayout.belief`)
-    pbelief: object  # the policy summary (`BeliefLayout.summary`)
+    belief: eqx.Module  # the observer's full belief (`BeliefLayout.belief`)
+    pbelief: eqx.Module  # the policy summary (`BeliefLayout.summary`)
     acquisition_counts: jax.Array
     pstate: jax.Array
     woke: jax.Array
@@ -160,6 +160,10 @@ class Trace(eqx.Module):
     belief_aux: jax.Array
     n_log: jax.Array
     pol_u: jax.Array
+
+
+# Trace fields filled by the observer layout's projection of the full belief.
+PROJECTION_FIELDS = ("belief_mean", "belief_aux")
 
 
 def empty_trace(caps):

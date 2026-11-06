@@ -16,18 +16,27 @@ from tests.core.helpers import worlds
 def _field_paths(cls, prefix):
     for field in dataclasses.fields(cls):
         path = f"{prefix}.{field.name}"
-        if dataclasses.is_dataclass(field.type):
+        # an `eqx.Module` annotation (a belief) has no fields of its own to walk
+        if dataclasses.is_dataclass(field.type) and dataclasses.fields(field.type):
             yield from _field_paths(field.type, path)
         else:
             yield path
 
 
 RESULT_FIELDS = (*_field_paths(Carry, "carry"), *_field_paths(Trace, "trace"))
+_STUDY = toy.survey_1()
+_LAYOUT = _STUDY.observer.layout(_STUDY.caps)
+# The belief fields' leaves come from the observer layout; mutate each of the toy's.
+MUTATED_FIELDS = (
+    *(f for f in RESULT_FIELDS if f not in base.LAYOUT_FIELDS),
+    *(f"carry.belief.{name}" for name in _LAYOUT.belief_leaves),
+    *(f"carry.pbelief.{name}" for name in _LAYOUT.summary_leaves),
+)
 
 
 @pytest.fixture(scope="module")
 def executor_pair():
-    study = toy.survey_1()
+    study = _STUDY
     truths, roots = worlds(1)
     batch = CompiledExecutor().run_worlds(study, truths, roots, 4)
     compiled = RunResult(
@@ -47,8 +56,10 @@ def test_every_output_field_has_an_explicit_disposition():
         for name in names
     }
     excluded = getattr(base, "CANONICAL_EXCLUSIONS", {})
+    from_layout = set(getattr(base, "LAYOUT_FIELDS", ()))
     assert not compared.intersection(excluded)
-    assert set(RESULT_FIELDS) == compared.union(excluded)
+    assert not from_layout.intersection(compared | set(excluded))
+    assert set(RESULT_FIELDS) == compared.union(excluded, from_layout)
     assert all(
         isinstance(reason, str) and reason.strip() for reason in excluded.values()
     )
@@ -80,7 +91,7 @@ def _perturb(tree, parts):
     return dataclasses.replace(tree, **{name: changed})
 
 
-@pytest.mark.parametrize("field", RESULT_FIELDS)
+@pytest.mark.parametrize("field", MUTATED_FIELDS)
 def test_compiled_field_mutation_fails_parity(executor_pair, field):
     """Any single compared field can reject a compiled-only corruption."""
     host, compiled = executor_pair

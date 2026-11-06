@@ -290,24 +290,30 @@ def run_case(
             case, probed(study), executor, truths, roots, n_steps, probe_wake_fn, False
         )
         probes = [(wake_count(t), int(c.n_dec), public_events(t)) for c, t, _ in extra]
-    return [
-        CaseRun(
-            case=case,
-            executor=executor,
-            world=w,
-            study=study,
-            carry=dataclasses.replace(
-                carry, belief=plain(carry.belief), pbelief=plain(carry.pbelief)
-            ),
-            trace=trace,
-            history=canonical_history(carry, trace),
-            views=views,
-            folds=tuple(
-                (np.asarray(b.ids), np.asarray(b.counts))
-                for b in (carry.belief, carry.pbelief)
-            ),
-            form_views={form: runs[w][2] for form, runs in form_runs.items()},
-            probe=probes[w],
+    layout = study.observer.layout(study.caps)
+    out = []
+    for w, (counted_carry, trace, views) in enumerate(main):
+        carry = dataclasses.replace(
+            counted_carry,
+            belief=plain(counted_carry.belief),
+            pbelief=plain(counted_carry.pbelief),
         )
-        for w, (carry, trace, views) in enumerate(main)
-    ]
+        out.append(
+            CaseRun(
+                case=case,
+                executor=executor,
+                world=w,
+                study=study,
+                carry=carry,
+                trace=trace,
+                history=canonical_history(carry, trace, layout),
+                views=views,
+                folds=tuple(
+                    (np.asarray(b.ids), np.asarray(b.counts))
+                    for b in (counted_carry.belief, counted_carry.pbelief)
+                ),
+                form_views={form: runs[w][2] for form, runs in form_runs.items()},
+                probe=probes[w],
+            )
+        )
+    return out

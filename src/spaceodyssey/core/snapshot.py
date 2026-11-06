@@ -1,6 +1,7 @@
 """Snapshot."""
 
 import dataclasses
+from collections.abc import Callable
 
 import equinox as eqx
 import jax
@@ -57,11 +58,15 @@ class BeliefLayout(eqx.Module):
     function recompiles it unless its projections are module-level functions.
     """
 
-    belief: object = eqx.field(static=True, converter=_as_shapes)
-    summary: object = eqx.field(static=True, converter=_as_shapes)
+    belief: eqx.Module = eqx.field(static=True, converter=_as_shapes)
+    summary: eqx.Module = eqx.field(static=True, converter=_as_shapes)
     count_leaf: str = eqx.field(static=True)
-    project: object = eqx.field(static=True)
-    project_summary: object = eqx.field(default=None, static=True)
+    project: Callable[[eqx.Module], tuple[jax.Array, jax.Array]] = eqx.field(
+        static=True
+    )
+    project_summary: Callable[[eqx.Module], tuple[jax.Array, jax.Array]] | None = (
+        eqx.field(default=None, static=True)
+    )
 
     def __check_init__(self):
         """Refuse a layout whose count leaf is missing, not integer, or mismatched."""
@@ -125,7 +130,7 @@ class Snapshot(eqx.Module):
 
     log: RecordLog
     n_rows: jax.Array
-    belief: object
+    belief: eqx.Module
     tick: jax.Array
     n_dec: jax.Array
     release_version: jax.Array  # releases this audience has received so far

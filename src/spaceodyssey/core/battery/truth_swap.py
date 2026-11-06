@@ -8,11 +8,13 @@ from spaceodyssey.core.battery.result import (
     make_result,
     worlds_of,
 )
+from spaceodyssey.core.carry import PROJECTION_FIELDS
 from spaceodyssey.core.enums import Audience, EventKind
 from spaceodyssey.core.records import payload_columns
 
-# Trace fields that carry the observer belief; the rest are actions and event order.
-BELIEF_FIELDS = ("belief_mean", "belief_aux")
+# Trace fields that carry the observer belief (the layout's projection); the rest are
+# actions and event order.
+BELIEF_FIELDS = PROJECTION_FIELDS
 
 
 def _release_steps(carry, trace):

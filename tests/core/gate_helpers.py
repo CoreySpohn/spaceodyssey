@@ -119,6 +119,10 @@ FIELD_WALK = (
     "iterates the declared fields of a core pytree, a structural walk over the "
     "transaction schema that never names a study or kind"
 )
+WRAPPED_FIELD = (
+    "the conformance fold counter forwards a field read to the observer value it "
+    "wraps; the name comes from the reader of the belief, never from a study or kind"
+)
 SCHEMA_TYPE = (
     "type check against a core-owned record-schema class (column descriptor or "
     "record-kind registry type), not a study, survey or channel kind"
@@ -149,14 +153,6 @@ ALLOWED = {
         "battery/metamorphic.py",
         "a, b = np.asarray(getattr(cb.log, name)), np.asarray(getattr(cl.log, name))",
     ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_epoch_world", 1),
-    (
-        "battery/metamorphic.py",
-        "if not tree_bits_equal(getattr(cb, name), getattr(cl, name)):",
-    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_epoch_world", 1),
-    (
-        "battery/metamorphic.py",
-        "if not tree_bits_equal(getattr(ca, name), getattr(cb, name)):",
-    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "zero_time_asset", 1),
     ("battery/replay_latency.py", "n: np.asarray(getattr(trace, n))[keep]"): Allowance(
         COLUMN_BY_NAME, ("dynamic-getattr",), "_non_release", 1
     ),
@@ -173,10 +169,6 @@ ALLOWED = {
     (
         "battery/replay_latency.py",
         "if not bits_equal(getattr(cb.ledger, name), getattr(cl.ledger, name)):",
-    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_compare_world", 1),
-    (
-        "battery/replay_latency.py",
-        "if not bits_equal(getattr(cb.belief, name), getattr(cl.belief, name)):",
     ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_compare_world", 1),
     ("battery/result.py", "int(getattr(log, n)[i])"): Allowance(
         COLUMN_BY_NAME, ("dynamic-getattr",), "log_index", 1
@@ -200,6 +192,9 @@ ALLOWED = {
     ),
     ("battery/views.py", "if not bits_equal(x, getattr(vb.log, name)):"): Allowance(
         COLUMN_BY_NAME, ("dynamic-getattr",), "compare_views", 1
+    ),
+    ("conformance/folds.py", "return getattr(self.value, name)"): Allowance(
+        WRAPPED_FIELD, ("dynamic-getattr",), "CountedBelief.__getattr__", 1
     ),
     ("carry.py", "o = getattr(o, part)"): Allowance(
         COLUMN_BY_NAME, ("dynamic-getattr",), "_tree_set.getter", 1

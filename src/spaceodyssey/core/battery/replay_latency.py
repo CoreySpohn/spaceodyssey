@@ -11,8 +11,10 @@ from spaceodyssey.core.battery.result import (
     worlds_of,
 )
 from spaceodyssey.core.battery.views import DecisionViews, compare_views
+from spaceodyssey.core.carry import PROJECTION_FIELDS
 from spaceodyssey.core.enums import EventKind, RunStatus
 from spaceodyssey.core.executors.base import run_status
+from spaceodyssey.core.snapshot import named_leaves
 
 # Log columns a release delay may move, all by exactly the delay.
 SHIFTED_LOG_FIELDS = ("available_tick", "released_tick", "accepted_tick")
@@ -20,7 +22,7 @@ SHIFTED_LOG_FIELDS = ("available_tick", "released_tick", "accepted_tick")
 # its updates and the policy draw is keyed by its decision tick, which a release-woken
 # decision shares with the release, so both are compared separately or not at all.
 # The snapshot and event digests hash release ticks, which the delay moves by design.
-LATENCY_FREE_SKIP = ("belief_mean", "belief_aux", "pol_u", "snapshot_fp", "event_fp")
+LATENCY_FREE_SKIP = (*PROJECTION_FIELDS, "pol_u", "snapshot_fp", "event_fp")
 
 
 def delayed(study, delay_ticks):
@@ -38,7 +40,7 @@ def delay_in_ticks(study, delay_s):
 
 
 def _belief_at(trace, tick):
-    """Observer belief after the last handled step at or before `tick` (zeros first)."""
+    """Projected belief after the last handled step at or before `tick`, else zeros."""
     handled = np.asarray(trace.handled) & (np.asarray(trace.tick) <= tick)
     belief = np.asarray(trace.belief_mean)
     idx = np.flatnonzero(handled)
@@ -68,6 +70,7 @@ def latency_shift(study, truths, roots, n_steps, *, delay_s=2 * 86400.0, executo
     moved_study = delayed(study, delay)
     base = runner.run_worlds(va.instrument(study), truths, roots, n_steps)
     late = runner.run_worlds(vb.instrument(moved_study), truths, roots, n_steps)
+    layout = study.observer.layout(study.caps)
     failures = []
     moved = 0
     for name, run in (("base", base), ("delayed", late)):
@@ -83,9 +86,10 @@ def latency_shift(study, truths, roots, n_steps, *, delay_s=2 * 86400.0, executo
             cl,
             study.caps,
             tb,
+            layout=layout,
             delay=delay,
         )
-        failures += _compare_world(w, cb, tb, cl, tl, delay)
+        failures += _compare_world(w, cb, tb, cl, tl, delay, layout)
         moved += _count_moved_updates(tb, tl)
     if moved == 0 and not failures:
         failures.append("the delay moved no belief update, so the check is vacuous")
@@ -101,7 +105,7 @@ def _non_release(trace):
     }
 
 
-def _compare_world(w, cb, tb, cl, tl, delay):
+def _compare_world(w, cb, tb, cl, tl, delay, layout):
     out = []
     a, b = _non_release(tb), _non_release(tl)
     bad = [n for n in a if not bits_equal(a[n], b[n])]
@@ -134,8 +138,9 @@ def _compare_world(w, cb, tb, cl, tl, delay):
     for name in ("balance",):
         if not bits_equal(getattr(cb.ledger, name), getattr(cl.ledger, name)):
             out.append(f"world {w}: the ledger {name} changed")
-    for name in ("mean", "n", "aux"):
-        if not bits_equal(getattr(cb.belief, name), getattr(cl.belief, name)):
+    final_b, final_l = named_leaves(cb.belief), named_leaves(cl.belief)
+    for name in layout.belief_leaves:
+        if not bits_equal(final_b[name], final_l[name]):
             out.append(f"world {w}: the final belief {name} changed")
     ticks = np.unique(np.asarray(tb.tick)[np.asarray(tb.handled)])
     for t in ticks:

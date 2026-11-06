@@ -70,11 +70,12 @@ class HostExecutor(AbstractExecutor):
         dec, adm, close, fin = self.decide, _adm, _close, _fin
         carry = _init(study, truths)
         caps = study.caps
+        layout = study.observer.layout(caps)
         if n_steps == 0:
             trace = jax.tree_util.tree_map(
                 lambda x: jnp.empty((0, *x.shape), dtype=x.dtype), empty_trace(caps)
             )
-            return RunResult(carry, trace)
+            return RunResult(carry, trace, layout)
         traces = []
         for _ in range(n_steps):
             carry, trace, wake = adv(carry, roots, study, truths)
@@ -113,7 +114,7 @@ class HostExecutor(AbstractExecutor):
             if service is not None:
                 carry = answer_pending(carry, study, service)
         return RunResult(
-            carry, jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces)
+            carry, jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces), layout
         )
 
     def run_worlds(self, study, truths, roots, n_steps, **kw):
@@ -125,4 +126,5 @@ class HostExecutor(AbstractExecutor):
         return RunResult(
             jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[r.carry for r in runs]),
             jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[r.trace for r in runs]),
+            study.observer.layout(study.caps),
         )

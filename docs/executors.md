@@ -22,7 +22,14 @@ or any integer difference is a failure.
 
 `core.executors.base.CANONICAL_FIELDS` explicitly lists every compared leaf of
 `Carry` and `Trace`, including every column of the record log, event queue and
-request, both beliefs, and the ledger. `CANONICAL_EXCLUSIONS` is the single map
+request, and the ledger. The leaves of the two beliefs (`LAYOUT_FIELDS`) are named
+by the observer's `BeliefLayout`: every leaf of nonzero size of the full belief and
+of the policy summary, so a leaf whose capacity is zero adds nothing to a history.
+The layout also names the count leaf behind `belief_n` and `pbelief_n` and the
+projection behind `belief_final`, `pbelief_final`, `belief_aux` and the trace
+fields `belief_mean` and `belief_aux`. `RunResult.history` reads the layout the
+executor recorded; `canonical_history(carry, trace)` without one reads the
+`MeanBelief` layout of the carry. `CANONICAL_EXCLUSIONS` is the single map
 for whole-field exclusions and their reasons; it is currently empty. A new output
 field must be added to the inventory or given a documented exclusion. The
 `test_every_output_field_has_an_explicit_disposition` regression enumerates the

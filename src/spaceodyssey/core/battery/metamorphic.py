@@ -18,7 +18,7 @@ from spaceodyssey.core.battery.result import (
 from spaceodyssey.core.battery.views import DecisionViews, compare_views
 from spaceodyssey.core.carry import init_carry
 from spaceodyssey.core.enums import I64
-from spaceodyssey.core.executors.base import canonical_history
+from spaceodyssey.core.executors.base import belief_leaves, canonical_history
 from spaceodyssey.core.transaction import transition
 
 # Float columns of a canonical history that no draw feeds.
@@ -54,6 +54,7 @@ def relabel_ids(
     if all(old == new for old, new in channel_map.items()):
         raise ValueError("the relabeling changes no id")
     runner = default_executor(executor)
+    layout = study.observer.layout(study.caps)
     va, vb = DecisionViews(), DecisionViews()
     a = runner.run_worlds(va.instrument(study), truths, roots, n_steps)
     b = runner.run_worlds(vb.instrument(relabeled), truths, roots, n_steps)
@@ -70,9 +71,10 @@ def relabel_ids(
             cb,
             study.caps,
             ta,
+            layout=layout,
             channel_map=channel_map,
         )
-        ha, hb = canonical_history(ca, ta), canonical_history(cb, tb)
+        ha, hb = canonical_history(ca, ta, layout), canonical_history(cb, tb, layout)
         n_records += ha.n_records
         for name, x in ha.ints.items():
             # History keys are bare ("channel") or dotted leaf paths ("trace.channel").
@@ -131,6 +133,7 @@ def shift_epoch(study, truths, roots, n_steps, delta_ticks):
     compared.
     """
     zero = jnp.asarray(0, I64)
+    layout = study.observer.layout(study.caps)
     va, vb = DecisionViews(), DecisionViews()
     base_carry, base_trace = _scan_from(
         va.instrument(study), truths, roots, zero, n_steps
@@ -150,6 +153,7 @@ def shift_epoch(study, truths, roots, n_steps, delta_ticks):
             pick(late_carry),
             study.caps,
             pick(base_trace),
+            layout=layout,
             epoch=delta_ticks,
         )
         failures += _epoch_world(
@@ -159,6 +163,7 @@ def shift_epoch(study, truths, roots, n_steps, delta_ticks):
             pick(late_carry),
             pick(late_trace),
             delta_ticks,
+            layout,
         )
         n_records += int(np.asarray(base_carry.log.valid[w]).sum())
     if not n_records:
@@ -166,7 +171,7 @@ def shift_epoch(study, truths, roots, n_steps, delta_ticks):
     return make_result("shift_epoch", failures, n_records=n_records)
 
 
-def _epoch_world(w, cb, tb, cl, tl, delta):
+def _epoch_world(w, cb, tb, cl, tl, delta, layout):
     out = []
     handled = np.asarray(tb.handled)
     if not bits_equal(handled, np.asarray(tl.handled)):
@@ -187,12 +192,22 @@ def _epoch_world(w, cb, tb, cl, tl, delta):
             b = np.where(np.asarray(cb.log.valid) & (b >= 0), b - delta, b)
         if not bits_equal(a, b):
             out.append(f"world {w}: log column {name} changed under the shift")
-    for name in ("belief", "pbelief", "acquisition_counts"):
-        if not tree_bits_equal(getattr(cb, name), getattr(cl, name)):
-            out.append(f"world {w}: {name} changed under the shift")
+    out += [
+        f"world {w}: {name} changed under the shift"
+        for name in _changed_beliefs(cb, cl, layout)
+    ]
     if not bits_equal(cb.ledger.balance, cl.ledger.balance):
         out.append(f"world {w}: the balance changed under the shift")
     return out
+
+
+def _changed_beliefs(ca, cb, layout):
+    """Comparator leaves of the two beliefs, and the acquisition counts, that differ."""
+    la, lb = belief_leaves(ca, layout), belief_leaves(cb, layout)
+    changed = [name for name, leaf in la.items() if not bits_equal(leaf, lb[name])]
+    if not bits_equal(ca.acquisition_counts, cb.acquisition_counts):
+        changed.append("acquisition_counts")
+    return changed
 
 
 def with_zero_time_asset(study):
@@ -230,6 +245,7 @@ def zero_time_asset(study, truths, roots, n_steps, *, executor=None):
     the new asset) must be bitwise equal.
     """
     runner = default_executor(executor)
+    layout = study.observer.layout(study.caps)
     more = with_zero_time_asset(study)
     a = runner.run_worlds(study, truths, roots, n_steps)
     b = runner.run_worlds(more, truths, roots, n_steps)
@@ -241,9 +257,9 @@ def zero_time_asset(study, truths, roots, n_steps, *, executor=None):
         n_records += int(np.asarray(ca.log.valid).sum())
         if not tree_bits_equal((ta, ca.log), (tb, cb.log)):
             failures.append(f"world {w}: the trace or the records changed")
-        for name in ("belief", "pbelief", "acquisition_counts"):
-            if not tree_bits_equal(getattr(ca, name), getattr(cb, name)):
-                failures.append(f"world {w}: {name} changed")
+        failures += [
+            f"world {w}: {name} changed" for name in _changed_beliefs(ca, cb, layout)
+        ]
         want = np.insert(
             np.asarray(ca.ledger.balance), study.caps.n_assets, 0.0, axis=0
         )

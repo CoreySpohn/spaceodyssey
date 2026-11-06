@@ -149,9 +149,13 @@ def _payload_matches_log(view, carry, caps):
 
 
 def compare_views(
-    left, right, ca, cb, caps, trace, *, channel_map=None, epoch=0, delay=0
+    left, right, ca, cb, caps, trace, *, layout, channel_map=None, epoch=0, delay=0
 ):
-    """Compare decision views under an id, epoch or release-time transformation."""
+    """Compare decision views under an id, epoch or release-time transformation.
+
+    `layout` is the observer's `BeliefLayout`; under a relabeling only the summary's
+    count leaf is compared, since draws move with the new ids.
+    """
     if len(left) != len(right):
         return ["the number of policy decision views changed"]
     failures = []
@@ -198,7 +202,7 @@ def compare_views(
             if not bits_equal(x, getattr(vb.log, name)):
                 failures.append(f"{prefix} log {name} changed")
         if channel_map:
-            if not bits_equal(va.belief.n, vb.belief.n):
+            if not bits_equal(layout.count(va.belief), layout.count(vb.belief)):
                 failures.append(f"{prefix} belief counts changed")
         elif not tree_bits_equal(va.belief, vb.belief):
             failures.append(f"{prefix} belief changed")

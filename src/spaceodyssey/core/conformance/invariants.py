@@ -139,7 +139,8 @@ def one_fold_per_acquisition(run):
         for i in rows
         if int(log.accepted_tick[i]) >= 0 and int(log.status[i]) == done
     }
-    folds = int(np.asarray(c.belief.n).sum())
+    layout = run.study.observer.layout(run.study.caps)
+    folds = int(np.asarray(layout.count(c.belief)).sum())
     if folds > len(seen):
         failures.append(f"{folds} folds for {len(seen)} accepted acquisitions")
     released = {
@@ -147,7 +148,7 @@ def one_fold_per_acquisition(run):
         for i in rows
         if int(log.released_tick[i]) >= 0 and int(log.status[i]) == done
     }
-    pfolds = int(np.asarray(c.pbelief.n).sum())
+    pfolds = int(np.asarray(layout.count(c.pbelief)).sum())
     if pfolds > len(released):
         failures.append(f"{pfolds} policy folds for {len(released)} released")
     return make_result("one_fold_per_acquisition", failures, folds=folds)

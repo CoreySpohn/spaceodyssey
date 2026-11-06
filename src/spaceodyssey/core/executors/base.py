@@ -7,12 +7,14 @@ import numpy as np
 
 from spaceodyssey.core.carry import Carry, Trace
 from spaceodyssey.core.enums import I64, RunStatus
+from spaceodyssey.core.snapshot import BeliefLayout, mean_layout, named_leaves
 
 GO_TOLERANCE = 1e-12
 KILL_TOLERANCE = 1e-9
 
-# Every leaf of `Carry` and `Trace` appears here or in `CANONICAL_EXCLUSIONS`
-# (`tests/core/test_canonical_fields.py` enumerates the dataclasses independently).
+# Every leaf of `Carry` and `Trace` appears here, in `LAYOUT_FIELDS` or in
+# `CANONICAL_EXCLUSIONS` (`tests/core/test_canonical_fields.py` enumerates the
+# dataclasses independently).
 CANONICAL_FIELDS = {
     "carry": (
         "tick",
@@ -103,16 +105,6 @@ CANONICAL_FIELDS = {
         "debited",
         "refunded",
     ),
-    "carry.belief": (
-        "mean",
-        "n",
-        "aux",
-    ),
-    "carry.pbelief": (
-        "mean",
-        "n",
-        "aux",
-    ),
     "carry.request": (
         "kind",
         "tick",
@@ -168,6 +160,10 @@ CANONICAL_FIELDS = {
         "pol_u",
     ),
 }
+
+# Carry fields whose leaves are named by the observer's `BeliefLayout`: every
+# comparator leaf of the full belief and of the policy summary (see `belief_leaves`).
+LAYOUT_FIELDS = ("carry.belief", "carry.pbelief")
 
 # Whole-field exclusions: dotted output path -> reason. Empty on purpose; invalid
 # queue/log rows and unhandled trace rows are masked in `canonical_history`, not
@@ -243,7 +239,23 @@ class ParityReport(eqx.Module):
         return self.ok and self.max_abs <= GO_TOLERANCE
 
 
-def _canonical_leaves(carry, trace, handled):
+def belief_leaves(carry, layout):
+    """Comparator leaves of both beliefs, as `belief.<leaf>` and `pbelief.<leaf>`.
+
+    The names are the layout's: leaves of nonzero size of the full belief and of the
+    policy summary.
+    """
+    out = {}
+    for prefix, tree, names in (
+        ("belief", carry.belief, layout.belief_leaves),
+        ("pbelief", carry.pbelief, layout.summary_leaves),
+    ):
+        leaves = named_leaves(tree)
+        out.update({f"{prefix}.{name}": np.asarray(leaves[name]) for name in names})
+    return out
+
+
+def _canonical_leaves(carry, trace, handled, layout):
     """Dotted path -> array for every inventoried field, inactive rows removed.
 
     Queue and log rows compare where `valid` is set, in slot order (the `valid`
@@ -267,11 +279,23 @@ def _canonical_leaves(carry, trace, handled):
             if mask is not None and name != "valid":
                 leaf = leaf[mask]
             out[f"{group}.{name}"] = leaf
+    for name, leaf in belief_leaves(carry, layout).items():
+        out[f"carry.{name}"] = leaf
     return out
 
 
-def canonical_history(carry, trace):
-    """Valid-compressed history of one world: handled steps and valid log rows."""
+def canonical_history(carry, trace, layout=None):
+    """Valid-compressed history of one world: handled steps and valid log rows.
+
+    `layout` is the observer's `BeliefLayout`; it names the belief leaves compared,
+    the count leaf and the projections of the final beliefs. Without one, the history
+    reads the `MeanBelief` layout of the carry's own beliefs, the default every
+    observer that keeps `init` declares.
+    """
+    if layout is None:
+        layout = mean_layout(carry.belief, carry.pbelief)
+    final_mean, final_aux = layout.project(carry.belief)
+    summary_mean, _ = layout.summary_projection(carry.pbelief)
     h = np.asarray(trace.handled)
     pick = lambda a: np.asarray(a)[h]  # noqa: E731
     events = tuple(
@@ -342,8 +366,8 @@ def canonical_history(carry, trace):
         "next_sid": np.asarray(carry.next_sid),
         "n_log": np.asarray(carry.n_log),
         "acquisition_counts": np.asarray(carry.acquisition_counts),
-        "belief_n": np.asarray(carry.belief.n),
-        "pbelief_n": np.asarray(carry.pbelief.n),
+        "belief_n": np.asarray(layout.count(carry.belief)),
+        "pbelief_n": np.asarray(layout.count(carry.pbelief)),
         "lane_gen": np.asarray(carry.ledger.lane_gen),
         "refund_of": np.asarray(log.refund_of)[v],
         "program_charge_rule": np.asarray(carry.ledger.program_charge_rule),
@@ -358,9 +382,9 @@ def canonical_history(carry, trace):
         "charged": np.asarray(log.charged)[v],
         "belief_mean": pick(trace.belief_mean),
         "belief_aux_path": pick(trace.belief_aux),
-        "belief_final": np.asarray(carry.belief.mean),
-        "pbelief_final": np.asarray(carry.pbelief.mean),
-        "belief_aux": np.asarray(carry.belief.aux),
+        "belief_final": np.asarray(final_mean),
+        "pbelief_final": np.asarray(summary_mean),
+        "belief_aux": np.asarray(final_aux),
         "balance": np.asarray(carry.ledger.balance),
     }
     ints["meta"] = np.asarray(
@@ -368,7 +392,7 @@ def canonical_history(carry, trace):
         dtype=np.int64,
     )
     ints["lane_tuple"] = np.asarray(pick(trace.lane), dtype=np.int64)
-    for path, leaf in _canonical_leaves(carry, trace, h).items():
+    for path, leaf in _canonical_leaves(carry, trace, h, layout).items():
         (floats if leaf.dtype.kind == "f" else ints)[path] = leaf
     return RunHistory(
         events=events,
@@ -470,10 +494,15 @@ def tree_equal_report(a, b):
 
 
 class RunResult(eqx.Module):
-    """Final carry and per-step trace; unpackable as a pair."""
+    """Final carry and per-step trace; unpackable as a pair.
+
+    `layout` is the observer's `BeliefLayout`, which `history` compares through; the
+    executors set it, and without one `canonical_history` uses its default.
+    """
 
     carry: Carry
     trace: Trace
+    layout: BeliefLayout | None = eqx.field(default=None, static=True)
 
     def __iter__(self):
         """Iterate over the carry and trace."""
@@ -492,9 +521,9 @@ class RunResult(eqx.Module):
     def history(self, world=None):
         """Canonical history of one world, or of a run without a world axis."""
         if world is None:
-            return canonical_history(self.carry, self.trace)
+            return canonical_history(self.carry, self.trace, self.layout)
         return canonical_history(
-            index_world(self.carry, world), index_world(self.trace, world)
+            index_world(self.carry, world), index_world(self.trace, world), self.layout
         )
 
 

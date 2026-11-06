@@ -64,8 +64,14 @@ the cost of divergent handler branches under `vmap`.
    Channels name occupancy, release latency, costs, audiences and coincidence order.
 3. Implement the kind contracts: `AbstractWorldSource`, `AbstractChannelModel`,
    `AbstractProcess`, `AbstractObserver`, `AbstractPolicy`, `AbstractDesign` and
-   `AbstractObjective`. Put phase policies, boundaries and permitted effects into
-   an `Agenda`, then compose a `Study`.
+   `AbstractObjective`. An observer keeps two belief types: the full belief
+   (`Carry.belief`) and the policy summary (`Carry.pbelief`), the only belief a
+   policy reads. It declares both in a `BeliefLayout` (`observer.layout(caps)`):
+   their shapes, the integer count leaf the snapshot fingerprint reads, and the
+   projection the trace records. The default is `MeanBelief` for both types, and a
+   `Study` refuses an observer whose layout does not describe what it initializes.
+   Put phase policies, boundaries and permitted effects into an `Agenda`, then
+   compose a `Study`.
 4. Run pre-flight for the intended executor and resolve its findings. Declarations
    are assertions by the components, so a clean result does not prove scientific
    correctness or detect an undeclared dependency hidden in a closure.
