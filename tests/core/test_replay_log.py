@@ -8,16 +8,26 @@ import numpy as np
 import pytest
 
 from spaceodyssey import core
-from spaceodyssey.core import HostExecutor, MeanBelief, index_world, replay_belief
+from spaceodyssey.core import (
+    HostExecutor,
+    MeanBelief,
+    index_world,
+    replay_belief,
+    replay_run,
+)
 from spaceodyssey.core.records import write_log
 from spaceodyssey.studies import toy
 from tests.core.corpus import CORPUS, CORPUS_BY_NAME
 from tests.core.helpers import N_STEPS_CORPUS, advance_j, one_world, service_of, worlds
 
-# A refresh case's belief comes from installs, not release folds: replay folds only.
+# A refresh case's belief comes from installs, not release folds: `replay_belief`
+# folds only, so `replay_run` replays those cases (below).
 RELEASING = [
     c for c in CORPUS if not c.name.startswith("overflow") and c.make_refit is None
 ]
+
+
+REFRESHING = [c for c in CORPUS if c.make_refit is not None]
 
 
 def _bits(belief):
@@ -147,3 +157,20 @@ def test_replay_rejects_unmatched_release(reordered_releases, field, value):
     )
     with pytest.raises(ValueError, match="release"):
         replay_belief(study, carry, trace)
+
+
+@pytest.mark.parametrize("case", REFRESHING, ids=lambda c: c.name)
+def test_refresh_cases_replay_with_their_checkpoints(case):
+    study = case.make_study()
+    truths, roots = worlds(2)
+    for w in range(2):
+        carry, trace = HostExecutor().run(
+            study,
+            index_world(truths, w),
+            roots[w],
+            N_STEPS_CORPUS,
+            refit=case.make_refit(),
+            **service_of(case),
+        )
+        out = replay_run(study, roots[w], carry, trace, refit=case.make_refit())
+        assert out.checkpoints >= 1 and out.products >= 1, case.name
