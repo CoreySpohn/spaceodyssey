@@ -55,6 +55,15 @@ The new run-based tests are in the slow tier because one executor compile is nea
 cold. The quick tests cover the replacement-rule oracle on a hand log, the kit key
 against the protocol's key (it moves with the set and the seed) and the two refusals.
 
+## Full suite
+
+One run, `-n 2 --dist loadfile`, entry-points test deselected: 3,077 tests, 20 failed,
+3,057 passed in 78 min. Eighteen failures are the golden float digests described above.
+The other two were this change's own (the dispatch lint flagged a `getattr` loop and a
+status `.name` in `observer_kit.py`); both are fixed and the two lint files, the slice
+gate and the kit files pass (382 tests). The budget report lists six unit tests over 5 s,
+all in files this change does not touch.
+
 ## Decisions to check
 
 1. The run-based checks compare only `subject_leaves` at the corrected or summarised
