@@ -17,3 +17,5 @@ from spaceodyssey.codec.dump import dump_study as dump_study
 from spaceodyssey.codec.kinds import CORE_KINDS as CORE_KINDS
 from spaceodyssey.codec.kinds import KindResolver as KindResolver
 from spaceodyssey.codec.load import load_study as load_study
+from spaceodyssey.codec.preflight import DocumentFinding as DocumentFinding
+from spaceodyssey.codec.preflight import preflight_document as preflight_document
