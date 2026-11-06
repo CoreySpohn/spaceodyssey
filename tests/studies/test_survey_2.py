@@ -1,10 +1,13 @@
 """Survey 2, an adaptive revisit search: reductions, refresh and the run document."""
 
+import dataclasses
+
+import jax
 import numpy as np
 import pytest
 
-from spaceodyssey.core import CompiledExecutor, HostExecutor
-from spaceodyssey.core.enums import EffectKind
+from spaceodyssey.core import CompiledExecutor, HostExecutor, replay_run
+from spaceodyssey.core.enums import EffectKind, EventKind
 from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.studies import toy
 from spaceodyssey.studies.survey_2 import (
@@ -208,12 +211,46 @@ def test_the_run_document_round_trips(every, batch):
 
 
 @pytest.mark.slow
-def test_replay_of_the_adaptive_run_waits_on_keyed_replay():
-    """Replay of the recorded run, with a refit on the host, is the keyed replay
-    task's. Skipped until `replay_run` exists on this branch's base.
+@pytest.mark.parametrize("executor", ["host", "compiled"])
+def test_replay_of_the_adaptive_run(executor, batch):
+    """Fails if keyed replay loses an adaptive belief, summary, checkpoint or product,
+    or accepts a corrupted product payload on either executor.
     """
-    from spaceodyssey.core.executors import replay
+    truths, roots = batch
+    study = survey_2(EVERY)
+    refit = boundary()
+    driver = {"host": HostExecutor, "compiled": CompiledExecutor}[executor]()
+    live = driver.run_worlds(study, truths, roots, N_STEPS, refit=refit)
+    assert bool(np.all(np.asarray(live.complete)))
+    carry = index_world(live.carry, 0)
+    trace = index_world(live.trace, 0)
+    root = live.roots[0]
+    out = replay_run(study, root, carry, trace, refit=refit, executor=executor)
 
-    if not hasattr(replay, "replay_run"):
-        pytest.skip("waits on T4c: replay_run(run, roots, carry, trace, refit=...)")
-    raise AssertionError("replay_run exists: write the replay assertions")
+    for replayed, original in (
+        (out.belief, carry.belief),
+        (out.pbelief, carry.pbelief),
+    ):
+        for got, expected in zip(
+            jax.tree.leaves(replayed), jax.tree.leaves(original), strict=True
+        ):
+            np.testing.assert_array_equal(got, expected)
+
+    products = np.flatnonzero(
+        np.asarray(carry.log.valid) & (np.asarray(carry.log.kind) == toy.PRODUCT_KIND)
+    )
+    refresh_steps = np.asarray(trace.handled) & (
+        np.asarray(trace.kind) == EventKind.REFRESH
+    )
+    # Each completed checkpoint has a hold step followed by its completion step.
+    assert int(refresh_steps.sum()) % 2 == 0
+    assert out.checkpoints == int(refresh_steps.sum()) // 2 > 0
+    assert out.products == len(products) > 0
+    assert not out.refused and not out.unfinished
+
+    payload = carry.log.payload.at[products[0], 0].add(1.0)
+    tampered = dataclasses.replace(
+        carry, log=dataclasses.replace(carry.log, payload=payload)
+    )
+    with pytest.raises(ValueError, match=r"product row .* differs in payload"):
+        replay_run(study, root, tampered, trace, refit=refit, executor=executor)

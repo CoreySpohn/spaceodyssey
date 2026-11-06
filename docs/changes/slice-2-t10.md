@@ -84,14 +84,19 @@ when all are detected. Declared `ignore_belief` it takes plan entries and equals
   trace disruptive flags. Nine requested-field mutations and a trace disruptive mutation
   of a rejected request, with no acquisition rows, each fail the comparison.
 
-## Waiting on other tasks
+## Survey 2 replay
 
-- Survey 2 replay assertions (replay of the recorded adaptive run with `OftiRefit` or the
-  masked refit, equal beliefs and products) wait on T4c: `replay_run(run, roots, carry,
-  trace, refit=...)` is not on this branch's base. The test
-  `test_replay_of_the_adaptive_run_waits_on_keyed_replay` skips with that reason and fails
-  loudly (it raises) once `replay_run` appears, so it cannot be forgotten. No T4c code was copied.
-- Nothing waits on T3b.
+`test_replay_of_the_adaptive_run` replaces the replay placeholder now that
+`replay_run` is available. Two slow-tier cases run the adaptive study with the
+100-tick refresh grid and its masked refit boundary, on host and compiled. Each
+replays one world's carry and trace with the root key recorded by that executor.
+Every leaf of the observer belief and policy summary must equal the live carry
+exactly. The product count must equal the valid product rows, and the checkpoint
+count must equal half the handled refresh steps (hold and completion), both
+nonzero, with no refusal or unfinished checkpoint.
+
+Each case also changes one product row's first payload value by 1.0 and requires
+`replay_run` to raise `ValueError` identifying the product payload mismatch.
 
 ## Builder self-review
 
@@ -149,14 +154,17 @@ when all are detected. Declared `ignore_belief` it takes plan entries and equals
 Original implementation: 46 added (survey 14: 9, survey 5: 9, survey 2: 28 including
 one skip), none retired, net +46. Review fixes add 17 cases (one executor case, one
 cancellation control, two OFTI policy cases, three large-capacity cases, and ten
-complete-effect mutations); none retired, net +17, total 63 including the unchanged
-replay skip.
+complete-effect mutations); none retired, net +17, total 63 including the original
+replay skip. Replay activation replaces that skipped case with two executor cases:
+two added, one placeholder retired, net +1, for 64 survey and helper cases with
+no expected replay skip.
 
 
 ## Review fixes
 
 | Finding | Change | Regression evidence |
 |---|---|---|
+| 1 | Replace the replay placeholder with slow host and compiled adaptive replay cases | Exact belief and policy-summary equality, recorded product and checkpoint counts, and rejection of a tampered product payload |
 | 2 | Detection summary alongside orbit particles; adaptive and ignoring OFTI cases | OFTI installation, unchanged complete actions, eager adaptive choices, and a different-plan control |
 | 3 | Pooled and per-subject PIT checks | Opposite CDF errors pass pooled but fail both subject checks |
 | 4 | Refresh-enabled ignoring reduction on host and compiled | Both executor cases compare against survey 1 |
@@ -165,9 +173,10 @@ replay skip.
 | 7 | Negative candidate namespace | 1,001 subjects and up to 100,001 acquisitions cannot overlap candidate ids |
 | 8 | Remove blanket survey slow marking; assign tiers from cold setup plus call | Quick-tier collection and cold timing probes, recorded below |
 
-Finding 1 is out of scope. Replay activation and its existing skip remain unchanged.
+## Verification after earlier review fixes
 
-## Verification after review fixes
+The measurements below predate replay activation; its verification is recorded
+separately at the end of this document.
 
 Runs use `PYTHONPATH=src`, the shared environment's Python,
 `-m pytest -p no:cacheprovider`, and exclude the installed-entry-point test. Every
@@ -231,3 +240,34 @@ validation of changed Python, and `git diff --check` pass. A repository-wide
 formatter check also reports an existing fenced-stub formatting issue in the
 unrelated `docs/changes/slice-2-t1b.md`; that file is left untouched. Core sources
 and golden histories have no diff. No commit or push was made.
+
+## Verification of replay activation
+
+Both requested runs use `compute-run --threads 4 --mem 4096`, `PYTHONPATH=src`,
+the shared Python environment and `pytest -p no:cacheprovider -q`, with
+`--durations=3` added. Pytest times exclude the compute queue wait.
+The existing persistent JAX cache remains enabled; these are not cold-tier probes.
+
+| Validation | Result | Pytest wall (s) | Sampled peak footprint (MiB) |
+|---|---|---:|---:|
+| `test_replay_of_the_adaptive_run`, host and compiled | 2 passed | 9.00 | 1618.4 |
+| Complete `tests/studies/test_survey_2.py` | 11 passed, no skips | 59.09 | 3047.3 |
+
+The complete file passes both replay cases, including both negative controls:
+changing a product payload raises `ValueError` identifying the product row's
+payload mismatch. The three slowest calls were the compiled refresh-enabled
+ignoring reduction (10.91 s), the no-refresh ignoring reduction (8.72 s), and
+adaptive executor agreement (8.37 s). The budget plugin reports a 2.85 GB peak RSS
+and no tier violations. The earlier 64.85 s / 2.67 GB file result above is historical,
+not a controlled before/after measurement.
+The isolated replay calls took 3.88 s on host and 3.69 s compiled, with 0.05 s
+host fixture setup, and the budget plugin reported no violations. Both isolated
+payload-tampering controls also passed.
+
+The outer `/usr/bin/time -l` wrappers returned 1 because access to
+`kern.clockrate` was denied after pytest completed; pytest and `compute-run`
+completed successfully. Timings and memory here come from pytest and `compute-run`.
+
+Ruff 0.17.4 passes repository-wide; changed-file formatting, ASCII validation,
+the internal-reference scanner and `git diff --check` pass. Core sources and
+goldens are unchanged. No commit or push was made.
