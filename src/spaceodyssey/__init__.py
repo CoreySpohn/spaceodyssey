@@ -8,13 +8,6 @@ The transaction core is ``spaceodyssey.core``; the document form of a study is
 """
 
 from spaceodyssey._version import __version__
-from spaceodyssey.certify import (
-    AbstractCertificate,
-    AbstractProfileCertificate,
-    CertificateState,
-    SnrThreshold,
-    ToyGaussianCertifier,
-)
 from spaceodyssey.data import Observation, SummaryDataset
 from spaceodyssey.dist import AbstractPredictive, GaussianSummary
 from spaceodyssey.errors import (
@@ -22,7 +15,6 @@ from spaceodyssey.errors import (
     UnsupportedOperator,
     UnsupportedProfile,
 )
-from spaceodyssey.gaussian_profile import GaussianProfileCertifier
 from spaceodyssey.metrics import CertifiedYield, YieldSummary, summarize
 from spaceodyssey.observe import AbstractMeasurement
 from spaceodyssey.plan import CertificationOutcome, PlanPredictive, PlanSummary
@@ -39,19 +31,15 @@ from spaceodyssey.truth import (
 from spaceodyssey.universe import AbstractUniverseSource, FixedUniverse, Universe
 
 __all__ = [
-    "AbstractCertificate",
     "AbstractMeasurement",
     "AbstractPredictive",
-    "AbstractProfileCertificate",
     "AbstractTruthModel",
     "AbstractUniverseSource",
-    "CertificateState",
     "CertificationOutcome",
     "CertifiedYield",
     "Claim",
     "Edge",
     "FixedUniverse",
-    "GaussianProfileCertifier",
     "GaussianSummary",
     "Observation",
     "ObservedData",
@@ -61,9 +49,7 @@ __all__ = [
     "PriorSet",
     "Profile",
     "Purpose",
-    "SnrThreshold",
     "SummaryDataset",
-    "ToyGaussianCertifier",
     "Truth",
     "Universe",
     "UnsupportedOperator",

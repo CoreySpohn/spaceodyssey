@@ -2,7 +2,6 @@
 
 import json
 
-import ineedvalidation as vv
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -10,10 +9,8 @@ import pytest
 from jax.test_util import check_grads
 
 from spaceodyssey.metrics import CertifiedYield
-from spaceodyssey.plan import PlanPredictive
 from spaceodyssey.reporting import certified_yield, weighted_yields
-from tests.test_plan import make_outcome, make_plan
-from tests.test_toy_certifier import make_toy, predictive_for
+from tests.test_plan import make_outcome
 
 
 def hand_outcome():
@@ -103,52 +100,28 @@ class TestWeightedYields:
                 data[name.removesuffix("_independent_lower_bound")] = data.pop(name)
         assert CertifiedYield.from_json(json.dumps(data)) == report
 
-    @vv.case(
-        "certification-calibration",
-        "code-verification",
-        srq="calibration-excess",
-    )
-    def test_matched_flat_prior_wrong_yield_bound(self):
-        """A proper wide-window approximation to the toy's improper flat prior.
-
-        Seed 2026, 40000 uniform truths within 10 noise sigmas of the
-        boundary. The distant window edges affect the certification tail
-        negligibly (normal tails beyond 8 sigma). Tolerance is five sample
-        standard errors of p_wrong - alpha*p_pos, covering population Monte
-        Carlo variation; noise is integrated analytically, not sampled.
-        """
-        toy = make_toy()
-        rng = np.random.default_rng(2026)
-        theta = rng.uniform(toy.boundary - 2.0, toy.boundary + 2.0, 40_000)
-        outcome = toy.integrate(predictive_for(theta, np.full(theta.size, 10.0)))
-        report = certified_yield(outcome, np.ones(theta.size), certificate="toy")
-        residual = np.asarray(outcome.p_wrong) - toy.alpha * np.asarray(outcome.p_pos)
-        tolerance = 5.0 * np.std(residual, ddof=1) * np.sqrt(theta.size)
-        assert report.y_issued > 0.0
-        assert report.y_wrong > 0.0
-        assert report.y_wrong <= toy.alpha * report.y_issued + tolerance
-
     def test_weight_shape_checked(self):
         """Weights must be one per planet."""
         with pytest.raises(ValueError, match="weights"):
             certified_yield(hand_outcome(), jnp.ones(3), certificate="hand")
 
-    def test_differentiable_in_snr(self):
-        """Y_cert+ from the toy is differentiable in the toy adapter's SNR.
+    def test_differentiable_in_probabilities(self):
+        """Y_cert+ is differentiable in the outcome probabilities.
 
-        Tolerance: floating-point; float32 central differences at eps 1e-2
-        carry O(eps**2) truncation and round-off, so check_grads uses 2e-2.
+        The gradient is w * (1 - r) for a wrong fraction r.
+
+        Tolerance: floating-point; the yield is linear in p_pos, so check_grads
+        agrees with the exact gradient to 1e-6 in float64.
         """
-        toy = make_toy()
-        theta = jnp.array([0.5, 0.9, 0.2])
+        weights = jnp.array([1.0, 2.0, 0.5])
+        wrong_fraction = 0.25
 
-        def y_pos(snr):
-            plan = make_plan(n_planets=3, n_bins=2, noise_sigma=1.0 / snr)
-            outcome = toy.integrate(PlanPredictive(plan=plan, truth=theta))
-            return weighted_yields(outcome, jnp.ones(3))[1]
+        def y_pos(p_pos):
+            outcome = make_outcome(p_pos=p_pos, p_wrong=wrong_fraction * p_pos)
+            return weighted_yields(outcome, weights)[1]
 
-        snr = jnp.array([[2.0, 1.0], [1.5, 1.5], [3.0, 0.5]])
-        check_grads(
-            y_pos, (snr,), order=1, modes=["rev"], eps=1e-2, atol=2e-2, rtol=2e-2
+        p_pos = jnp.array([0.9, 0.5, 0.2])
+        check_grads(y_pos, (p_pos,), order=1, modes=["rev"], atol=1e-6, rtol=1e-6)
+        np.testing.assert_allclose(
+            jax.grad(y_pos)(p_pos), weights * (1.0 - wrong_fraction), rtol=1e-12
         )
-        assert float(jnp.sum(jax.grad(y_pos)(snr))) != 0.0

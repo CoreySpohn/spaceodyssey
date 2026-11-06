@@ -153,9 +153,6 @@ library = "spaceodyssey"
 "tests/test_rng.py" = { case = "yield-estimator", evidence = "code-verification" }
 "tests/test_dist.py" = { case = "yield-estimator", evidence = "code-verification" }
 "tests/test_metrics.py" = { case = "yield-estimator", evidence = "code-verification" }
-"tests/test_certify.py" = { case = "certification-seam", evidence = "code-verification" }
-"tests/test_toy_certifier.py" = { case = "certification-seam", evidence = "code-verification" }
-"tests/test_profile_certificate.py" = { case = "certification-seam", evidence = "code-verification" }
 "tests/test_profile.py" = { case = "claim-profile", evidence = "code-verification" }
 "tests/test_claim_outcome.py" = { case = "claim-profile", evidence = "code-verification" }
 "tests/test_truth.py" = { case = "truth-model", evidence = "code-verification" }
