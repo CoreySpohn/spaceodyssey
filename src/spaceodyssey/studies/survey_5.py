@@ -3,7 +3,7 @@
 The catalog channel (`catalog.CATALOG_CHANNEL_ID`) writes one catalog row per
 acquisition, released `catalog.CATALOG_DELAY_TICKS` after its occupancy ends. Each row
 puts one candidate on a roster the observer keeps. A candidate has an identifier of its
-own, `CANDIDATE_ID_BASE` plus its place on the roster, which never equals a truth id
+own, `CANDIDATE_ID_BASE` minus its place on the roster, which never equals a truth id
 (a subject index). The policy reads the roster size from its summary; the candidate's
 catalog value stays an observer-only column, so the policy never sees it.
 
@@ -27,8 +27,8 @@ from spaceodyssey.studies import catalog, toy
 # aux slots of the belief: 0 and 1 are the toy's and the catalog's own
 ROSTER_COUNT_SLOT = 2
 LAST_CANDIDATE_SLOT = 3
-# Candidate identifiers start here, far above any subject index.
-CANDIDATE_ID_BASE = 1000
+# Negative ids are the candidate namespace; subjects and acquisitions are nonnegative.
+CANDIDATE_ID_BASE = -1
 # The survey plan: subject and channel id of each planned acquisition. The third entry
 # is the catalog channel, whose row is the candidate.
 SURVEY_PLAN = (
@@ -47,7 +47,7 @@ class RosterObserver(catalog.CatalogObserver):
 
     A catalog row adds one candidate: the roster count (`ROSTER_COUNT_SLOT`) rises by
     one and the identifier of the newest candidate (`LAST_CANDIDATE_SLOT`) is
-    `CANDIDATE_ID_BASE` plus its place on the roster. Nothing reads the row's payload,
+    `CANDIDATE_ID_BASE` minus its place on the roster. Nothing reads the row's payload,
     so the roster is the same for an audience that cannot read the catalog value.
     """
 
@@ -58,7 +58,7 @@ class RosterObserver(catalog.CatalogObserver):
         count = belief.aux[ROSTER_COUNT_SLOT] + jnp.where(row, 1.0, 0.0)
         last = jnp.where(
             row,
-            CANDIDATE_ID_BASE + belief.aux[ROSTER_COUNT_SLOT],
+            CANDIDATE_ID_BASE - belief.aux[ROSTER_COUNT_SLOT],
             belief.aux[LAST_CANDIDATE_SLOT],
         )
         aux = belief.aux.at[ROSTER_COUNT_SLOT].set(count)

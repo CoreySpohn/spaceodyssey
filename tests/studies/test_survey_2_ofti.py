@@ -1,4 +1,4 @@
-"""Survey 2 with orbit determination: an OFTI refit never changes a policy's actions."""
+"""Survey 2: adaptive detections alongside checkpoint orbit determination."""
 
 import dataclasses
 
@@ -7,79 +7,89 @@ import pytest
 
 pytest.importorskip("photomancy")
 
-from spaceodyssey.core import HostExecutor
-from spaceodyssey.core.executors.base import index_world
-from spaceodyssey.studies.survey_2 import RevisitPolicy
-from tests.adapters.test_photomancy_ofti import ofti_study, refit
+from spaceodyssey.core.enums import EffectKind
+from spaceodyssey.studies.survey_2 import OrbitSearchObserver, RevisitPolicy
+from tests.adapters.test_photomancy_ofti import REGISTRY, ofti_study, refit
 from tests.core.helpers import worlds
-from tests.studies.survey_helpers import action_projection
+from tests.studies.survey_helpers import (
+    action_projection,
+    run_with_actions,
+    same_actions,
+)
 
 N_STEPS = 80
-IGNORING = RevisitPolicy(ignore_belief=True)
 
 
-def _with_policy(study, policy):
-    agenda = dataclasses.replace(study.agenda, policies=(policy,))
-    return dataclasses.replace(study, agenda=agenda)
+def _study(policy, every=100):
+    study = ofti_study(every=every)
+    observer = OrbitSearchObserver()
+    return dataclasses.replace(
+        study,
+        caps=REGISTRY.lower(study.caps, observer),
+        observer=observer,
+        agenda=dataclasses.replace(study.agenda, policies=(policy,)),
+    )
 
 
 def _run(study, boundary=None):
     truths, roots = worlds(1)
-    return HostExecutor().run(
-        study, index_world(truths, 0), roots[0], N_STEPS, refit=boundary
-    )
+    return run_with_actions("host", study, truths, roots, N_STEPS, refit=boundary)
 
 
-@pytest.fixture(scope="module")
-def runs():
-    """The revisit survey with scripted astrometry: no refresh, and OFTI refresh."""
-    with_ofti = _run(_with_policy(ofti_study(), IGNORING), refit())
-    # a grid wider than the run: the same survey, never refreshed
-    without = _run(_with_policy(ofti_study(every=10**6), IGNORING))
-    return with_ofti, without
+@pytest.fixture(scope="module", params=[False, True], ids=["adaptive", "ignoring"])
+def runs(request):
+    """Both policies, each with and without an OFTI checkpoint."""
+    policy = RevisitPolicy(ignore_belief=request.param)
+    with_ofti = _run(_study(policy), refit(count="epochs"))
+    without = _run(_study(policy, every=10**6))
+    return request.param, with_ofti, without
 
 
-def _one(run):
-    """The single world of a host run as a batch of one for the projection helper."""
-    return dataclasses.replace(
-        run,
-        carry=_batched(run.carry),
-        trace=_batched(run.trace),
-    )
-
-
-def _batched(tree):
-    import jax
-
-    return jax.tree_util.tree_map(lambda x: np.asarray(x)[None], tree)
-
-
-@pytest.mark.slow  # one cold study compile and the OFTI scorer on the host
+@pytest.mark.medium
 def test_an_ofti_refit_installs_particles_but_does_not_change_the_actions(runs):
-    """Fails if the refit changes any decision, subject, acquisition or payload of the
-    revisit policy, or never installs the orbit fit it was run for.
+    """Fails if adaptive search cannot read detections alongside an orbit fit,
+    or a refresh changes its complete effects or acquisition payloads. The ignoring
+    reduction is checked separately by the fixture's second policy.
     """
-    with_ofti, without = runs
-    assert int(with_ofti.carry.belief.n[0]) == 3
-    assert int(without.carry.belief.n[0]) == 0
-    a = action_projection(_one(with_ofti), 0)
-    b = action_projection(_one(without), 0)
-    assert a[0] == b[0] and a[1] == b[1]
-    assert np.array_equal(a[2], b[2])
-    # the scripted astrometry wakes the policy at ticks 10, 40 and 70 as well
-    assert len(a[0]) >= 5 and len(a[1]) == 2
+    ignoring, with_ofti, without = runs
+    belief = with_ofti.result.carry.belief
+    assert int(belief.epochs[0, 0]) == 3
+    assert int(without.result.carry.belief.epochs[0, 0]) == 0
+    samples = np.asarray(belief.samples[0, 0])
+    assert np.isfinite(samples).all() and len({tuple(r) for r in samples}) > 1
+    assert same_actions(with_ofti, without, 1)
+    summary = with_ofti.result.carry.pbelief
+    assert not hasattr(summary, "samples")
+    assert int(np.asarray(summary.n).sum()) == 2
+    np.testing.assert_array_equal(summary.n, belief.n)
+    np.testing.assert_array_equal(summary.mean, belief.mean)
+    decisions = with_ofti.decisions[0]
+    assert len(decisions) >= 5
+    # An adaptive decision at a measurement release must use the detection data.
+    if not ignoring:
+        study = _study(RevisitPolicy())
+        observed = []
+        for view, eff in decisions:
+            if int(eff.kind[0]) != EffectKind.OBSERVE:
+                continue
+            n = np.asarray(view.belief.n)[:2]
+            snr = np.asarray(view.belief.mean)[:2] * np.sqrt(n)
+            snr /= float(study.channel_model.noise[0])
+            detected = snr > float(study.objective.threshold)
+            score = np.where(n == 0, np.inf, np.where(detected, -np.inf, snr))
+            assert int(eff.subject[0]) == int(np.argmax(score))
+            if n.any():
+                observed.append(int(eff.subject[0]))
+        assert 1 in observed
 
 
-@pytest.mark.slow  # a third cold study compile
+@pytest.mark.medium
 def test_the_action_projection_sees_a_different_plan(runs):
-    """Negative control: the same comparison fails for a policy with another plan,
-    so the equality above is not a property of an insensitive projection.
-    """
-    _, without = runs
+    """Fails if an ignoring plan matches the adaptive path or another ignoring plan."""
+    _, _, without = runs
     other = RevisitPolicy(
         ignore_belief=True, plan=((1, 10), (0, 10), (1, 10), (0, 10), (1, 10))
     )
-    changed = _run(_with_policy(ofti_study(every=10**6), other))
-    a = action_projection(_one(without), 0)
-    b = action_projection(_one(changed), 0)
-    assert a[1] != b[1]
+    changed = _run(_study(other, every=10**6))
+    assert not same_actions(without, changed, 1)
+    assert action_projection(without, 0)[1] != action_projection(changed, 0)[1]

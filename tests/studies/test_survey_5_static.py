@@ -2,14 +2,20 @@
 
 import dataclasses
 
+import jax.numpy as jnp
+import pytest
+
+from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration, Need
 from spaceodyssey.core.preflight import preflight
+from spaceodyssey.core.records import record_none
 from spaceodyssey.studies import catalog
 from spaceodyssey.studies.survey_5 import (
     CANDIDATE_ID_BASE,
     LAST_CANDIDATE_SLOT,
     ROSTER_COUNT_SLOT,
     FollowUpPolicy,
+    RosterObserver,
     survey_5,
 )
 
@@ -53,7 +59,7 @@ def test_the_survey_is_clean_and_names_its_roster():
     study = survey_5()
     assert not preflight(study, executor="compiled")
     assert not preflight(study, executor="host")
-    assert CANDIDATE_ID_BASE >= study.caps.n_subjects
+    assert CANDIDATE_ID_BASE < 0
     assert ROSTER_COUNT_SLOT < study.caps.n_an
     assert LAST_CANDIDATE_SLOT < study.caps.n_an
     assert int(study.channels.audience[3]) == 3  # the catalog is public
@@ -67,10 +73,39 @@ def test_c001_flags_a_decision_declared_before_the_candidate_is_released():
     assert [str(f.code) for f in flagged] == ["C001"]
     assert "released no earlier than" in flagged[0].message
     assert not preflight(with_need(RELEASE))
-    # pre-flight is conservative (a cancel can end the occupancy early), never late
-    first = first_clean_tick(survey_5())
-    assert 130 < first <= RELEASE
-    assert preflight(with_need(first - 1)) and not preflight(with_need(first))
+    # Admission is at 130; cancellation can happen during the 5-tick transition.
+    # Its 150-tick release latency gives 280, independently of preflight's answer.
+    study = survey_5()
+    channel = list(map(int, study.channels.id)).index(catalog.CATALOG_CHANNEL_ID)
+    lane = int(study.channels.lane[channel])
+    admitted = CATALOG_START - int(study.assets.transition_ticks[lane])
+    bound = admitted + int(study.channels.latency_ticks[channel])
+    assert admitted == 130 and bound == 280 and RELEASE == 325
+    assert first_clean_tick(study) == bound
+    assert [str(f.code) for f in preflight(with_need(bound - 1))] == ["C001"]
+    assert not preflight(with_need(bound))
+    assert not preflight(with_need(bound + 1))
+
+
+@pytest.mark.parametrize("ordinal", [0, 1000, 100_000])
+def test_candidate_namespace_is_disjoint_at_large_capacities(ordinal):
+    """Fails if a large subject or acquisition range can contain a candidate id."""
+    caps = Capacities(n_subjects=1001, n_log=100_001)
+    observer = RosterObserver()
+    belief = observer.init(caps)
+    belief = dataclasses.replace(
+        belief, aux=belief.aux.at[ROSTER_COUNT_SLOT].set(ordinal)
+    )
+    rec = dataclasses.replace(
+        record_none(caps),
+        valid=jnp.asarray(True),
+        kind=jnp.asarray(observer.catalog_kind),
+    )
+    folded = observer.fold(belief, rec, caps)
+    candidate = int(folded.aux[LAST_CANDIDATE_SLOT])
+    assert candidate == -1 - ordinal
+    assert candidate not in range(caps.n_subjects)
+    assert candidate not in range(caps.n_log)
 
 
 def test_c001_flags_a_catalog_that_is_never_released_to_the_policy():

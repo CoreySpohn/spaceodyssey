@@ -1,8 +1,12 @@
 """Survey 2 builders and policy declarations: no run needed."""
 
+from types import SimpleNamespace
+
 import jax.numpy as jnp
+import jax.random as jr
 import pytest
 
+from spaceodyssey.core.battery.result import tree_bits_equal
 from spaceodyssey.core.enums import EffectKind
 from spaceodyssey.studies import toy
 from spaceodyssey.studies.survey_2 import (
@@ -14,12 +18,21 @@ from spaceodyssey.studies.survey_2 import (
 
 
 def test_the_plain_survey_is_survey_1_with_another_policy():
-    """Fails if the plain survey changes anything of survey 1 but its policy."""
+    """Fails if the plain survey changes more than its policy, or the ignoring
+    policy requests different parameters (including inactive effect columns).
+    """
     study, base = survey_2(), toy.survey_1()
     assert study.caps == base.caps
     assert study.channels.id.tolist() == base.channels.id.tolist()
     assert int(study.refresh.every_ticks) == int(base.refresh.every_ticks)
     assert type(study.agenda.policies[0]) is RevisitPolicy
+    view = SimpleNamespace(tick=jnp.asarray(0), n_dec=jnp.asarray(0))
+    ignoring = RevisitPolicy(ignore_belief=True)
+    for pos in (0, 5):
+        state = jnp.zeros(study.caps.n_pstate).at[0].set(pos)
+        got = ignoring.decide(state, view, study, jr.PRNGKey(0))
+        expected = base.agenda.policies[0].decide(state, view, base, jr.PRNGKey(0))
+        assert tree_bits_equal(got, expected)
 
 
 def test_a_refresh_grid_adds_the_refit_observer_and_a_schedule():

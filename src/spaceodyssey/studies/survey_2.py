@@ -13,6 +13,8 @@ wakes the policy. `GaussianSignals` and `GaussianMean` give the study a conjugat
 Gaussian prior whose posterior is calibrated for any design that reads only data.
 """
 
+import dataclasses
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -33,7 +35,7 @@ from spaceodyssey.core.kinds import (
     AbstractWorldSource,
     ObserverCapabilities,
 )
-from spaceodyssey.core.snapshot import MeanBelief
+from spaceodyssey.core.snapshot import BeliefLayout, MeanBelief, project_mean
 from spaceodyssey.studies import toy
 
 # The survey plan of `survey_1`: subject and channel id of each acquisition.
@@ -69,16 +71,15 @@ class RevisitPolicy(AbstractPolicy):
 
     def decide(self, pstate, view, study, key):
         """Revisit the subject closest to a detection, or take the next plan entry."""
+        if self.ignore_belief:
+            return toy.FixedPlanPolicy(self.plan).decide(pstate, view, study, key)
         plan = jnp.asarray(self.plan, I64)
         pos = pstate[0].astype(I64)
         spent = pos >= plan.shape[0]
         at = jnp.minimum(pos, plan.shape[0] - 1)
         channel = jnp.argmax(study.channels.id == plan[at, 1]).astype(I64)
-        if self.ignore_belief:
-            subject, stop = plan[at, 0], spent
-        else:
-            subject, done = self._choice(view, study)
-            stop = spent | done
+        subject, done = self._choice(view, study)
+        stop = spent | done
         eff = toy._effects(
             study.caps,
             kind=jnp.stack(
@@ -119,6 +120,78 @@ class SearchMean(toy.ToyRunningMean):
     def capabilities(self):
         """Incremental and refit-capable on measurement rows."""
         return ObserverCapabilities(refit=True, refit_kinds=("measurement",))
+
+
+class OrbitSearchBelief(MeanBelief):
+    """Detection statistics alongside orbit particles and their fitted epoch count."""
+
+    samples: jax.Array
+    epochs: jax.Array
+
+
+class OrbitSearchObserver(toy.ToyRunningMean):
+    """Fold detection measurements; refit astrometry without changing detections.
+
+    The policy sees only `MeanBelief`. OFTI replaces `samples` and `epochs` in the
+    full belief; these are independent of the measurement mean and count.
+    """
+
+    subject_leaves = ("samples", "epochs")
+    n_particles: int = eqx.field(default=16, static=True)
+    n_parameters: int = eqx.field(default=7, static=True)
+
+    def capabilities(self):
+        """Incremental detections and checkpoint refits of astrometric rows."""
+        return ObserverCapabilities(refit=True, refit_kinds=("astrometry",))
+
+    def init(self, caps):
+        """Start with no detections or fitted orbit."""
+        mean = super().init(caps)
+        return OrbitSearchBelief(
+            mean.mean,
+            mean.n,
+            mean.aux,
+            jnp.zeros((caps.n_subjects, self.n_particles, self.n_parameters), F64),
+            jnp.zeros(caps.n_subjects, I64),
+        )
+
+    def init_summary(self, caps):
+        """Detection statistics without particles."""
+        return super().init(caps)
+
+    def summary(self, belief):
+        """Expose the detection mean and count, keeping particles observer-only."""
+        return MeanBelief(belief.mean, belief.n, belief.aux)
+
+    def layout(self, caps):
+        """Count measurements in both types; project only detection statistics."""
+        return BeliefLayout(
+            belief=jax.eval_shape(lambda: self.init(caps)),
+            summary=jax.eval_shape(lambda: self.init_summary(caps)),
+            count_leaf="n",
+            project=project_mean,
+        )
+
+    def fold(self, belief, rec, caps, key=None):
+        """Update detections while retaining the installed orbit."""
+        mean = super().fold(self.summary(belief), rec, caps, key=key)
+        return dataclasses.replace(belief, mean=mean.mean, n=mean.n, aux=mean.aux)
+
+    def fold_summary(self, summary, rec, caps, key=None):
+        """Fold only the detection statistics released to the policy."""
+        return super().fold(summary, rec, caps, key=key)
+
+    def install(self, belief, fitted, subject):
+        """Replace the subject's orbit, retaining all detection statistics."""
+        return dataclasses.replace(
+            belief,
+            samples=belief.samples.at[subject].set(fitted.samples[subject]),
+            epochs=belief.epochs.at[subject].set(fitted.epochs[subject]),
+        )
+
+    def install_summary(self, summary, fitted, subject):
+        """An orbit fit contributes no new detection measurement."""
+        return summary
 
 
 class GaussianSignals(AbstractWorldSource):
@@ -208,6 +281,8 @@ __all__ = [
     "SURVEY_PLAN",
     "GaussianMean",
     "GaussianSignals",
+    "OrbitSearchBelief",
+    "OrbitSearchObserver",
     "RevisitPolicy",
     "SearchMean",
     "gaussian_pit",

@@ -7,6 +7,7 @@ import pytest
 
 from spaceodyssey.codec import Bindings
 from spaceodyssey.core import CompiledExecutor, HostExecutor, battery
+from spaceodyssey.core.battery.result import tree_bits_equal
 from spaceodyssey.core.enums import EffectKind
 from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.study import Clock
@@ -33,6 +34,8 @@ KINDS = {
     ("policy", "survey5.follow_up", 1): FollowUpPolicy,
     ("policy", "survey5.absolute_plan", 1): AbsolutePlanPolicy,
 }
+pytestmark = pytest.mark.medium
+
 N_STEPS = 60
 LATER = 100
 
@@ -116,10 +119,7 @@ def test_a_candidate_released_after_a_decision_does_not_change_it(base, later):
     assert before == [0, 1]
     for i in before:
         assert int(base.views[i].tick) == int(later.views[i].tick)
-        for name in ("kind", "subject", "channel_index", "group"):
-            np.testing.assert_array_equal(
-                getattr(base.effects[i], name), getattr(later.effects[i], name)
-            )
+        assert tree_bits_equal(base.effects[i], later.effects[i])
     # the decision that reads the candidate follows it up, at the release tick
     for run, release in ((base, RELEASE), (later, RELEASE + LATER)):
         assert int(run.views[2].tick) == release

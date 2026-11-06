@@ -1,12 +1,57 @@
 """Shared helpers for the survey tests (not a test file)."""
 
+import dataclasses
+
+import jax
 import numpy as np
 
 from spaceodyssey.codec import Bindings, dump_run, load_run
 from spaceodyssey.core import CompiledExecutor, HostExecutor
+from spaceodyssey.core.battery.views import DecisionViews
 from spaceodyssey.core.executors.base import GO_TOLERANCE, histories_equal, index_world
 
 EXECUTORS = {"host": HostExecutor, "compiled": CompiledExecutor}
+
+
+@dataclasses.dataclass(frozen=True)
+class ActionRun:
+    """A batched executor result and its complete requested effects per world."""
+
+    result: object
+    decisions: tuple
+
+
+def run_with_actions(name, study, truths, roots, n_steps, **kw):
+    """Capture executed decisions on either executor, including rejected requests."""
+    if name == "host":
+        views, effects = [], []
+        run = run_on(
+            name,
+            study,
+            truths,
+            roots,
+            n_steps,
+            view_log=views,
+            effects_log=effects,
+            **kw,
+        )
+        sizes = (np.asarray(run.trace.handled) & np.asarray(run.trace.wake)).sum(axis=1)
+        assert sum(sizes) == len(views) == len(effects)
+        entries = tuple(zip(views, effects, strict=True))
+        ends = np.cumsum(sizes)
+        starts = np.r_[0, ends[:-1]]
+        return ActionRun(
+            run,
+            tuple(entries[start:end] for start, end in zip(starts, ends, strict=True)),
+        )
+    capture = DecisionViews()
+    run = run_on(name, capture.instrument(study), truths, roots, n_steps, **kw)
+    decisions = tuple(
+        tuple(capture.read(study, root, index_world(run.trace, w)))
+        for w, root in enumerate(roots)
+    )
+    assert all(v is not None for world in decisions for v in world)
+    return ActionRun(run, decisions)
 
 
 def run_on(name, study, truths, roots, n_steps, **kw):
@@ -52,22 +97,28 @@ def redump(run, executor, kinds, *, bindings=None, refit=None):
 def action_projection(run, world, measurement_kind=1):
     """What a policy did and what it got, with refresh steps and product rows left out.
 
-    Each decision's tick, effect kinds and admission codes, in order; each measurement
-    acquisition's subject, channel, acquisition index, start tick and payload, in log
-    order. Returns `(decisions, acquisitions)`: tuples of ints, and arrays of floats.
+    Each decision's tick, complete requested effects and admission codes; each
+    measurement's subject, channel, acquisition index, start tick and payload, in log
+    order. Returns `(decisions, acquisition_coordinates, payloads)`.
     """
-    trace = index_world(run.trace, world)
+    trace = index_world(run.result.trace, world)
     keep = np.asarray(trace.handled) & np.asarray(trace.wake)
     decisions = tuple(
-        (int(t), tuple(map(int, k)), tuple(map(int, c)))
-        for t, k, c in zip(
+        (
+            int(t),
+            tuple(tuple(np.asarray(x).flat) for x in jax.tree_util.tree_leaves(eff)),
+            tuple(map(int, disruptive)),
+            tuple(map(int, c)),
+        )
+        for t, (_, eff), disruptive, c in zip(
             np.asarray(trace.tick)[keep],
-            np.asarray(trace.eff_kind)[keep],
+            run.decisions[world],
+            np.asarray(trace.eff_disruptive)[keep],
             np.asarray(trace.admit_code)[keep],
             strict=True,
         )
     )
-    log = index_world(run.carry.log, world)
+    log = index_world(run.result.carry.log, world)
     rows = np.asarray(log.valid) & (np.asarray(log.kind) == measurement_kind)
     ints = tuple(
         tuple(int(x) for x in row)

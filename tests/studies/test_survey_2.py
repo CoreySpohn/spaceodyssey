@@ -20,6 +20,7 @@ from tests.studies.survey_helpers import (
     action_projection,
     redump,
     round_trip,
+    run_with_actions,
     same_actions,
     same_histories,
 )
@@ -29,6 +30,8 @@ KINDS = {
     ("policy", "survey2.revisit", 1): RevisitPolicy,
     ("observer", "survey2.search_mean", 1): SearchMean,
 }
+# Individual reductions fit medium. Shared adaptive run comparisons have cold
+# observations around 41 and 32 s; the refresh document round trip is also slow.
 N_WORLDS = 3
 N_STEPS = 80
 EVERY = 100
@@ -43,20 +46,20 @@ def batch():
 @pytest.fixture(scope="module")
 def survey_1_run(batch):
     truths, roots = batch
-    return HostExecutor().run_worlds(toy.survey_1(), truths, roots, N_STEPS)
+    return run_with_actions("host", toy.survey_1(), truths, roots, N_STEPS)
 
 
 @pytest.fixture(scope="module")
 def adaptive_off(batch):
     truths, roots = batch
-    return HostExecutor().run_worlds(survey_2(), truths, roots, N_STEPS)
+    return run_with_actions("host", survey_2(), truths, roots, N_STEPS)
 
 
 @pytest.fixture(scope="module")
 def adaptive_on(batch):
     truths, roots = batch
-    return HostExecutor().run_worlds(
-        survey_2(EVERY), truths, roots, N_STEPS, refit=boundary()
+    return run_with_actions(
+        "host", survey_2(EVERY), truths, roots, N_STEPS, refit=boundary()
     )
 
 
@@ -71,23 +74,29 @@ def test_a_belief_ignoring_revisit_policy_with_no_refresh_is_survey_1(
     for executor in (HostExecutor, CompiledExecutor):
         run = executor().run_worlds(survey_2(policy=IGNORING), truths, roots, N_STEPS)
         assert bool(np.all(np.asarray(run.complete)))
-        assert same_histories(run, survey_1_run, N_WORLDS)
+        assert same_histories(run, survey_1_run.result, N_WORLDS)
 
 
 @pytest.mark.medium
+@pytest.mark.parametrize("executor", ["host", "compiled"])
 def test_with_refresh_the_actions_are_survey_1s_though_the_history_is_not(
-    batch, survey_1_run
+    executor, batch, survey_1_run
 ):
     """Fails if a refresh wakes the policy or changes what it chose or read: the
     action projection must equal survey 1's. The full history differs by the refresh
     checkpoints, so equality of the whole history would be the wrong claim.
     """
     truths, roots = batch
-    run = HostExecutor().run_worlds(
-        survey_2(EVERY, policy=IGNORING), truths, roots, N_STEPS, refit=boundary()
+    run = run_with_actions(
+        executor,
+        survey_2(EVERY, policy=IGNORING),
+        truths,
+        roots,
+        N_STEPS,
+        refit=boundary(),
     )
     assert same_actions(run, survey_1_run, N_WORLDS)
-    assert not same_histories(run, survey_1_run, N_WORLDS)
+    assert not same_histories(run.result, survey_1_run.result, N_WORLDS)
 
 
 @pytest.mark.medium
@@ -103,13 +112,13 @@ def test_the_adaptive_policy_acts_on_its_belief(batch, survey_1_run, adaptive_of
     assert any(s != (0, 1, 0, 1, 0) for s in subjects)
 
 
-@pytest.mark.medium
+@pytest.mark.slow
 def test_a_refresh_does_not_change_the_adaptive_actions(adaptive_off, adaptive_on):
     """Fails if refit checkpoints change the adaptive policy's decisions, subjects
     or payloads.
     """
     assert same_actions(adaptive_on, adaptive_off, N_WORLDS)
-    assert not same_histories(adaptive_on, adaptive_off, N_WORLDS)
+    assert not same_histories(adaptive_on.result, adaptive_off.result, N_WORLDS)
 
 
 @pytest.mark.medium
@@ -157,7 +166,7 @@ def test_the_adaptive_rule_matches_an_eager_reference(batch):
     assert "observe" in kinds_seen
 
 
-@pytest.mark.medium
+@pytest.mark.slow
 def test_survey_2_agrees_between_executors_with_refresh(adaptive_on, batch):
     """Fails if the compiled executor differs from the host on the adaptive study
     with a refresh grid.
@@ -167,11 +176,16 @@ def test_survey_2_agrees_between_executors_with_refresh(adaptive_on, batch):
         survey_2(EVERY), truths, roots, N_STEPS, refit=boundary()
     )
     assert bool(np.all(np.asarray(compiled.complete)))
-    assert same_histories(compiled, adaptive_on, N_WORLDS)
+    assert same_histories(compiled, adaptive_on.result, N_WORLDS)
 
 
-@pytest.mark.medium
-@pytest.mark.parametrize("every", [0, EVERY])
+@pytest.mark.parametrize(
+    "every",
+    [
+        pytest.param(0, marks=pytest.mark.medium),
+        pytest.param(EVERY, marks=pytest.mark.slow),
+    ],
+)
 def test_the_run_document_round_trips(every, batch):
     """Fails if a dumped run document, loaded and executed, does not reproduce the
     original history, or its re-dump has another content hash.
@@ -193,6 +207,7 @@ def test_the_run_document_round_trips(every, batch):
     assert changed.content_hash != doc.content_hash
 
 
+@pytest.mark.slow
 def test_replay_of_the_adaptive_run_waits_on_keyed_replay():
     """Replay of the recorded run, with a refit on the host, is the keyed replay
     task's. Skipped until `replay_run` exists on this branch's base.
