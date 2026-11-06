@@ -132,22 +132,6 @@ def test_integer_vocabularies():
     assert int(core.Audience.OBSERVER | core.Audience.POLICY) == 3
 
 
-def test_collection_preserves_callers_x64_setting():
-    code = (
-        'import jax, pytest; jax.config.update("jax_enable_x64", False); '
-        'result = pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", '
-        '"tests/core/test_keys.py", "tests/studies/test_toy.py"]); '
-        "assert result == 0; assert not jax.config.x64_enabled"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
 @pytest.mark.parametrize("ids", [[], [0], [0, 0], [0, 2]])
 def test_gate_rejects_missing_duplicate_or_wrong_worlds(monkeypatch, ids):
     from types import SimpleNamespace

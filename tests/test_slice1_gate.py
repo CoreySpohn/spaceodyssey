@@ -221,14 +221,12 @@ def test_latency_acceptance(check):
 
 @pytest.mark.parametrize("check", ["K4-parity"])
 @pytest.mark.parametrize("case", CORPUS, ids=lambda c: c.name)
-def test_executor_parity(check, case, record_property):
+def test_executor_parity(check, case):
     assert GO_TOLERANCE == 1e-12 and KILL_TOLERANCE == 1e-9
     reports = corpus_parity_reports(case)
     assert reports
     worst = max(report.max_abs for _, _, report in reports)
     go = all(report.go for _, _, report in reports)
-    record_property("go_band_1e-12", go)
-    record_property("max_abs", worst)
     # Print separately so `-rP` reports the tighter band without making it the cutoff.
     print(f"{case.name}: go_band_1e-12={go}, max_abs={worst:.17g}")
     for form, world, report in reports:
