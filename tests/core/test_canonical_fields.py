@@ -63,10 +63,11 @@ def test_every_output_field_has_an_explicit_disposition():
     assert all(
         isinstance(reason, str) and reason.strip() for reason in excluded.values()
     )
-    # A newly added record column must reach the log, then canonical comparison.
-    assert {f.name for f in dataclasses.fields(Record)} == {
+    # A newly added record column must reach the log, then canonical comparison;
+    # `refit_rows` also relies on the two classes listing their columns in one order.
+    assert [f.name for f in dataclasses.fields(Record)] == [
         f.name for f in dataclasses.fields(RecordLog)
-    }
+    ]
 
 
 def _perturb(tree, parts):

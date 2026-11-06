@@ -310,8 +310,15 @@ def refit_rows(log, caps, audience, subject):
     counts = mine & ~newer & jnp.isin(log.kind, kinds) & jnp.isin(log.status, statuses)
     last = (~counts).astype(I64)
     order = jnp.lexsort((log.revision, log.acquisition_index, log.channel, last))
-    fields = {n: getattr(log, n)[order] for n in (*LOG_INT_FIELDS, "cost", "charged")}
-    rows = Record(**fields, payload=log.payload[order], valid=counts[order])
+    # `RecordLog` holds the columns of `Record` in the same order, so the sorted
+    # log's leaves are a batch of records
+    picked = jax.tree_util.tree_map(
+        lambda x: x[order], dataclasses.replace(log, valid=counts)
+    )
+    leaves = jax.tree_util.tree_leaves(picked)
+    rows = jax.tree_util.tree_unflatten(
+        jax.tree_util.tree_structure(record_none(caps)), leaves
+    )
     return masked_record(rows, caps, audience)
 
 
