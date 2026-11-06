@@ -151,7 +151,7 @@ def check_declared_margins(observer):
 
 
 def calibration_size(margin, n_slots):
-    """Worlds per PIT slot that make the DKW band at most half of `margin`."""
+    """Worlds per PIT slot that make the DKW slack at most half of `margin`."""
     return math.ceil(2.0 * math.log(2.0 * n_slots / ALPHA) / margin**2)
 
 
@@ -170,15 +170,15 @@ def check_calibration(run, truths, pit, *, margin):
     mapped over the world axis of `run.carry.belief` and `truths`.
 
     The check bounds the Kolmogorov distance between the true distribution of the
-    pooled PITs and the uniform one: the empirical distance `D` plus a band, which
-    must stay within `margin`. Slots of one world may share randomness, so the band
+    pooled PITs and the uniform one: the empirical distance `D` plus a slack, which
+    must stay within `margin`. Slots of one world may share randomness, so the slack
     is built from worlds, the independent units: by the Dvoretzky-Kiefer-Wolfowitz
     inequality the empirical CDF of slot j over its N_j worlds lies within
     sqrt(log(2 m / alpha) / (2 N_j)) of its true CDF for all m slots at once with
     probability 1 - alpha, and the pooled empirical CDF is the N_j-weighted mean of
-    the slot CDFs, so the band is the weighted mean of those widths. `D + band <=
+    the slot CDFs, so the slack is the weighted mean of those widths. `D + slack <=
     margin` then says, at 95 percent confidence, that the PITs are within `margin` of
-    uniform. Refuses a band wider than half the margin (`calibration_size` gives the
+    uniform. Refuses a slack wider than half the margin (`calibration_size` gives the
     worlds needed).
     """
     values, counted = jax.vmap(pit)(run.carry.belief, truths)
@@ -190,14 +190,14 @@ def check_calibration(run, truths, pit, *, margin):
         raise ValueError("no PIT counts; calibration is vacuous")
     n_pits = int(per_slot.sum())
     widths = np.sqrt(np.log(2.0 * n_slots / ALPHA) / (2.0 * per_slot[used]))
-    band = float(np.sum(per_slot[used] / n_pits * widths))
-    if band > margin / 2.0:
+    slack = float(np.sum(per_slot[used] / n_pits * widths))
+    if slack > margin / 2.0:
         raise ValueError(
-            f"a DKW band of {band:.4f} cannot resolve a margin of {margin}; need "
+            f"a DKW slack of {slack:.4f} cannot resolve a margin of {margin}; need "
             f"{calibration_size(margin, n_slots)} worlds per PIT slot"
         )
     pooled = values[counted]
-    detail = {"n_pits": n_pits, "n_slots": n_slots, "band": band, "margin": margin}
+    detail = {"n_pits": n_pits, "n_slots": n_slots, "slack": slack, "margin": margin}
     if not np.all(np.isfinite(pooled) & (pooled >= 0.0) & (pooled <= 1.0)):
         return make_result(
             "calibration", ["a PIT is outside [0, 1] or not finite"], **detail
@@ -205,9 +205,9 @@ def check_calibration(run, truths, pit, *, margin):
     distance = _ecdf_distance(pooled)
     detail["distance"] = distance
     failures = []
-    if distance + band > margin:
+    if distance + slack > margin:
         failures.append(
-            f"the PITs are {distance:.4f} from uniform; with the {band:.4f} band "
+            f"the PITs are {distance:.4f} from uniform; with the {slack:.4f} slack "
             f"that is not inside the margin {margin}"
         )
     return make_result("calibration", failures, **detail)
@@ -455,11 +455,11 @@ def _promotions(observer, study, logs, orders, counts, roots, seeds):
                 fold_keys(root, canon_rows, study),
             )
             canonical = observer.analyze(observer.install(current, canon, subject))
-            target = _shifted(current)
-            installed = observer.install(target, fitted, subject)
+            shifted = _shifted(current)
+            installed = observer.install(shifted, fitted, subject)
             challenge = (
                 per_subject(installed),
-                per_subject(target),
+                per_subject(shifted),
                 per_subject(fitted),
             )
             return released, canonical, challenge
@@ -514,15 +514,15 @@ def _row_label(where, subjects, seeds):
 
 def _install_failures(challenge, subjects, valid, seeds):
     """Install must write the refit subject's values and leave every other subject."""
-    (got_p, got_c), (target_p, target_c), (fitted_p, fitted_c) = challenge
+    (got_p, got_c), (shifted_p, shifted_c), (fitted_p, fitted_c) = challenge
     n_subjects = got_p.shape[-1]
     mine = np.arange(n_subjects) == subjects[:, :, None, None]
-    pairs = [(got_p, target_p, fitted_p, "projection")]
+    pairs = [(got_p, shifted_p, fitted_p, "projection")]
     if got_c.shape[-1:] == (n_subjects,) and got_c.ndim == got_p.ndim:
-        pairs.append((got_c, target_c, fitted_c, "count"))
+        pairs.append((got_c, shifted_c, fitted_c, "count"))
     every = valid[:, :, None, None]
-    for got, target, fitted, what in pairs:
-        same = (got == target) | (np.isnan(got) & np.isnan(target))
+    for got, shifted, fitted, what in pairs:
+        same = (got == shifted) | (np.isnan(got) & np.isnan(shifted))
         took = (got == fitted) | (np.isnan(got) & np.isnan(fitted))
         changed = ~same & ~mine & every
         if changed.any():

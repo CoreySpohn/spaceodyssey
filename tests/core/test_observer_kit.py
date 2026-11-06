@@ -34,8 +34,8 @@ from tests.core.kit_helpers import (
 
 TOY = ("mean", "sample")
 # Calibration margin on the Kolmogorov distance of the PITs from uniform. Four PIT
-# slots need calibration_size(0.075, 4) = 1,805 worlds for a band of half the
-# margin; the batch has 2,000 (band 0.036). A calibrated observer fails only if the
+# slots need calibration_size(0.075, 4) = 1,805 worlds for a slack of half the
+# margin; the batch has 2,000 (slack 0.036). A calibrated observer fails only if the
 # empirical distance of its 8,000 PITs exceeds 0.039 (probability near 1e-10); the
 # control that ignores half its records sits at 0.083, outside the margin itself.
 MARGIN = 0.075
@@ -94,15 +94,15 @@ def _shared(belief, truth):
     return jnp.broadcast_to(pits[0], pits.shape), counted
 
 
-def test_calibration_band_counts_worlds_not_pits():
-    """Fails if the band treats the PITs of one world as independent (it must be
+def test_calibration_slack_counts_worlds_not_pits():
+    """Fails if the slack treats the PITs of one world as independent (it must be
     built from per-slot world counts), or accepts too few worlds for the margin.
     """
     _, run, truths, _ = kit_run("mean")
     result = check_calibration(run, truths, _shared, margin=MARGIN)
     assert result, result.diagnostic
     want = math.sqrt(math.log(2 * 4 / 0.05) / (2 * N_WORLDS))
-    assert result.detail["band"] == pytest.approx(want, rel=1e-12)
+    assert result.detail["slack"] == pytest.approx(want, rel=1e-12)
     assert calibration_size(MARGIN, 4) <= N_WORLDS
     few, few_truths = first_worlds((run, truths), 1000)
     with pytest.raises(ValueError, match="cannot resolve"):
