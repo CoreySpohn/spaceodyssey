@@ -4,6 +4,7 @@ import dataclasses
 import functools
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -18,7 +19,7 @@ from spaceodyssey.core import (
 from spaceodyssey.core import refresh as refresh_module
 from spaceodyssey.core.carry import _tree_set
 from spaceodyssey.core.conformance import refit_beliefs
-from spaceodyssey.core.enums import EventKind, RefitStatus, Stage
+from spaceodyssey.core.enums import F64, I64, Capacity, EventKind, RefitStatus, Stage
 from spaceodyssey.core.executors import base
 from spaceodyssey.studies import toy
 from tests.core.corpus import LEAK_PLAN, LEAK_SCENARIOS
@@ -500,3 +501,107 @@ def test_observer_only_column_is_computed_twice_and_public_rows_once():
     assert wanted == wanted2 and wanted > shared  # control: dedup happens at all
     assert twice == wanted2  # no entry shares a computation
     assert shared < twice
+
+
+# ---- review fixes: budget, capacity, execution, audience ---------------------------
+
+
+@pytest.mark.parametrize("chunk", [1, 7, 32])
+@pytest.mark.parametrize("budget", [1, 2, 3, 4])
+def test_a_budget_that_ends_on_the_hold_installs_nothing(budget, chunk):
+    """Fails if a checkpoint installs when no step is left for its completion."""
+    h, c = run_pair(refresh_study(100), budget, 2, chunk)
+    for res in (h, c):
+        carry = base.index_world(res.carry, 0)
+        assert float(np.asarray(carry.belief.n).sum()) == 0.0
+        assert float(np.asarray(carry.pbelief.n).sum()) == 0.0
+        assert product_rows(carry) == []
+        assert not np.asarray(carry.refresh.valid)
+    # control: with a budget for the completion the same checkpoint installs
+    full = run_pair(refresh_study(100), 60, 2, chunk)[0]
+    assert float(np.asarray(full.carry.belief.n[0]).sum()) > 0
+
+
+@pytest.mark.parametrize("which", ["ids", "rows"])
+def test_capacity_exhaustion_refuses_the_whole_install(monkeypatch, which):
+    """Fails if a belief installs while its product rows or ids have no room."""
+    study = refresh_study(100)
+    caps = study.caps
+    seen = []
+    real = refresh_module._commit
+
+    def tight(carry, request, result, st):
+        field = dict(ids="next_sid", rows="n_log")[which]
+        limit = dict(ids=caps.max_sid, rows=caps.n_log)[which]
+        squeezed = _tree_set(carry, **{field: jnp.asarray(limit, I64)})
+        out = real(squeezed, request, result, st)
+        seen.append((squeezed, out))
+        return out
+
+    monkeypatch.setattr(refresh_module, "_commit", tight)
+    truths, roots = worlds(1)
+    HostExecutor().run_worlds(study, truths, roots, 20, refit=masked())
+    assert seen
+    before, after = seen[0]
+    bit = dict(ids=Capacity.STABLE_IDS, rows=Capacity.LOG_ROWS)[which]
+    assert bool(after.overflow) and int(after.overflow_mask) & int(bit)
+    for a, b in zip(
+        jax.tree_util.tree_leaves(before.belief),
+        jax.tree_util.tree_leaves(after.belief),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(before.refresh_dirty, after.refresh_dirty)
+    assert product_rows(after) == []
+
+
+def _counting_kernel(counter):
+    def kernel(study, entry):
+        out = toy.toy_mean_kernel(study, entry)
+        jax.debug.callback(lambda: counter.append(1))
+        return out
+
+    return kernel
+
+
+def test_masked_batch_executes_only_unique_dirty_entries():
+    """Fails if the kernel runs for padded, clean or deduplicated entries."""
+    study = refresh_study(100)
+    truths, roots = worlds(1)
+    counter = []
+    spy = SpyBoundary(refresh_module.MaskedBatchRefit(_counting_kernel(counter)))
+    HostExecutor().run_worlds(study, truths, roots, 60, refit=spy)
+    jax.effects_barrier()
+    wanted = sum(int(out.computed.sum()) for out in spy.results)
+    assert wanted > 0
+    assert len(counter) == wanted
+    # control: dedup shared some entries, so a run of every dirty entry would be more
+    assert wanted < sum(int(r.dirty.sum()) for r in spy.calls)
+
+
+def _fraction_kernel(study, entry):
+    """A fit of the observer-only fraction column: the policy copy of it is masked."""
+    rows = entry.rows
+    take = rows.valid & (rows.kind == study.observer.measurement_kind)
+    n = jnp.sum(take).astype(I64)
+    total = jnp.sum(jnp.where(take, rows.payload[:, 2], 0.0))
+    mean = total / jnp.maximum(n, 1).astype(F64)
+    ok = jnp.asarray(RefitStatus.OK, I64)
+    return (mean, n), ok, jnp.zeros(1, F64)
+
+
+def test_each_audience_installs_its_own_slice():
+    """Fails if the policy summary takes the observer's slice, or the reverse."""
+    study = observer_only_column_study(100)
+    refit = refresh_module.MaskedBatchRefit(_fraction_kernel)
+    h, c = run_pair(study, 60, 1, 7, refit=refit)
+    for res in (h, c):
+        carry = base.index_world(res.carry, 0)
+        seen = np.asarray(carry.belief.n) > 0
+        assert seen.any()
+        observer_mean = np.asarray(carry.belief.mean)[seen]
+        policy_mean = np.asarray(carry.pbelief.mean)[seen]
+        assert (observer_mean > 0).all()  # the observer read its column
+        assert (policy_mean == 0).all()  # the policy copy of it is masked
+    r = histories_equal(h.history(0), c.history(0))
+    assert r.ok and r.go, r

@@ -443,3 +443,25 @@ class RefitSample(toy.ToySampleObserver):
 
     def capabilities(self):
         return REFIT
+
+
+def test_policy_refit_rows_ignore_corrections_it_never_received():
+    """Fails if an observer-only revision still marks the earlier public row for the
+    policy, so that a metadata-sensitive refit sees a different input.
+    """
+    caps = _registry_with_product().lower(Capacities(), RefitMean())
+    rows = [dict(r) for r in REVISION_ROWS]
+    with_fix = _hand_log(caps, rows)
+    without = _hand_log(caps, [r for i, r in enumerate(rows) if i != 1])
+    a = refit_rows(with_fix, caps, Audience.POLICY, 0)
+    b = refit_rows(without, caps, Audience.POLICY, 0)
+    keep = np.asarray(a.valid)
+    assert keep.sum() == np.asarray(b.valid).sum() > 0
+    for x, y in zip(
+        jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b), strict=True
+    ):
+        np.testing.assert_array_equal(np.asarray(x)[keep], np.asarray(y)[keep])
+    assert (np.asarray(a.superseded_by)[keep] == -1).all()
+    # control: the observer does see the correction
+    seen = refit_rows(with_fix, caps, Audience.OBSERVER, 0)
+    assert (np.asarray(seen.revision)[np.asarray(seen.valid)] > 0).any()
