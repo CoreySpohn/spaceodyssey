@@ -9,6 +9,7 @@ from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.carry import empty_trace, init_carry
 from spaceodyssey.core.enums import Audience
 from spaceodyssey.core.executors.base import AbstractExecutor, RunResult, index_world
+from spaceodyssey.core.refresh import answer_refresh
 from spaceodyssey.core.service import answer_pending
 from spaceodyssey.core.snapshot import effects_none, snapshot_view
 from spaceodyssey.core.transaction import (
@@ -56,6 +57,7 @@ class HostExecutor(AbstractExecutor):
         view_log=None,
         effects_log=None,
         service=None,
+        refit=None,
     ):
         """Python loop over steps; the decision stage may use a Python-form policy.
 
@@ -63,7 +65,9 @@ class HostExecutor(AbstractExecutor):
         it; with `effects_log` a list, the effects of every decision (woken
         steps only). With a `service` (see `AbstractHostService`), a request the
         transaction reaches is answered before the next step; without one it stays
-        pending and the run reports `RunStatus.AWAITING`.
+        pending and the run reports `RunStatus.AWAITING`. A refresh checkpoint the
+        transaction reaches is answered the same way through `refit` (an
+        `AbstractRefitBoundary`), in the iteration that held it.
         """
         require_x64()
         adv = lambda c, r, s, t: self.advance(c, r, s, t, wake_fn=wake_fn)  # noqa: E731
@@ -113,6 +117,8 @@ class HostExecutor(AbstractExecutor):
             traces.append(fin(trace, eff, codes, u, wake, carry, study, fp))
             if service is not None:
                 carry = answer_pending(carry, study, service)
+            if refit is not None:
+                carry = answer_refresh(carry, roots, study, refit)
         return RunResult(
             carry, jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces), layout
         )

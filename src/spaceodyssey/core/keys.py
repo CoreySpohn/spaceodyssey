@@ -156,6 +156,24 @@ def fold_keys(root, rows, study) -> jax.Array:
     return jax.vmap(lambda rec: fold_key(root, rec, study))(rows)
 
 
+_REFIT_TAG = 0x726566697400
+
+
+def refit_key(root, subject, digest) -> jax.Array:
+    """The key of a refit of `subject`: `Purpose.INFERENCE`, the subject, a set digest.
+
+    `digest` is the 64-bit digest of the subject's revision set, the
+    `(channel, acquisition index, revision)` triples of the counting rows in
+    canonical order (`refresh.revision_set_digest`). The key names no audience: the
+    same row set gives the same key for the observer and for the policy, which is
+    what lets one computation serve both when their inputs are equal. No fold
+    count, checkpoint ordinal, log length or queue id enters it, so private events
+    and a different checkpoint grid move no refit key for an unchanged row set.
+    """
+    key = fold64(fold64(root, _REFIT_TAG), Purpose.INFERENCE)
+    return fold64(fold64(key, subject), digest)
+
+
 def policy_key(
     root, phase, tick, ordinal, *, lineage=0, coupling=DEFAULT_COUPLING
 ) -> jax.Array:

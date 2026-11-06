@@ -29,9 +29,17 @@ from spaceodyssey.core.snapshot import snapshot_fingerprint, snapshot_view
 def active(c):
     """Every write in `advance`, `admit` and `close_decision` is gated by this.
 
-    A run waiting for the host to answer a request does nothing until it does.
+    A run waiting for the host to answer a request, or to install a refresh
+    checkpoint, does nothing until it does.
     """
-    return ~c.done & ~c.stalled & ~c.overflow & ~c.idle & ~c.request.valid
+    return (
+        ~c.done
+        & ~c.stalled
+        & ~c.overflow
+        & ~c.idle
+        & ~c.request.valid
+        & ~c.refresh.valid
+    )
 
 
 def wake_by_audience(carry, ev):
@@ -72,8 +80,11 @@ def advance(carry, root, study, truth, *, wake_fn=wake_by_audience):
         | (c3.ev.kind == EventKind.RELEASE)
         | (c3.ev.kind == EventKind.REQUEST)
         | (c3.ev.kind == EventKind.RESULT)
+        | (c3.ev.kind == EventKind.REFRESH)
     )
-    drained = handled & c3.draining & ~drainable.any() & ~c3.request.valid
+    drained = (
+        handled & c3.draining & ~drainable.any() & ~c3.request.valid & ~c3.refresh.valid
+    )
     idle = carry.idle | (act & ~has)
     c4 = _tree_set(c3, idle=idle, done=c3.done | drained | idle)
     raised = handled & wake_fn(c4, ev)

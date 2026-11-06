@@ -18,6 +18,8 @@ from spaceodyssey.core.kinds import (
 )
 from spaceodyssey.core.ledger import AssetTable, ChannelTable
 from spaceodyssey.core.records import lower_refit
+from spaceodyssey.core.refresh import RefreshSchedule, refresh_enabled
+from spaceodyssey.core.snapshot import named_leaves
 
 
 def _as_horizon_tick(value):
@@ -87,9 +89,10 @@ class Study(eqx.Module):
     objective: AbstractObjective
     coupling: Coupling = eqx.field(default_factory=lambda: DEFAULT_COUPLING)
     fork: Fork = eqx.field(default_factory=Fork)
+    refresh: RefreshSchedule = eqx.field(default_factory=RefreshSchedule)
 
     def __check_init__(self):
-        """Validate precision, registered kinds, the observer's layout and refit.
+        """Validate precision, kinds, the observer's layout, refit and refresh.
 
         Payload column audiences come from the registered record kinds. Capacities with
         no registered kinds would leave every column readable by every audience, so a
@@ -102,22 +105,26 @@ class Study(eqx.Module):
                 "into the capacities so payload columns carry their audiences"
             )
         _check_layout(self.observer, self.caps)
-        _check_refit(self.observer, self.caps)
+        _check_refit(self.observer, self.caps, self.refresh)
+        _check_refresh(self.observer, self.caps, self.refresh)
 
 
-def _check_refit(observer, caps):
+def _check_refit(observer, caps, refresh):
     """Require the observer's refit declaration to be lowered into the capacities.
 
     A refit kind must name a registered kind that is not derived (`lower_refit`), and
     the capacities must hold the kinds and statuses the observer declares, so a
     registry lowered without this observer is refused. An observer that is not
-    incremental changes only by refresh, which this core does not schedule yet.
+    incremental changes only by refresh, so it needs a schedule that checkpoints.
     """
     declared = observer.capabilities()
-    if not declared.incremental:
+    if not declared.incremental and not (
+        refresh_enabled(caps) and int(refresh.every_ticks) > 0
+    ):
         raise ValueError(
-            "the observer is not incremental; a refit-only observer needs a refresh "
-            "schedule, which studies do not support yet"
+            "the observer is not incremental; it changes only by refresh, so the "
+            "study needs a refresh schedule (every_ticks > 0) and "
+            "Capacities.rows_per_subject > 0"
         )
     lowered = lower_refit(declared, caps.kind_names, caps.derived_kinds)
     if lowered != (caps.refit_kinds, caps.refit_statuses):
@@ -125,6 +132,43 @@ def _check_refit(observer, caps):
             "the capacities do not hold the observer's refit kinds and statuses; "
             "lower the registry with the observer (KindRegistry.lower(caps, observer))"
         )
+
+
+def _check_refresh(observer, caps, refresh):
+    """Require a consistent refresh protocol: capacities, observer, schedule, kinds.
+
+    A schedule that checkpoints needs `Capacities.rows_per_subject`; capacities that
+    carry the protocol need a refit-capable observer that declares `subject_leaves`
+    (leaves of the full belief whose leading axis is the subject), and a schedule whose
+    product kind is a registered derived kind with the two product columns and whose
+    two product channels differ.
+    """
+    every, offset = int(refresh.every_ticks), int(refresh.offset_ticks)
+    if every < 0 or offset < 0:
+        raise ValueError("a refresh schedule has nonnegative ticks")
+    if not refresh_enabled(caps):
+        if every > 0:
+            raise ValueError("a refresh schedule needs Capacities.rows_per_subject > 0")
+        return
+    if not observer.capabilities().refit:
+        raise ValueError("refresh needs a refit-capable observer")
+    names = observer.subject_leaves
+    if not names:
+        raise ValueError("a refit-capable observer declares its subject_leaves")
+    leaves = named_leaves(observer.layout(caps).belief)
+    for name in names:
+        leaf = leaves.get(name)
+        if leaf is None or not leaf.shape or leaf.shape[0] != caps.n_subjects:
+            raise ValueError(
+                f"subject leaf {name!r} is not a belief leaf indexed by subject"
+            )
+    kind = int(refresh.kind)
+    if kind not in caps.derived_kinds:
+        raise ValueError("RefreshSchedule.kind must be a registered derived kind")
+    if caps.payload_audience and sum(1 for a in caps.payload_audience[kind] if a) < 2:
+        raise ValueError("the refresh product kind needs the status and n_rows columns")
+    if int(refresh.observer_channel) == int(refresh.policy_channel):
+        raise ValueError("the two product channels must differ")
 
 
 def _shapes(tree):

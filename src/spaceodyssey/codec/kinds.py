@@ -22,6 +22,7 @@ from spaceodyssey.core import enums
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.keys import Coupling, Fork
 from spaceodyssey.core.ledger import AssetTable, ChannelTable
+from spaceodyssey.core.refresh import RefreshSchedule
 from spaceodyssey.core.snapshot import EffectTable
 from spaceodyssey.core.study import Agenda, Clock, Study
 
@@ -36,6 +37,7 @@ CORE_KINDS: Mapping[KindRef, type] = {
     ("core", "capacities", 1): Capacities,
     ("core", "coupling", 1): Coupling,
     ("core", "fork", 1): Fork,
+    ("core", "refresh_schedule", 1): RefreshSchedule,
     ("core", "effect_table", 1): EffectTable,
     ("core", "stage", 1): enums.Stage,
     ("core", "event_kind", 1): enums.EventKind,

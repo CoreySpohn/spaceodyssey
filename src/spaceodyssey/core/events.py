@@ -185,6 +185,21 @@ def enqueue(
     )
 
 
+def requeue(carry, row, ok):
+    """Put a row `select_next` popped back unchanged, in a free slot, where `ok`.
+
+    Every field, position and id included: the row keeps its place in the order, so a
+    handler can hold a row while it waits for the host. The pop freed a slot, so one is
+    always available.
+    """
+    free = ~carry.ev.valid
+    i = jnp.argmax(free)
+    write = jnp.asarray(ok, B) & free.any()
+    fields = {n: getattr(row, n) for n in EVENT_INT_FIELDS}
+    ev = _set_row(carry.ev, i, write, **fields, valid=jnp.asarray(True))
+    return eqx.tree_at(lambda c: c.ev, carry, ev)
+
+
 def select_next(carry, caps):
     """Pop the queued row with the smallest order key.
 
