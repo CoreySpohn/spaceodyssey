@@ -10,17 +10,15 @@ A document is a JSON object with four keys:
 
 Values are encoded by type:
 
-| Python value | JSON |
-|---|---|
-| `None`, `bool`, `int`, `str` | the JSON literal |
-| finite `float` | a JSON number written with `repr`, so it round-trips (`-0.0` too) |
-| NaN, +inf, -inf | `{"$float": "nan"}`, `{"$float": "inf"}`, `{"$float": "-inf"}` |
-| `tuple` | a JSON array |
-| `list` | `{"$list": [...]}` |
-| `dict` with string keys | `{"$dict": [[key, value], ...]}`, in insertion order |
-| enum member | `{"$enum": [group, id, version], "value": ...}` |
-| JAX or NumPy array | `{"$array": dtype, "shape": [...], "data": nested lists}` |
-| `eqx.Module` or dataclass | `{"$kind": [group, id, version], <field>: <value>, ...}` |
+- `None`, `bool`, `int`, `str`: the JSON literal
+- finite `float`: a JSON number written with `repr`, so it round-trips (`-0.0` too)
+- NaN, +inf, -inf: `{"$float": "nan"}`, `{"$float": "inf"}`, `{"$float": "-inf"}`
+- `tuple`: a JSON array
+- `list`: `{"$list": [...]}`
+- `dict` with string keys: `{"$dict": [[key, value], ...]}`, in insertion order
+- enum member: `{"$enum": [group, id, version], "value": ...}`
+- JAX or NumPy array: `{"$array": dtype, "shape": [...], "data": nested lists}`
+- `eqx.Module` or dataclass: `{"$kind": [group, id, version], <field>: <value>, ...}`
 
 An array also carries `"weak": true` when it is a weakly typed JAX array, and
 `"type": "numpy"` or `"type": "numpy_scalar"` when it is a NumPy array or scalar
