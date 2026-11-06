@@ -179,6 +179,12 @@ def _dropped_pedigree_row(run):
     return planted(run, lambda c: c.log.product, product.at[slot, 2].add(-1))
 
 
+def _log_length_index(run):
+    """A product indexed by its log position, not by its checkpoint's grid ordinal."""
+    slot = _first_product_slot(run)
+    return _log_set(run, "acquisition_index", slot, slot + 40)
+
+
 def _wrong_recorded_status(run):
     return planted(run, lambda c: c.refresh_status, run.carry.refresh_status + 3)
 
@@ -201,7 +207,11 @@ PLANTED = {
 # invariants that only mean something on a refresh-bearing case
 ON_REFRESH = {
     "refit_inputs_equal_revision_set": (_wrong_pedigree, _dropped_pedigree_row),
-    "installs_match_product_rows": (_wrong_recorded_status, _wrong_product_channel),
+    "installs_match_product_rows": (
+        _wrong_recorded_status,
+        _wrong_product_channel,
+        _log_length_index,
+    ),
 }
 
 

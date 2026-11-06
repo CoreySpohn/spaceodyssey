@@ -114,7 +114,11 @@ def _service_binding():
 
 
 @pytest.mark.parametrize("executor", ["host", "compiled"])
-@pytest.mark.parametrize("case", CORPUS, ids=lambda c: c.name)
+# The refresh case needs a refit boundary: its reload is covered by the run-document
+# tests with a bound boundary above.
+@pytest.mark.parametrize(
+    "case", [c for c in CORPUS if c.make_refit is None], ids=lambda c: c.name
+)
 def test_every_corpus_run_reloads_to_the_same_hash_and_history(case, executor):
     study = case.make_study()
     registry = _registry_of(study.caps)

@@ -1,8 +1,10 @@
 """Pedigree layout, derived kinds in revision sets and the channel pre-flight check."""
 
 import dataclasses
+import types
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -20,6 +22,8 @@ from spaceodyssey.core.records import (
     refit_rows,
     revision_set,
 )
+from spaceodyssey.core.refresh import pedigree_words
+from spaceodyssey.core.snapshot import snapshot_fingerprint
 from spaceodyssey.studies import toy
 from tests.core.refresh_helpers import oracle_refresh_study, refresh_study
 
@@ -94,3 +98,106 @@ def test_two_product_channels_sharing_an_id_is_k002():
     study = refresh_study()
     found = _k002(_with_channels(study, policy_channel=study.refresh.observer_channel))
     assert [f.member for f in found] == ["policy_channel"]
+
+
+def _hand_log(caps):
+    """Four counting rows of subject 0, logged against the canonical order.
+
+    Row slots hold (channel, index) as (12, 2), (10, 3), (11, 0), (10, 1). All four are
+    accepted by the observer; only the first two are released to the policy.
+    """
+    log = empty_log(caps)
+    pad = lambda v: jnp.asarray(list(v) + [0] * (caps.n_log - len(v)), I64)  # noqa: E731
+    on = jnp.arange(caps.n_log) < 4
+    return dataclasses.replace(
+        log,
+        valid=on,
+        kind=pad([toy.RECORD_MEASUREMENT] * 4),
+        channel=pad([12, 10, 11, 10]),
+        acquisition_index=pad([2, 3, 0, 1]),
+        acquisition_id=pad([1, 2, 3, 4]),
+        accepted_tick=pad([1, 1, 1, 1]),
+        released_tick=pad([1, 1, -1, -1]),
+        audience=pad([int(Audience.OBSERVER | Audience.POLICY)] * 2 + [1, 1]),
+    )
+
+
+def test_pedigree_triples_are_canonical_and_per_audience():
+    caps = refresh_study().caps
+    log = _hand_log(caps)
+    both = [refit_rows(log, caps, a, 0) for a in (Audience.OBSERVER, Audience.POLICY)]
+    k = caps.rows_per_subject  # a request holds the first rows_per_subject
+    rows = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs)[:, None, :k], *both)
+    request = types.SimpleNamespace(rows=rows)
+    got = {}
+    for a in (0, 1):
+        words = pedigree_words(request, a, 0, 0, caps)
+        out = dataclasses.replace(empty_log(caps), product=jnp.zeros_like(log.product))
+        out = eqx.tree_at(lambda x: x.product, out, out.product.at[0].set(words))
+        got[a] = pedigree_of(out, 0)
+    # canonical order by (channel, index, revision), not by arrival or log slot
+    assert got[0][2] == ((10, 1, 0), (10, 3, 0), (11, 0, 0), (12, 2, 0))
+    # the policy's pedigree names only what it received, never the observer-only rows
+    assert got[1][2] == ((10, 3, 0), (12, 2, 0))
+    assert got[0][0] != got[1][0]
+
+
+def _view(caps, product):
+    log = dataclasses.replace(
+        empty_log(caps), valid=jnp.arange(caps.n_log) < 1, product=product
+    )
+    return types.SimpleNamespace(
+        log=log,
+        n_rows=jnp.asarray(1, I64),
+        belief=refresh_study().observer.init(caps),
+        tick=jnp.asarray(0, I64),
+        n_dec=jnp.asarray(0, I64),
+        release_version=jnp.asarray(0, I64),
+    )
+
+
+def test_fingerprint_covers_the_pedigree_and_width_zero_is_unchanged():
+    study = refresh_study()
+    caps = study.caps
+    layout = study.observer.layout(caps)
+    base = (
+        jnp.zeros((caps.n_log, caps.product_width), I64)
+        .at[0, :5]
+        .set(jnp.asarray([1, 0, 1, 10, 3], I64))
+    )
+    moved = base.at[0, 4].set(4)  # a triple's acquisition index
+    fp = lambda v: int(snapshot_fingerprint(v, layout))  # noqa: E731
+    assert fp(_view(caps, base)) == fp(_view(caps, base))
+    assert fp(_view(caps, base)) != fp(_view(caps, moved))
+    # a width-0 column adds nothing: the digest equals one over the other leaves
+    slim = dataclasses.replace(caps, rows_per_subject=0, refit_lanes=0, product_width=0)
+    empty = jnp.zeros((slim.n_log, 0), I64)
+    assert fp(_view(slim, empty)) == fp(_view(slim, empty))
+
+
+def test_a_derived_row_never_supersedes_a_source_row():
+    from spaceodyssey.core.snapshot import _superseded_in_view
+
+    caps = refresh_study().caps
+    log = empty_log(caps)
+    pad = lambda v: jnp.asarray(list(v) + [0] * (caps.n_log - len(v)), I64)  # noqa: E731
+    mk = lambda **kw: dataclasses.replace(  # noqa: E731
+        log,
+        valid=jnp.arange(caps.n_log) < 2,
+        acquisition_id=pad([7, 7]),
+        revision=pad([0, 1]),
+        accepted_tick=pad([1, 1]),
+        released_tick=pad([1, 1]),
+        **kw,
+    )
+    derived = mk(kind=pad([toy.RECORD_MEASUREMENT, toy.PRODUCT_KIND]))
+    counts, replaced = revision_set(derived, caps, Audience.OBSERVER, 0)
+    assert bool(counts[0]) and not bool(counts[1])
+    assert int(replaced[0]) == -1
+    vis = derived.valid
+    assert int(_superseded_in_view(derived, vis, caps)[0]) == -1
+    # control: the same ids as two revisions of one measurement do replace
+    source = mk(kind=pad([toy.RECORD_MEASUREMENT] * 2))
+    counts, replaced = revision_set(source, caps, Audience.OBSERVER, 0)
+    assert not bool(counts[0]) and bool(counts[1]) and int(replaced[0]) == 1
+    assert int(_superseded_in_view(source, vis, caps)[0]) == 1

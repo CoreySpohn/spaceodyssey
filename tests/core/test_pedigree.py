@@ -125,3 +125,76 @@ def test_a_log_length_index_for_answers_is_caught(monkeypatch):
     finally:
         eqx.clear_caches()
         jax.clear_caches()
+
+
+def test_scripted_acquisition_ids_do_not_collide_with_refresh_products():
+    from spaceodyssey.studies.scripted import scripted_refresh_study
+
+    study = scripted_refresh_study(ticks=(1,), values=(2.0,), ids=(4,), every=100)
+    truths, roots = worlds(1)
+    run = HostExecutor().run(
+        study, base.index_world(truths, 0), roots[0], 30, refit=masked()
+    )
+    log = run.carry.log
+    valid = np.flatnonzero(np.asarray(log.valid))
+    ids = [int(log.acquisition_id[i]) for i in valid]
+    assert len(ids) == len(set(ids)) and len(ids) >= 2, ids
+    kinds = {int(log.kind[i]) for i in valid}
+    assert toy.PRODUCT_KIND in kinds  # control: a product was written
+    scripted = [i for i in valid if int(log.kind[i]) == toy.RECORD_MEASUREMENT]
+    assert [int(log.acquisition_index[i]) for i in scripted] == [4]
+
+
+def test_a_scripted_correction_still_finds_its_original():
+    from spaceodyssey.core.enums import Audience
+    from spaceodyssey.core.records import revision_set
+    from spaceodyssey.studies.scripted import scripted_refresh_study
+
+    study = scripted_refresh_study(
+        ticks=(1, 2), values=(2.0, 9.0), ids=(4, 4), revisions=(0, 1), every=100
+    )
+    truths, roots = worlds(1)
+    run = HostExecutor().run(
+        study, base.index_world(truths, 0), roots[0], 30, refit=masked()
+    )
+    log = run.carry.log
+    scripted = [
+        i
+        for i in np.flatnonzero(np.asarray(log.valid))
+        if int(log.kind[i]) == toy.RECORD_MEASUREMENT
+    ]
+    assert len(scripted) == 2
+    assert int(log.acquisition_id[scripted[0]]) == int(log.acquisition_id[scripted[1]])
+    counts, replaced = revision_set(log, study.caps, Audience.OBSERVER, 0)
+    assert [bool(counts[i]) for i in scripted] == [False, True]
+    assert int(replaced[scripted[0]]) == 1
+
+
+def _derived_measurement_study():
+    import dataclasses as dc
+
+    from spaceodyssey.core.capacities import Capacities
+    from spaceodyssey.core.records import KindRegistry, RecordKind
+
+    derived = dc.replace(toy.MEASUREMENT_KIND, derived=True)
+    registry = KindRegistry((RecordKind("none", ()), derived, toy.AUXILIARY_KIND))
+    return toy.survey_1(registry.lower(Capacities()))
+
+
+def test_replay_skips_derived_rows_like_the_live_run():
+    import jax.numpy as jnp
+
+    from spaceodyssey.core import replay_belief
+    from spaceodyssey.core.conformance import replay_beliefs
+
+    study = _derived_measurement_study()
+    truths, roots = worlds(2)
+    run = HostExecutor().run_worlds(study, truths, roots, 40)
+    live = np.asarray(run.carry.belief.n)
+    assert live.sum() == 0  # control: nothing derived is folded live
+    for w in range(2):
+        carry = base.index_world(run.carry, w)
+        trace = base.index_world(run.trace, w)
+        assert int(jnp.sum(replay_belief(study, carry, trace).n)) == 0
+    kit, _ = replay_beliefs(study, run, roots)
+    assert np.asarray(kit.n).sum() == 0

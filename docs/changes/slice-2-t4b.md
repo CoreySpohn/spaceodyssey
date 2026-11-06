@@ -94,6 +94,29 @@ tier (`-m "not slow" -n 2 --dist loadfile`): 1691 passed in 55 s; the one over-b
 report, `test_every_hand_study_reproduces_its_history`, was over budget before this
 change. Lints: ruff check and format, core imports, domain words, internal references.
 
+## Review fixes
+
+- **Scripted internal ids.** `ScriptedRecords` takes each internal `acquisition_id`
+  from the shared allocator (`next_sid`): the first fire of a scripted id takes the next
+  one, a correction reuses the id of the record it corrects, and the scripted id stays
+  the semantic index. A scripted measurement and a refresh product can no longer share
+  an identity. Moved goldens: `revision` and `refresh` (ints only, 8 entries), because
+  their internal ids changed; no other entry moved.
+- **Replay skips derived rows**, in `replay_belief` and in the observer kit's replay.
+- **The snapshot fingerprint hashes the pedigree** when `product_width > 0`; a width-0
+  fingerprint is unchanged. Only the `refresh` entries moved for this reason.
+- **A derived row never takes part in supersession**: not in revision sets, not in the
+  release handler's `superseded_by` metadata, not in snapshot views. A correction
+  that reuses a derived acquisition id therefore leaves the source row current.
+- **`installs_match_product_rows` ties each product to its checkpoint**: index equals
+  the grid ordinal of the checkpoint tick, revision 0, available at that tick. A plant
+  indexing a product by log position fails it.
+- **Tests.** Quick: exact canonical per-audience triples from a log written against
+  the canonical order with observer-only rows; fingerprint covers the pedigree; derived
+  rows never supersede. Slow: the scripted collision repro, a scripted correction that
+  still finds its original, replay over a derived measurement kind. The run-document
+  corpus reload skips the `refresh` case, which needs a bound refit boundary.
+
 ## Remaining
 
 - Repeated `Query` answers on one channel (a policy asking twice) are covered by the
