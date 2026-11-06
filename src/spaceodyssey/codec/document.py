@@ -67,6 +67,7 @@ class DocumentError(ValueError):
         """Store the pointer and code and put the pointer in the message."""
         self.pointer = pointer
         self.code = code
+        self.detail = message
         where = "" if pointer is None else f" at {pointer or '/'}"
         prefix = "" if code is None else f"{code}: "
         super().__init__(f"{prefix}{message}{where}")

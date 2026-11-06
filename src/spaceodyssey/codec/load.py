@@ -37,7 +37,12 @@ from spaceodyssey.codec.document import (
     with_max_tick,
 )
 from spaceodyssey.codec.dump import ARRAY_DTYPES
-from spaceodyssey.codec.files import current_store, make_store, using_store
+from spaceodyssey.codec.files import (
+    DEFAULT_MAX_BYTES,
+    current_store,
+    make_store,
+    using_store,
+)
 from spaceodyssey.codec.kinds import as_resolver, is_kind_class, is_version_field
 from spaceodyssey.core.capacities import Capacities, require_x64
 from spaceodyssey.core.study import Agenda, Study
@@ -66,7 +71,7 @@ def tolerating_null_arrays(fields):
         _NULL_OK.reset(token)
 
 
-def load_study(document, kinds=None, *, files=None):
+def load_study(document, kinds=None, *, files=None, max_file_bytes=DEFAULT_MAX_BYTES):
     """Rebuild the `Study` a `StudyDocument` (or its JSON text) describes.
 
     `kinds` is a `KindResolver` or the mapping `dump_study` took. A module stored
@@ -81,13 +86,14 @@ def load_study(document, kinds=None, *, files=None):
     sha256, is refused at its pointer, and a document with references and no `files`
     directory is refused. A `{"no_switch": true}` phase boundary becomes
     `caps.max_tick`, and a study whose `horizon_tick` reaches `caps.max_tick` is
-    refused.
+    refused. A file is read only when its size is the one the dtype and shape imply
+    and at most `max_file_bytes`; it must be a regular file, never a symlink.
     """
     require_x64()
     if isinstance(document, str):
         document = StudyDocument.from_json(document)
     check_schema_version(document.schema_version)
-    with using_store(make_store(files, 0)):
+    with using_store(make_store(files, 0, max_file_bytes)):
         study = decode(document.study, ("study",), as_resolver(kinds))
     if not isinstance(study, Study):
         raise DocumentError("the document's study is not a Study", "/study")
@@ -436,14 +442,8 @@ def _read_file(ref, dtype, shape, path):
             "the document holds an array file reference; pass the files directory",
             pointer(path),
         )
-    raw = store.get(ref, path)
     expected = math.prod(shape) * dtype.itemsize
-    if len(raw) != expected:
-        raise DocumentError(
-            f"the file holds {len(raw)} bytes, shape {shape} of {dtype.name} needs "
-            f"{expected}",
-            pointer((*path, "bytes")),
-        )
+    raw = store.get(ref, path, expected)
     return np.frombuffer(raw, dtype=dtype).reshape(shape).copy()
 
 

@@ -49,6 +49,7 @@ import dataclasses
 import math
 from enum import StrEnum
 
+from spaceodyssey.codec.bindings import build_binding
 from spaceodyssey.codec.document import (
     DOCUMENT_KEYS,
     FORMAT,
@@ -61,6 +62,7 @@ from spaceodyssey.codec.document import (
     parse_text,
     pointer,
 )
+from spaceodyssey.codec.files import DEFAULT_MAX_BYTES
 from spaceodyssey.codec.kinds import RegistrationError, as_resolver
 from spaceodyssey.codec.load import load_study, tolerating_null_arrays
 from spaceodyssey.codec.records import check_lowering, decode_records
@@ -148,7 +150,16 @@ def resolve_pointer(root, ptr):
     return node
 
 
-def preflight_document(document, kinds=None, *, run=None, executor=None, bindings=None):
+def preflight_document(
+    document,
+    kinds=None,
+    *,
+    run=None,
+    executor=None,
+    bindings=None,
+    files=None,
+    max_file_bytes=DEFAULT_MAX_BYTES,
+):
     """Every pre-flight finding of a study document, errors first.
 
     `document` is JSON text, a parsed object or a `StudyDocument`. `kinds` is a
@@ -166,7 +177,12 @@ def preflight_document(document, kinds=None, *, run=None, executor=None, binding
     above, unknown members of it are `D003`, and the registry must decode and lower
     to the study's capacities (`L001` at `/records` otherwise). `bindings` is the
     `Bindings` table of service and refit kinds; with it, a binding that names an
-    unknown kind or a newer version is `D001`.
+    unknown kind or a newer version is `D001`; and, for a run document, each service
+    and boundary is rebuilt as `load_run` rebuilds it: a configuration its kind rejects
+    and a rebuilt `model_hash` that is not the stored one are `D003`. `files` is the
+    directory of array files a dump wrote, forwarded to the loader with
+    `max_file_bytes`, so a file-backed document is checked, integrity included.
+    `load_run` raises the first error this returns.
     """
     resolver = _resolver(kinds)
     try:
@@ -194,7 +210,7 @@ def preflight_document(document, kinds=None, *, run=None, executor=None, binding
         refs = _unknown_kinds(data["study"], resolver)
         found += refs
         decodable = decodable and not refs
-    if run is not None:
+    if run is not None or is_run:
         found += record_findings(run, strict=is_run)
         if bindings is not None:
             found += _unknown_bindings(run, bindings)
@@ -204,14 +220,17 @@ def preflight_document(document, kinds=None, *, run=None, executor=None, binding
     found += _check_hash(data)
     study = None
     if decodable:
-        study, failure = _decoded(data, resolver)
+        study, failure = _decoded(data, resolver, files, max_file_bytes)
         found += failure
     if study is not None:
         found += _in_memory(study, data["study"], executor)
         if run is not None:
             found += service_findings(study, run)
         if is_run and "records" in data:
-            found += _records(data["records"], study)
+            bad = _records(data["records"], study)
+            found += bad
+            if bindings is not None and not bad:
+                found += _rebuilt(run, data["records"], bindings)
     return _ordered(found)
 
 
@@ -280,7 +299,7 @@ def _from_error(err, fix=None):
     """The finding a `DocumentError` stands for: its own code, or `L001`."""
     code = DocumentCode(err.code) if err.code else DocumentCode.L001
     fix = fix or "correct the value at the pointer so the document decodes"
-    return DocumentFinding(code, Severity.ERROR, err.pointer or "", str(err), fix)
+    return DocumentFinding(code, Severity.ERROR, err.pointer or "", err.detail, fix)
 
 
 def _envelope(data, is_run=False):
@@ -325,12 +344,14 @@ def _check_hash(data):
     return [_from_error(err, "recompute the hash, or drop it after a hand edit")]
 
 
-def _decoded(data, resolver):
+def _decoded(data, resolver, files=None, max_file_bytes=DEFAULT_MAX_BYTES):
     """The loaded study, or the `L001` of the failure; a null order loads."""
     doc = StudyDocument(study=data["study"], schema_version=data["schema_version"])
     try:
         with tolerating_null_arrays([(ChannelTable, "coincident_order")]):
-            return load_study(doc, resolver), []
+            return load_study(
+                doc, resolver, files=files, max_file_bytes=max_file_bytes
+            ), []
     except DocumentError as err:
         return None, [_from_error(err)]
 
@@ -459,6 +480,59 @@ def _records(node, study):
             _from_error(err, "write the registry the study's capacities lower from")
         ]
     return []
+
+
+def _rebuilt(run, records, bindings):
+    """`D003` for a service or boundary that does not rebuild, or another model."""
+    try:
+        registry = decode_records(records)
+    except DocumentError:
+        return []
+    out = []
+    if not isinstance(run, dict):
+        return out
+    refit = run.get("refit")
+    items = [(("service",), run.get("service"), False)]
+    if isinstance(refit, dict):
+        items += [(("refit", s), refit.get(s), True) for s in ("host", "compiled")]
+    for where, record, boundary in items:
+        ok = (
+            isinstance(record, dict)
+            and _text(record.get("kind"))
+            and _version(record.get("version"))
+            and _object(record.get("configuration"))
+        )
+        if not ok:
+            continue
+        ptr = (RUN_KEY, *where)
+        try:
+            entry = bindings.resolve(record["kind"], record["version"], ptr)
+            built = build_binding(entry, record, registry, ptr)
+        except DocumentError as err:
+            if err.code != "D001":
+                out.append(
+                    DocumentFinding(
+                        DocumentCode.D003,
+                        Severity.ERROR,
+                        err.pointer or "",
+                        err.detail,
+                        "write a configuration the kind accepts",
+                    )
+                )
+            continue
+        if boundary and _is_hash(record.get("model_hash")):
+            if built.model_hash != record["model_hash"]:
+                out.append(
+                    DocumentFinding(
+                        DocumentCode.D003,
+                        Severity.ERROR,
+                        pointer((*ptr, "model_hash")),
+                        f"the rebuilt boundary has model_hash {built.model_hash!r}, "
+                        f"the document says {record['model_hash']!r}",
+                        "store the model hash the boundary's kind reports",
+                    )
+                )
+    return out
 
 
 def _unknown_bindings(run, bindings):

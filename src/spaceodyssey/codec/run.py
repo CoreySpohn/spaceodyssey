@@ -16,23 +16,28 @@ activation) is refused by name.
 
 import dataclasses
 import math
-from collections.abc import Callable
 
+from spaceodyssey.codec.bindings import (
+    BindingKind as BindingKind,
+)
+from spaceodyssey.codec.bindings import Bindings as Bindings
+from spaceodyssey.codec.bindings import build_binding
 from spaceodyssey.codec.document import (
     RUN_FORMAT,
     CallableRefused,
     DocumentError,
     RunDocument,
     StudyDocument,
-    check_schema_version,
     pointer,
 )
 from spaceodyssey.codec.dump import dump_study
-from spaceodyssey.codec.files import DEFAULT_MAX_INLINE
+from spaceodyssey.codec.files import DEFAULT_MAX_BYTES, DEFAULT_MAX_INLINE
 from spaceodyssey.codec.load import load_study
 from spaceodyssey.codec.preflight import (
     CALLABLE_MEMBERS,
     RUN_KEY,
+    DocumentCode,
+    preflight_document,
     record_findings,
     service_findings,
 )
@@ -42,93 +47,6 @@ from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
 
 _SIDES = ("host", "compiled")
-_HOOK_ATTRIBUTES = ("fit", "kernel")
-
-
-@dataclasses.dataclass(frozen=True)
-class BindingKind:
-    """A service or refit boundary the codec can describe and rebuild.
-
-    `kind` and `version` name it in a document. `describe(obj, registry)` returns
-    its configuration, a plain JSON object, and `build(configuration, registry)`
-    returns an instance from one, where `registry` is the run's `KindRegistry` (a
-    service names the record kind it writes by name there). `matches(obj)` says
-    whether an instance is of this kind; it defaults to `type(obj) is cls`.
-    `migrate(from_version, configuration)` reads a configuration stored at an older
-    version. A refit boundary's `model_hash` is read from the instance and checked
-    against the one the document stores when it is rebuilt.
-    """
-
-    kind: str
-    version: int
-    describe: Callable
-    build: Callable
-    cls: type | None = None
-    matches: Callable | None = None
-    migrate: Callable | None = None
-
-    def __post_init__(self):
-        """Require a name, a positive version and a way to match instances."""
-        if not self.kind or type(self.version) is not int or self.version < 1:
-            raise ValueError("a binding kind needs a name and a positive version")
-        if self.cls is None and self.matches is None:
-            raise ValueError(f"binding kind {self.kind!r} needs cls or matches")
-
-    def covers(self, obj):
-        """Whether `obj` is an instance of this kind."""
-        if self.matches is not None:
-            return bool(self.matches(obj))
-        return type(obj) is self.cls
-
-
-class Bindings:
-    """The service and refit kinds a run document may name, passed in explicitly."""
-
-    def __init__(self, kinds=()):
-        """Register `kinds`; one kind name has one (current) version."""
-        self._kinds = {}
-        for kind in kinds:
-            if kind.kind in self._kinds:
-                raise ValueError(f"binding kind {kind.kind!r} is registered twice")
-            self._kinds[kind.kind] = kind
-
-    def resolve(self, kind, version, path=()):
-        """The `BindingKind` a document names; `D001` if unknown or too new."""
-        entry = self._kinds.get(kind)
-        if entry is None:
-            raise DocumentError(
-                f"unknown binding kind {kind!r}", pointer((*path, "kind")), code="D001"
-            )
-        if version > entry.version:
-            raise DocumentError(
-                f"binding kind {kind!r} version {version} is newer than the "
-                f"registered version {entry.version}",
-                pointer((*path, "version")),
-                code="D001",
-            )
-        if version < entry.version and entry.migrate is None:
-            raise DocumentError(
-                f"binding kind {kind!r} version {version} is older than "
-                f"{entry.version} and defines no migrate",
-                pointer((*path, "version")),
-                code="D001",
-            )
-        return entry
-
-    def of(self, obj, path):
-        """The `BindingKind` an instance belongs to, or a refusal at `path`."""
-        for entry in self._kinds.values():
-            if entry.covers(obj):
-                return entry
-        name = type(obj).__name__
-        for attr in _HOOK_ATTRIBUTES:
-            hook = getattr(obj, attr, None)
-            if callable(hook):
-                label = getattr(hook, "__qualname__", type(hook).__name__)
-                raise CallableRefused(f"{name}.{attr} ({label})", pointer(path))
-        raise DocumentError(
-            f"no binding kind is registered for a {name}", pointer(path)
-        )
 
 
 def _plain(value, path):
@@ -247,7 +165,7 @@ class Run:
         entry = self.bindings.resolve(
             self.service["kind"], self.service["version"], (RUN_KEY, "service")
         )
-        return _build(entry, self.service, self.registry, (RUN_KEY, "service"))
+        return build_binding(entry, self.service, self.registry, (RUN_KEY, "service"))
 
     def execute(self, truths, roots, n_steps, *, executor=None, **kw):
         """Run the bound study on `executor` (default: the document's executor)."""
@@ -266,88 +184,64 @@ class Run:
         )
 
 
-def _build(entry, record, registry, path):
-    """An instance from a binding record, through `migrate` for an older version."""
-    config = record["configuration"]
-    if record["version"] < entry.version:
-        try:
-            config = entry.migrate(record["version"], dict(config))
-        except (ValueError, TypeError, KeyError) as err:
-            raise DocumentError(
-                f"migrate of {entry.kind!r} from version {record['version']}: {err}",
-                pointer((*path, "configuration")),
-            ) from err
-    try:
-        return entry.build(config, registry)
-    except (ValueError, TypeError, KeyError) as err:
-        raise DocumentError(
-            f"cannot build {entry.kind!r}: {err}", pointer((*path, "configuration"))
-        ) from err
-
-
-def load_run(document, bindings, kinds=None, *, files=None):
+def load_run(
+    document, bindings, kinds=None, *, files=None, max_file_bytes=DEFAULT_MAX_BYTES
+):
     """Rebuild the `Run` a `RunDocument` (or its JSON text) describes.
 
-    Every failure is a `DocumentError` with a pointer: the study's own (see
-    `load_study`), a run record whose members are missing, ill-typed or unknown
-    (`D003`), a member that is a callable (`CallableRefused`), a registry that does
-    not decode or does not lower to the study's capacities (`/records`), a binding
-    kind unknown or newer than the table (`D001`), and a rebuilt boundary whose
-    `model_hash` is not the stored one.
+    The document is validated by `preflight_document` with the same arguments, and
+    the first error among its document-level findings (`D001`, `D002`, `D003`,
+    `L001`) is raised as a `DocumentError` with that code (`None` for `L001`) and
+    pointer, so `load_run` and pre-flight agree on what is wrong first. A callable
+    member of the run record is `CallableRefused` at the same pointer. The study is
+    then loaded strictly (see `load_study`).
     """
+    if not isinstance(document, (str, RunDocument)):
+        raise TypeError("load_run needs a RunDocument or its JSON text")
+    findings = preflight_document(
+        document,
+        kinds,
+        bindings=bindings,
+        files=files,
+        max_file_bytes=max_file_bytes,
+    )
+    for finding in findings:
+        if finding.severity == "error" and isinstance(finding.code, DocumentCode):
+            _raise(finding)
     if isinstance(document, str):
         document = RunDocument.from_json(document)
-    elif not isinstance(document, RunDocument):
-        raise TypeError("load_run needs a RunDocument or its JSON text")
-    check_schema_version(document.schema_version)
     run = document.run
-    _refuse_callables(run)
     study = load_study(
         StudyDocument(study=document.study, schema_version=document.schema_version),
         kinds,
         files=files,
+        max_file_bytes=max_file_bytes,
     )
-    problems = [
-        f
-        for f in (*record_findings(run, strict=True), *service_findings(study, run))
-        if f.severity == "error"
-    ]
-    if problems:
-        first = problems[0]
-        raise DocumentError(first.message, first.pointer, code=str(first.code))
-    if "executor" not in run:
-        raise DocumentError("the run record has no 'executor'", "/run/executor")
     registry = decode_records(document.records)
     check_lowering(registry, study)
-    service = run.get("service")
-    if service is not None:
-        entry = bindings.resolve(
-            service["kind"], service["version"], (RUN_KEY, "service")
-        )
-        _build(entry, service, registry, (RUN_KEY, "service"))
     boundaries = {}
     for side in _SIDES:
-        if side not in run.get("refit", {}):
-            continue
-        record = run["refit"][side]
-        where = (RUN_KEY, "refit", side)
-        entry = bindings.resolve(record["kind"], record["version"], where)
-        boundary = _build(entry, record, registry, where)
-        if boundary.model_hash != record["model_hash"]:
-            raise DocumentError(
-                f"the rebuilt boundary has model_hash {boundary.model_hash!r}, "
-                f"the document says {record['model_hash']!r}",
-                pointer((*where, "model_hash")),
-            )
-        boundaries[side] = boundary
-    return Run(study, registry, run["executor"], service, boundaries, bindings)
+        if side in run.get("refit", {}):
+            record = run["refit"][side]
+            where = (RUN_KEY, "refit", side)
+            entry = bindings.resolve(record["kind"], record["version"], where)
+            boundaries[side] = build_binding(entry, record, registry, where)
+    return Run(
+        study, registry, run["executor"], run.get("service"), boundaries, bindings
+    )
 
 
-def _refuse_callables(run):
-    """Name a callable member of the run record before anything else is read."""
-    if isinstance(run, dict):
-        for key in sorted(set(run) & CALLABLE_MEMBERS):
-            raise CallableRefused(key, pointer((RUN_KEY, key)))
+def _raise(finding):
+    """Raise the error a document-level finding stands for."""
+    text = finding.message
+    if text.startswith("callable refused: "):
+        raise CallableRefused(text[18:].split(" is code", 1)[0], finding.pointer)
+    if finding.code == DocumentCode.D003 and any(
+        f"member {name!r} is a callable" in text for name in CALLABLE_MEMBERS
+    ):
+        raise CallableRefused(finding.pointer.rsplit("/", 1)[-1], finding.pointer)
+    code = None if finding.code == DocumentCode.L001 else str(finding.code)
+    raise DocumentError(text, finding.pointer, code=code)
 
 
 __all__ = ["RUN_FORMAT", "BindingKind", "Bindings", "Run", "dump_run", "load_run"]
