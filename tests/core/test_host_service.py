@@ -55,7 +55,8 @@ def _host(w=0):
 
 
 def _history(carry, trace):
-    return canonical_history(carry, trace)
+    study, _ = _setup()
+    return canonical_history(carry, trace, study.observer.layout(study.caps))
 
 
 def _query_effects(caps, subject=1, service=0):
@@ -205,7 +206,7 @@ def test_a_truncated_hosted_run_agrees_across_executors(n_steps):
     run = CompiledExecutor().run(
         study, truths, roots, n_steps, service=_service(), chunk=4
     )
-    host, comp = canonical_history(carry, trace), run.history(0)
+    host, comp = _history(carry, trace), run.history(0)
     assert histories_equal(host, comp).ok
     assert host.status == comp.status == RunStatus.TRUNCATED
     assert host.n_handled == comp.n_handled == n_steps
@@ -220,15 +221,12 @@ def test_an_unanswered_request_holds_the_run_and_says_so():
         (carry, trace),
         (index_world(run.carry, 0), index_world(run.trace, 0)),
     ):
-        h = canonical_history(c, t)
+        h = _history(c, t)
         assert h.status == RunStatus.AWAITING and not h.complete
         assert bool(c.request.valid)
         assert [e[2] for e in h.events][-1] == REQUEST
         assert int(c.request.audience) == Audience.POLICY
-    assert histories_equal(
-        canonical_history(carry, trace),
-        canonical_history(index_world(run.carry, 0), index_world(run.trace, 0)),
-    ).ok
+    assert histories_equal(_history(carry, trace), run.history(0)).ok
 
 
 def test_the_answer_reaches_the_audience_of_its_snapshot_only():
@@ -248,7 +246,7 @@ def test_the_answer_reaches_the_audience_of_its_snapshot_only():
 
 def test_a_service_answer_wider_than_the_payload_is_refused():
     class Wide(oracle.ToyOracleService):
-        def answer(self, request, view):
+        def answer(self, request, view, layout):
             return np.zeros(99)
 
     study, kind = _setup()

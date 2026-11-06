@@ -30,15 +30,16 @@ def test_baseline_hand_history_both_executors():
     st = kinds.survey_1()
     truths, roots = worlds(8)
     cs, ts = CompiledExecutor().run(st, truths, roots, N_STEPS)
+    layout = st.observer.layout(st.caps)
     for w in range(8):
-        h = canonical_history(index_world(cs, w), index_world(ts, w))
+        h = canonical_history(index_world(cs, w), index_world(ts, w), layout)
         assert h.events == HAND_HISTORIES["baseline"]
         assert tuple(r[3:] for r in h.rows) == HAND_ROWS["baseline"]
         assert all(inv(h) for inv in HAND_INVARIANTS["baseline"])
         channel_index, th = HostExecutor().run(
             st, index_world(truths, w), roots[w], N_STEPS
         )
-        assert histories_equal(h, canonical_history(channel_index, th)).ok
+        assert histories_equal(h, canonical_history(channel_index, th, layout)).ok
         assert int(index_world(cs, w).n_dec) == 6 and h.n_records == 5
 
 
@@ -48,8 +49,9 @@ def test_hand_histories_match_across_executors_and_policy_forms(name, form):
     st = HAND_STUDIES[name]()
     truths, roots = worlds(3)
     cs, ts = CompiledExecutor().run(st, truths, roots, N_STEPS)
+    layout = st.observer.layout(st.caps)
     for w in range(3):
-        h = canonical_history(index_world(cs, w), index_world(ts, w))
+        h = canonical_history(index_world(cs, w), index_world(ts, w), layout)
         assert h.events == HAND_HISTORIES[name], (name, w)
         # full rows: the extra columns (lane, subject, acquisition_index, n_written,
         # wake) per step
@@ -58,7 +60,7 @@ def test_hand_histories_match_across_executors_and_policy_forms(name, form):
         channel_index, th = HostExecutor().run(
             st, index_world(truths, w), roots[w], N_STEPS, policy_form=form
         )
-        r = histories_equal(h, canonical_history(channel_index, th))
+        r = histories_equal(h, canonical_history(channel_index, th, layout))
         assert r.ok, (name, form, w, r)
 
 
@@ -172,18 +174,19 @@ def test_canonical_history_detects_corrupted_identities(field):
     study = kinds.survey_1()
     truths, roots = worlds(1)
     carry, trace = HostExecutor().run(study, index_world(truths, 0), roots[0], 20)
-    original = canonical_history(carry, trace)
+    layout = study.observer.layout(study.caps)
+    original = canonical_history(carry, trace, layout)
     assert original.n_records == 5
     if field == "acquisition_id":
         log = dataclasses.replace(
             carry.log, acquisition_id=jnp.zeros_like(carry.log.acquisition_id)
         )
-        altered = canonical_history(dataclasses.replace(carry, log=log), trace)
+        altered = canonical_history(dataclasses.replace(carry, log=log), trace, layout)
     else:
         altered_trace = dataclasses.replace(
             trace, **{field: getattr(trace, field) + trace.handled.astype(jnp.int64)}
         )
-        altered = canonical_history(carry, altered_trace)
+        altered = canonical_history(carry, altered_trace, layout)
     assert histories_equal(original, original).go
     assert not histories_equal(original, altered).ok
     if field == "acquisition_id":

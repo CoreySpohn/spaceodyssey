@@ -177,9 +177,10 @@ def _bundle_run(study):
     cs, ts = CompiledExecutor().run(study, truths, roots, 40)
     out = []
     for w in range(2):
-        h = canonical_history(index_world(cs, w), index_world(ts, w))
+        layout = study.observer.layout(study.caps)
+        h = canonical_history(index_world(cs, w), index_world(ts, w), layout)
         host_carry, th = HostExecutor().run(study, index_world(truths, w), roots[w], 40)
-        parity = histories_equal(h, canonical_history(host_carry, th))
+        parity = histories_equal(h, canonical_history(host_carry, th, layout))
         assert parity.structure_equal and parity.max_int_diff == 0
         out.append((h, index_world(cs, w)))
     return out

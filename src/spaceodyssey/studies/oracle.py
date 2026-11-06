@@ -1,9 +1,9 @@
 """A toy host service: it answers a policy's question from the snapshot it was asked on.
 
-The service reads the policy belief in the snapshot and returns the running mean and
-sample count of the subject asked about, plus the snapshot's release version. The
-answer is a record of its own kind, readable by the policy audience only. Nothing in
-`spaceodyssey.core` names it.
+The service reads the policy belief in the snapshot, through the observer's layout,
+and returns the projected mean and the count of the subject asked about, plus the
+snapshot's release version. The answer is a record of its own kind, readable by the
+policy audience only. Nothing in `spaceodyssey.core` names it.
 """
 
 import equinox as eqx
@@ -28,21 +28,26 @@ DEFAULT_PLAN = ((0, 10), (1, 10), (0, 10), (1, 10), (0, 10))
 
 
 class ToyOracleService(AbstractHostService):
-    """Answer with the asked subject's belief as the snapshot shows it."""
+    """Answer with the asked subject's belief as the snapshot shows it.
+
+    The belief is read through the observer's `BeliefLayout`: the mean from the
+    summary projection, the count from the count leaf.
+    """
 
     def __init__(self, kind):
         """Answer with records of registry index `kind`."""
         self.kind = kind
         self.requests = []
 
-    def answer(self, request, view):
+    def answer(self, request, view, layout):
         """Return (mean, count, release version) for the subject of the request."""
         self.requests.append(request)
         subject = request.subject
+        mean, _ = layout.summary_projection(view.belief)
         return np.asarray(
             [
-                view.belief.mean[subject],
-                view.belief.n[subject],
+                mean[subject],
+                layout.count(view.belief)[subject],
                 view.release_version,
             ],
             dtype=np.float64,

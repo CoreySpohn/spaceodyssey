@@ -14,7 +14,6 @@ from spaceodyssey import core as sch
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import Audience, EffectKind, EventKind, Purpose, Stage
 from spaceodyssey.core.executors.base import (
-    canonical_history,
     index_world,
 )
 from spaceodyssey.core.executors.compiled import CompiledExecutor
@@ -49,8 +48,7 @@ def private_channel_study(plan, channel_index=2, **kw):
 
 def history_of(study, n_steps=40, w=0):
     truths, roots = worlds(w + 1)
-    cs, ts = CompiledExecutor().run(study, truths, roots, n_steps)
-    return canonical_history(index_world(cs, w), index_world(ts, w))
+    return CompiledExecutor().run(study, truths, roots, n_steps).history(w)
 
 
 @functools.cache

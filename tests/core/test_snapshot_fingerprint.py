@@ -59,7 +59,7 @@ def test_snapshot_fingerprint_recorded():
         view = jax.tree_util.tree_map(jnp.asarray, view)
         assert int(fingerprint_j(view, layout)) == int(fp)
     # the history carries it, and the compiled executor records the same values
-    h = canonical_history(carry, trace)
+    h = canonical_history(carry, trace, layout)
     assert np.array_equal(h.ints["snapshot_fp"][h.ints["wake"] == 1], fps[woke])
     run = hand_run("baseline")
     assert np.array_equal(run.history(0).ints["snapshot_fp"], h.ints["snapshot_fp"])

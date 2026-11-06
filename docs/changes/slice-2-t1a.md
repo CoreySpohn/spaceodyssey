@@ -18,6 +18,9 @@ trace records. Every Slice 1 history is unchanged: all 112 golden digests match.
    (types and trace).
 3. `feat(core): canonical history, battery and fold counter read the belief layout`
    (comparator and battery).
+4. `docs(changes): record Slice 2 T1a belief layouts`.
+5. `feat(core): require layouts in history and answer(); harden layout checks`
+   (the review fixes below), with this record updated.
 
 ## Golden-history manifest
 
@@ -65,9 +68,8 @@ first nightly run on the Linux runner shows whether its float bytes agree.
 - The canonical history reads belief leaves, `belief_n`, `pbelief_n`,
   `belief_final`, `pbelief_final` and `belief_aux` through the layout
   (`LAYOUT_FIELDS` replaces the two hard-coded belief groups of
-  `CANONICAL_FIELDS`). `canonical_history(carry, trace, layout=None)` uses the
-  `MeanBelief` layout of the carry when given none; `RunResult` carries the layout
-  the executor used, and `history` passes it.
+  `CANONICAL_FIELDS`). `canonical_history(carry, trace, layout)` and `RunResult`
+  require the layout; `RunResult.history` passes the one the executor used.
 - Battery: `truth_swap` and `latency_shift` name the projection fields through
   `carry.PROJECTION_FIELDS`; `latency_shift` compares the final belief over the
   layout's leaves; the metamorphic relations compare both beliefs over the
@@ -77,7 +79,7 @@ first nightly run on the Linux runner shows whether its float bytes agree.
   the release handler, and reads no belief leaf.
 - Conformance (added to this task after a review of the spec): the fold counter
   `CountingObserver` wraps whatever full belief and summary the inner layout
-  declares, in a generic `CountedBelief(value, ids, counts)`, instead of
+  declares, in a generic `CountedBelief` (see the review fixes), instead of
   rebuilding `MeanBelief`. Field reads on the wrapper go to the wrapped value, so
   a policy or host service still reads the summary's own fields; this one dynamic
   attribute read is a reviewed allowance in `tests/core/gate_helpers.py`.
@@ -90,12 +92,15 @@ first nightly run on the Linux runner shows whether its float bytes agree.
 
 ## Public API
 
-`AbstractObserver`, `snapshot_fingerprint`, `finish_trace` and `canonical_history`
-are exported from `spaceodyssey.core`. Observers that subclass `AbstractObserver`
-keep working unchanged through the defaults. `snapshot_fingerprint` now needs the
-layout and `finish_trace` the study, which breaks direct callers. The library is
-below 1.0, so the commits are `feat(core)` without a breaking marker, and the
-first subject names the `snapshot_fingerprint` change.
+`AbstractObserver`, `AbstractHostService`, `RunResult`, `snapshot_fingerprint`,
+`finish_trace` and `canonical_history` are exported from `spaceodyssey.core`.
+Observers that subclass `AbstractObserver` keep working unchanged through the
+defaults. `snapshot_fingerprint`, `canonical_history` and `RunResult` now need the
+layout, `finish_trace` the study, and `AbstractHostService.answer` a third
+argument, which breaks direct callers and service implementations. The library is
+below 1.0, so the commits are `feat(core)` without a breaking marker; the first
+subject names the `snapshot_fingerprint` change and the review-fix subject names
+the history and service changes.
 
 ## Tests
 
@@ -103,22 +108,61 @@ Added:
 
 - `tests/core/test_golden_histories.py`: 58 (one coverage check, 56 per case and
   executor, one negative control); slow tier.
-- `tests/core/test_belief_layout.py`: 8 unit tests (refused layouts, four cases;
+- `tests/core/test_belief_layout.py`: 15 unit tests (refused layouts, four cases;
   the fingerprint reads the declared count leaf; the carry holds the declared
   types and an undeclared summary is refused; the comparator reads layout names
   and drops a zero-size leaf; the fold counter wraps a layout whose summary is not
-  a `MeanBelief`).
+  a `MeanBelief`; and the review tests below).
 
 Changed: the fingerprint call sites in `test_snapshot_fingerprint.py`,
 `test_audience_firewall.py` and `test_query_ordering.py` pass the layout;
 `test_canonical_fields.py` accepts `LAYOUT_FIELDS` as a disposition and mutates
 each toy layout leaf, the same six belief fields as before.
 
-Retired: none. Net: 8 quick, 58 slow.
+Retired: none. Net: 15 quick, 58 slow.
 
 Deciding tests on the rebased branch: `tests/core/test_corpus_invariants.py`,
 `tests/core/test_parity_values.py`, `tests/test_slice1_gate.py` and
 `tests/core/test_golden_histories.py` pass, with no history difference.
+
+## Review fixes
+
+A code review of the first three commits found seven defects; each was
+reproduced, then fixed with a test.
+
+1. The fold counter's attribute pass-through shadowed observer fields named
+   `counts`, `ids` or `value`. Its own fields are now `_fold_value`, `_fold_ids`
+   and `_fold_counts` (`folds.RESERVED`), every other attribute reads through, and
+   an observer value that defines a reserved name is refused. Read the counters
+   with `fold_counts`.
+2. `canonical_history` and `RunResult` fell back to the `MeanBelief` layout when
+   none was given. Both now require the layout, so a history is never read under a
+   layout the observer did not declare. Every test call site passes the study's
+   layout or reads `RunResult.history`.
+3. The toy host service read `mean` and `n` by name. `AbstractHostService.answer`
+   now receives the observer's layout (`answer(request, view, layout)`), passed by
+   `answer_pending` from the running study, and the toy service reads the summary
+   projection and the count leaf through it. Passing the layout at call time, not
+   at construction, lets the service read a view built by any observer wrapper
+   with the layout of the observer actually running. This changes the service
+   contract.
+4. `latency_shift` compared and counted belief updates in `belief_mean` only. It
+   now uses both projection fields.
+5. The counter's layout held fresh closures, so two equal results compared as
+   different static structures. Its projections are now `OnValue` modules around
+   the inner layout's functions, equal and hashable by value.
+6. `Study` did not check what the projections return. It now evaluates both with
+   `jax.eval_shape` and requires `(F64[n_subjects], F64[n_an])`.
+7. The layout check compared leaf paths only. It now compares tree definitions,
+   node types and static fields included, with leaf shapes and dtypes.
+
+Tests added for these: the counter keeps shadowed fields and refuses a reserved
+name; the toy service reads a layout whose count leaf is `m` and whose projection
+scales the mean; the latency check counts an update made only in `belief_aux`
+(and none for identical traces); `Study` refuses a layout with the right field
+names on another node type, a scalar projection and a short auxiliary projection;
+the history and `RunResult` refuse a missing layout; two counter layouts are equal
+and hash equal. Seven tests in all, unit tier.
 
 ## Time
 
@@ -128,7 +172,9 @@ before T1a; 85.0 s for 1,695 tests on the rebased branch. The difference is
 within run-to-run noise on a shared machine; the eight new quick tests take under
 1 s together, and the golden manifest runs in the slow tier. Its file takes about
 100 s alone with a warm compile cache, about 140 s cold. The full suite on the
-rebased branch passes: 2,754 tests in 672 s wall at `-n 2`.
+rebased branch passes: 2,754 tests in 672 s wall at `-n 2`. After the review
+fixes: quick tier 75.1 s cold for 1,701 tests, full suite 2,760 passed in 686 s,
+golden manifest unchanged.
 
 Actual time spent: about 1.3 hours of wall time, of which about 40 minutes was
 spent waiting on full-suite and golden runs.

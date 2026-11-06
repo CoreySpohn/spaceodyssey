@@ -28,8 +28,9 @@ of the policy summary, so a leaf whose capacity is zero adds nothing to a histor
 The layout also names the count leaf behind `belief_n` and `pbelief_n` and the
 projection behind `belief_final`, `pbelief_final`, `belief_aux` and the trace
 fields `belief_mean` and `belief_aux`. `RunResult.history` reads the layout the
-executor recorded; `canonical_history(carry, trace)` without one reads the
-`MeanBelief` layout of the carry. `CANONICAL_EXCLUSIONS` is the single map
+executor recorded, and `canonical_history(carry, trace, layout)` requires one, so
+no history is read under a layout the observer did not declare.
+`CANONICAL_EXCLUSIONS` is the single map
 for whole-field exclusions and their reasons; it is currently empty. A new output
 field must be added to the inventory or given a documented exclusion. The
 `test_every_output_field_has_an_explicit_disposition` regression enumerates the
@@ -103,8 +104,9 @@ same stage. The request and the `Result` rows both carry the snapshot fingerprin
 both appear in the history.
 
 A service is an `AbstractHostService`: a `kind` (the record kind index of its answers) and
-`answer(request, view)`, which receives the request and the audience's masked snapshot
-as numpy arrays and returns the payload columns. The service-facing request carries
+`answer(request, view, layout)`, which receives the request, the audience's masked
+snapshot as numpy arrays and the observer's `BeliefLayout` (through which it reads the
+snapshot's belief) and returns the payload columns. The service-facing request carries
 the question's semantic coordinates, not its internal stage or microstep, which can
 depend on private events. It sees nothing else. Before answering, the executor rebuilds
 the snapshot and checks that its fingerprint equals the one on the

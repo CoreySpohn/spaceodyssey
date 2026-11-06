@@ -40,7 +40,7 @@ def executor_pair():
     truths, roots = worlds(1)
     batch = CompiledExecutor().run_worlds(study, truths, roots, 4)
     compiled = RunResult(
-        base.index_world(batch.carry, 0), base.index_world(batch.trace, 0)
+        base.index_world(batch.carry, 0), base.index_world(batch.trace, 0), batch.layout
     )
     host = HostExecutor().run(study, base.index_world(truths, 0), roots[0], 4)
     assert int(compiled.carry.log.valid.sum()) > 0
@@ -145,4 +145,5 @@ def test_inactive_storage_and_trace_padding_are_ignored(executor_pair):
             for field in dataclasses.fields(compiled.trace)
         },
     )
-    assert base.histories_equal(host.history(), RunResult(carry, trace).history()).go
+    padded = RunResult(carry, trace, compiled.layout)
+    assert base.histories_equal(host.history(), padded.history()).go

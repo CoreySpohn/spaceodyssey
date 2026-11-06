@@ -39,14 +39,15 @@ class Request:
 class AbstractHostService:
     """A host-side answerer. `kind` is the record kind index its answers carry.
 
-    `answer` gets the request and the snapshot it names (the audience's masked view,
-    as numpy arrays) and returns the payload columns of the answer. It must be a
-    function of those two alone, and the same on every executor.
+    `answer` gets the request, the snapshot it names (the audience's masked view, as
+    numpy arrays) and the observer's `BeliefLayout`, through which it reads the
+    view's belief, and returns the payload columns of the answer. It must be a
+    function of those alone, and the same on every executor.
     """
 
     kind: int = 0
 
-    def answer(self, request, view):
+    def answer(self, request, view, layout):
         """Return the answer's payload as a float vector of at most `payload_width`."""
         raise NotImplementedError
 
@@ -161,7 +162,11 @@ def answer_pending(carry, study, service):
     payload = np.zeros(caps.payload_width, dtype=np.float64)
     given = np.atleast_1d(
         np.asarray(
-            service.answer(request, jax.tree_util.tree_map(np.asarray, view)),
+            service.answer(
+                request,
+                jax.tree_util.tree_map(np.asarray, view),
+                study.observer.layout(caps),
+            ),
             dtype=np.float64,
         )
     )

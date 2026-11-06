@@ -84,13 +84,18 @@ class Study(eqx.Module):
 
 
 def _shapes(tree):
-    """Leaf paths, shapes and dtypes of a pytree, comparable with `==`."""
-    paths, _ = jax.tree_util.tree_flatten_with_path(tree)
-    return [(path, leaf.shape, leaf.dtype) for path, leaf in paths]
+    """Tree structure (node types and static metadata) and leaf shapes and dtypes."""
+    leaves, treedef = jax.tree_util.tree_flatten(tree)
+    return treedef, [(leaf.shape, leaf.dtype) for leaf in leaves]
 
 
 def _check_layout(observer, caps):
-    """Require the observer's layout to describe the beliefs it initializes."""
+    """Require the observer's layout to describe its beliefs and projections.
+
+    The declared shapes must equal those `init` and `init_summary` build, node types
+    and static fields included. Both projections must return `(F64[n_subjects],
+    F64[n_an])`, the shapes of the trace fields they fill.
+    """
     layout = observer.layout(caps)
     belief = jax.eval_shape(lambda: observer.init(caps))
     summary = jax.eval_shape(lambda: observer.init_summary(caps))
@@ -101,4 +106,17 @@ def _check_layout(observer, caps):
         if _shapes(declared) != _shapes(made):
             raise ValueError(
                 f"the observer's layout does not describe the {which} it initializes"
+            )
+    want = [((caps.n_subjects,), jnp.dtype(F64)), ((caps.n_an,), jnp.dtype(F64))]
+    for which, project, shapes in (
+        ("project", layout.project, belief),
+        ("summary projection", layout.summary_projection, summary),
+    ):
+        out = jax.eval_shape(project, shapes)
+        got = [(x.shape, x.dtype) for x in jax.tree_util.tree_leaves(out)]
+        pair = jax.tree_util.tree_structure((0, 0))
+        if jax.tree_util.tree_structure(out) != pair or got != want:
+            raise ValueError(
+                f"the layout's {which} must return (F64[n_subjects], F64[n_an]), "
+                f"not {got}"
             )

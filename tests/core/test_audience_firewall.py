@@ -65,7 +65,7 @@ def _release(carry, study, slot, audience, tick=10):
 
 
 class RequestService(oracle.ToyOracleService):
-    def answer(self, request, view):
+    def answer(self, request, view, layout):
         self.requests.append(request)
         return np.asarray([getattr(request, "micro", 0), 0.0, 0.0])
 

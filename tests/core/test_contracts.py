@@ -203,10 +203,10 @@ def test_draw_control_rejects_nan_only_corruption(monkeypatch, executor, mutant)
                     result.trace,
                     jnp.full_like(result.trace.pol_u, jnp.nan),
                 )
-                return core.RunResult(result.carry, trace)
+                return core.RunResult(result.carry, trace, result.layout)
             payload = result.carry.log.payload.at[..., 1].set(jnp.nan)
             carry = eqx.tree_at(lambda c: c.log.payload, result.carry, payload)
-            return core.RunResult(carry, result.trace)
+            return core.RunResult(carry, result.trace, result.layout)
 
         return run
 

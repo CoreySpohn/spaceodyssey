@@ -22,7 +22,7 @@ from spaceodyssey.core.enums import (
     Scope,
     Stage,
 )
-from spaceodyssey.core.executors.base import canonical_history, index_world
+from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.studies import toy as kinds
 from tests.core.corpus import HAND_HISTORIES, HAND_STUDIES, frozen
@@ -500,9 +500,9 @@ def test_partial_draw_key_ignores_status(bundle_state):
 
 
 def test_phase_switch_changes_policy_at_boundary():
-    cs, ts = hand_run("phase_switch")
+    run = hand_run("phase_switch")
     for w in range(2):
-        h = canonical_history(index_world(cs, w), index_world(ts, w))
+        h = run.history(w)
         assert h.ints["phase"].tolist() == [0, 0, 0, 1, 1]
         assert h.ints["vintage"].tolist() == [0, 0, 0, 1, 1]
         # phase B restarts its own plan: first subject 0 on channel 12 at 445
@@ -512,7 +512,7 @@ def test_phase_switch_changes_policy_at_boundary():
             445,
         )
         assert h.ints["acquisition_index"][3] == 2
-    assert [int(p) for p in cs.phase] == [1, 1]
+    assert [int(p) for p in run.carry.phase] == [1, 1]
 
 
 def test_cancel_partial_joins_observer_not_belief_mean(bundle_state):

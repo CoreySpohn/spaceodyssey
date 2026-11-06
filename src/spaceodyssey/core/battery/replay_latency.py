@@ -40,9 +40,14 @@ def delay_in_ticks(study, delay_s):
 
 
 def _belief_at(trace, tick):
-    """Projected belief after the last handled step at or before `tick`, else zeros."""
+    """Projected belief after the last handled step at or before `tick`, else zeros.
+
+    Both projection fields count: a layout may record its updates in `belief_aux`.
+    """
     handled = np.asarray(trace.handled) & (np.asarray(trace.tick) <= tick)
-    belief = np.asarray(trace.belief_mean)
+    belief = np.concatenate(
+        [np.asarray(trace.belief_mean), np.asarray(trace.belief_aux)], axis=-1
+    )
     idx = np.flatnonzero(handled)
     return belief[idx[-1]] if idx.size else np.zeros_like(belief[0])
 

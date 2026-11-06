@@ -17,7 +17,8 @@ def _run(executor, study):
     truth, root = one_world()
     views = []
     carry, trace = executor.run(study, truth, root, N_STEPS, view_log=views)
-    return canonical_history(carry, trace), views, trace
+    layout = study.observer.layout(study.caps)
+    return canonical_history(carry, trace, layout), views, trace
 
 
 def _decisions_at(trace, tick):

@@ -7,7 +7,7 @@ import numpy as np
 
 from spaceodyssey.core.carry import Carry, Trace
 from spaceodyssey.core.enums import I64, RunStatus
-from spaceodyssey.core.snapshot import BeliefLayout, mean_layout, named_leaves
+from spaceodyssey.core.snapshot import BeliefLayout, named_leaves
 
 GO_TOLERANCE = 1e-12
 KILL_TOLERANCE = 1e-9
@@ -284,16 +284,13 @@ def _canonical_leaves(carry, trace, handled, layout):
     return out
 
 
-def canonical_history(carry, trace, layout=None):
+def canonical_history(carry, trace, layout):
     """Valid-compressed history of one world: handled steps and valid log rows.
 
-    `layout` is the observer's `BeliefLayout`; it names the belief leaves compared,
-    the count leaf and the projections of the final beliefs. Without one, the history
-    reads the `MeanBelief` layout of the carry's own beliefs, the default every
-    observer that keeps `init` declares.
+    `layout` is the observer's `BeliefLayout` (`study.observer.layout(study.caps)`);
+    it names the belief leaves compared, the count leaf and the projections of the
+    final beliefs.
     """
-    if layout is None:
-        layout = mean_layout(carry.belief, carry.pbelief)
     final_mean, final_aux = layout.project(carry.belief)
     summary_mean, _ = layout.summary_projection(carry.pbelief)
     h = np.asarray(trace.handled)
@@ -496,13 +493,12 @@ def tree_equal_report(a, b):
 class RunResult(eqx.Module):
     """Final carry and per-step trace; unpackable as a pair.
 
-    `layout` is the observer's `BeliefLayout`, which `history` compares through; the
-    executors set it, and without one `canonical_history` uses its default.
+    `layout` is the observer's `BeliefLayout`, which `history` compares through.
     """
 
     carry: Carry
     trace: Trace
-    layout: BeliefLayout | None = eqx.field(default=None, static=True)
+    layout: BeliefLayout = eqx.field(static=True)
 
     def __iter__(self):
         """Iterate over the carry and trace."""

@@ -33,8 +33,9 @@ def runs():
 
 
 def histories(runs):
-    _, scan, host = runs
-    return canonical_history(*scan), canonical_history(*host)
+    study, scan, host = runs
+    layout = study.observer.layout(study.caps)
+    return canonical_history(*scan, layout), canonical_history(*host, layout)
 
 
 # carry-side field: (history key, expected value as a function of the capacities)
@@ -135,8 +136,9 @@ def test_reserved_table_field_has_no_behaviour(runs, name):
     study, scan, _ = runs
     truths, roots = worlds(1)
     cs, ts = CompiledExecutor().run(perturbed(study, name), truths, roots, N_STEPS)
-    changed = canonical_history(index_world(cs, 0), index_world(ts, 0))
-    baseline = canonical_history(*scan)
+    layout = study.observer.layout(study.caps)
+    changed = canonical_history(index_world(cs, 0), index_world(ts, 0), layout)
+    baseline = canonical_history(*scan, layout)
     assert histories_equal(baseline, changed).ok
     assert changed.events == baseline.events
 

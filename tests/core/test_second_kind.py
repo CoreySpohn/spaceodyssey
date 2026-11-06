@@ -10,7 +10,6 @@ from spaceodyssey.core import (
     Audience,
     CompiledExecutor,
     HostExecutor,
-    canonical_history,
     histories_equal,
     index_world,
     snapshot_view,
@@ -95,13 +94,10 @@ def test_catalog_row_never_reaches_the_policy():
 def test_catalog_study_agrees_between_executors():
     study = _study()
     truths, roots = worlds(2)
-    cs, ts = CompiledExecutor().run(study, truths, roots, N_STEPS_CORPUS)
+    cs_history = CompiledExecutor().run(study, truths, roots, N_STEPS_CORPUS).history
     for w in range(2):
         host = HostExecutor().run(
             study, index_world(truths, w), roots[w], N_STEPS_CORPUS
         )
-        r = histories_equal(
-            canonical_history(*host),
-            canonical_history(index_world(cs, w), index_world(ts, w)),
-        )
+        r = histories_equal(host.history(), cs_history(w))
         assert r.structure_equal and r.max_int_diff == 0 and r.max_abs <= 1e-9

@@ -130,9 +130,10 @@ def test_executors_agree_on_indices(case):
     study = case.make_study()
     truths, roots = worlds(1)
     cs, ts = CompiledExecutor().run(study, truths, roots, 40)
-    scan = canonical_history(index_world(cs, 0), index_world(ts, 0))
+    layout = study.observer.layout(study.caps)
+    scan = canonical_history(index_world(cs, 0), index_world(ts, 0), layout)
     host_carry, th = HostExecutor().run(study, index_world(truths, 0), roots[0], 40)
-    host = canonical_history(host_carry, th)
+    host = canonical_history(host_carry, th, layout)
     for key in ("acquisition_index", "subject", "acquisition_counts"):
         assert np.array_equal(scan.ints[key], host.ints[key]), (case.name, key)
     per_subject = {}

@@ -77,9 +77,10 @@ def test_observer_only_revisions_do_not_reach_the_policy():
 @pytest.mark.parametrize("revisions", [(0, 1), (1, 0)])
 def test_revisions_agree_between_executors_and_replay(revisions):
     study, carry, trace, (cc, ct) = _run(revisions, (2.0, 9.0))
-    a = canonical_history(carry, trace)
+    layout = study.observer.layout(study.caps)
+    a = canonical_history(carry, trace, layout)
     host_h = a
-    comp_h = canonical_history(cc, ct)
+    comp_h = canonical_history(cc, ct, layout)
     r = histories_equal(host_h, comp_h)
     assert r.structure_equal and r.max_int_diff == 0 and r.max_abs <= 1e-9
     assert list(a.ints["superseded_by"]) == list(comp_h.ints["superseded_by"])

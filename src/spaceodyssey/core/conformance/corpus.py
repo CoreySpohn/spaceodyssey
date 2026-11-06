@@ -21,7 +21,7 @@ import numpy as np
 
 from spaceodyssey.core.battery.views import DecisionViews
 from spaceodyssey.core.capacities import require_x64
-from spaceodyssey.core.conformance.folds import CountingObserver, plain
+from spaceodyssey.core.conformance.folds import CountingObserver, fold_counts, plain
 from spaceodyssey.core.enums import Audience, EventKind, Purpose, Stage
 from spaceodyssey.core.events import enqueue, where_tree
 from spaceodyssey.core.executors.base import canonical_history, index_world
@@ -309,7 +309,7 @@ def run_case(
                 history=canonical_history(carry, trace, layout),
                 views=views,
                 folds=tuple(
-                    (np.asarray(b.ids), np.asarray(b.counts))
+                    tuple(np.asarray(x) for x in fold_counts(b))
                     for b in (counted_carry.belief, counted_carry.pbelief)
                 ),
                 form_views={form: runs[w][2] for form, runs in form_runs.items()},

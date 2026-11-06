@@ -90,7 +90,8 @@ def test_balance_must_be_finite(executor):
 def test_refused_bundle_preserves_stable_ids(executor):
     run = runs("bundle_unaffordable", executor)[0]
     bad = planted(run, lambda c: c.next_sid, run.carry.next_sid + 2)
-    history = canonical_history(bad.carry, bad.trace)
+    layout = run.study.observer.layout(run.study.caps)
+    history = canonical_history(bad.carry, bad.trace, layout)
     assert not all(check(history) for check in run.case.invariants)
 
 

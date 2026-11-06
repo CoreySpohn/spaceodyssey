@@ -193,7 +193,7 @@ ALLOWED = {
     ("battery/views.py", "if not bits_equal(x, getattr(vb.log, name)):"): Allowance(
         COLUMN_BY_NAME, ("dynamic-getattr",), "compare_views", 1
     ),
-    ("conformance/folds.py", "return getattr(self.value, name)"): Allowance(
+    ("conformance/folds.py", "return getattr(self._fold_value, name)"): Allowance(
         WRAPPED_FIELD, ("dynamic-getattr",), "CountedBelief.__getattr__", 1
     ),
     ("carry.py", "o = getattr(o, part)"): Allowance(
