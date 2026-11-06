@@ -214,6 +214,11 @@ def check_calibration(run, truths, pit, *, margin):
     if not _positive(margin):
         raise ValueError(f"a margin must be positive and finite, not {margin}")
     values, counted = jax.vmap(pit)(run.carry.belief, truths)
+    return _calibration(values, counted, margin)
+
+
+def _calibration(values, counted, margin):
+    """Judge world-by-slot PITs with the world-clustered DKW slack."""
     values, counted = np.asarray(values), np.asarray(counted, dtype=bool)
     per_slot = counted.sum(axis=0)
     used = per_slot > 0
@@ -450,10 +455,17 @@ def replay_beliefs(study, run, roots, observer=None):
 
 
 def _shifted(tree):
-    """`tree` with one added to every numeric leaf: a belief unlike any refit."""
-    return jax.tree_util.tree_map(
-        lambda x: x if x.dtype == jnp.bool_ else x + jnp.ones((), x.dtype), tree
-    )
+    """Invert booleans and shift numeric values enough that each differs."""
+
+    def shift(x):
+        if x.dtype == jnp.bool_:
+            return ~x
+        one = jnp.ones((), x.dtype)
+        if jnp.issubdtype(x.dtype, jnp.integer):
+            return x + one
+        return x + jnp.maximum(one, jnp.abs(x))
+
+    return jax.tree_util.tree_map(shift, tree)
 
 
 def _refit_subject(observer, study, log, root, seed, subject):
@@ -704,8 +716,9 @@ def check_promotion_parity(study, run, roots, *, observer=None):
     `MIN_WORLDS` worlds at least.
 
     `install` is challenged too: the release-order refit, installed into a copy of
-    the incremental belief with every numeric leaf shifted by one, must give the
-    refit subject the refit's values in every leaf the observer declares in
+    the incremental belief with booleans inverted and numeric values shifted so
+    each differs, must give the refit subject the refit's values in every leaf
+    the observer declares in
     `subject_leaves`, keep every other subject's values there, and keep every other
     leaf, before analysis.
 
@@ -817,24 +830,69 @@ def refit_beliefs(study, run, roots, *, observer=None, seed=0):
 
 
 def check_refit_calibration(study, run, truths, roots, pit, *, margin, observer=None):
-    """Check 1 applied to the refit beliefs, once per declared seed.
+    """Check 1 applied to refits at each subject row depth, per declared seed.
 
     Promotion parity holds a statistical refit to the incremental belief in mean
-    only; this holds its draws to the truth: the PITs of `refit_beliefs` under
-    each declared seed (or seed 0) must pass `check_calibration`.
+    only; this holds its draws to the truth at every canonical prefix parity
+    exercises. `pit` returns one PIT slot per subject. Only the refitted subject's
+    PIT counts at each prefix, pooled over subjects separately at each row depth
+    under each declared seed (or seed 0). Every depth must pass the calibration
+    margin, with worlds as the independent units for the DKW slack.
     """
     if not _positive(margin):
         raise ValueError(f"a margin must be positive and finite, not {margin}")
     observer = study.observer if observer is None else observer
     declared = declared_margin(observer)
+    seeds = (0,) if declared is None else declared.seeds
+    carry, trace = jax.device_get((run.carry, run.trace))
+    orders, counts, accepted, released = _orders(carry, trace, Audience.OBSERVER)
+    if not counts.any():
+        raise ValueError("no world folded a row; refit calibration is vacuous")
+    canonical = _promotions(
+        observer,
+        study,
+        run.carry.log,
+        jnp.asarray(orders),
+        jnp.asarray(counts),
+        jnp.asarray(accepted),
+        jnp.asarray(released),
+        roots,
+        jnp.asarray(seeds, I64),
+    )[2]
+
+    def one(beliefs, truth):
+        return jax.vmap(jax.vmap(lambda belief: pit(belief, truth)))(beliefs)
+
+    values, counted = (np.asarray(x) for x in jax.vmap(one)(canonical, truths))
+    n_subjects = study.caps.n_subjects
+    if values.shape[3:] != (n_subjects,):
+        raise ValueError("refit calibration needs one PIT slot per subject")
+    n_rows = orders.shape[1]
+    valid = np.arange(n_rows)[None, :] < counts[:, None]
+    subjects = np.take_along_axis(np.asarray(carry.log.subject), orders, axis=1)
+    depth = np.stack(
+        [
+            (subjects[:, : k + 1] == subjects[:, k : k + 1]).sum(1)
+            for k in range(n_rows)
+        ],
+        axis=1,
+    )
     failures, detail = [], {}
-    for seed in (0,) if declared is None else declared.seeds:
-        belief = refit_beliefs(study, run, roots, observer=observer, seed=seed)
-        refit = dataclasses.replace(
-            run, carry=dataclasses.replace(run.carry, belief=belief)
-        )
-        result = check_calibration(refit, truths, pit, margin=margin)
-        detail[f"seed {seed}"] = result.detail
-        if not result:
-            failures.append(f"seed {seed}: {result.diagnostic}")
+    for j, seed in enumerate(seeds):
+        per_depth = {}
+        for rows in sorted(set(depth[valid].tolist())):
+            take = (
+                valid[:, :, None]
+                & (depth[:, :, None] == rows)
+                & (subjects[:, :, None] == np.arange(n_subjects))
+            )
+            # Each world contributes at most once per subject at this depth.
+            pits = np.where(take, values[:, :, j], 0.0).sum(axis=1)
+            used = (take & counted[:, :, j]).any(axis=1)
+            result = _calibration(pits, used, margin)
+            label = f"after {rows} of its rows"
+            per_depth[label] = result.detail
+            if not result:
+                failures.append(f"seed {seed}, {label}: {result.diagnostic}")
+        detail[f"seed {seed}"] = per_depth
     return make_result("refit_calibration", failures, **detail)

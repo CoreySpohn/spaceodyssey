@@ -8,6 +8,7 @@ compile alone is over the unit budget.
 
 import math
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -21,7 +22,7 @@ from spaceodyssey.core.conformance import (
     declared_margin,
     t_quantile,
 )
-from spaceodyssey.core.conformance.observer_kit import _stratum_failures
+from spaceodyssey.core.conformance.observer_kit import _shifted, _stratum_failures
 from tests.core.kit_helpers import (
     NOISE,
     OBSERVERS,
@@ -33,6 +34,20 @@ from tests.core.kit_helpers import (
 )
 
 STUDY = kit_study(OBSERVERS["mean"])
+
+
+def test_install_challenge_changes_every_leaf_value():
+    """Fails if booleans or large numeric values survive the install challenge."""
+    belief = (
+        jnp.asarray([False, True]),
+        jnp.asarray([0, 2**60], jnp.int64),
+        jnp.asarray([0.0, 1e20, -1e20], jnp.float64),
+    )
+    changed = _shifted(belief)
+    for got, before in zip(changed, belief, strict=True):
+        assert got.dtype == before.dtype
+        assert np.all(np.asarray(got) != np.asarray(before))
+    np.testing.assert_array_equal(changed[1], np.asarray([1, 2**60 + 1]))
 
 
 class Unowned(RefitMean):

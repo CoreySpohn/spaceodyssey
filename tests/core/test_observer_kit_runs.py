@@ -25,6 +25,7 @@ from tests.core.kit_helpers import (
     N_STEPS,
     NOISE,
     MeanMutant,
+    ReadyMean,
     RefitMean,
     ResampleSample,
     first_worlds,
@@ -126,6 +127,24 @@ def test_promotion_parity_exact():
     assert result, result.diagnostic
     assert result.detail["n_checked"] == 8 * HOST_WORLDS
     assert result.detail["canonical_equal"]
+
+
+def test_promotion_parity_refuses_stale_boolean_install():
+    """Fails if install can leave a subject-owned boolean stale."""
+    _, batch, _, roots = kit_run("mean", "host")
+    observer = ReadyMean()
+    study = kit_study(observer)
+    belief, summary = replay_beliefs(study, batch, roots)
+    run = dataclasses.replace(
+        batch, carry=dataclasses.replace(batch.carry, belief=belief, pbelief=summary)
+    )
+    correct = check_promotion_parity(study, run, roots)
+    assert correct, correct.diagnostic
+    result = check_promotion_parity(
+        study, run, roots, observer=ReadyMean(stale_ready=True)
+    )
+    assert not result
+    assert "install did not take the refit's ready" in result.diagnostic
 
 
 PARITY_CONTROLS = {

@@ -162,9 +162,9 @@ def test_promotion_parity_controls(control):
 
 @pytest.mark.parametrize("name", ["statistical", "order_sensitive"])
 def test_refit_calibration(name):
-    """Fails if the draws a refresh of every subject installs are not calibrated
-    against the truth under each declared seed: a fresh posterior draw from the
-    refit key, or the canonical-order draw of the latest fold.
+    """Fails if correct refits are refused at either row depth or if prefix PITs
+    lose worlds or treat subjects of one world as independent, under each seed:
+    a fresh posterior draw, or the canonical-order draw of the latest fold.
     """
     study, run, truths, roots = kit_run("sample")
     observer = ResampleSample(noise=NOISE) if name == "statistical" else None
@@ -179,18 +179,30 @@ def test_refit_calibration(name):
     )
     assert result, result.diagnostic
     assert len(result.detail) == (2 if name == "statistical" else 1)
+    for depths in result.detail.values():
+        assert set(depths) == {"after 1 of its rows", "after 2 of its rows"}
+        for detail in depths.values():
+            assert detail["n_pits"] == 4 * N_WORLDS
+            assert detail["slack"] == pytest.approx(
+                math.sqrt(math.log(2 * 4 / 0.05) / (2 * N_WORLDS)), rel=1e-12
+            )
 
 
-def test_refit_calibration_control_a_refit_twice_as_wide():
+@pytest.mark.parametrize("fault", ["wide_refit", "one_row_wide_refit"])
+def test_refit_calibration_control_a_refit_twice_as_wide(fault):
     """Fails if refit calibration passes draws of twice the posterior's standard
     deviation: their mean matches the incremental draw, so parity alone can pass
-    them (its worst bound near 0.065 is inside the 0.1 margin).
+    them (its worst bound near 0.065 is inside the 0.1 margin), even when the
+    refit is correct after two rows and wrong only after one.
     """
     study, run, truths, roots = kit_run("sample")
-    wide = _mutant(wide_refit=True)
+    wide = _mutant(**{fault: True})
     parity = check_promotion_parity(study, run, roots, observer=wide)
     assert parity, parity.diagnostic
     result = check_refit_calibration(
         study, run, truths, roots, pit_of_sample(NOISE), margin=MARGIN, observer=wide
     )
     assert not result and "from uniform" in result.diagnostic
+    if fault == "one_row_wide_refit":
+        assert "after 1 of its rows" in result.diagnostic
+        assert "after 2 of its rows" not in result.diagnostic

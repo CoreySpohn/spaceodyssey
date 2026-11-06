@@ -56,6 +56,57 @@ class RefitMean(toy.ToyRunningMean):
         return REFIT
 
 
+class ReadyBelief(MeanBelief):
+    """A running mean with subject-owned boolean state."""
+
+    ready: jax.Array
+
+
+class ReadyMean(RefitMean):
+    """A boolean install mutant, with the fault off by default."""
+
+    subject_leaves = ("mean", "n", "ready")
+    stale_ready: jax.Array = _flag()
+
+    def init(self, caps):
+        belief = super().init(caps)
+        return ReadyBelief(belief.mean, belief.n, belief.aux, belief.n > 0)
+
+    def fold(self, belief, rec, caps, key=None):
+        folded = super().fold(belief, rec, caps, key=key)
+        return ReadyBelief(folded.mean, folded.n, folded.aux, folded.n > 0)
+
+    def analyze(self, belief):
+        analyzed = super().analyze(belief)
+        return ReadyBelief(analyzed.mean, analyzed.n, analyzed.aux, belief.ready)
+
+    def fold_summary(self, belief, rec, caps, key=None):
+        return RefitMean().fold_summary(belief, rec, caps, key=key)
+
+    def init_summary(self, caps):
+        return RefitMean().init_summary(caps)
+
+    def install(self, belief, fitted, subject):
+        put = super().install(belief, fitted, subject)
+        ready = belief.ready.at[subject].set(
+            jnp.where(self.stale_ready, belief.ready[subject], fitted.ready[subject])
+        )
+        return ReadyBelief(put.mean, put.n, put.aux, ready)
+
+    def layout(self, caps):
+        layout = super().layout(caps)
+        belief = layout.belief
+        return dataclasses.replace(
+            layout,
+            belief=ReadyBelief(
+                belief.mean,
+                belief.n,
+                belief.aux,
+                jax.ShapeDtypeStruct(belief.n.shape, jnp.bool_),
+            ),
+        )
+
+
 class RefitSample(toy.ToySampleObserver):
     """The toy sampling observer, declared refit-capable on measurement rows.
 
@@ -170,6 +221,7 @@ class SampleMutant(ResampleSample):
     - `canonical_mean`: a refit adds 100 to its (deterministic) mean when its first
       counting row is not its subject's first acquisition (canonical order only).
     - `wide_refit`: a refit's draw has twice the posterior's standard deviation.
+    - `one_row_wide_refit`: twice the draw's standard deviation at one row only.
     - `stale_install`: `install` leaves the subject's mean as it was.
     - `leak_install`: `install` adds 100 to the next subject's mean.
     """
@@ -181,6 +233,7 @@ class SampleMutant(ResampleSample):
     nan_sample: jax.Array = _flag()
     canonical_mean: jax.Array = _flag()
     wide_refit: jax.Array = _flag()
+    one_row_wide_refit: jax.Array = _flag()
     stale_install: jax.Array = _flag()
     leak_install: jax.Array = _flag()
 
@@ -200,7 +253,11 @@ class SampleMutant(ResampleSample):
         subject = rows.subject[first]
         shift = jnp.where(self.cancelling, jnp.where(subject % 2 == 0, 1.0, -1.0), 0.0)
         spread = fitted.sample[subject] - fitted.mean[subject]
-        wide = jnp.where(self.wide_refit, spread, 0.0)
+        wide = jnp.where(
+            self.wide_refit | (self.one_row_wide_refit & (fitted.n[subject] == 1)),
+            spread,
+            0.0,
+        )
         sample = fitted.sample.at[subject].add(shift + wide)
         sample = jnp.where(self.nan_refit, jnp.nan, sample)
         late = rows.valid.any() & (rows.acquisition_index[first] > 0)

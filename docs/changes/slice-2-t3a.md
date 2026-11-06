@@ -85,7 +85,8 @@ runs on every corpus case on both executors through the existing corpus tests.
   worlds with the larger of the observed and declared standard errors, which must
   lie inside the margin, over ten worlds at least. `install` is challenged: the
   release-order refit installed into a copy of the incremental belief with every
-  numeric leaf shifted by one must give the refit subject the refit's values in
+  boolean leaf inverted and every numeric value shifted enough to differ must
+  give the refit subject the refit's values in
   every leaf the observer declares in `subject_leaves` (each with a leading
   subject axis), keep every other subject's values there, and keep every other
   leaf, before analysis. The
@@ -105,9 +106,10 @@ runs on every corpus case on both executors through the existing corpus tests.
   observer that fails this.
 - **Refit calibration.** Parity holds a statistical refit to the incremental
   belief in mean only, so `check_refit_calibration` holds its draws to the truth:
-  every subject of each world is refit from `refit_rows` of the final log under
-  each declared seed, installed and analyzed (`refit_beliefs`), and the PITs must
-  pass the calibration check.
+  the canonical refit at every promotion prefix is installed and analyzed under
+  each declared seed. Only the refitted subject's PIT counts at that prefix, and
+  each subject row depth must pass calibration separately, with the DKW slack
+  built from worlds. `refit_beliefs` still gives the final-log refresh beliefs.
 
 ## Row order in promotion parity
 
@@ -298,6 +300,22 @@ entry-point test deselected in the worktree: it reads the main checkout's
 metadata), golden manifest unchanged. `ruff`, the domain-word and core-import
 lints, the Slice 1 gate's dispatch scan and the internal-reference check are clean.
 The one budget report in that run is an existing hand-study test in `test_core.py`.
+
+## Post-merge follow-ups
+
+The install challenge now inverts boolean state and shifts floats enough to
+change even large values, while integers still increase by one. The
+`ReadyMean(stale_ready=True)` mutant leaves its subject-owned `ready` boolean
+stale and fails with `install did not take the refit's ready`.
+
+Refit calibration now checks every subject row depth exercised by canonical
+promotion parity, including one-row prefixes, separately under each seed. It
+keeps the world-clustered DKW slack. The
+`SampleMutant(one_row_wide_refit=True)` mutant doubles the posterior draw standard
+deviation only at one row, passes parity, and fails calibration with
+`after 1 of its rows` and `from uniform`; correct refits pass at both depths.
+Run-based regressions remain in the existing slow files, and the numeric
+challenge regression needs no run.
 
 ## Time
 
