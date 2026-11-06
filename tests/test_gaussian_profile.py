@@ -15,7 +15,7 @@ from scipy.stats import norm
 
 from spaceodyssey import Claim, Edge, PlanPredictive, PriorSet, Profile, Truth
 from spaceodyssey.errors import UnsupportedProfile
-from spaceodyssey.testing import LinearGaussianTruthModel, check_outcome
+from tests.doubles import LinearGaussianTruthModel, check_outcome
 from tests.test_plan import make_plan
 
 
@@ -69,18 +69,6 @@ def test_interval_too_narrow_is_empty():
         radius, feasible = _interval_radius(0.1, 1.0, 0.05)
         assert not bool(feasible)
         assert float(radius) == 0
-
-
-def test_public_registered_certifier():
-    import spaceodyssey
-    from spaceodyssey.registry import REGISTRY
-
-    assert hasattr(spaceodyssey, "GaussianProfileCertifier")
-    assert (
-        REGISTRY.get("certification", "gaussian_profile").cls
-        is spaceodyssey.GaussianProfileCertifier
-    )
-    assert REGISTRY.get("certification", "gaussian_profile").info.fidelity == ""
 
 
 class GaussianModel(LinearGaussianTruthModel):
@@ -242,39 +230,6 @@ def test_separate_matches_data_monte_carlo(interval, correlated):
             actual = np.asarray(getattr(outcome, name))
             se = np.sqrt(actual * (1 - actual) / len(hits))
             np.testing.assert_array_less(np.abs(actual - expected), 5 * se + 1e-12)
-
-
-def test_reference_separate_and_orbit_run_integrate():
-    from spaceodyssey import GaussianProfileCertifier
-    from spaceodyssey.build import build
-    from spaceodyssey.engines.analytic import run_integrate
-    from spaceodyssey.profiles import EXOEARTH_CANDIDATE, HABITABLE_ZONE_ONLY
-    from tests.doubles import make_spec
-    from tests.test_analytic import TestIntegrateEngine
-
-    with jax.enable_x64():
-        reference = replace(EXOEARTH_CANDIDATE, support_rule="separate")
-        model = ReferenceModel(prior_set_id=reference.prior_set_id, scale=5.0)
-        predictive = experiment(
-            model,
-            [[0.2, 0.1, -3.0], [0.1, -0.1, -4.0], [0.5, 0.3, -5.0]],
-            noise_sigma=jnp.full((3, 3), 0.05),
-        )
-        outcomes = []
-        for profile in (reference, HABITABLE_ZONE_ONLY):
-            cert = GaussianProfileCertifier(profile, model)
-            outcome = cert.integrate(predictive)
-            check_outcome(outcome, profile)
-            mission = build(make_spec(), TestIntegrateEngine.config())
-            mission = eqx.tree_at(lambda m: m.model.certification, mission, cert)
-            report = run_integrate(
-                mission, predictive=predictive, weights=[1.0, 1.0, 1.0]
-            )
-            assert report.profile_hash == profile.content_hash()
-            outcomes.append(outcome)
-        np.testing.assert_allclose(
-            outcomes[1].p_pos, outcomes[0].claim_p_pos[:, 0], atol=1e-12, rtol=0
-        )
 
 
 def test_general_linear_quantity_and_nonlinear_rejection(monkeypatch):

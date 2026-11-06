@@ -7,10 +7,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from spaceodyssey.engines.analytic import CHANNELS, certified_yield
 from spaceodyssey.metrics import CertifiedYield
 from spaceodyssey.profiles import EXOEARTH_CANDIDATE, HABITABLE_ZONE_ONLY
-from spaceodyssey.testing import check_outcome
+from spaceodyssey.reporting import CHANNELS, certified_yield
+from tests.doubles import check_outcome
 from tests.test_plan import make_outcome
 
 FIELDS = (

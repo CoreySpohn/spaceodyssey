@@ -1,9 +1,11 @@
 """Tests for the public package surface."""
 
-import importlib
 import inspect
 
+import pytest
+
 import spaceodyssey
+from spaceodyssey import codec, plugins
 
 
 def test_all_names_importable():
@@ -23,34 +25,38 @@ def test_certified_yield_is_reporting_function():
     assert spaceodyssey.certified_yield is spaceodyssey.reporting.certified_yield
 
 
-def test_observe_is_loop_function():
-    """The public observe entry point is the loop function."""
-    assert spaceodyssey.observe is spaceodyssey.loop.observe
+@pytest.mark.parametrize(
+    "name",
+    [
+        "REGISTRY",
+        "Registry",
+        "MissionSpec",
+        "FidelityConfig",
+        "FileRef",
+        "SeamRef",
+        "WiringError",
+        "RegistryError",
+        "build",
+        "run",
+        "run_mission",
+        "get_engine",
+        "register_engine",
+        "to_json",
+        "spec_from_json",
+    ],
+)
+def test_legacy_names_are_gone(name):
+    """Fails if a name of the removed mission-loop API is exported again."""
+    assert not hasattr(spaceodyssey, name)
+    assert name not in spaceodyssey.__all__
 
 
-def test_observe_submodule_remains_importable():
-    """The measurement interface remains available through its module path."""
-    module = importlib.import_module("spaceodyssey.observe")
-    assert module.AbstractMeasurement is spaceodyssey.AbstractMeasurement
-
-
-def test_default_registry_entries_available():
-    """The in-tree reference implementations are discoverable and usable."""
-    for seam, name in (
-        ("certification", "snr_threshold"),
-        ("certification", "toy_gaussian"),
-        ("context", "always_observable"),
-        ("cost", "constant_overheads"),
-    ):
-        entry = spaceodyssey.REGISTRY.get(seam, name)
-        assert entry.available, f"{seam}:{name} unavailable: {entry.reason}"
-
-
-def test_sample_engine_available():
-    """The sampling engine resolves through the public entry point."""
-    assert callable(spaceodyssey.get_engine("sample"))
-
-
-def test_integrate_engine_available():
-    """The analytic integrate engine resolves through the public entry point."""
-    assert callable(spaceodyssey.get_engine("integrate"))
+def test_document_codec_surface():
+    """The codec and plugin entry points that replace the spec and registry."""
+    assert inspect.isclass(codec.KindResolver)
+    assert callable(codec.dump_study)
+    assert callable(codec.load_study)
+    assert callable(plugins.installed_resolver)
+    assert callable(plugins.kinds_from_entry_points)
+    assert issubclass(plugins.RegistrationError, Exception)
+    assert plugins.FAMILIES

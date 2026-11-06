@@ -275,7 +275,7 @@ class CertificationOutcome(eqx.Module):
         claim_in_range: Claim validity flags, shape (P, K), boolean.
         claim_names: Ordered names; supplied with all six claim arrays.
         fidelity: Optional free-form method label, such as closed_form or quadrature;
-            metadata only, never ordered, as in SeamInfo.
+            metadata only and never ordered.
         profile_hash: Optional 64-character lowercase hexadecimal profile content hash.
         replicate_key: Static identifier of the replicate stream. Batch main
             probabilities must match replicate means to rtol 1e-10.

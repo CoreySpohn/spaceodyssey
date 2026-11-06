@@ -5,9 +5,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import spaceodyssey
-from spaceodyssey import contracts
-from spaceodyssey.contracts import resolve_contract
 from spaceodyssey.errors import OutOfRangeError
 from spaceodyssey.plan import CertificationOutcome, PlanPredictive, PlanSummary
 
@@ -139,18 +136,6 @@ class TestCertificationOutcome:
         outcome = make_outcome(in_range=jnp.array([True, False, False]))
         with pytest.raises(OutOfRangeError, match=r"\[1, 2\]"):
             outcome.raise_if_out_of_range()
-
-
-class TestContractRegistration:
-    """The new contracts resolve through the contract namespace."""
-
-    @pytest.mark.parametrize("cls", [PlanSummary, PlanPredictive, CertificationOutcome])
-    def test_resolves_by_public_name(self, cls):
-        """'spaceodyssey.<Name>' resolves to the class and contracts re-exports it."""
-        assert resolve_contract(f"spaceodyssey.{cls.__name__}") is cls
-        assert getattr(contracts, cls.__name__) is cls
-        assert cls.__name__ in contracts.__all__
-        assert getattr(spaceodyssey, cls.__name__) is cls
 
 
 @pytest.mark.parametrize("value", [0.0, -1.0, jnp.inf, jnp.nan])

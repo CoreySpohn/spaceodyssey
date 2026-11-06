@@ -13,7 +13,6 @@ from photomancy.priors import Uniform
 import spaceodyssey
 from spaceodyssey import Claim, Edge, Profile, Purpose, stream
 from spaceodyssey.errors import UnsupportedProfile
-from spaceodyssey.testing import LinearGaussianTruthModel
 from spaceodyssey.truth import (
     AbstractTruthModel,
     ObservedData,
@@ -21,6 +20,7 @@ from spaceodyssey.truth import (
     Truth,
     check_compatible,
 )
+from tests.doubles import LinearGaussianTruthModel
 from tests.test_plan import make_plan
 
 
@@ -322,11 +322,3 @@ def test_simulate_accepts_typed_and_raw_threefry_keys(key_factory, monkeypatch):
     data = model.simulate(key_factory(0), make_truth(), make_plan())
     assert data.spectrum.shape == (3, 2)
     assert bool(jnp.all(jnp.isfinite(data.spectrum)))
-
-
-def test_deprecated_truth_model_alias():
-    import spaceodyssey.testing as testing
-
-    with pytest.warns(DeprecationWarning, match=r"LinearGaussianTruthModel.*0\.1\.0"):
-        old = testing.LinearGaussianTruth
-    assert old is testing.LinearGaussianTruthModel

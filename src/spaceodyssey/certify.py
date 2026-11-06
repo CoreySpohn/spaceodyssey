@@ -28,7 +28,6 @@ from jax.scipy.special import ndtr, ndtri
 from spaceodyssey.errors import UnsupportedOperator, UnsupportedProfile
 from spaceodyssey.plan import CertificationOutcome, PlanPredictive, PlanSummary
 from spaceodyssey.profile import Profile
-from spaceodyssey.registry import SeamInfo, register
 from spaceodyssey.truth import AbstractTruthModel, check_compatible
 
 # Discover the generated constructor's private factory placeholder without
@@ -230,18 +229,6 @@ class AbstractProfileCertificate(
 
 
 @final
-@register(
-    "certification",
-    "snr_threshold",
-    SeamInfo(
-        operators={"sample"},
-        consumes=("spaceodyssey.SummaryDataset",),
-        produces=("spaceodyssey.CertificateState",),
-        version="1",
-        fidelity="threshold",
-        cost_hint="low",
-    ),
-)
 class SnrThreshold(AbstractCertificate):
     """Certify a detection when the best observed statistic crosses a bar.
 
@@ -277,18 +264,6 @@ class SnrThreshold(AbstractCertificate):
 
 
 @final
-@register(
-    "certification",
-    "toy_gaussian",
-    SeamInfo(
-        operators={"integrate"},
-        consumes=("spaceodyssey.PlanPredictive",),
-        produces=("spaceodyssey.CertificationOutcome",),
-        version="1",
-        fidelity="closed_form",
-        cost_hint="low",
-    ),
-)
 class ToyGaussianCertifier(AbstractCertificate):
     """A one-claim certificate with an exact closed-form certification law.
 
