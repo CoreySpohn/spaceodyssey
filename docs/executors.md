@@ -153,6 +153,19 @@ recorded log: each logged row is folded once, in the order the run released rows
 through the study's observer. Rows released by a host result count as releases. The
 result equals the belief the run carried, bit for bit.
 
+`replay_run(run, roots, carry, trace)` replays a run that refreshes. It walks the handled
+release, result and refresh steps in trace order and rebuilds each audience's revision
+sets from that order alone, never from the final `superseded_by`. At a checkpoint's hold
+step it refits through the run's refit boundary with the same keys, and at the
+completion step it installs and checks the product rows written (payload and pedigree),
+the written count and the trace projection of the belief. At the end the replayed
+`belief` and `pbelief` must equal the run's: integers exactly, floats within the kill
+tolerance. A hold with no completion, as in a run cut by its step budget, installs
+nothing. `run` is a loaded run document or a study with `refit=` given; `roots` is the
+world's root key (`RunResult.roots` holds one per world). An incremental observer folds
+the first accepted revision of each acquisition between checkpoints, as in
+`replay_belief`.
+
 ## Handler lowering under `vmap`
 
 The transition picks a handler with `lax.switch` on the event kind. How that lowers

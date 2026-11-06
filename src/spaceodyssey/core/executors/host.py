@@ -79,7 +79,7 @@ class HostExecutor(AbstractExecutor):
             trace = jax.tree_util.tree_map(
                 lambda x: jnp.empty((0, *x.shape), dtype=x.dtype), empty_trace(caps)
             )
-            return RunResult(carry, trace, layout)
+            return RunResult(carry, trace, layout, roots)
         traces = []
         for step in range(n_steps):
             carry, trace, wake = adv(carry, roots, study, truths)
@@ -122,7 +122,10 @@ class HostExecutor(AbstractExecutor):
                     carry, roots, study, refit, can_finish=step + 1 < n_steps
                 )
         return RunResult(
-            carry, jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces), layout
+            carry,
+            jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces),
+            layout,
+            roots,
         )
 
     def run_worlds(self, study, truths, roots, n_steps, **kw):
@@ -135,4 +138,5 @@ class HostExecutor(AbstractExecutor):
             jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[r.carry for r in runs]),
             jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[r.trace for r in runs]),
             study.observer.layout(study.caps),
+            roots,
         )
