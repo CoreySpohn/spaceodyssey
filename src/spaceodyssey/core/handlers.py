@@ -19,7 +19,7 @@ from spaceodyssey.core.enums import (
     Stage,
 )
 from spaceodyssey.core.events import enqueue, where_tree
-from spaceodyssey.core.keys import draw_key
+from spaceodyssey.core.keys import draw_key, fold_key
 from spaceodyssey.core.ledger import _resource_rows
 from spaceodyssey.core.records import Record, masked_record, record_none, write_log
 
@@ -156,7 +156,9 @@ def h_release(c, ev, study, truth, root):
     )
     accepted = others & (log.accepted_tick >= 0)
     obs = masked_record(rec, caps, Audience.OBSERVER)
-    folded = study.observer.analyze(study.observer.fold(c.belief, obs, caps))
+    # one key per record identity serves both audiences' folds
+    key = fold_key(root, rec, study)
+    folded = study.observer.analyze(study.observer.fold(c.belief, obs, caps, key=key))
     belief = where_tree(to_observer & ~already & ~accepted.any(), folded, c.belief)
     # the policy summary folds only records released to the policy audience, once
     seen = log.released_tick[slot] >= 0
@@ -170,7 +172,7 @@ def h_release(c, ev, study, truth, root):
         ),
     )
     pol = masked_record(pol_rec, caps, Audience.POLICY)
-    pfolded = study.observer.fold_summary(c.pbelief, pol, caps)
+    pfolded = study.observer.fold_summary(c.pbelief, pol, caps, key=key)
     pbelief = where_tree(public & ~seen & ~released.any(), pfolded, c.pbelief)
     older = jnp.where(accepted & (log.revision < rec.revision), rec.revision, -1)
     newer = jnp.max(jnp.where(accepted, log.revision, -1))

@@ -141,8 +141,8 @@ def test_pending_request_rejects_changed_visible_revisions():
 
 
 class ProvenanceObserver(toy.ToyRunningMean):
-    def fold(self, belief, rec, caps):
-        folded = super().fold(belief, rec, caps)
+    def fold(self, belief, rec, caps, key=None):
+        folded = super().fold(belief, rec, caps, key=key)
         return dc.replace(folded, aux=folded.aux.at[1].set(rec.acquisition_id))
 
 
@@ -170,9 +170,12 @@ def test_policy_fold_hides_private_event_identity():
 
 
 class UnreplacedObserver(toy.ToyRunningMean):
-    def fold(self, belief, rec, caps):
+    def fold(self, belief, rec, caps, key=None):
         return super().fold(
-            belief, dc.replace(rec, valid=rec.valid & (rec.superseded_by < 0)), caps
+            belief,
+            dc.replace(rec, valid=rec.valid & (rec.superseded_by < 0)),
+            caps,
+            key=key,
         )
 
 

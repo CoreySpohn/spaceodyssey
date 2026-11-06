@@ -120,15 +120,16 @@ def test_catalog_case_requires_its_kind_and_contribution(executor):
 def test_release_handler_cannot_fold_an_auxiliary_acquisition_twice(
     executor, monkeypatch
 ):
-    def fold_twice(observer, belief, rec, caps):
-        once = observer.fold(belief, rec, caps)
-        twice = observer.fold(once, rec, caps)
+    def fold_twice(observer, belief, rec, caps, key):
+        once = observer.fold(belief, rec, caps, key=key)
+        twice = observer.fold(once, rec, caps, key=key)
         return where_tree(rec.kind == 3, twice, once)
 
     original = handlers.h_release
+    call = "study.observer.fold(c.belief, obs, caps, key=key)"
+    assert call in inspect.getsource(original)
     source = inspect.getsource(original).replace(
-        "study.observer.fold(c.belief, obs, caps)",
-        "fold_twice(study.observer, c.belief, obs, caps)",
+        call, "fold_twice(study.observer, c.belief, obs, caps, key)"
     )
     namespace = dict(vars(handlers), fold_twice=fold_twice)
     exec(compile(source, "<double_fold>", "exec"), namespace)

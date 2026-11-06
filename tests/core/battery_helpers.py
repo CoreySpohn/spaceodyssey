@@ -182,10 +182,10 @@ class PriorBiasedMean(kinds.ToyRunningMean):
 
     bias: float = eqx.field(default=1.0)
 
-    def fold(self, belief, rec, caps):
+    def fold(self, belief, rec, caps, key=None):
         """Fold the record with its value pushed up by the bias."""
         biased = dataclasses.replace(rec, payload=rec.payload.at[0].add(self.bias))
-        return super().fold(belief, biased, caps)
+        return super().fold(belief, biased, caps, key=key)
 
 
 # ---- broken executors ---------------------------------------------------------------

@@ -17,6 +17,7 @@ from spaceodyssey.core.kinds import (
     AbstractWorldSource,
 )
 from spaceodyssey.core.ledger import AssetTable, ChannelTable
+from spaceodyssey.core.records import lower_refit
 
 
 def _as_horizon_tick(value):
@@ -88,7 +89,7 @@ class Study(eqx.Module):
     fork: Fork = eqx.field(default_factory=Fork)
 
     def __check_init__(self):
-        """Validate precision, registered record kinds and the observer's layout.
+        """Validate precision, registered kinds, the observer's layout and refit.
 
         Payload column audiences come from the registered record kinds. Capacities with
         no registered kinds would leave every column readable by every audience, so a
@@ -101,6 +102,29 @@ class Study(eqx.Module):
                 "into the capacities so payload columns carry their audiences"
             )
         _check_layout(self.observer, self.caps)
+        _check_refit(self.observer, self.caps)
+
+
+def _check_refit(observer, caps):
+    """Require the observer's refit declaration to be lowered into the capacities.
+
+    A refit kind must name a registered kind that is not derived (`lower_refit`), and
+    the capacities must hold the kinds and statuses the observer declares, so a
+    registry lowered without this observer is refused. An observer that is not
+    incremental changes only by refresh, which this core does not schedule yet.
+    """
+    declared = observer.capabilities()
+    if not declared.incremental:
+        raise ValueError(
+            "the observer is not incremental; a refit-only observer needs a refresh "
+            "schedule, which studies do not support yet"
+        )
+    lowered = lower_refit(declared, caps.kind_names, caps.derived_kinds)
+    if lowered != (caps.refit_kinds, caps.refit_statuses):
+        raise ValueError(
+            "the capacities do not hold the observer's refit kinds and statuses; "
+            "lower the registry with the observer (KindRegistry.lower(caps, observer))"
+        )
 
 
 def _shapes(tree):

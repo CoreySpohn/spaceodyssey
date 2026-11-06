@@ -112,13 +112,47 @@ class CountingObserver(AbstractObserver):
             project_summary=None if summary is None else OnValue(summary),
         )
 
-    def fold(self, belief, rec, caps):
-        """Count this acquisition whenever the caller commits the folded state."""
-        return _count(belief, self.inner.fold(plain(belief), rec, caps), rec)
+    def capabilities(self):
+        """The inner observer's capabilities."""
+        return self.inner.capabilities()
 
-    def fold_summary(self, summary, rec, caps):
+    def fold(self, belief, rec, caps, key=None):
+        """Count this acquisition whenever the caller commits the folded state."""
+        value = self.inner.fold(plain(belief), rec, caps, key=key)
+        return _count(belief, value, rec)
+
+    def fold_summary(self, summary, rec, caps, key=None):
         """Count this acquisition in the summary the same way."""
-        return _count(summary, self.inner.fold_summary(plain(summary), rec, caps), rec)
+        value = self.inner.fold_summary(plain(summary), rec, caps, key=key)
+        return _count(summary, value, rec)
+
+    def summary(self, belief):
+        """The inner summary of the wrapped belief, beside the belief's counters."""
+        return dataclasses.replace(
+            belief, _fold_value=self.inner.summary(plain(belief))
+        )
+
+    def refit(self, belief0, rows, caps, key):
+        """The inner refit; a refit is not a fold, so the counters are kept."""
+        return dataclasses.replace(
+            belief0, _fold_value=self.inner.refit(plain(belief0), rows, caps, key)
+        )
+
+    def install(self, belief, fitted, subject):
+        """The inner install of the refit value; the counters of `belief` are kept."""
+        return dataclasses.replace(
+            belief,
+            _fold_value=self.inner.install(plain(belief), plain(fitted), subject),
+        )
+
+    def install_summary(self, summary, fitted, subject):
+        """The inner summary install; the counters of `summary` are kept."""
+        return dataclasses.replace(
+            summary,
+            _fold_value=self.inner.install_summary(
+                plain(summary), plain(fitted), subject
+            ),
+        )
 
     def analyze(self, belief):
         """Analyze the original values while preserving the counters."""

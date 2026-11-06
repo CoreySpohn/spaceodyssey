@@ -106,9 +106,9 @@ class MomentObserver(toy.ToyRunningMean):
         n = caps.n_subjects
         return MomentSummary(jnp.zeros(n, F64), jnp.zeros(n, I64))
 
-    def fold_summary(self, summary, rec, caps):
+    def fold_summary(self, summary, rec, caps, key=None):
         aux = jnp.zeros(caps.n_an, F64)
-        full = self.fold(MeanBelief(summary.mean, summary.n, aux), rec, caps)
+        full = self.fold(MeanBelief(summary.mean, summary.n, aux), rec, caps, key=key)
         return MomentSummary(full.mean, full.n)
 
     def layout(self, caps):

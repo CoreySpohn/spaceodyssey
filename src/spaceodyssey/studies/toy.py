@@ -131,7 +131,7 @@ class ToyRunningMean(AbstractObserver):
             belief=belief, summary=belief, count_leaf="n", project=project_mean
         )
 
-    def fold(self, belief, rec, caps):
+    def fold(self, belief, rec, caps, key=None):
         """Update completed measurement means and auxiliary values."""
         t = rec.subject
         take = (
@@ -149,6 +149,14 @@ class ToyRunningMean(AbstractObserver):
             aux=belief.aux.at[0].add(jnp.where(extra, rec.payload[0], 0.0)),
         )
 
+    def install(self, belief, fitted, subject):
+        """Take the subject's mean and count from a refit; keep the auxiliary state."""
+        return MeanBelief(
+            mean=belief.mean.at[subject].set(fitted.mean[subject]),
+            n=belief.n.at[subject].set(fitted.n[subject]),
+            aux=belief.aux,
+        )
+
 
 class ToySolveAnalysis(ToyRunningMean):
     """Analysis stage: a small linear solve written back into `aux`."""
@@ -159,6 +167,108 @@ class ToySolveAnalysis(ToyRunningMean):
         m, n = belief.mean[:n_an], belief.n[:n_an].astype(F64)
         a = jnp.outer(m, m) + jnp.diag(1.0 + n + 0.1 * jnp.arange(n_an))
         return MeanBelief(belief.mean, belief.n, jnp.linalg.solve(a, m + 1.0))
+
+
+class SampleBelief(eqx.Module):
+    """A running mean with one posterior draw per subject and the variates drawn.
+
+    `sample` is a draw of each subject's signal from the conjugate Gaussian
+    posterior after its latest fold; `draws[subject, acquisition_index]` holds the
+    standard-normal variate the fold of that acquisition drew (zero where none was
+    drawn, or the index is beyond the table).
+    """
+
+    mean: jax.Array
+    n: jax.Array
+    aux: jax.Array
+    sample: jax.Array
+    draws: jax.Array
+
+
+def project_sample(belief):
+    """The trace projection of a `SampleBelief`: its posterior draws and `aux`."""
+    return belief.sample, belief.aux
+
+
+class ToySampleObserver(ToyRunningMean):
+    """A sampling observer: each fold draws from the record's fold key.
+
+    The full belief is a `SampleBelief`; the policy summary is the `MeanBelief` of
+    the running mean, which draws nothing. `noise` is the per-record standard
+    deviation the posterior assumes, under a flat prior.
+    """
+
+    noise: jax.Array = eqx.field(default=1.0, converter=lambda x: jnp.asarray(x, F64))
+    n_draws: int = eqx.field(default=8, static=True)
+
+    def init(self, caps):
+        """Zero means, counts, draws and variates."""
+        mean = super().init(caps)
+        n = caps.n_subjects
+        return SampleBelief(
+            mean.mean,
+            mean.n,
+            mean.aux,
+            jnp.zeros(n, F64),
+            jnp.zeros((n, self.n_draws), F64),
+        )
+
+    def init_summary(self, caps):
+        """The running mean's `MeanBelief`."""
+        return super().init(caps)
+
+    def layout(self, caps):
+        """`SampleBelief` and `MeanBelief`, counted by `n`, projected separately."""
+        return BeliefLayout(
+            belief=jax.eval_shape(lambda: self.init(caps)),
+            summary=jax.eval_shape(lambda: self.init_summary(caps)),
+            count_leaf="n",
+            project=project_sample,
+            project_summary=project_mean,
+        )
+
+    def fold(self, belief, rec, caps, key=None):
+        """Fold the running mean, then draw the subject's posterior from `key`."""
+        if key is None:
+            raise ValueError("ToySampleObserver draws from its fold key; pass one")
+        mean = super().fold(self.summary(belief), rec, caps)
+        t, i = rec.subject, rec.acquisition_index
+        took = mean.n[t] > belief.n[t]
+        z = jr.normal(key, dtype=F64)
+        scale = self.noise / jnp.sqrt(jnp.maximum(mean.n[t], 1).astype(F64))
+        draw = mean.mean[t] + scale * z
+        return SampleBelief(
+            mean.mean,
+            mean.n,
+            mean.aux,
+            belief.sample.at[t].set(jnp.where(took, draw, belief.sample[t])),
+            belief.draws.at[t, i].set(
+                jnp.where(took, z, belief.draws[t, i]), mode="drop"
+            ),
+        )
+
+    def fold_summary(self, summary, rec, caps, key=None):
+        """Fold the running mean; the summary draws nothing."""
+        return super().fold(summary, rec, caps)
+
+    def summary(self, belief):
+        """The running mean of a `SampleBelief`."""
+        return MeanBelief(belief.mean, belief.n, belief.aux)
+
+    def install(self, belief, fitted, subject):
+        """Take every per-subject leaf of the subject from a refit; keep `aux`."""
+        mean = super().install(self.summary(belief), self.summary(fitted), subject)
+        return SampleBelief(
+            mean.mean,
+            mean.n,
+            mean.aux,
+            belief.sample.at[subject].set(fitted.sample[subject]),
+            belief.draws.at[subject].set(fitted.draws[subject]),
+        )
+
+    def install_summary(self, summary, fitted, subject):
+        """Install the running mean of the subject."""
+        return super().install(summary, fitted, subject)
 
 
 def _as_i64(x):

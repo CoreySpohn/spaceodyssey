@@ -38,9 +38,9 @@ class CatalogObserver(toy.ToyRunningMean):
 
     catalog_kind: int = eqx.field(default=3)
 
-    def fold(self, belief, rec, caps):
+    def fold(self, belief, rec, caps, key=None):
         """Fold as the running mean does, then add a catalog row's value."""
-        belief = super().fold(belief, rec, caps)
+        belief = super().fold(belief, rec, caps, key=key)
         row = rec.valid & (rec.kind == self.catalog_kind)
         aux = belief.aux.at[CATALOG_AUX_SLOT].add(jnp.where(row, rec.payload[0], 0.0))
         return MeanBelief(belief.mean, belief.n, aux)

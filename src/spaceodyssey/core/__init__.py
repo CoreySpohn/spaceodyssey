@@ -79,6 +79,7 @@ from spaceodyssey.core.keys import Coupling as Coupling
 from spaceodyssey.core.keys import Fork as Fork
 from spaceodyssey.core.keys import draw_key as draw_key
 from spaceodyssey.core.keys import fold64 as fold64
+from spaceodyssey.core.keys import fold_key as fold_key
 from spaceodyssey.core.keys import key_for as key_for
 from spaceodyssey.core.keys import policy_key as policy_key
 from spaceodyssey.core.kinds import AbstractChannelModel as AbstractChannelModel
@@ -88,6 +89,7 @@ from spaceodyssey.core.kinds import AbstractObserver as AbstractObserver
 from spaceodyssey.core.kinds import AbstractPolicy as AbstractPolicy
 from spaceodyssey.core.kinds import AbstractProcess as AbstractProcess
 from spaceodyssey.core.kinds import AbstractWorldSource as AbstractWorldSource
+from spaceodyssey.core.kinds import ObserverCapabilities as ObserverCapabilities
 from spaceodyssey.core.ledger import AssetTable as AssetTable
 from spaceodyssey.core.ledger import ChannelTable as ChannelTable
 from spaceodyssey.core.ledger import Ledger as Ledger
@@ -105,6 +107,7 @@ from spaceodyssey.core.records import Record as Record
 from spaceodyssey.core.records import RecordKind as RecordKind
 from spaceodyssey.core.records import RecordLog as RecordLog
 from spaceodyssey.core.records import empty_log as empty_log
+from spaceodyssey.core.records import lower_refit as lower_refit
 from spaceodyssey.core.records import masked_record as masked_record
 from spaceodyssey.core.records import payload_columns as payload_columns
 from spaceodyssey.core.records import record_none as record_none

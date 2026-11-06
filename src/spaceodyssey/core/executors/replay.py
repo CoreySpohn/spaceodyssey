@@ -7,12 +7,13 @@ import jax.numpy as jnp
 import numpy as np
 
 from spaceodyssey.core.enums import Audience, EventKind, RecordStatus
+from spaceodyssey.core.keys import fold_key
 from spaceodyssey.core.records import LOG_INT_FIELDS, Record, masked_record
 
 
 @eqx.filter_jit
-def _fold(study, belief, rec):
-    return study.observer.analyze(study.observer.fold(belief, rec, study.caps))
+def _fold(study, belief, rec, key=None):
+    return study.observer.analyze(study.observer.fold(belief, rec, study.caps, key=key))
 
 
 def _row(log, i):
@@ -23,15 +24,17 @@ def _row(log, i):
     return Record(**fields)  # the full row; callers mask it for their audience
 
 
-def replay_belief(study, carry, trace):
+def replay_belief(study, carry, trace, root=None):
     """Rebuild the observer belief of one world from its recorded log alone.
 
     Reads only the record log and the order in which the run released rows (the
     handled release and result steps of the trace). Each acquisition is folded once, in
     release order, through the study's observer; later revisions are not folded. With
     the executor's own observer on the same rows in the same order the result equals
-    `carry.belief` bit for bit. A release that names no matching log row raises
-    `ValueError`.
+    `carry.belief` bit for bit. Each fold gets the record's fold key under the
+    world's `root` key (`keys.fold_key`, as in the run); without `root` the folds
+    get no key, which only an observer that draws nothing accepts. A release that
+    names no matching log row raises `ValueError`.
     """
     log = dataclasses.replace(
         carry.log,
@@ -73,6 +76,9 @@ def replay_belief(study, carry, trace):
         if acquisition in folded:
             continue
         folded.add(acquisition)
-        row = masked_record(_row(carry.log, i), study.caps, Audience.OBSERVER)
-        belief = _fold(study, belief, row)
+        full = _row(carry.log, i)
+        key = None if root is None else fold_key(root, full, study)
+        belief = _fold(
+            study, belief, masked_record(full, study.caps, Audience.OBSERVER), key
+        )
     return belief

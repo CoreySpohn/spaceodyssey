@@ -134,6 +134,23 @@ def draw_key(
     return key_for(root, **coords)
 
 
+def fold_key(root, rec, study) -> jax.Array:
+    """The key of an incremental fold of `rec`: its own identity, `Purpose.INFERENCE`.
+
+    The coordinates are the record's subject, channel, acquisition index, phase,
+    revision and status, with the study's fork branch and coupling, as for a
+    measurement draw. No count or queue position enters, so private events and a
+    different queue order move no fold key.
+    """
+    return draw_key(
+        root,
+        rec,
+        Purpose.INFERENCE,
+        branch=study.fork.branch_of(rec.acquisition_index),
+        coupling=study.coupling,
+    )
+
+
 def policy_key(
     root, phase, tick, ordinal, *, lineage=0, coupling=DEFAULT_COUPLING
 ) -> jax.Array:

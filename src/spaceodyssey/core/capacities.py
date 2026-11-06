@@ -24,6 +24,13 @@ class Capacities:
     # Audience flags per record kind and payload column, lowered from the registry.
     # Empty means no registry was lowered and every column is readable.
     payload_audience: tuple[tuple[int, ...], ...] = ()
+    # Registered kind names by index and the indices of derived kinds, lowered from
+    # the registry; and the observer's refit kind indices and statuses (empty when it
+    # does not refit), lowered by `KindRegistry.lower`.
+    kind_names: tuple[str, ...] = ()
+    derived_kinds: tuple[int, ...] = ()
+    refit_kinds: tuple[int, ...] = ()
+    refit_statuses: tuple[int, ...] = ()
     n_effects: int = 2
     n_pstate: int = 4
     n_an: int = 4

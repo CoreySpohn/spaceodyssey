@@ -32,10 +32,15 @@ class PayloadColumn:
 
 @dataclasses.dataclass(frozen=True)
 class RecordKind:
-    """A registered record layout: a name and its payload columns in order."""
+    """A registered record layout: a name and its payload columns in order.
+
+    A `derived` kind holds a product computed from other records (a summary or a
+    refit product); an observer never names it as refit data.
+    """
 
     name: str
     columns: tuple[PayloadColumn, ...]
+    derived: bool = False
 
     def __post_init__(self):
         """Require typed columns with distinct names."""
@@ -93,11 +98,14 @@ class KindRegistry:
         """Width of the widest registered kind."""
         return max((k.width for k in self._kinds), default=0)
 
-    def lower(self, caps=None):
-        """Return `caps` with the payload width and column audiences of this registry.
+    def lower(self, caps=None, observer=None):
+        """Return `caps` with this registry's layouts and `observer`'s refit kinds.
 
         The width is the larger of `caps.payload_width` and the widest kind. A column
-        a kind does not declare has no audience and is unreadable.
+        a kind does not declare has no audience and is unreadable. The kind names and
+        the indices of derived kinds are recorded, and the refit kinds and statuses
+        the observer's `capabilities()` declare are lowered by `lower_refit`, which
+        refuses a derived or unregistered kind name.
         """
         caps = Capacities() if caps is None else caps
         width = max(caps.payload_width, self.width)
@@ -105,7 +113,42 @@ class KindRegistry:
             tuple(c.audience for c in k.columns) + (0,) * (width - k.width)
             for k in self._kinds
         )
-        return dataclasses.replace(caps, payload_width=width, payload_audience=table)
+        names = tuple(k.name for k in self._kinds)
+        derived = tuple(i for i, k in enumerate(self._kinds) if k.derived)
+        declared = None if observer is None else observer.capabilities()
+        kinds, statuses = lower_refit(declared, names, derived)
+        return dataclasses.replace(
+            caps,
+            payload_width=width,
+            payload_audience=table,
+            kind_names=names,
+            derived_kinds=derived,
+            refit_kinds=kinds,
+            refit_statuses=statuses,
+        )
+
+
+def lower_refit(declared, kind_names, derived_kinds):
+    """`(refit_kinds, refit_statuses)` as `Capacities` stores them.
+
+    `declared` is an observer's `capabilities()` (or `None`). Each refit kind name
+    becomes its registered index; a name no kind is registered under, or one that
+    names a derived kind, is refused. An observer that does not refit lowers to
+    empty tuples.
+    """
+    if declared is None or not declared.refit:
+        return (), ()
+    indices = []
+    for name in declared.refit_kinds:
+        if name not in kind_names:
+            raise ValueError(f"refit kind {name!r} is not a registered record kind")
+        index = kind_names.index(name)
+        if index in derived_kinds:
+            raise ValueError(
+                f"refit kind {name!r} is derived; a product is never refit data"
+            )
+        indices.append(index)
+    return tuple(indices), tuple(int(s) for s in declared.refit_statuses)
 
 
 def payload_columns(caps, kind, audience):
