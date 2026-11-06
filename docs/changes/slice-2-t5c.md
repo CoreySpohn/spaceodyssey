@@ -20,6 +20,10 @@ untouched.
 2. `feat(plugins): discover kinds from spaceodyssey entry points`
 3. `test(core): add lint negative controls for plugins and the codec`
 4. `docs(changes): record Slice 2 T5c`
+5. `fix(codec): require a positive integer version default for every registered kind`
+6. `fix(plugins): refuse one class registered under two entry-point ids`
+7. `test(codec): check migrated fields against annotations, converters and hooks`
+8. `docs(changes): record the T5c review fixes`
 
 ## KindResolver
 
@@ -29,8 +33,9 @@ moved here from `document.py` and is still exported from `spaceodyssey.codec`).
 - `KindResolver(kinds=None)`: `kinds` maps `(group, id, version)` to a class and
   is merged over `CORE_KINDS`. Construction raises `ValueError` for a key that
   rebinds a core key to another class, one `(group, id)` at two versions, one
-  class under two references, and a reference whose version differs from the
-  default of the class's `version` field. The resolver is a read-only mapping of
+  class under two references, a class whose `version` field has no positive
+  integer default (a factory, a missing default, a value of another type), and a
+  reference whose version differs from that default. The resolver is a read-only mapping of
   every registered reference.
 - `current_version(group, kind_id)`: the registered version, or `None`.
 - `resolve(ref, path=())`: the class a document reference names. An unknown
@@ -74,10 +79,12 @@ pointer.
 - `kinds_from_entry_points(entries)`: the `(group, id, version)` to class mapping
   a set of entry points registers; entries outside the `spaceodyssey.` groups are
   ignored. A group with no family, a malformed name, an object that fails to load,
-  a class of another family, a version the class does not declare, a core entry
-  that differs from `CORE_KINDS`, and one `(group, id)` registered twice each raise
-  `RegistrationError` (a `ValueError`). The duplicate error names both entries and
-  both distributions.
+  a class of another family, a class whose `version` field has no positive integer
+  default, a version the class does not declare, a core entry that differs from
+  `CORE_KINDS`, one `(group, id)` registered twice, and one class registered under
+  two ids each raise `RegistrationError` (a `ValueError`). Both duplicate errors
+  name both entries and both distributions, so an installation that builds a
+  mapping here never fails later in `KindResolver` with a plain `ValueError`.
 - `installed_kinds()` and `installed_resolver()`: the same over
   `importlib.metadata.entry_points()`.
 
@@ -108,7 +115,7 @@ such kind adds one.
 
 Added, in the unit tier:
 
-- `tests/codec/test_plugins.py` (5 functions, 13 cases):
+- `tests/codec/test_plugins.py` (6 functions, 22 cases):
   - `test_load_by_id_without_path_import`: entry points build a resolver that
     round-trips survey 1 by id; an entry in another group is never loaded; a
     document whose kind id is an importable module path fails with `D001` at the
@@ -116,13 +123,18 @@ Added, in the unit tier:
   - `test_older_kind_version_migrates_to_the_registered_one`: a hand-written
     version-1 `toy.gain` design loads into a version-2 kind that stores the log of
     the gain, with the migrated bits and version 2, and dumps back at version 2.
-  - `test_unreadable_kind_version_fails_with_a_pointer` (3 cases): a newer kind
+  - `test_unreadable_kind_version_fails_with_a_pointer` (6 cases): a newer kind
     version and an older one with no `migrate` are `D001` at the reference; a
-    migration returning the old field names is refused at the module.
+    migration returning the old field names, a tuple in an array field, a value its
+    converter would change, or a value the class's `__check_init__` refuses is
+    refused at the module.
   - `test_bad_registration_is_refused` (6 cases): one id from two distributions
-    (the error names both), an unknown family, a name without a version, a class
-    of another family, a version its class does not declare, a core entry bound to
-    another class.
+    and one class under two ids (each error names both entries and both
+    distributions), an unknown family, a name without a version, a class of
+    another family, a core entry bound to another class.
+  - `test_version_must_be_a_matching_integer_default` (6 cases): through both the
+    resolver and the entry points, a version its class does not declare, a
+    `version` field with a factory, and one with a string default are refused.
   - `test_resolver_refuses_a_double_binding` (2 cases): one id at two versions,
     one class under two ids.
 - `tests/codec/test_entry_points_installed.py` (1 function): the installed
@@ -141,7 +153,7 @@ Added, in the unit tier:
   loader (`importlib.metadata`), and the codec, where the dispatch gate refuses its
   field walk, while the repository core lint passes with both outside the core.
 
-Retired: none. Net: 7 functions, 20 cases.
+Retired: none. Net: 8 functions, 29 cases.
 
 The installed test runs the round trip only. The observer kit
 (`core/conformance/observer_kit.py`, T3a) is on its own branch and not yet on
@@ -159,6 +171,24 @@ worktree (`uv build --wheel`), unpack only its `.dist-info` directory into a
 scratch directory, and put that directory on `PYTHONPATH`. In CI the package is
 installed from the branch, and after the merge `uv sync` reinstalls it because
 `pyproject.toml` changed.
+
+## Review fixes
+
+A fresh review found three gaps, each fixed in its own commit with its test:
+
+- A `version` field with a factory or a non-integer default was read as no
+  version, so such a class registered at any version (a factory giving 2 was
+  accepted at version 7) and its default instance could not be dumped. Both
+  registration paths now require a positive integer default; the new test failed
+  on the four factory and string cases before the fix.
+- Two entry-point ids naming one class passed `kinds_from_entry_points`, and
+  `installed_resolver` then failed with a plain `ValueError` and no distributions.
+  Discovery now refuses it with a `RegistrationError` naming both entries and
+  distributions; the new case failed before the fix.
+- The checks on migrated fields (array annotation, converter, `__post_init__` and
+  `__check_init__`) were right but untested: a mutant skipping them for migrated
+  modules passed every codec test. Three migration cases now fail against that
+  mutant, checked by applying it.
 
 ## What later tasks need from this
 
@@ -186,8 +216,9 @@ branch's metadata on the path as above:
 | Quick tier on this branch | 1,770 passed, 55.0 s wall, peak RSS 3.35 GB |
 | Quick tier on this branch, earlier, beside two other jobs | 1,770 passed, 121.8 s wall, peak RSS 3.08 GB |
 | Full suite | 2,832 passed, 1,553 s wall, peak RSS 4.11 GB |
+| Quick tier after the review fixes, beside a quick-tier run in the other slot | 1,779 passed, 63.7 s wall, peak RSS 2.79 GB |
 
-The quick tier is flat: the 20 new cases sum to about 0.9 s (the installed round
+The quick tier is flat: the first 20 new cases sum to about 0.9 s (the installed round
 trip 0.49 s, the lint control 0.27 s, everything else under 0.1 s each). The
 three slowest quick-tier tests are unchanged and outside this change:
 `test_every_hand_study_reproduces_its_history`,
