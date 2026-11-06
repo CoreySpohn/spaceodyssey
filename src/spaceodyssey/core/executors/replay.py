@@ -7,8 +7,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from spaceodyssey.core import refresh
 from spaceodyssey.core.carry import _tree_set
-from spaceodyssey.core.enums import I64, Audience, EventKind, RecordStatus
+from spaceodyssey.core.enums import I64, Audience, Capacity, EventKind, RecordStatus
 from spaceodyssey.core.events import empty_event_row
 from spaceodyssey.core.executors.base import (
     KILL_TOLERANCE,
@@ -16,7 +17,7 @@ from spaceodyssey.core.executors.base import (
 )
 from spaceodyssey.core.keys import fold_key
 from spaceodyssey.core.records import LOG_INT_FIELDS, Record, masked_record
-from spaceodyssey.core.refresh import _commit, _gather, refresh_enabled
+from spaceodyssey.core.refresh import refresh_enabled
 from spaceodyssey.core.snapshot import named_leaves
 
 
@@ -117,13 +118,20 @@ class Replayed(eqx.Module):
 
     `belief` and `pbelief` are the replayed observer belief and policy summary,
     `checkpoints` counts the checkpoints that completed and `products` the product
-    rows checked against the log.
+    rows checked against the log. A checkpoint the core refused to install (too many
+    rows, no room in the log or the internal ids) is in `refused` as `(ordinal, bits)`,
+    the `Capacity` bits the replayed install set; a hold the run never completed
+    (a budget cut) is `unfinished`; `overflow_mask` is the run's own final mask, which
+    also holds refusals the replay does not meet, such as an invalid correction.
     """
 
     belief: object
     pbelief: object
     checkpoints: int = eqx.field(static=True)
     products: int = eqx.field(static=True)
+    refused: tuple = eqx.field(static=True, default=())
+    unfinished: bool = eqx.field(static=True, default=False)
+    overflow_mask: int = eqx.field(static=True, default=0)
 
 
 @eqx.filter_jit
@@ -133,7 +141,7 @@ def _fold_summary(study, pbelief, rec, key):
 
 def _request(view, root, study):
     """The refit request of the frozen replay world: the run's own gather."""
-    return _gather(view, root, study)
+    return refresh._gather(view, root, study)
 
 
 def _visible(carry, n_log, accepted, released):
@@ -166,14 +174,43 @@ def _row_unequal(a, b):
     return not np.array_equal(a, b)
 
 
-_SEEDED = ("acquisition_id", "phase", "vintage")
+REFUSALS = Capacity.REFIT_ROWS | Capacity.STABLE_IDS | Capacity.LOG_ROWS
+
+
+def _phase_after(phase, tick, bounds):
+    """The phase a decision at `tick` leaves: the phase never goes back."""
+    return max(phase, int((tick >= bounds).sum()))
+
+
+def _check_ids(carry, first, count, ordinal):
+    """The reserved internal ids of a checkpoint are fresh and unique.
+
+    Each is above the id of every row written before the checkpoint (the allocator only
+    advances) and held by no other row of the log. Consecutive order is checked with the
+    rows themselves.
+    """
+    log = _numpy_log(carry)
+    ids = log.acquisition_id
+    mine = ids[first : first + count]
+    earlier = ids[:first][log.valid[:first]]
+    if count and earlier.size and mine.min() <= earlier.max():
+        raise ValueError(
+            f"checkpoint {ordinal}: a reserved id is not above earlier ids"
+        )
+    for slot in range(first, first + count):
+        shared = (log.valid & (ids == ids[slot])).sum()
+        if shared != 1:
+            raise ValueError(
+                f"checkpoint {ordinal}: product id at slot {slot} is shared"
+            )
 
 
 def _check_products(new, carry, first, count, ordinal):
     """The rows a replayed checkpoint wrote equal the run's rows at the same slots.
 
-    Internal id, phase and vintage are read from the run's row (the trace holds
-    neither); every other column, the payload and the pedigree must match.
+    Every column, the payload and the pedigree must match. The first internal id is
+    the one the run reserved (the trace does not hold the allocator), so its freshness
+    is checked separately (`_check_ids`).
     """
     for slot in range(first, first + count):
         mine = named_leaves(_row(new.log, slot))
@@ -181,7 +218,7 @@ def _check_products(new, carry, first, count, ordinal):
         mine["product"] = new.log.product[slot]
         theirs["product"] = carry.log.product[slot]
         for name, leaf in mine.items():
-            if name not in _SEEDED and _row_unequal(leaf, theirs[name]):
+            if _row_unequal(leaf, theirs[name]):
                 raise ValueError(
                     f"checkpoint {ordinal}: product row at slot {slot} differs in "
                     f"{name}"
@@ -220,7 +257,6 @@ def replay_run(run, roots, carry, trace, *, refit=None, executor=None):
     log = _numpy_log(carry)
     refit_kinds = {int(k) for k in caps.refit_kinds}
     names = ("kind", "tick", "subject", "acquisition_index", "channel", "log_slot")
-    kinds = np.asarray(trace.kind)
     handled = np.asarray(trace.handled)
     cols = {n: np.asarray(v) for n, v in vars(trace).items()}
     belief = observer.init(caps)
@@ -230,97 +266,147 @@ def replay_run(run, roots, carry, trace, *, refit=None, executor=None):
     obs_acq, pub_acq = set(), {}  # acquisition ids received, with released revisions
     pending = None
     n_checkpoints = n_products = 0
+    refused = []
+    phase = 0
+    bounds = np.asarray(study.agenda.phase_until)[:-1]
+    wake = np.asarray(trace.wake)
     releasing = (EventKind.RELEASE, EventKind.RESULT)
-    for step in np.flatnonzero(
-        handled & np.isin(kinds, (*releasing, EventKind.REFRESH))
-    ):
+    for step in np.flatnonzero(handled):
         at = {n: int(cols[n][step]) for n in (*names, "audience", "n_written", "n_log")}
         if at["kind"] == EventKind.REFRESH:
             ordinal = at["acquisition_index"]
             if pending is None:
-                pending = _hold(
-                    study,
-                    carry,
-                    roots,
-                    boundary,
-                    at,
-                    (belief, pbelief, dirty, accepted, released),
-                )
-                continue
-            if pending["ordinal"] != ordinal:
-                raise ValueError(
-                    f"checkpoint {ordinal} completes checkpoint {pending['ordinal']}"
-                )
-            new = pending["new"]
-            written = int(new.n_log) - pending["n_log"]
-            if written != at["n_written"] or int(new.n_log) != at["n_log"]:
-                raise ValueError(
-                    f"checkpoint {ordinal}: wrote {written} rows, the trace says "
-                    f"{at['n_written']}"
-                )
-            _check_products(new, carry, pending["n_log"], written, ordinal)
-            mean, aux = layout.project(new.belief)
-            for got, name in ((mean, "belief_mean"), (aux, "belief_aux")):
-                if _row_unequal(got, vars(trace)[name][step]):
-                    raise ValueError(f"checkpoint {ordinal}: trace {name} differs")
-            belief, pbelief = new.belief, new.pbelief
-            dirty = np.array(new.refresh_dirty)
-            n_checkpoints += 1
-            n_products += written
-            pending = None
-            continue
-        i = at["log_slot"]
-        _check_release(
-            log, i, at["tick"], at["subject"], at["acquisition_index"], at["channel"]
-        )
-        if log.status[i] == RecordStatus.UNRELEASED:
-            continue
-        kind = int(log.kind[i])
-        if kind in caps.derived_kinds:
-            continue
-        reach = at["audience"] & int(log.audience[i])
-        acquisition = int(log.acquisition_id[i])
-        full = _row(carry.log, i)
-        key = fold_key(roots, full, study) if incremental else None
-        eligible = kind in refit_kinds
-        if reach & Audience.OBSERVER and i not in accepted:
-            if log.accepted_tick[i] != at["tick"]:
-                raise ValueError(
-                    f"release at tick {at['tick']} matches no accepted row at slot {i}"
-                )
-            first = acquisition not in obs_acq
-            accepted.add(i)
-            obs_acq.add(acquisition)
-            if incremental and first:
-                row = masked_record(full, caps, Audience.OBSERVER)
-                belief = _fold(study, belief, row, key)
-            if eligible and dirty.size:
-                dirty[0, at["subject"]] = True
-        if reach & Audience.POLICY and i not in released:
-            if log.released_tick[i] != at["tick"]:
-                raise ValueError(
-                    f"release at tick {at['tick']} matches no released row at slot {i}"
-                )
-            before = pub_acq.setdefault(acquisition, [])
-            first = not before
-            revision = int(log.revision[i])
-            replaced = max([r for r in before if r > revision], default=-1)
-            released.add(i)
-            before.append(revision)
-            if incremental and first:
-                seen = dataclasses.replace(
-                    full, superseded_by=jnp.asarray(replaced, I64)
-                )
-                row = masked_record(seen, caps, Audience.POLICY)
-                pbelief = _fold_summary(study, pbelief, row, key)
-            if eligible and dirty.size:
-                dirty[1, at["subject"]] = True
+                state = (belief, pbelief, dirty, accepted, released, phase)
+                pending = _hold(study, carry, roots, boundary, at, state)
+            else:
+                if pending["ordinal"] != ordinal:
+                    raise ValueError(
+                        f"checkpoint {ordinal} completes checkpoint "
+                        f"{pending['ordinal']}"
+                    )
+                new = pending["new"]
+                written = int(new.n_log) - pending["n_log"]
+                if written != at["n_written"] or int(new.n_log) != at["n_log"]:
+                    raise ValueError(
+                        f"checkpoint {ordinal}: wrote {written} rows, the trace says "
+                        f"{at['n_written']}"
+                    )
+                _check_products(new, carry, pending["n_log"], written, ordinal)
+                _check_ids(carry, pending["n_log"], written, ordinal)
+                mean, aux = layout.project(new.belief)
+                for got, name in ((mean, "belief_mean"), (aux, "belief_aux")):
+                    if _row_unequal(got, vars(trace)[name][step]):
+                        raise ValueError(f"checkpoint {ordinal}: trace {name} differs")
+                bits = int(new.overflow_mask) & int(REFUSALS)
+                if bits:
+                    refused.append((ordinal, bits))
+                belief, pbelief = new.belief, new.pbelief
+                dirty = np.array(new.refresh_dirty)
+                n_checkpoints += 1
+                n_products += written
+                pending = None
+        elif at["kind"] in releasing:
+            belief, pbelief = _release(
+                study,
+                carry,
+                log,
+                roots,
+                at,
+                (belief, pbelief, dirty),
+                (accepted, released, obs_acq, pub_acq),
+                incremental,
+                refit_kinds,
+            )
+        if wake[step]:
+            phase = _phase_after(phase, at["tick"], bounds)
     ours = belief_leaves(_Pair(belief, pbelief), layout)
     theirs = belief_leaves(carry, layout)
     for name, leaf in ours.items():
         if _row_unequal(leaf, theirs[name]):
             raise ValueError(f"the replayed {name} differs from the run's")
-    return Replayed(belief, pbelief, n_checkpoints, n_products)
+    mask = int(np.asarray(carry.overflow_mask))
+    for ordinal, bits in refused:
+        if bits & ~mask:
+            raise ValueError(f"checkpoint {ordinal} was refused in the replay only")
+    return Replayed(
+        belief,
+        pbelief,
+        n_checkpoints,
+        n_products,
+        tuple(refused),
+        pending is not None,
+        mask,
+    )
+
+
+def _release(study, carry, log, roots, at, state, seen, incremental, refit_kinds):
+    """One handled release or result step: folds, received state and dirty flags.
+
+    The folds see the row as the handler did: before this step stamped the ticks, with
+    the supersession then in force (the observer's own is always clear, the policy's is
+    the highest revision released to it before). Returns the new beliefs; `state` holds
+    the beliefs and the dirty flags (updated in place), `seen` the received state
+    (updated in place).
+    """
+    belief, pbelief, dirty = state
+    accepted, released, obs_acq, pub_acq = seen
+    caps = study.caps
+    i = at["log_slot"]
+    _check_release(
+        log, i, at["tick"], at["subject"], at["acquisition_index"], at["channel"]
+    )
+    kind = int(log.kind[i])
+    if log.status[i] == RecordStatus.UNRELEASED or kind in caps.derived_kinds:
+        return belief, pbelief
+    reach = at["audience"] & int(log.audience[i])
+    acquisition = int(log.acquisition_id[i])
+    full = _row(carry.log, i)
+    key = fold_key(roots, full, study) if incremental else None
+    eligible = kind in refit_kinds
+    last = jnp.asarray(-1, I64)
+    # the ticks the handler read: stamped only after the folds
+    before = dataclasses.replace(
+        full,
+        accepted_tick=full.accepted_tick if i in accepted else last,
+        released_tick=full.released_tick if i in released else last,
+        superseded_by=last,
+    )
+    if reach & Audience.OBSERVER and i not in accepted:
+        if log.accepted_tick[i] != at["tick"]:
+            raise ValueError(
+                f"release at tick {at['tick']} matches no accepted row at slot {i}"
+            )
+        first = acquisition not in obs_acq
+        if incremental and first:
+            row = masked_record(before, caps, Audience.OBSERVER)
+            belief = _fold(study, belief, row, key)
+        accepted_now = True
+        if eligible and dirty.size:
+            dirty[0, at["subject"]] = True
+    else:
+        accepted_now = False
+    if reach & Audience.POLICY and i not in released:
+        if log.released_tick[i] != at["tick"]:
+            raise ValueError(
+                f"release at tick {at['tick']} matches no released row at slot {i}"
+            )
+        earlier = pub_acq.setdefault(acquisition, [])
+        revision = int(log.revision[i])
+        replaced = max([r for r in earlier if r > revision], default=-1)
+        if incremental and not earlier:
+            seen_row = dataclasses.replace(
+                before, superseded_by=jnp.asarray(replaced, I64)
+            )
+            row = masked_record(seen_row, caps, Audience.POLICY)
+            pbelief = _fold_summary(study, pbelief, row, key)
+        earlier.append(revision)
+        released.add(i)
+        if eligible and dirty.size:
+            dirty[1, at["subject"]] = True
+    if accepted_now:
+        accepted.add(i)
+        obs_acq.add(acquisition)
+    return belief, pbelief
 
 
 @dataclasses.dataclass(frozen=True)
@@ -344,11 +430,14 @@ def _bound(run, refit, executor):
 
 def _hold(study, carry, roots, boundary, at, state):
     """Refit a frozen replay world at its hold step: request, boundary, install."""
-    belief, pbelief, dirty, accepted, released = state
+    belief, pbelief, dirty, accepted, released, phase = state
     ordinal, n_log = at["acquisition_index"], at["n_log"]
     log = carry.log
-    ahead = n_log < log.valid.shape[0]
-    seed = lambda name: jnp.asarray(vars(log)[name][n_log] if ahead else 0, I64)  # noqa: E731
+    # The allocator is not in the trace: a checkpoint that wrote rows reserved ids from
+    # the first of them; one that wrote none (refused) is seeded with the run's final
+    # allocator, which any refusal for lack of ids is consistent with.
+    ahead = n_log < log.valid.shape[0] and bool(log.valid[n_log])
+    next_sid = vars(log)["acquisition_id"][n_log] if ahead else carry.next_sid
     held = dataclasses.replace(
         empty_event_row(),
         tick=jnp.asarray(at["tick"], I64),
@@ -364,12 +453,12 @@ def _hold(study, carry, roots, boundary, at, state):
         belief=belief,
         pbelief=pbelief,
         n_log=jnp.asarray(n_log, I64),
-        next_sid=seed("acquisition_id"),
-        phase=seed("phase"),
+        next_sid=jnp.asarray(next_sid, I64),
+        phase=jnp.asarray(phase, I64),
     )
     request = _request(view, roots, study)
     batch = jax.tree_util.tree_map(lambda x: x[None], request)
     result = boundary.refit_batch(study, batch)
     one = jax.tree_util.tree_map(lambda x: x[0], result)
-    new = _commit(view, request, one, study)
+    new = refresh._commit(view, request, one, study)
     return {"ordinal": ordinal, "n_log": n_log, "new": new}
