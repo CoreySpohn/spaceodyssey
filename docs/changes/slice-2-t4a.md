@@ -64,7 +64,8 @@ size.
   whenever there is a `service` or `study.refresh.every_ticks > 0`.
 - **Boundaries.** `AbstractRefitBoundary.refit_batch(study, requests)` returns a
   `RefitResult` with axes `[world, 2, n_subjects, ...]`. `MaskedBatchRefit(kernel)`
-  runs a fixed `refit_lanes` batch of world lanes through one jitted vmapped call,
+  runs a fixed `refit_lanes` batch of world lanes through one jitted call (a sequential map over lanes and
+  entries),
   masks entries that are not dirty or are shared, and pads a batch of worlds to whole
   lanes, so the host executor's single world and the compiled executor's worlds run
   one program. Its default kernel is the observer's own `refit`
@@ -222,6 +223,35 @@ chunked driver and the masked kernel for a different study structure). An earlie
 full run before the merge had 7 failures: the dispatch scan on the first `requeue`
 (2 tests), four mutant tests and one kit control that match the release handler's
 fold lines by text; commit 4 fixes all seven.
+
+## Review fixes
+
+An adversarial review of the pushed branch found two P1 and five P2 defects and one
+surviving mutant. Each is fixed in commits after the first push (the source in
+`fix(core): hold install needs completion budget, ...`, the tests in
+`test(core): review fixes for the refresh protocol`), followed by a sync merge of main.
+
+| Item | Resolution |
+|---|---|
+| P1 budget ends on the hold | Installation needs a step for the completion transition. The host loop passes `can_finish`, the compiled driver passes the remaining budget; without one the hold is dropped (`drop_hold`) and nothing installs. |
+| P1 policy refit input | `refit_rows` rebuilds `superseded_by` from the revisions this audience received, as `snapshot_view` does, so an observer-only revision no longer marks an earlier public row. |
+| P2 install before capacity | `commit_refresh` reserves product slots and internal ids for every dirty entry first and refuses the whole install (`STABLE_IDS`, `LOG_ROWS`) when either is short. |
+| P2 reduction order | The toy kernel sums left to right with a scan and the host fit sums left to right, so the two agree bit for bit. |
+| P2 digest padding | `revision_set_digest` folds only the counting `(channel, acquisition index, revision)` triples and then their count; capacity no longer matters. |
+| P2 dedup execution | The masked boundary maps sequentially over lanes and entries with a real conditional, so only unique dirty entries run the kernel. |
+| P2 grid wrap | `next_grid_tick` uses ceiling arithmetic that cannot wrap and saturates at the largest int64; `schedule_refresh` sets `GRID_TICK` overflow when the tick is not representable or beyond `max_tick`. |
+| Surviving mutant | A fit of the observer-only column gives distinct observer and policy beliefs, and a swap of the two slices now fails. |
+
+New tests: the budget cases (budgets 1 to 4, host and compiled, chunks 1, 7 and 32),
+both capacity exhaustions, execution counts of the kernel, per-audience slices, the
+audience-isolated refit rows, digest invariance across capacities 4, 8 and 16, the
+int64 grid edge and the cancelling-row parity case.
+
+Results on the merged tree: full suite 2,828 passed in 968 s (one budget report,
+`test_core.py::test_every_hand_study_reproduces_its_history` at 5.15 s on a cold
+compile under load; not a refresh test). Quick tier 1,684 passed in 43.1 s wall
+(72.0 s summed), against 57 to 59 s for the earlier quiet pair. All golden digests
+match.
 
 ## Golden status
 
