@@ -84,6 +84,45 @@ _count_transition = _clone(transaction.transition, decide=_count_decide)
 _count_decide_jit = eqx.filter_jit(_count_decide)
 
 
+def _count_fold_release(c, ev, study, truth, root):
+    """The mutant fold key: the record's key folded with the decision count."""
+
+    def key(root, rec, study):
+        return jr.fold_in(core.fold_key(root, rec, study), c.n_dec)
+
+    return _clone(handlers.h_release, fold_key=key)(c, ev, study, truth, root)
+
+
+COUNT_FOLD_HANDLERS = tuple(
+    {
+        2: _count_fold_release,
+        7: _clone(handlers.h_result, h_release=_count_fold_release),
+    }.get(i, h)
+    for i, h in enumerate(handlers.HANDLERS)
+)
+
+
+def _count_fold_step(carry, ev, study, truth, root):
+    return _step_with_table(carry, ev, study, truth, root, COUNT_FOLD_HANDLERS)
+
+
+_count_fold_advance = _clone(transaction.advance, step=_count_fold_step)
+_count_fold_transition = _clone(transaction.transition, advance=_count_fold_advance)
+_count_fold_advance_jit = eqx.filter_jit(_count_fold_advance)
+
+
+class CountFoldKeyCompiledExecutor(CompiledExecutor):
+    def transition(
+        self, carry, i, root, study, truth, *, wake_fn=core.wake_by_audience
+    ):
+        return _count_fold_transition(carry, i, root, study, truth, wake_fn=wake_fn)
+
+
+class CountFoldKeyHostExecutor(HostExecutor):
+    def advance(self, carry, root, study, truth, *, wake_fn=core.wake_by_audience):
+        return _count_fold_advance_jit(carry, root, study, truth, wake_fn=wake_fn)
+
+
 class CountKeyCompiledExecutor(CompiledExecutor):
     def transition(
         self, carry, i, root, study, truth, *, wake_fn=core.wake_by_audience

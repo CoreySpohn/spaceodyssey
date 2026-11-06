@@ -8,6 +8,7 @@ from tests.core.corpus import PERTURBATIONS
 from tests.core.draw_helpers import (
     DrawingSpinPolicy,
     compare_draws,
+    compare_inference_draws,
     compare_policy_draws,
     draw_table,
     policy_draw_table,
@@ -20,9 +21,16 @@ from tests.core.draw_helpers import (
 @pytest.mark.parametrize("name", list(PERTURBATIONS))
 @pytest.mark.parametrize("executor", ["scan", "host"])
 def test_draws_invariant(name, executor):
-    base, other = run_pair(name, executor, n_seeds=4)
+    """Measurement and fold (`INFERENCE`) variates follow record identity only.
+
+    Fails if a measurement key or the key the core passes to `fold` reads a count,
+    a queue position or an event that is not the record's own.
+    """
+    base, other = run_pair(name, executor, n_seeds=4, sample=True)
     n_compared, n_baseline, n_changed = compare_draws(base, other)
     assert n_compared == n_baseline >= 5 * 4 and n_changed == 0, (name, executor)
+    n_compared, _, n_changed = compare_inference_draws(base, other)
+    assert n_compared >= 4 * 4 and n_changed == 0, (name, executor)
 
 
 def test_cancel_partial_shares_variate_with_full():
@@ -45,11 +53,35 @@ def test_mutant_is_caught_on_the_host_executor_too():
     assert compare_draws(base, other)[2] > 0
 
 
+def test_compiled_fold_variates_equal_the_host_variates():
+    """Fails if the compiled executor keys a fold by batch position or world index.
+
+    Reuses the runs of `test_draws_invariant`, whose host variates
+    `test_observer_contract.py` checks against `fold_key`.
+    """
+    scan, _ = run_pair("insert_wait", "scan", n_seeds=4, sample=True)
+    host, _ = run_pair("insert_wait", "host", n_seeds=4, sample=True)
+    n_compared, n_baseline, n_changed = compare_inference_draws(host, scan)
+    assert n_compared == n_baseline >= 4 * 4 and n_changed == 0
+
+
+@pytest.mark.parametrize("executor", ["scan", "host"])
+def test_fold_key_with_n_dec_is_caught(executor):
+    """Fails if the inference invariance check cannot see a count-keyed fold."""
+    base, other = run_pair(
+        "insert_wait", executor, n_seeds=2, sample=True, fold_mutant=True
+    )
+    assert compare_inference_draws(base, other)[2] > 0
+    # the mutant moves fold keys only
+    assert compare_draws(base, other)[2] == 0
+
+
 @pytest.mark.parametrize("name", list(PERTURBATIONS))
 @pytest.mark.parametrize("executor", ["scan", "host"])
 def test_policy_draws_invariant(name, executor):
     """Policy draws follow phase, decision tick and ordinal, so none moves."""
-    base, other = run_pair(name, executor, n_seeds=2)
+    # the sampling observer shares the host programs of `test_draws_invariant`
+    base, other = run_pair(name, executor, n_seeds=2, sample=True)
     n_compared, _, n_changed = compare_policy_draws(base, other)
     assert n_compared >= 2 * 2 and n_changed == 0, (name, executor)
 

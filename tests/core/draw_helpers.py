@@ -15,6 +15,8 @@ from spaceodyssey.studies import toy as kinds
 from tests.core.corpus import PERTURBATIONS, PLAN5
 from tests.core.leak_helpers import make_worlds
 from tests.core.mutants import (
+    CountFoldKeyCompiledExecutor,
+    CountFoldKeyHostExecutor,
     CountKeyCompiledExecutor,
     CountKeyHostExecutor,
     MutantCompiledExecutor,
@@ -122,6 +124,34 @@ def _compare_tables(base, other, table, min_matches):
     return n_cmp, n_base, n_chg
 
 
+def inference_draw_table(world):
+    """Index the fold variates of a `ToySampleObserver` by subject and acquisition."""
+    draws = np.asarray(world.carry.belief.draws)
+    return {
+        (int(s), int(a)): float(draws[s, a])
+        for s, a in zip(*np.nonzero(draws), strict=True)
+    }
+
+
+def compare_inference_draws(base, other, min_matches=2):
+    """(n_compared, n_baseline, n_changed) of the fold variates, all worlds."""
+    return _compare_tables(base, other, inference_draw_table, min_matches)
+
+
+def sampling(make_study):
+    """`make_study` with its running mean replaced by a `ToySampleObserver`."""
+
+    def make():
+        study = make_study()
+        observer = kinds.ToySampleObserver(
+            measurement_kind=study.observer.measurement_kind,
+            auxiliary_kind=study.observer.auxiliary_kind,
+        )
+        return dataclasses.replace(study, observer=observer)
+
+    return make
+
+
 def compare_draws(base, other, min_matches=2):
     """(n_compared, n_baseline, n_changed) over the keys both runs hold, all worlds."""
     return _compare_tables(base, other, draw_table, min_matches)
@@ -157,6 +187,7 @@ def run_study(
     hook=None,
     padded=False,
     policy_mutant=False,
+    fold_mutant=False,
 ):
     study = make_study()
     scan = MutantCompiledExecutor() if hook is not None else CompiledExecutor()
@@ -165,6 +196,8 @@ def run_study(
         scan, host = CountKeyCompiledExecutor(), CountKeyHostExecutor()
     if padded:
         scan, host = PaddedCompiledExecutor(), PaddedHostExecutor()
+    if fold_mutant:
+        scan, host = CountFoldKeyCompiledExecutor(), CountFoldKeyHostExecutor()
     truths, roots = make_worlds(n_seeds, study.caps)
     if executor == "scan":
         cs, ts = scan.run(study, truths, roots, n_steps)
@@ -176,18 +209,26 @@ def run_study(
     return out
 
 
-def run_pair(name, executor, n_seeds, mutant=False, policy_mutant=False):
-    """Run both variants on the same worlds, optionally with mutated draw keys."""
+def run_pair(
+    name,
+    executor,
+    n_seeds,
+    mutant=False,
+    policy_mutant=False,
+    sample=False,
+    fold_mutant=False,
+):
+    """Run both variants on the same worlds, optionally with mutated draw keys.
+
+    With `sample` both studies fold through a `ToySampleObserver`, so the fold
+    variates can be compared too.
+    """
     make_base, make_other = PAIRS[name]
+    if sample:
+        make_base, make_other = sampling(make_base), sampling(make_other)
     hook = fold_n_dec if mutant else None
+    kw = dict(hook=hook, policy_mutant=policy_mutant, fold_mutant=fold_mutant)
     return (
-        run_study(make_base, executor, n_seeds, hook=hook, policy_mutant=policy_mutant),
-        run_study(
-            make_other,
-            executor,
-            n_seeds,
-            hook=hook,
-            padded=name == "extra_kinds",
-            policy_mutant=policy_mutant,
-        ),
+        run_study(make_base, executor, n_seeds, **kw),
+        run_study(make_other, executor, n_seeds, padded=name == "extra_kinds", **kw),
     )
