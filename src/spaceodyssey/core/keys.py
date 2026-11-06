@@ -151,6 +151,11 @@ def fold_key(root, rec, study) -> jax.Array:
     )
 
 
+def fold_keys(root, rows, study) -> jax.Array:
+    """`fold_key` of each row of a `Record` with a leading row axis."""
+    return jax.vmap(lambda rec: fold_key(root, rec, study))(rows)
+
+
 def policy_key(
     root, phase, tick, ordinal, *, lineage=0, coupling=DEFAULT_COUPLING
 ) -> jax.Array:

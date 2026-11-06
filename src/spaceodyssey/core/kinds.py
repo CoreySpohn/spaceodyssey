@@ -7,9 +7,8 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
-from spaceodyssey.core.enums import F64, I64, Purpose, RecordStatus
+from spaceodyssey.core.enums import F64, I64, RecordStatus
 from spaceodyssey.core.events import where_tree
-from spaceodyssey.core.keys import draw_key
 from spaceodyssey.core.records import record_none
 from spaceodyssey.core.snapshot import MeanBelief, mean_layout
 
@@ -62,8 +61,9 @@ class AbstractObserver(eqx.Module):
 
     A fold receives the key of the record it folds (`keys.fold_key`: the record's
     own identity under `Purpose.INFERENCE`), the same key for the belief and the
-    summary; a refit receives the key of the subject's revision set. Neither is ever
-    keyed by a count or an order.
+    summary; a refit receives the same per-row keys (`keys.fold_keys`) and,
+    separately, the key of the subject's revision set. None is ever keyed by a
+    count or an order.
 
     The defaults make the summary the full belief itself and the observer
     incremental only: `init_summary` is `init`, `summary` is the identity,
@@ -113,22 +113,37 @@ class AbstractObserver(eqx.Module):
         """The policy summary of a full belief."""
         return belief
 
-    def refit(self, belief0, rows, caps, key):
+    def refit(self, belief0, rows, caps, key, row_keys):
         """Recompute a belief from one subject's rows, starting from `belief0`.
 
-        `rows` is a `Record` with a leading row axis: the subject's revision set in
-        canonical order, masked for the audience, with `valid` false on padding
-        rows. `key` is the refit key of that revision set. The default folds and
-        analyzes each valid row in order, keyed by the row's identity under `key`,
-        so an exact incremental observer refits to what folding gave.
+        `rows` is a `Record` with a leading row axis, as `records.refit_rows` selects
+        it: the subject's eligible rows in canonical order, masked for the audience,
+        with `valid` false on every row that does not count (padding, a superseded
+        revision, an ineligible kind or status). `row_keys` holds each row's fold
+        key, `keys.fold_keys(root, rows, study)`, the keys the incremental folds of
+        the same rows received. `key` is the refit key of the revision set, for an
+        observer whose refit draws beyond its row folds.
+
+        Returns a belief of `belief0`'s shape before the final analysis, like
+        `fold`: the default folds each valid row in order, analyzing between folds as
+        the incremental path does, so `analyze(refit(...))` of an observer's rows
+        equals folding them one by one. A row that does not count is replaced by a
+        row that does before its fold is evaluated and discarded, so padding cannot
+        put a NaN into a gradient. With no valid row, `belief0` is returned.
         """
+        first = jax.tree_util.tree_map(lambda x: x[jnp.argmax(rows.valid)], rows)
+        stand_in = dataclasses.replace(first, valid=jnp.zeros_like(first.valid))
 
-        def step(belief, row):
-            row_key = draw_key(key, row, Purpose.INFERENCE)
-            folded = self.analyze(self.fold(belief, row, caps, key=row_key))
-            return where_tree(row.valid, folded, belief), None
+        def step(state, xs):
+            belief, started = state
+            row, row_key = xs
+            safe = where_tree(row.valid, row, stand_in)
+            base = where_tree(started, self.analyze(belief), belief)
+            folded = self.fold(base, safe, caps, key=row_key)
+            return (where_tree(row.valid, folded, belief), started | row.valid), None
 
-        return lax.scan(step, belief0, rows)[0]
+        start = (belief0, jnp.zeros((), bool))
+        return lax.scan(step, start, (rows, row_keys))[0][0]
 
     def install(self, belief, fitted, subject):
         """Replace `subject`'s part of `belief` with that of the refit belief `fitted`.

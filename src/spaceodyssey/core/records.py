@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 
 from spaceodyssey.core.capacities import Capacities
-from spaceodyssey.core.enums import EVERYONE, F64, I64, B, Capacity
+from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience, B, Capacity
 
 
 @dataclasses.dataclass(frozen=True)
@@ -288,6 +288,31 @@ def write_log(carry, rec, caps):
         ),
     )
     return out, s
+
+
+def refit_rows(log, caps, audience, subject):
+    """The rows a refit of `subject` for `audience` reads, as `n_log` log rows.
+
+    Selection takes, for each acquisition of the subject, the latest revision the
+    audience has received (accepted by the observer, released to the policy) first;
+    that row counts only when its kind is in `caps.refit_kinds` and its status in
+    `caps.refit_statuses`, so a correction with an unlisted status retracts the
+    acquisition rather than leaving its earlier value. Counting rows come first in
+    canonical order (channel, acquisition index, revision) with `valid` true; every
+    other row follows with `valid` false. Rows are masked for the audience.
+    """
+    seen = log.accepted_tick if audience == Audience.OBSERVER else log.released_tick
+    mine = log.valid & (seen >= 0) & (log.subject == subject)
+    same = (log.acquisition_id[:, None] == log.acquisition_id[None, :]) & mine[None, :]
+    newer = (same & (log.revision[None, :] > log.revision[:, None])).any(axis=1)
+    kinds = jnp.asarray(caps.refit_kinds, I64)
+    statuses = jnp.asarray(caps.refit_statuses, I64)
+    counts = mine & ~newer & jnp.isin(log.kind, kinds) & jnp.isin(log.status, statuses)
+    last = (~counts).astype(I64)
+    order = jnp.lexsort((log.revision, log.acquisition_index, log.channel, last))
+    fields = {n: getattr(log, n)[order] for n in (*LOG_INT_FIELDS, "cost", "charged")}
+    rows = Record(**fields, payload=log.payload[order], valid=counts[order])
+    return masked_record(rows, caps, audience)
 
 
 RECORD_INT_FIELDS = tuple(

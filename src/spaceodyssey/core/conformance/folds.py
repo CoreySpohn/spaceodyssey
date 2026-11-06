@@ -132,11 +132,10 @@ class CountingObserver(AbstractObserver):
             belief, _fold_value=self.inner.summary(plain(belief))
         )
 
-    def refit(self, belief0, rows, caps, key):
+    def refit(self, belief0, rows, caps, key, row_keys):
         """The inner refit; a refit is not a fold, so the counters are kept."""
-        return dataclasses.replace(
-            belief0, _fold_value=self.inner.refit(plain(belief0), rows, caps, key)
-        )
+        value = self.inner.refit(plain(belief0), rows, caps, key, row_keys)
+        return dataclasses.replace(belief0, _fold_value=value)
 
     def install(self, belief, fitted, subject):
         """The inner install of the refit value; the counters of `belief` are kept."""

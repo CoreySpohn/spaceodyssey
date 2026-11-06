@@ -80,6 +80,7 @@ from spaceodyssey.core.keys import Fork as Fork
 from spaceodyssey.core.keys import draw_key as draw_key
 from spaceodyssey.core.keys import fold64 as fold64
 from spaceodyssey.core.keys import fold_key as fold_key
+from spaceodyssey.core.keys import fold_keys as fold_keys
 from spaceodyssey.core.keys import key_for as key_for
 from spaceodyssey.core.keys import policy_key as policy_key
 from spaceodyssey.core.kinds import AbstractChannelModel as AbstractChannelModel
@@ -111,6 +112,7 @@ from spaceodyssey.core.records import lower_refit as lower_refit
 from spaceodyssey.core.records import masked_record as masked_record
 from spaceodyssey.core.records import payload_columns as payload_columns
 from spaceodyssey.core.records import record_none as record_none
+from spaceodyssey.core.records import refit_rows as refit_rows
 from spaceodyssey.core.records import write_log as write_log
 from spaceodyssey.core.service import AbstractHostService as AbstractHostService
 from spaceodyssey.core.service import Request as Request
