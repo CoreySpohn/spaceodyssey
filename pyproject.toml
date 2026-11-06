@@ -97,6 +97,9 @@ physical = [
     "numpyro>=0.21.0",
     "jaxedith>=2.0",
     "optixstuff>=4.0",
+    # The summary adapter reads EqxCoronagraph.stellar_frame and stellar_pixel_scale_lod,
+    # which no release carries yet; .github/sibling-pins.txt pins the yippy commit that
+    # adds them. The floor moves to the first release that carries them.
     "yippy>=2.11",
     "interpax>=0.3",
 ]
