@@ -156,6 +156,7 @@ def test_record_kind_passes_kp5_against_the_profile_table():
 # -- Sampling against likelihood (B2) --------------------------------------------
 
 
+@pytest.mark.slow  # A 20,000-draw Monte Carlo panel (the tier the spec assigns).
 @pytest.mark.parametrize("corr", [0.0, 0.5])
 def test_sampling_and_likelihood_agree(corr):
     """Fails if draws and the likelihood disagree beyond Monte Carlo error.
@@ -202,6 +203,7 @@ def test_sampling_and_likelihood_agree(corr):
             assert abs(detected.mean() - doubled) > 3 * se
 
 
+@pytest.mark.slow  # The correlated-error control of the 20,000-draw panel.
 def test_position_whitening_control_fails_on_the_correlated_case():
     """Fails if the chi-square check cannot see a correlation sign error.
 
@@ -468,34 +470,149 @@ def test_photomancy_null_coincides_only_when_s_equals_s0():
 # -- Calibration id ------------------------------------------------------------------
 
 
-def test_calibration_id_digests_every_declaration(observatory):
-    """Fails if a declaration change leaves the calibration id unchanged.
+def _renominal(report, where, value):
+    """`report` with one field replaced and its nominal scene prepared again."""
+    out = eqx.tree_at(where, report, value)
+    return eqx.tree_at(lambda r: r.nominal, out, out.prepare(out.nominal.scene))
 
-    The id is stable across two builds, an integer below 2^48 that a float64
-    payload column holds exactly, and it moves with the law's threshold, kappa and
-    corr, the detector's dark current, the nominal exozodi level, the
-    systematic floor and the background multiplier.
+
+def _mutations(observatory):
+    """One declaration change per entry: (name, mutated report or law)."""
+    from tests.adapters.test_jaxedith_summary import (
+        ToyCoronagraph,
+        toy_report,
+        toy_scene,
+    )
+
+    base = toy_report(observatory)
+    spec = type(base.detector_spec)
+    halo = observatory.orbit._interp_x
+    return [
+        ("threshold", ReportingLaw(threshold=7.0)),
+        ("kappa", ReportingLaw(kappa=2.0)),
+        ("corr", ReportingLaw(corr=0.5)),
+        (
+            "dark_current",
+            toy_report(observatory, spec=spec.fixture(dark_current_rate_e_per_s=1e-4)),
+        ),
+        (
+            "quantum_efficiency",
+            toy_report(observatory, spec=spec.fixture(quantum_efficiency=0.8)),
+        ),
+        (
+            "pixel_scale",
+            toy_report(observatory, spec=spec.fixture(pixel_scale_arcsec=0.02)),
+        ),
+        ("n_exozodi", toy_report(observatory, scene=toy_scene(n_exozodi=1.0))),
+        (
+            "star_flux",
+            toy_report(observatory, scene=toy_scene(star_flux_density_jy=40.0)),
+        ),
+        ("ppfact", toy_report(observatory, ppfact=30.0)),
+        ("bg_multiplier", toy_report(observatory, bg_multiplier=2.0)),
+        ("eps_warm_T_cold", toy_report(observatory, eps_warm_T_cold=0.1)),
+        ("bin_width", toy_report(observatory, bin_width_nm=50.0)),
+        ("n_time_nodes", toy_report(observatory, n_time_nodes=4)),
+        ("orbit_epoch", toy_report(observatory, orbit_epoch_jd=2461001.5)),
+        (
+            "occulter_transmission",
+            toy_report(observatory, coronagraph=ToyCoronagraph(sky=0.1)),
+        ),
+        (
+            "throughput_curve",
+            toy_report(observatory, coronagraph=ToyCoronagraph(peak=0.2)),
+        ),
+        ("n_channels", _renominal(base, lambda r: r.optical_path.n_channels, 2.0)),
+        (
+            "npix_multiplier",
+            _renominal(base, lambda r: r.optical_path.npix_multiplier, 2.0),
+        ),
+        (
+            "optics_throughput",
+            _renominal(
+                base, lambda r: r.optical_path.attenuating_elements[0].throughput, 0.4
+            ),
+        ),
+        (
+            "obscuration",
+            _renominal(base, lambda r: r.optical_path.primary.obscuration, 0.3),
+        ),
+        (
+            "observatory_orbit",
+            eqx.tree_at(
+                lambda r: r.observatory.orbit._interp_x,
+                base,
+                eqx.tree_at(lambda i: i.f, halo, halo.f + 0.01),
+            ),
+        ),
+    ]
+
+
+def test_calibration_id_digests_every_declaration(observatory):
+    """Fails if any declaration a predicted budget depends on leaves the id unchanged.
+
+    The id is stable across two builds and an integer below 2^48 that a float64
+    payload column holds exactly. Each of 21 single-field mutations (the law's
+    threshold, kappa and corr; the detector's dark current, QE and pixel scale; the
+    nominal exozodi and stellar flux; the floor, background multiplier, thermal
+    emissivity, band width, time nodes and orbit epoch; the occulter transmission
+    and throughput curves; `n_channels`, `npix_multiplier`, the optics throughput and
+    the obscuration of the optical path; the observatory orbit) gives a distinct id.
     """
-    from tests.adapters.test_jaxedith_summary import toy_report, toy_scene
+    from tests.adapters.test_jaxedith_summary import toy_report
 
     law = ReportingLaw()
-    base = calibration_id(toy_report(observatory), law)
+    base_report = toy_report(observatory)
+    base = calibration_id(base_report, law)
     assert base == calibration_id(toy_report(observatory), law)
     assert 0 < base < 2**48 and int(float(base)) == base
-    spec = type(toy_report(observatory).detector_spec)
-    changed = [
-        calibration_id(toy_report(observatory), ReportingLaw(threshold=7.0)),
-        calibration_id(toy_report(observatory), ReportingLaw(kappa=2.0)),
-        calibration_id(toy_report(observatory), ReportingLaw(corr=0.5)),
-        calibration_id(
-            toy_report(observatory, spec=spec.fixture(dark_current_rate_e_per_s=1e-4)),
-            law,
-        ),
-        calibration_id(toy_report(observatory, scene=toy_scene(n_exozodi=1.0)), law),
-        calibration_id(toy_report(observatory, ppfact=30.0), law),
-        calibration_id(toy_report(observatory, bg_multiplier=2.0), law),
-    ]
-    assert base not in changed and len(set(changed)) == len(changed)
+    ids = {}
+    for name, mutated in _mutations(observatory):
+        if isinstance(mutated, ReportingLaw):
+            ids[name] = calibration_id(base_report, mutated)
+        else:
+            ids[name] = calibration_id(mutated, law)
+    assert base not in ids.values(), [k for k, v in ids.items() if v == base]
+    assert len(set(ids.values())) == len(ids)
+
+
+@pytest.mark.medium  # One predicted budget per mutated report (21 evaluations).
+def test_every_digested_report_field_moves_the_predicted_budget(observatory):
+    """Fails if a report field the id digests does not change a predicted budget.
+
+    Each report mutation of the calibration test, evaluated on a face-on planet over
+    thirty days (long enough that 4 and 8 time nodes differ), changes the predicted
+    counts, a variance component or the centroid: the id covers fields that matter.
+    """
+    from spaceodyssey.adapters.jaxedith import ScienceInterval
+    from tests.adapters.test_jaxedith_summary import face_on, toy_report
+
+    planet = face_on(1.0)
+    interval = ScienceInterval.from_start(2461000.5, 30 * 86400.0)
+
+    def summary(report):
+        b = report.predict(planet, interval)
+        return np.array(
+            [
+                float(x)
+                for x in (
+                    b.planet,
+                    b.background,
+                    b.var_detector,
+                    b.var_systematic,
+                    b.thermal,
+                    b.ra_arcsec,
+                    b.dec_arcsec,
+                )
+            ]
+        )
+
+    base = summary(toy_report(observatory))
+    for name, mutated in _mutations(observatory):
+        if isinstance(mutated, ReportingLaw):
+            continue
+        moved = summary(mutated)
+        assert not np.allclose(moved, base, rtol=1e-12, atol=0.0), name
 
 
 # -- Survey: detection and null sequence over planned visits -----------------------
@@ -672,6 +789,9 @@ def run_survey(n_worlds=N_WORLDS, kappas=(1.0, 2.0)):
     )
 
     def sample_all(law_k):
+        # Each law is its own declaration: its rows carry its own calibration id.
+        calibration_k = calibration_id(report, law_k)
+
         def one(w, v):
             budget = jax.tree_util.tree_map(lambda x: x[w, v], expected)
             iv = jax.tree_util.tree_map(lambda x: x[v], intervals)
@@ -684,7 +804,7 @@ def run_survey(n_worlds=N_WORLDS, kappas=(1.0, 2.0)):
                 lod_arcsec=lod,
                 time_d=iv.midpoint_jd,
                 occupied_s=occupied_s[v],
-                calibration_id=calibration,
+                calibration_id=calibration_k,
             )
 
         w, v = jnp.meshgrid(
@@ -819,6 +939,8 @@ def run_survey(n_worlds=N_WORLDS, kappas=(1.0, 2.0)):
         p_detect=1.0 - np.exp(ours_null),
         s_over_shat=s_true / np.sqrt(np.asarray(base.limit_counts)[detected] ** 2 + f),
         calibration=calibration,
+        row_ids={k: np.unique(np.asarray(r.calibration_id)) for k, r in rows.items()},
+        law_ids={k: calibration_id(report, ReportingLaw(kappa=k)) for k in kappas},
     )
 
 
@@ -839,6 +961,9 @@ def test_survey_detection_and_null_sequence_over_planned_visits():
     information.
     """
     s = run_survey()
+    for k, ids in s["row_ids"].items():
+        assert ids.tolist() == [float(s["law_ids"][k])]
+    assert len(set(s["law_ids"].values())) == len(s["law_ids"])
     detected, p = s["detected"], s["p_detect"]
     assert 0 < detected.sum() < detected.size
     se = math.sqrt(float(np.sum(p * (1 - p))))

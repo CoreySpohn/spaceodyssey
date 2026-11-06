@@ -1143,7 +1143,7 @@ def _canonical(value):
         return "{" + ",".join(items) + "}"
     if isinstance(value, (list, tuple)):
         return "[" + ",".join(_canonical(v) for v in value) + "]"
-    if isinstance(value, str):
+    if value is None or isinstance(value, (str, bool)):
         return repr(value)
     array = np.asarray(value, dtype=np.float64)
     if array.ndim == 0:
@@ -1152,50 +1152,72 @@ def _canonical(value):
     return "[" + ",".join(f"{v:.9g}" for v in array.ravel()) + "]"
 
 
-def calibration_id(report, law):
-    """Six-byte digest of the report's and the law's declarations, as an integer.
+def _declaration(obj, skip=()):
+    """Every field of a module, recursively, as plain values for `_canonical`.
 
-    Covers the detector and its cadence, the optics (aperture, obscuration,
-    attenuating elements), the response (working angles, pixel scale and its
-    throughput, core area and stellar leakage curves at the nominal host), the band,
-    the variance declarations, the nominal scene and the law. The integer is below
+    Modules and dataclasses become their type name plus their fields (static and
+    dynamic) except those in `skip`; arrays become arrays; anything else (a
+    callable) is named by its type.
+    """
+    if obj is None or isinstance(obj, (str, bool, int, float)):
+        return obj
+    if isinstance(obj, (jax.Array, np.ndarray, np.generic)):
+        return np.asarray(obj)
+    if dataclasses.is_dataclass(obj):
+        out = {"type": type(obj).__name__}
+        for f in dataclasses.fields(obj):
+            if f.name not in skip:
+                out[f.name] = _declaration(getattr(obj, f.name))
+        return out
+    if isinstance(obj, dict):
+        return {str(k): _declaration(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_declaration(v) for v in obj]
+    return type(obj).__name__
+
+
+def calibration_id(report, law):
+    """Six-byte digest of every declaration a predicted budget depends on.
+
+    Covers the detector spec and its cadence; every field of the optical path the
+    nominal scene is evaluated on (primary, attenuating elements, detector,
+    disperser, `n_channels`, `npix_multiplier`, speckle) except the coronagraph,
+    which enters through its working angles, pixel scale and its throughput, core
+    area, occulter transmission and stellar leakage curves at the nominal host on
+    the leakage grid; the observatory (its orbit sets the local zodiacal light, its
+    temperature the thermal term); the band; the variance declarations and time
+    nodes; the field radius; the nominal scene; and the law. The integer is below
     2^48, so a float64 payload column holds it exactly; it is never zero.
     """
-    path = report.optical_path
-    coronagraph = report.nominal.optical_path.coronagraph
+    path = report.nominal.optical_path
+    coronagraph = path.coronagraph
     grid = jnp.arange(0.0, report.leakage_max_lod, report.leakage_step_lod)
     wl = report.wavelength_nm
     declarations = {
         "detector": dataclasses.asdict(report.detector_spec),
-        "optics": {
-            "diameter_m": path.primary.diameter_m,
-            "obscuration": path.primary.obscuration,
-            "elements": [
-                [type(e).__name__, getattr(e, "name", ""), getattr(e, "throughput", 0)]
-                for e in path.attenuating_elements
-            ],
-        },
+        "optical_path": _declaration(path, skip=("coronagraph",)),
         "response": {
             "IWA": coronagraph.IWA,
             "OWA": coronagraph.OWA,
             "pixel_scale_lod": coronagraph.pixel_scale_lod,
             "throughput": coronagraph.throughput(grid, wl),
             "core_area": coronagraph.core_area(grid, wl),
+            "occulter_transmission": coronagraph.occulter_transmission(grid, wl),
             "leakage": coronagraph.core_mean_intensity(grid, wl),
             "field_radius_lod": report.field_radius_lod,
+            "leakage_step_lod": report.leakage_step_lod,
         },
+        "observatory": _declaration(report.observatory),
         "band": {"wavelength_nm": wl, "bin_width_nm": report.bin_width_nm},
         "variance": {
             "bg_multiplier": report.bg_multiplier,
             "ppfact": "inf" if math.isinf(report.ppfact) else report.ppfact,
             "eps_warm_T_cold": report.eps_warm_T_cold,
-            "n_time_nodes": int(report.nodes.shape[0]),
+            "nodes": report.nodes,
+            "weights": report.weights,
             "orbit_epoch_jd": report.orbit_epoch_jd,
         },
-        "nominal_scene": {
-            f.name: getattr(report.nominal.scene, f.name)
-            for f in dataclasses.fields(report.nominal.scene)
-        },
+        "nominal_scene": _declaration(report.nominal.scene),
         "law": {"threshold": law.threshold, "kappa": law.kappa, "corr": law.corr},
     }
     text = _canonical(declarations).encode("utf-8")
