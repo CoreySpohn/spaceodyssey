@@ -79,6 +79,34 @@ class MisnamedGain(LogGain):
         return dict(params)
 
 
+class TupleGain(LogGain):
+    """A migration that puts a tuple in the array field."""
+
+    @classmethod
+    def migrate(cls, from_version, params):
+        return {"log_gain": (0.5,)}
+
+
+class UnconvertedGain(LogGain):
+    """A migration that returns a float its converter would turn into an array."""
+
+    @classmethod
+    def migrate(cls, from_version, params):
+        return {"log_gain": 0.5}
+
+
+class PositiveLogGain(LogGain):
+    """A version-2 design whose check refuses a gain below one."""
+
+    def __check_init__(self):
+        if self.log_gain < 0:
+            raise ValueError("the gain is below one")
+
+    @classmethod
+    def migrate(cls, from_version, params):
+        return {"log_gain": jnp.log(params["gain"] / 4.0)}
+
+
 class FactoryVersion(AbstractDesign):
     """A design whose version comes from a factory, not a default."""
 
@@ -153,13 +181,25 @@ def test_older_kind_version_migrates_to_the_registered_one():
         (LogGain, 3, "/study/design/$kind", "D001"),
         (FrozenGain, 1, "/study/design/$kind", "D001"),
         (MisnamedGain, 1, "/study/design", None),
+        (TupleGain, 1, "/study/design", None),
+        (UnconvertedGain, 1, "/study/design", None),
+        (PositiveLogGain, 1, "/study/design", None),
     ],
-    ids=["newer-version", "no-migrate", "migrate-wrong-fields"],
+    ids=[
+        "newer-version",
+        "no-migrate",
+        "migrate-wrong-fields",
+        "migrate-tuple-for-array",
+        "migrate-unconverted",
+        "migrate-fails-check",
+    ],
 )
 def test_unreadable_kind_version_fails_with_a_pointer(cls, version, where, code):
     """Fails if a document at a kind version newer than the registered one, or an
     older one whose class has no `migrate`, loads or fails without D001 at the
-    reference, or if a migration that returns the wrong fields is accepted.
+    reference, or if a migration's result is not validated like stored fields:
+    wrong field names, a tuple in an array field, a value its converter would
+    change, or a value the class's `__check_init__` refuses.
     """
     with pytest.raises(DocumentError) as err:
         load_study(v1_document(version), gain_v2(cls))
