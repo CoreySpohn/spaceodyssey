@@ -225,7 +225,15 @@ def load_run(
             record = run["refit"][side]
             where = (RUN_KEY, "refit", side)
             entry = bindings.resolve(record["kind"], record["version"], where)
-            boundaries[side] = build_binding(entry, record, registry, where)
+            built = build_binding(entry, record, registry, where)
+            if built.model_hash != record["model_hash"]:
+                raise DocumentError(
+                    f"the rebuilt boundary has model_hash {built.model_hash!r}, "
+                    f"the document says {record['model_hash']!r}",
+                    pointer((*where, "model_hash")),
+                    code="D003",
+                )
+            boundaries[side] = built
     return Run(
         study, registry, run["executor"], run.get("service"), boundaries, bindings
     )

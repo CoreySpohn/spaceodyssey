@@ -324,8 +324,8 @@ def _envelope(data, is_run=False):
 def _check_hash(data):
     """`L001` when a stored content hash differs from the document's canonical hash."""
     stored = data.get("content_hash")
-    version = data["schema_version"]
-    if stored is None or type(version) is not int:
+    version = data.get("schema_version")
+    if stored is None or type(version) is not int or "study" not in data:
         return []
     if data.get("format") == RUN_FORMAT and "run" in data and "records" in data:
         doc = RunDocument(

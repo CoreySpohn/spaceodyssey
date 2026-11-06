@@ -81,9 +81,10 @@ class FileStore:
         """Exactly `size` bytes of a regular file, refusing a link or another size."""
         if size > limit:
             raise ValueError("file is larger than the limit")
-        dir_fd = os.open(self.directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        _require_safe_open()
+        dir_fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+            flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
             fd = os.open(name, flags, dir_fd=dir_fd)
         finally:
             os.close(dir_fd)
@@ -100,6 +101,8 @@ class FileStore:
                     raise ValueError("file ended early")
                 chunks.append(chunk)
                 left -= len(chunk)
+            if os.fstat(fd).st_size != size or os.read(fd, 1):
+                raise ValueError("file changed while it was read")
             return b"".join(chunks)
         finally:
             os.close(fd)
@@ -136,6 +139,7 @@ class FileStore:
                 f"array file {name} is {size} bytes, over the limit {self.max_bytes}",
                 pointer((*path, "bytes")),
             )
+        _require_safe_open(pointer((*path, "name")))
         try:
             raw = self._read(name, size, self.max_bytes)
         except FileNotFoundError as err:
@@ -161,6 +165,22 @@ class FileStore:
                 pointer((*path, "sha256")),
             )
         return raw
+
+
+def _require_safe_open(where=None):
+    """Refuse to read where a symlink or a special file cannot be ruled out."""
+    for flag in ("O_NOFOLLOW", "O_NONBLOCK", "O_DIRECTORY"):
+        if not hasattr(os, flag):
+            raise DocumentError(
+                f"array files need os.{flag}, which this platform lacks; "
+                "a symlink or special file could not be refused",
+                where,
+            )
+    if os.open not in os.supports_dir_fd:
+        raise DocumentError(
+            "array files need dir_fd support in os.open, which this platform lacks",
+            where,
+        )
 
 
 _STORE = contextvars.ContextVar("file_store", default=None)
