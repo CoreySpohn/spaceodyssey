@@ -15,10 +15,17 @@ and `tests/adapters/test_refinement.py`, with shared physical fixtures in
 
 ## Commits
 
-1. `feat(adapters): summary radiometry through jaxedith with time-integrated counts and variance components` (`ac3ea05`)
-2. `fix(adapters): zero summary SNR for a zero-length interval` (`85c9b79`)
-3. `fix(adapters): finite summary centroid for a zero-length interval` (`eb67c7b`)
-4. this record
+Replayed onto main `45bb1c2` (PT0 to PT2 merged), with the physical extra merged into
+PT1's list:
+
+1. `feat(adapters): summary radiometry through jaxedith with time-integrated counts and variance components` (`581dc7e`)
+2. `fix(adapters): zero summary SNR for a zero-length interval` (`e0ef50d`)
+3. `fix(adapters): finite summary centroid for a zero-length interval` (`0b3983d`)
+4. `docs(changes): physical PT3 summary radiometry record` (`032cf93`)
+5. `build: pin unreleased yippy for the summary adapter's response metadata` (`c176aea`)
+6. `fix(adapters): rates through jaxedith's QE-aware intermediates and finite-frame variance when present` (`e8d651e`)
+7. `test(adapters): hold the B4 observation fixed across the time ladder` (`36bbf55`)
+8. this record's review-fix update
 
 ## What is in
 
@@ -57,24 +64,30 @@ and `tests/adapters/test_refinement.py`, with shared physical fixtures in
 Geometry-invariant factors live in `PreparedScene` and on the report: the flux zero point,
 the stellar ratio, the exozodi surface brightness at 1 AU
 (`n_exozodi * zodi_fn_ayo(lambda) * L/Lsun`, the J2 formula), distance, mass, the stellar
-diameter in lambda/D, the collecting area, the optics throughput, the band and the detector.
+diameter in lambda/D and the band.
 The stellar leakage at the host's diameter is tabulated once on the response's own radial
 profile nodes (`yippy.performance.PROFILE_STEP_PIX` times the stellar pixel scale, 0.0625
 lambda/D) and read with PCHIP, which reproduces the library's curve exactly; evaluating it
-directly at a finite diameter re-averages a whole stellar map per call. Throughput, core
-area and occulter transmission are the response's own one-dimensional interpolants. At
+directly at a finite diameter re-averages a whole stellar map per call. The table is served
+through `TabulatedLeakageCoronagraph`, which delegates throughput, core area and occulter
+transmission to the response, and each `PreparedScene` carries an optical path with it. At
 every node of every proposal the planet position and contrast come from photomancy's
-`predict_relative_astrometry` and `predict_photometry`, and the rates from jaxedith's
-`planet_rate`, `stellar_leakage_rate`, `zodi_rate`, `exozodi_rate` and `noise_floor_stellar`
-primitives plus its `thermal_background` and `detector_noise` intermediates. Local zodi is
+`predict_relative_astrometry` and `predict_photometry`, and every rate from jaxedith's
+intermediates (`planet_signal`, `stellar_leakage`, `zodi_background`,
+`exozodi_background`, `thermal_background`, `detector_noise`, `stellar_noise_floor`) on
+that optical path, so detector QE and dQE are applied wherever jaxedith applies them. Local zodi is
 `zodi_fn_leinert` at each node's epoch.
 
 ## Library state and blocked anchors
 
-The adapter builds against merged library mains only and runs the legacy photon-counting
-cadence; `cadence = 0` (`photon_counting_legacy`) is in every budget. A `fixed_frame`
-detector is refused with `NotImplementedError` naming jaxedith's missing finite-frame
-variance API. Each blocked anchor is a strict expected failure that names its library item
+The adapter builds against merged library mains. The legacy photon-counting cadence is the
+fixture's (`cadence = 0` in every budget). A `fixed_frame` detector uses jaxedith's
+`count_variance_components_ayo` (which applies `detector_variance_counts`) for the whole
+interval when jaxedith provides it, and is refused with `NotImplementedError` naming that
+API when it does not. Verified against archives of the two branches: with
+`codex-detector-qe` (`a0db634`) both QE anchors pass; with `codex-fixed-frame` (`9f1c13b`)
+both QE and both fixed-frame anchors pass, so on merge each strict expected failure turns
+into an unexpected pass. Each blocked anchor is a strict expected failure that names its library item
 and the exception it must fail with, so a merge turns it into an unexpected pass.
 
 | Test | Library item | Fails on main with |
@@ -129,13 +142,14 @@ seven unit tests, five expected failures and two medium tests (the A.4 allowance
 - Collecting area: pi (D/2)^2 (1 - OBSCURED) to 1e-12; the raw fraction as obscuration
   overstates it by 17 percent.
 - B4 (fast mover: 0.6 AU edge-on at 4 pc, 4.7 to 4.3 lambda/D in five days, N about
-  5 s0): errors against 64 nodes at 1, 4, 8, 16 nodes are, for counts (relative)
-  3.6e-3, 3.7e-12, 8e-14, 2e-13 (roundoff from 4 nodes: the throughput is one smooth table
-  segment over the arc); for log p 9.9e-3, 1.7e-5, 5.7e-6, 5.0e-7; for P(null) 1.0e-2,
-  1.3e-5, 4.3e-6, 3.7e-7. Observed order over the 4 to 16 ladder 2.5 for both likelihood
-  quantities (the leakage table is piecewise cubic, so no spectral order is claimed). The
-  8-node default sits inside the allocation (1e-4 counts, 0.01 log p, 1e-3 P(null)); the
-  midpoint misses it.
+  5 s0), every level scored against one fixed observation (counts, position and
+  `limit_counts = 5 s0` from the 64-node reference): errors against 64 nodes at 1, 4, 8,
+  16 nodes are, for counts (relative) 3.6e-3, 3.7e-12, 8e-14, 2e-13 (roundoff from 4 nodes:
+  the throughput is one smooth table segment over the arc); for log p 1.3e-2, 4.8e-6,
+  1.6e-6, 1.4e-7; for P(null) 7.2e-3, 4.9e-9, 1.6e-9, 1.4e-10. Observed order over the 4 to
+  16 ladder 2.5 for both likelihood quantities (the leakage table is piecewise cubic, so no
+  spectral order is claimed). The 8-node default sits inside the allocation (1e-4 counts,
+  0.01 log p, 1e-3 P(null)); the midpoint misses it.
 - Survey, 47 UMa b on general-knowledge elements (2.1 AU, e 0.03, i 60 deg, Rp 11.2
   Rearth, Ag 0.3; host 42 Jy at 1 micron, 13.8 pc, 0.79 mas), jaxedith's `exptime_ayo` for
   SNR 10 at the start, then the integrated summary SNR over that exposure:
@@ -194,6 +208,9 @@ seven unit tests, five expected failures and two medium tests (the A.4 allowance
 - Quick tier at the third commit (`-m "not slow"`, serial; `-n 2` exceeded the 6 GiB ceiling):
   1,909 passed, 5 expected failures, 0 failed, in 310 s, peak footprint 3.8 GiB. The slow
   adapter tests (leakage anchor, survey, B4) pass at the same tree.
+- Quick tier after the review fixes (`36bbf55`, serial): 1,948 passed, 5 expected failures, 0
+  failed, in 364 s, peak footprint 3.3 GiB; the slow adapter tests (leakage anchor, survey,
+  B4) pass at the same tree.
 - Docs: `sphinx -W` builds (autoapi documents the new module).
 
 ## Spec silence
@@ -231,6 +248,27 @@ seven unit tests, five expected failures and two medium tests (the A.4 allowance
     interpax at their current release floors) and the test extra now installs it plus
     coronalyze; two warning filters copied from skyscapes for ExoJAX's unclosed `/dev/null`
     and HAPI, ExoJAX and Vaex escape sequences, which jaxedith's skyscapes import triggers.
+
+## Review fixes
+
+1. Unreleased yippy API (P1): `from_yip` reads `EqxCoronagraph.stellar_frame` and
+   `stellar_pixel_scale_lod`, which yippy 2.11.0 lacks; both arrived in yippy `471826b`.
+   `.github/sibling-pins.txt` now pins that commit beside photomancy, and `pyproject.toml`
+   keeps `yippy>=2.11` with a comment: the floor moves to the first release that carries
+   them.
+2. QE through the library (P2): the rates now come from jaxedith's intermediates on an
+   optical path whose coronagraph serves the leakage table (`TabulatedLeakageCoronagraph`),
+   instead of calling the primitives with the bare optics throughput. With
+   `codex-detector-qe` the half-QE and 0.8 dQE anchors pass (they reproduced 467.58 for
+   233.79 before). Main's QE gap is still recorded and not compensated. The moving-planet
+   test now uses QE 1 and dQE 1, like the hand budget, so it holds on both jaxedith states.
+3. Fixed-frame cadence (P2): refused only when jaxedith lacks `count_variance_components_ayo`;
+   otherwise the detector variance of the interval is jaxedith's finite-frame value (no
+   background multiplier), averaged over the nodes' aperture pixel counts. The refusal test
+   checks whichever applies. With `codex-fixed-frame` both fixed-frame anchors pass.
+4. B4 observation (P2): the record now carries a fixed `limit_counts` (5 s0 of the
+   reference), so the detection threshold and the astrometric covariance are the same at
+   every level; only the predicted counts, centroid and variance are refined. Numbers above.
 
 ## Not done
 
