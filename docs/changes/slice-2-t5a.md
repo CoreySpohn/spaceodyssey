@@ -125,4 +125,21 @@ Added, in `tests/codec/test_document.py` (unit tier, 5 functions, 8 cases):
   not match its declared shape, a field that breaks its module's check, an unknown
   kind (`D001`) and a hand-edited hash.
 
-Retired: none.
+Retired: none. Net: 5 functions, 8 cases.
+
+## Timing
+
+Local runs on the four-thread compute launcher, `-n 2 --dist loadfile`:
+
+| Run | Result |
+|---|---|
+| Codec file alone, persistent cache off | 8 passed, 6.6 s wall; slowest 3.9 s (program reuse, which compiles the host programs once), 1.6 s (cross-process hash), 0.2 s (round trip) |
+| Quick tier with the codec tests, warm cache | 1,736 passed, 50.5 s wall, peak RSS 3.2 GB; the codec tests sum to 3.4 s |
+| Quick tier without them, warm cache, beside a full-suite run | 1,728 passed, 63.9 s wall |
+| Full suite | 2,798 passed, 1,260 s wall, peak RSS 4.1 GB |
+
+The three slowest quick-tier tests are unchanged and outside the codec:
+`test_every_hand_study_reproduces_its_history`,
+`test_statuses_agree_between_executors_and_replay` and
+`test_the_fingerprint_hashes_the_masked_view_not_the_raw_log`; the first two were
+over the 5 s unit budget before this change as well.
