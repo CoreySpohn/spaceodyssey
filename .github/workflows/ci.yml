@@ -30,7 +30,8 @@ env:
   JAX_PLATFORMS: cpu
   # Batched programs can stall on 2-vCPU runners with the default Eigen threading.
   XLA_FLAGS: --xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1
-  JAX_COMPILATION_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+  # Pytest selects a worker subdirectory under this root; other commands use main.
+  JAX_COMPILATION_CACHE_DIR: ${{ github.workspace }}/.jax_cache/main
   SPACEODYSSEY_JAX_CACHE: ${{ github.workspace }}/.jax_cache
   JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS: "1"
   PYTHONHASHSEED: "0"
@@ -59,6 +60,7 @@ jobs:
       - name: Restore the JAX compile cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
+          # Restore the root, including main and both pytest worker directories.
           path: .jax_cache
           key: jax-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
           restore-keys: |

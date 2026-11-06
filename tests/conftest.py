@@ -2,8 +2,9 @@
 
 The suite is dominated by XLA compilation. Two settings keep it fast and small:
 
-- a persistent compilation cache, so separate processes and later runs reuse compiled
-  programs (``SPACEODYSSEY_JAX_CACHE`` names another directory, ``off`` disables it);
+- a persistent compilation cache per xdist worker (or ``main`` for serial runs), so
+  later runs reuse compiled programs without concurrent readers seeing partial writes
+  (``SPACEODYSSEY_JAX_CACHE`` names another cache root, ``off`` disables it);
 - fixed cache watermarks: test teardown clears when RSS exceeds
   ``SPACEODYSSEY_RSS_LIMIT_MB`` (default 3500 MiB), or live heap allocations exceed
   half that limit. On macOS, malloc's live bytes exclude freed pages it still keeps
@@ -40,7 +41,9 @@ _cache = os.environ.get(
     "SPACEODYSSEY_JAX_CACHE", str(Path(__file__).parents[1] / ".jax-cache")
 )
 if _cache != "off":
-    jax.config.update("jax_compilation_cache_dir", _cache)
+    # JAX writes entries in place; workers must not read each other's partial files.
+    _worker_cache = Path(_cache) / os.environ.get("PYTEST_XDIST_WORKER", "main")
+    jax.config.update("jax_compilation_cache_dir", str(_worker_cache))
     jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
     jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 

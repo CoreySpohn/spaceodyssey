@@ -80,6 +80,7 @@ def test_null_is_released_like_any_completed_row(scripted_run):
     assert int(RecordStatus.NULL) in np.asarray(view.log.status)[: int(view.n_rows)]
 
 
+@pytest.mark.medium  # Cold host, compiled and replay programs exceed the unit budget.
 def test_statuses_agree_between_executors_and_replay(scripted_run):
     study, carry, trace, truths, roots = scripted_run
     cs, _ = CompiledExecutor().run(study, truths, roots, N_STEPS_CORPUS)

@@ -7,6 +7,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from spaceodyssey.core import (
     Audience,
@@ -65,6 +66,7 @@ def test_snapshot_fingerprint_recorded():
     assert np.array_equal(run.history(0).ints["snapshot_fp"], h.ints["snapshot_fp"])
 
 
+@pytest.mark.medium  # Cold catalog execution and fingerprint compilation exceed 5 s.
 def test_the_fingerprint_hashes_the_masked_view_not_the_raw_log():
     study, carry, _ = _catalog()
     obs_rows = np.flatnonzero(
