@@ -88,6 +88,9 @@ Documentation = "https://spaceodyssey.readthedocs.io"
 "toy.threshold@1" = "spaceodyssey.studies.toy:ToyObjective"
 
 [project.optional-dependencies]
+# Physical adapters: scenes (skyscapes), orbits and keepout (orbix), prior draws
+# through photomancy's NumPyro model.
+physical = ["skyscapes>=2.1", "orbix>=3.0", "numpyro>=0.21.0"]
 retrieval = ["exojax>=2.5"]
 optics = ["physicaloptix>=2.3"]
 viz = ["eyepiece>=0.16.0", "matplotlib>=3.11"]
@@ -102,8 +105,10 @@ test = [
     "pytest-fail-slow>=0.1.0",
     "ineedvalidation>=1.1",
     "hwoutils>=1.10.0",
-    "skyscapes>=2.0",
-    "spaceodyssey[viz]>=0.0.1",
+    "spaceodyssey[physical,viz]>=0.0.1",
+    "yippy>=2.11",
+    "astropy>=6.0",
+    "mpmath>=1.3",
 ]
 docs = [
     "myst-nb>=1.1",
@@ -138,6 +143,10 @@ filterwarnings = [
     "error",
     # tol-colors initializes colormaps with set_bad, pending deprecation in Matplotlib 3.11.
     'ignore:The set_bad function will be deprecated in a future version\.:PendingDeprecationWarning:tol_colors$',
+    # skyscapes scenes import ExoJAX, which redirects HAPI's import output to an unclosed /dev/null stream.
+    "ignore:unclosed file.*name='/dev/null':ResourceWarning:exojax[.]database[.]_common[.]hitranapi$",
+    # HAPI, ExoJAX and Vaex (imported by skyscapes) use invalid escapes in non-raw strings on a cold import.
+    'ignore:invalid escape sequence:SyntaxWarning:.*[/]site-packages[/](hapi[/]hapi|(exojax|vaex)[/].*)$',
 ]
 testpaths = ["tests"]
 markers = [

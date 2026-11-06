@@ -1,0 +1,27 @@
+{
+  "profile": "first-summary-v1",
+  "recorded": "2026-11-06",
+  "note": "Library revisions the fixtures and anchors were generated against. Revisions are provenance, not an install requirement; floors are the oldest versions that carry every interface the adapters call.",
+  "libraries": {
+    "orbix": {"revision": "e0f615739c897945a3549dbf8acc7f761cb03d71", "floor": "3.0.0", "role": "Keplerian orbits, Kepler solver, L2 halo orbit, keepout"},
+    "photomancy": {"revision": "dc1d0deaef830a2e2d91716f7ce29092a776bfd3", "floor": "0.4.1.dev0", "role": "orbit prior with planet-scale sites (sample_planet_scale, unreleased after 0.4.0)"},
+    "skyscapes": {"revision": "28232bf44c38f93dffe27715b36599f0ce923eb6", "floor": "2.1.0", "role": "Star, BlackbodyStar, Planet, System, LambertianPhysicalModel"},
+    "hwoutils": {"revision": "6767088c192fa1ce6bb81d596678cb3db149c005", "floor": "1.10.0", "role": "constants and conversions"},
+    "yippy": {"revision": "8e2cea989eb54c7107330a5a2cf9dc76ef80c792", "floor": "2.11.0", "role": "pinned response package loader"},
+    "jaxedith": {"revision": "031974cefe5b11b59b217132b80a6b6e15c84784", "floor": "2.0.0", "role": "count rates and noise (consumed from the summary radiometry task on)"},
+    "optixstuff": {"revision": "dd5d10b6e031df7423a15d2c5984876c46558e76", "floor": "4.0.0", "role": "response density and core area (consumed from the summary radiometry task on)"}
+  },
+  "data": {
+    "package": "eac1_aavc_2d",
+    "release": "data-v2",
+    "digest": "md5:1f4892faff18e55cbec9781a055bea4d",
+    "loader": "yippy.datasets.fetch_yip"
+  },
+  "catalog": {
+    "service": "NASA Exoplanet Archive TAP, https://exoplanetarchive.ipac.caltech.edu/TAP/sync",
+    "table": "di_stars_exep",
+    "query": "select * from di_stars_exep where hip_name like 'HIP 53721%'",
+    "retrieved": "2026-11-06",
+    "columns_used": {"sy_dist": 13.8875, "sy_plx": 72.007, "ra": 164.8665531, "dec": 40.4302557, "st_lum": 0.1978, "st_teff": 5880, "st_rad": 1.21, "st_diam": 0.81, "st_mass": 1.07, "sy_vmag": 5.037}
+  }
+}
