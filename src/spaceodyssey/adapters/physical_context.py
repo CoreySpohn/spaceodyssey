@@ -15,7 +15,8 @@ to where the observatory may point.
 - `ObservingContext.certify` checks, before acquisition, that every admissible
   executed start in ``[planned_start, planned_start + max_delay]`` keeps the whole
   occupied interval inside the keepout window (and inside the response support,
-  when a support predicate is given). The admissible occupied intervals cover
+  when a support predicate is given; it is asked to hold within half a step of
+  each sample). The admissible occupied intervals cover
   ``[planned_start, planned_start + max_delay + occupancy]``, which is sampled on a
   grid of `step_d`; the keepout limits are tightened by the largest change of the
   Sun and Earth angles over half a step (`angle_rate_bound_deg_per_day` times
@@ -286,10 +287,13 @@ class ObservingContext(eqx.Module):
     def certify(self, visit, support=None):
         """Certify one `PlannedVisit`; returns a `Certificate`.
 
-        `support`, when given, is a callable ``support(target, jd) -> bool array``
-        for the response support (for example the nominal planet separation inside
-        the working angles). It is evaluated on the same grid without a margin, so
-        it must carry its own margin if it can change within one step.
+        `support`, when given, is a callable
+        ``support(target, jd, margin_d=...) -> bool array`` for the response
+        support (for example `SeparationSupport`, the nominal planet separation
+        inside the working angles). It is evaluated on the same grid with
+        ``margin_d = step_d / 2`` and must answer whether the support holds for
+        every epoch within `margin_d` days of each sample, so a sampled pass
+        covers the whole interval.
         """
         if not 0 <= visit.target < self.n_targets:
             raise ValueError(f"visit target {visit.target} is not a known target")
@@ -317,7 +321,9 @@ class ObservingContext(eqx.Module):
             if not bool(jnp.any(self.observable(visit.target, jd))):
                 return certificate(Certification.NO_VISIBILITY)
             return certificate(Certification.KEEPOUT_EDGE)
-        if support is not None and not bool(jnp.all(support(visit.target, jd))):
+        if support is not None and not bool(
+            jnp.all(support(visit.target, jd, margin_d=self.step_d / 2.0))
+        ):
             return certificate(Certification.OUTSIDE_SUPPORT)
         return certificate(Certification.CERTIFIED)
 

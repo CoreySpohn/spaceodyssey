@@ -79,3 +79,12 @@ science (2.9 s). The file takes 5.2 s.
   response arrives with the radiometry task.
 - hwoutils has no MJD origin; the module states the IAU value once.
 - orbix's `Observatory` carries no Earth keepout limits, so the context holds them.
+
+## Review fixes
+
+- The support predicate protocol is now `support(target, jd, margin_d=...)`; `certify`
+  passes half its grid step, and the predicate answers for every epoch within that
+  margin of each sample. Test: an edge-on 0.5-day circular orbit phased so every
+  quarter-day sample is at greatest elongation passes every sample but reaches the star
+  between them; it is now `OUTSIDE_SUPPORT` (a margin of zero certifies it, the failure
+  the test was written against), while the 47 UMa scene stays certified.

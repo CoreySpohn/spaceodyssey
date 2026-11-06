@@ -6,6 +6,8 @@ certification outcomes are named codes, so a visit with no visibility gives an
 explicit outcome and an uncertified plan is refused at load.
 """
 
+import dataclasses
+
 import astropy.units as u
 import jax
 import jax.numpy as jnp
@@ -25,6 +27,12 @@ from spaceodyssey.adapters.physical_context import (
     require_certified,
 )
 from spaceodyssey.adapters.physical_profile import load_profile
+from spaceodyssey.adapters.skyscapes import (
+    SceneSpec,
+    SeparationSupport,
+    build_scene,
+    geometry,
+)
 from spaceodyssey.core.study import Clock
 
 PROFILE = load_profile()
@@ -141,8 +149,8 @@ def test_certification_outcomes_are_explicit(context, edge):
     assert outcome(edge - 10 * DAY, exposure=0) is Certification.NO_SCIENCE
     cutoff = float(context.clock.jd(edge - 10 * DAY + DAY))
 
-    def support(target, jd):
-        return jnp.asarray(jd) < cutoff
+    def support(target, jd, margin_d):
+        return jnp.asarray(jd) + margin_d < cutoff
 
     assert outcome(edge - 10 * DAY, support=support) is Certification.OUTSIDE_SUPPORT
 
@@ -236,3 +244,39 @@ def test_malformed_visits_are_refused(context, visit, message):
     with pytest.raises(ValueError, match=message):
         context.certify(visit)
     assert context.observable(UMA, []).shape == (0,)
+
+
+def test_support_certification_covers_epochs_between_samples(context, edge):
+    """Fails if the support is checked only at the sampled epochs.
+
+    An edge-on circular orbit with a 0.5 day period, phased so that every
+    quarter-day sample falls at greatest elongation, passes every sample of an
+    inner working angle at half its elongation, yet reaches the star at each
+    conjunction between samples. Certification must refuse it; a slow orbit with
+    the same band stays certified.
+    """
+    start = edge - 10 * DAY
+    fast = dataclasses.replace(
+        SceneSpec.from_profile(PROFILE, UMA),
+        period_d=0.5,
+        ecc=0.0,
+        omega_star_deg=180.0,
+        inclination_deg=90.0,
+        tp_jd=float(context.clock.jd(start)),
+    )
+    system = build_scene(fast)
+    elongation = float(
+        geometry(system, [fast.tp_jd], fast.wavelength_nm).separation_arcsec[0]
+    )
+    support = SeparationSupport((system,), (fast.wavelength_nm,), elongation / 2, 1.0)
+    visit = PlannedVisit(UMA, start, DAY // 2)
+    samples = context.clock.jd(start + np.arange(0, 7) * (DAY // 4))
+    assert bool(jnp.all(support(UMA, samples)))  # every sample passes
+    midway = context.clock.jd(start + DAY // 8)
+    assert not bool(support(UMA, midway)[0])  # but not between samples
+    outcome = Certification(int(context.certify(visit, support).outcome))
+    assert outcome is Certification.OUTSIDE_SUPPORT
+    slow = SeparationSupport(
+        (build_scene(SceneSpec.from_profile(PROFILE, UMA)),), (1000.0,), 0.0, 1.0
+    )
+    assert int(context.certify(visit, slow).outcome) == Certification.CERTIFIED

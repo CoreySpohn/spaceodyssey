@@ -131,15 +131,34 @@ def test_sky_signs_at_four_phases(inc_deg, east_signs):
     assert np.sign(pa_later - pa) == (1 if inc_deg < 90 else -1)
 
 
-@pytest.mark.parametrize("ecc", [0.0, 0.5, 0.9])
-def test_positions_against_30_digit_kepler(ecc):
+def test_node_is_measured_north_through_east():
+    """Fails if the node is measured north through west.
+
+    By hand: an edge-on circular orbit with its periastron at the ascending node
+    and the node at 90 degrees sits at the node, due east of the star (east = +a,
+    north = 0), at the periastron epoch; with the node at 270 degrees it sits due
+    west.
+    """
+    for node_deg, sign in ((90.0, 1.0), (270.0, -1.0)):
+        spec = circular(90.0, node_deg)
+        g = geometry(build_scene(spec), [spec.tp_jd], spec.wavelength_nm)
+        sep = float(g.separation_arcsec[0])
+        np.testing.assert_allclose(float(g.east_arcsec[0]), sign * sep, rtol=1e-12)
+        assert abs(float(g.north_arcsec[0])) < 1e-9 * sep
+
+
+@pytest.mark.parametrize(
+    ("ecc", "node_deg"), [(0.0, 0.0), (0.5, 0.0), (0.9, 0.0), (0.5, 40.0)]
+)
+def test_positions_against_30_digit_kepler(ecc, node_deg):
     """Fails if the Kepler solve, node, argument of periastron or scale drifts.
 
-    The 47 UMa scene at three eccentricities over 64 epochs of one period,
-    against the 30-digit reference: sky offsets within 0.01 mas (the Kepler-solve
-    allocation) and the phase angle within 1e-9 rad.
+    The 47 UMa scene at three eccentricities, and at a 40 degree node, over 64
+    epochs of one period, against the 30-digit reference: sky offsets within
+    0.01 mas (the Kepler-solve allocation) and the phase angle within 1e-9 rad.
+    The nonzero node separates north-through-east from north-through-west.
     """
-    spec = dataclasses.replace(UMA, ecc=ecc)
+    spec = dataclasses.replace(UMA, ecc=ecc, node_deg=node_deg)
     t = spec.tp_jd + spec.period_d * (np.arange(64) + 0.37) / 64
     g = geometry(build_scene(spec), t, spec.wavelength_nm)
     expected = reference_scene(spec, t)

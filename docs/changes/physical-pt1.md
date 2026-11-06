@@ -88,3 +88,15 @@ photomancy match (5.0 s). The whole file takes 6.5 s.
 - The star is a tabulated `Star` with a blackbody table, because `FlatStar` carries no
   angular diameter on skyscapes main; it can be swapped once that lands.
 - hwoutils has no Jupiter radius; the profile states it in metres (IAU 2015 nominal).
+
+## Review fixes
+
+- `SeparationSupport` was checked only at the sampled epochs. It now takes `margin_d`
+  and narrows the working-angle band at each edge by `margin_d` times an upper bound on
+  the separation rate (the periastron sky-plane speed `n a sqrt((1 + e) / (1 - e))`
+  over the distance), so a pass at every sample with `margin_d` half the spacing holds
+  for the whole interval.
+- New anchors for a nonzero node: the 30-digit comparison adds a 40 degree node, and a
+  hand test puts an edge-on orbit with the node at 90 degrees due east of the star at
+  the node epoch (270 degrees: due west). A node measured north through west now fails
+  both.

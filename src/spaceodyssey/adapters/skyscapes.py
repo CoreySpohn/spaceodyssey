@@ -39,6 +39,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 from hwoutils.constants import (
+    G,
     Mearth2kg,
     Mjup2kg,
     Msun2kg,
@@ -53,6 +54,7 @@ from hwoutils.constants import (
 )
 from hwoutils.conversions import photons_per_nm_per_m2_to_jy
 from numpyro import handlers
+from orbix.equations.orbit import mean_motion
 from orbix.kepler import markley_solve_trig
 from orbix.orbit import KeplerianOrbit
 from photomancy.orbit.data import OrbitData
@@ -417,8 +419,13 @@ def geometry(system, epoch_jd, wavelength_nm):
 class SeparationSupport(eqx.Module):
     """Response support of each target's nominal planet: separation in a band.
 
-    Calling it as ``support(target, jd)`` gives, per epoch, whether the nominal
-    planet's projected separation lies in ``[iwa_arcsec, owa_arcsec]``; it is the
+    Calling it as ``support(target, jd, margin_d=m)`` gives, per epoch, whether
+    the nominal planet's projected separation stays in ``[iwa_arcsec,
+    owa_arcsec]`` for every epoch within `m` days of it. The band is narrowed at
+    each edge by `m` times an upper bound on the separation's rate of change, the
+    largest sky-plane speed of the orbit, ``n a sqrt((1 + e) / (1 - e))`` (the
+    speed at periastron) over the distance. With `m` half the sample spacing a
+    pass at every sample is a pass for the whole sampled interval; it is the
     `support` predicate `ObservingContext.certify` takes.
     """
 
@@ -427,11 +434,21 @@ class SeparationSupport(eqx.Module):
     iwa_arcsec: float
     owa_arcsec: float
 
-    def __call__(self, target, jd):
-        """Whether target `target`'s nominal planet is in the support at `jd`."""
+    def separation_rate_bound(self, target):
+        """Upper bound on |d separation / dt| of target `target`'s planet, arcsec/d."""
+        system = self.systems[target]
+        planet = system.planets[0]
+        a_au, e = planet.orbit.a_AU[0], planet.orbit.e[0]
+        mu = G * planet.central_mass_kg(star=system.star)[0]
+        speed_au_per_d = mean_motion(a_au, mu) * a_au * jnp.sqrt((1 + e) / (1 - e))
+        return speed_au_per_d * rad2arcsec / (system.star.dist_pc * pc2AU)
+
+    def __call__(self, target, jd, margin_d=0.0):
+        """Whether target `target`'s nominal planet stays in the support near `jd`."""
         g = geometry(self.systems[target], jd, self.wavelengths_nm[target])
         sep = g.separation_arcsec
-        return (sep >= self.iwa_arcsec) & (sep <= self.owa_arcsec)
+        pad = self.separation_rate_bound(target) * margin_d
+        return (sep >= self.iwa_arcsec + pad) & (sep <= self.owa_arcsec - pad)
 
 
 class TruthDiagnosis(eqx.Module):
