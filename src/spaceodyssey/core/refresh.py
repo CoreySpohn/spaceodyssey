@@ -50,7 +50,7 @@ from spaceodyssey.core.records import (
     refit_rows,
     write_log,
 )
-from spaceodyssey.core.snapshot import digest_ints, named_leaves
+from spaceodyssey.core.snapshot import _mix, named_leaves
 
 # The derived record kind a refresh product row carries; a study registers it and
 # names its index in `RefreshSchedule.kind`.
@@ -89,19 +89,35 @@ def refresh_enabled(caps):
     return caps.rows_per_subject > 0
 
 
+def _grid_position(schedule, tick, stage):
+    """`(tick, ordinal, fits)` of the checkpoint, with overflow-safe arithmetic.
+
+    `fits` is false when the grid tick is not representable in int64; the tick is then
+    saturated at the largest int64 and the ordinal is meaningless.
+    """
+    big = jnp.asarray(np.iinfo(np.int64).max, I64)
+    every = jnp.maximum(schedule.every_ticks, 1)
+    offset = schedule.offset_ticks
+    gap = jnp.maximum(tick - offset, 0)
+    k = gap // every + (gap % every != 0).astype(I64)
+    on_grid = (tick >= offset) & (gap % every == 0)
+    k = k + (on_grid & (stage > Stage.ANALYZE)).astype(I64)
+    room = jnp.maximum(big - offset, 0) // every
+    fits = k <= room
+    at = offset + jnp.where(fits, k, 0) * every
+    return jnp.where(fits, at, big), k, fits
+
+
 def next_grid_tick(schedule, tick, stage):
     """The checkpoint a row accepted at `(tick, stage)` falls in: `(tick, ordinal)`.
 
     The smallest grid tick at or after `tick`, or the next one when the position is
     already past `Stage.ANALYZE` of a grid tick (an `ADMIT`-stage result). The grid
-    starts at the offset, so earlier positions map to ordinal 0.
+    starts at the offset, so earlier positions map to ordinal 0. A grid tick beyond
+    int64 saturates at the largest int64 instead of wrapping.
     """
-    every = jnp.maximum(schedule.every_ticks, 1)
-    offset = schedule.offset_ticks
-    k = jnp.where(tick <= offset, 0, (tick - offset + every - 1) // every)
-    past = (offset + k * every == tick) & (stage > Stage.ANALYZE)
-    k = k + past.astype(I64)
-    return offset + k * every, k
+    at, k, _ = _grid_position(schedule, tick, stage)
+    return at, k
 
 
 def schedule_refresh(c, mark, study):
@@ -114,8 +130,8 @@ def schedule_refresh(c, mark, study):
     sched = study.refresh
     queued = jnp.any(c.ev.valid & (c.ev.kind == EventKind.REFRESH))
     want = mark & (sched.every_ticks > 0) & ~queued
-    tick, k = next_grid_tick(sched, c.tick, c.stage)
-    beyond = want & (tick > caps.max_tick)
+    tick, k, fits = _grid_position(sched, c.tick, c.stage)
+    beyond = want & (~fits | (tick > caps.max_tick))
     c1 = _tree_set(
         c,
         overflow=c.overflow | beyond,
@@ -238,18 +254,25 @@ def _bits(x):
 def revision_set_digest(rows):
     """64-bit digest of a subject's revision set from its refit rows.
 
-    The `(channel, acquisition index, revision)` triples of the counting rows in the
-    canonical order the rows come in; a row that does not count contributes a fixed
-    word, so the digest depends on the set alone.
+    Hashes the `(channel, acquisition index, revision)` triples of the counting rows
+    in the canonical order the rows come in, then their count. Rows that do not count
+    leave the running hash untouched, so the digest depends on the set alone and not
+    on the padded length of `rows`.
     """
-    words = jnp.stack(
-        [
-            jnp.where(rows.valid, rows.channel, -1),
-            jnp.where(rows.valid, rows.acquisition_index, -1),
-            jnp.where(rows.valid, rows.revision, -1),
-        ]
-    )
-    return digest_ints(words.astype(I64), 17)
+    words = jnp.stack([rows.channel, rows.acquisition_index, rows.revision], axis=1)
+    words = words.astype(I64).astype(jnp.uint64)
+
+    seed = _mix(jnp.asarray(np.uint64(17), jnp.uint64))
+    h, _ = lax.scan(lambda h, item: _fold_row(h, *item), seed, (words, rows.valid))
+    count = rows.valid.sum().astype(jnp.uint64)
+    return lax.bitcast_convert_type(_mix(h ^ count), I64)
+
+
+def _fold_row(h, row, ok):
+    new = h
+    for k in range(3):
+        new = _mix(new ^ row[k])
+    return jnp.where(ok, new, h), None
 
 
 def _entry_rows(log, caps, audience, subject, n):
@@ -345,7 +368,9 @@ def commit_refresh(carry, request, result, study):
     clears, and one derived product row per entry is logged and counted in its
     audience's release version. Nothing is folded. The observer's whole belief is
     analyzed once, after its installs. A subject with more counting rows than
-    `rows_per_subject` refuses the whole answer and sets `Capacity.REFIT_ROWS`.
+    `rows_per_subject` refuses the whole answer and sets `Capacity.REFIT_ROWS`; so does
+    too little room in the log or in the internal ids for every product row, which
+    are reserved before anything changes (`Capacity.LOG_ROWS`, `Capacity.STABLE_IDS`).
 
     The queued checkpoint row is marked installed (`disposition`) with its product row
     count (`group`) and last slot, so its second handling consumes it, and
@@ -356,7 +381,12 @@ def commit_refresh(carry, request, result, study):
     names = observer.subject_leaves
     live = carry.refresh.valid
     too_many = (request.dirty & (request.n_rows > caps.rows_per_subject)).any()
-    go = live & ~too_many
+    # Reserve every product row and internal id before anything changes: with too
+    # little room the whole answer is refused, never an install without its rows.
+    needed = request.dirty.sum().astype(I64)
+    no_ids = carry.next_sid + needed > caps.max_sid
+    no_rows = carry.n_log + needed > caps.n_log
+    go = live & ~too_many & ~no_ids & ~no_rows
     base = observer.init(caps)
 
     def body(s, state):
@@ -377,15 +407,8 @@ def commit_refresh(carry, request, result, study):
             else:
                 new = observer.install_summary(c.pbelief, observer.summary(fitted), s)
                 c = _tree_set(c, pbelief=where_tree(installs, new, c.pbelief))
-            sid_ok = c.next_sid < caps.max_sid
-            c = _tree_set(
-                c,
-                overflow=c.overflow | (proc & ~sid_ok),
-                overflow_mask=c.overflow_mask
-                | jnp.where(proc & ~sid_ok, Capacity.STABLE_IDS, 0),
-            )
             rec = _product_record(
-                c, study, a, s, status, request.n_rows[a, s], proc & sid_ok, request
+                c, study, a, s, status, request.n_rows[a, s], proc, request
             )
             before = c.n_log
             c, slot = write_log(c, rec, caps)
@@ -411,7 +434,12 @@ def commit_refresh(carry, request, result, study):
     )
     analyzed = observer.analyze(done.belief)
     done = _tree_set(done, belief=where_tree(any_obs, analyzed, done.belief))
-    too_many_bit = jnp.where(live & too_many, Capacity.REFIT_ROWS, 0)
+    refused = live & (too_many | no_ids | no_rows)
+    refused_bits = (
+        jnp.where(live & too_many, Capacity.REFIT_ROWS, 0)
+        | jnp.where(live & no_ids, Capacity.STABLE_IDS, 0)
+        | jnp.where(live & no_rows, Capacity.LOG_ROWS, 0)
+    )
     held = done.ev.valid & (done.ev.kind == EventKind.REFRESH)
     held = held & (done.ev.sid == carry.refresh.sid)
     mark = held & live
@@ -429,8 +457,8 @@ def commit_refresh(carry, request, result, study):
         done,
         ev=ev,
         refresh=empty_event_row(),
-        overflow=done.overflow | (live & too_many),
-        overflow_mask=done.overflow_mask | too_many_bit,
+        overflow=done.overflow | refused,
+        overflow_mask=done.overflow_mask | refused_bits,
     )
     return where_tree(live, done, carry)
 
@@ -441,10 +469,26 @@ _gather_worlds = eqx.filter_jit(jax.vmap(gather_refit_rows, in_axes=(0, 0, None)
 _commit_worlds = eqx.filter_jit(jax.vmap(commit_refresh, in_axes=(0, 0, 0, None)))
 
 
-def answer_refresh(carry, root, study, boundary):
-    """Answer the held checkpoint of one world through `boundary`; returns the carry."""
+def drop_hold(carry):
+    """Release a held checkpoint without installing: the belief stays stale.
+
+    Used when the step budget cannot pay for the completion transition: installing
+    then would leave a belief and product rows the trace never shows, so the
+    checkpoint is left as it was queued and the run reports `TRUNCATED`.
+    """
+    return _tree_set(carry, refresh=empty_event_row())
+
+
+def answer_refresh(carry, root, study, boundary, *, can_finish=True):
+    """Answer the held checkpoint of one world through `boundary`; returns the carry.
+
+    Without budget for the completion transition (`can_finish` false) nothing is
+    installed and the hold is dropped.
+    """
     if not bool(carry.refresh.valid):
         return carry
+    if not can_finish:
+        return drop_hold(carry)
     request = _gather(carry, root, study)
     batch = jax.tree_util.tree_map(lambda x: x[None], request)
     result = boundary.refit_batch(study, batch)
@@ -452,14 +496,25 @@ def answer_refresh(carry, root, study, boundary):
     return _commit(carry, request, one, study)
 
 
-def answer_refreshes(carries, roots, study, boundary):
+def answer_refreshes(carries, roots, study, boundary, left=None):
     """Answer the held checkpoints of a batch of worlds in one boundary call.
+
+    Worlds with no budget left (`left <= 0`) cannot pay for the completion
+    transition: their holds are dropped without an install.
 
     The frozen worlds' requests are batched on a world axis (`MaskedBatchRefit` fills
     its lanes with them, with no Python loop over worlds); worlds that hold no
     checkpoint are untouched.
     """
-    frozen = np.flatnonzero(np.asarray(carries.refresh.valid))
+    held = np.asarray(carries.refresh.valid)
+    if left is not None:
+        broke = held & (np.asarray(left) <= 0)
+        if broke.any():
+            carries = jax.vmap(lambda c, m: where_tree(m, drop_hold(c), c))(
+                carries, jnp.asarray(broke)
+            )
+        held = held & ~broke
+    frozen = np.flatnonzero(held)
     if frozen.size == 0:
         return carries
     requests = _gather_worlds(carries, roots, study)
@@ -528,7 +583,7 @@ def _unflat(x, count):
 
 
 def _masked_lane(kernel, study, n_diag, request):
-    """One world lane: every entry through the kernel, masked and deduplicated."""
+    """One world lane: the unique dirty entries through the kernel, the rest copied."""
     count = study.caps.n_subjects
     n_entries = 2 * count
     flat = jax.tree_util.tree_map(_flat, (request.rows, request.row_keys, request.keys))
@@ -542,7 +597,17 @@ def _masked_lane(kernel, study, n_diag, request):
         row_keys=flat[1],
         n_rows=_flat(request.n_rows),
     )
-    pieces, status, diag = jax.vmap(lambda en: kernel(study, en))(entry)
+    shapes = jax.eval_shape(
+        lambda en: kernel(study, en), jax.tree_util.tree_map(lambda x: x[0], entry)
+    )
+    nothing = jax.tree_util.tree_map(lambda s: jnp.zeros(s.shape, s.dtype), shapes)
+
+    def one(item):
+        en, run = item
+        return lax.cond(run, lambda: kernel(study, en), lambda: nothing)
+
+    # a sequential map of real conditionals: only the unique active entries execute
+    pieces, status, diag = lax.map(one, (entry, computed))
     diag = diag.reshape(n_entries, n_diag)
 
     def masked(x):
@@ -564,7 +629,7 @@ def _masked_lane(kernel, study, n_diag, request):
 
 @eqx.filter_jit
 def _masked_call(kernel, study, n_diag, requests):
-    return jax.vmap(lambda r: _masked_lane(kernel, study, n_diag, r))(requests)
+    return lax.map(lambda r: _masked_lane(kernel, study, n_diag, r), requests)
 
 
 def _pad_lanes(requests, lanes):

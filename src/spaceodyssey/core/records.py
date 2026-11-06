@@ -304,7 +304,11 @@ def refit_rows(log, caps, audience, subject):
     seen = log.accepted_tick if audience == Audience.OBSERVER else log.released_tick
     mine = log.valid & (seen >= 0) & (log.subject == subject)
     same = (log.acquisition_id[:, None] == log.acquisition_id[None, :]) & mine[None, :]
-    newer = (same & (log.revision[None, :] > log.revision[:, None])).any(axis=1)
+    later = same & (log.revision[None, :] > log.revision[:, None])
+    newer = later.any(axis=1)
+    # supersession as this audience sees it: a revision it has not received (an
+    # observer-only correction, for the policy) must not mark an earlier row
+    replaced = jnp.max(jnp.where(later, log.revision[None, :], -1), axis=1)
     kinds = jnp.asarray(caps.refit_kinds, I64)
     statuses = jnp.asarray(caps.refit_statuses, I64)
     counts = mine & ~newer & jnp.isin(log.kind, kinds) & jnp.isin(log.status, statuses)
@@ -313,7 +317,8 @@ def refit_rows(log, caps, audience, subject):
     # `RecordLog` holds the columns of `Record` in the same order, so the sorted
     # log's leaves are a batch of records
     picked = jax.tree_util.tree_map(
-        lambda x: x[order], dataclasses.replace(log, valid=counts)
+        lambda x: x[order],
+        dataclasses.replace(log, valid=counts, superseded_by=replaced),
     )
     leaves = jax.tree_util.tree_leaves(picked)
     rows = jax.tree_util.tree_unflatten(

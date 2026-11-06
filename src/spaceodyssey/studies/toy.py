@@ -849,14 +849,19 @@ def toy_mean_kernel(study, entry):
         & (rows.status == RecordStatus.COMPLETED)
     )
     n = jnp.sum(take).astype(I64)
-    total = jnp.sum(jnp.where(take, rows.payload[:, 0], 0.0))
+    # Sum left to right, as `toy_refit_fit` does, so the two agree bit for bit.
+    total, _ = jax.lax.scan(
+        lambda t, x: (t + x, None),
+        jnp.zeros((), F64),
+        jnp.where(take, rows.payload[:, 0], 0.0),
+    )
     mean = total / jnp.maximum(n, 1).astype(F64)
     diag = jnp.zeros(1, F64).at[0].set(n.astype(F64))
     return (mean, n), jnp.asarray(RefitStatus.OK, I64), diag
 
 
 def toy_refit_fit(study, entry):
-    """The same posterior as `toy_mean_kernel`, summed in a Python loop on the host."""
+    """The same posterior as `toy_mean_kernel`, summed left to right on the host."""
     observer, rows = study.observer, entry.rows
     total, n = 0.0, 0
     for i in range(rows.valid.shape[0]):
