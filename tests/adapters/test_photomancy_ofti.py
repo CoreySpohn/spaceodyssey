@@ -21,7 +21,7 @@ from spaceodyssey.adapters.photomancy import (
     photomancy_bindings,
 )
 from spaceodyssey.codec import DocumentError, dump_run, load_run
-from spaceodyssey.core import HostExecutor
+from spaceodyssey.core import HostExecutor, replay_run
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import F64, I64, PUBLIC, Audience, RefitStatus
 from spaceodyssey.core.executors.base import histories_equal, index_world
@@ -435,3 +435,25 @@ def test_a_reloaded_run_document_reproduces_the_host_and_compiled_histories():
     for executor in ("host", "compiled"):
         again = run.execute(truths, roots, 30, executor=executor)
         assert histories_equal(mine.history(), again.history(0)).ok, executor
+
+
+@pytest.mark.slow  # a cold study compile and the OFTI scorer
+def test_replay_of_an_ofti_run_reproduces_the_checkpoint_and_the_particles():
+    """Replaying a run bound to the OFTI boundary reproduces its installed particles.
+
+    Fails if the replay rebuilds a different request or key for the host-loop boundary,
+    or its final particles, product rows or trace projection differ from the run's.
+    """
+    study = ofti_study()
+    boundary = refit()
+    truths, roots = worlds(1)
+    run = HostExecutor().run(
+        study, index_world(truths, 0), roots[0], 30, refit=boundary
+    )
+    out = replay_run(study, roots[0], run.carry, run.trace, refit=boundary)
+    assert out.checkpoints == 1 and out.products > 0
+    assert not out.refused and not out.unfinished
+    assert int(out.belief.n[0]) == 3
+    assert np.asarray(out.belief.samples).tobytes() == (
+        np.asarray(run.carry.belief.samples).tobytes()
+    )
