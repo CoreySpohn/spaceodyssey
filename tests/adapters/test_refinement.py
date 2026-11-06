@@ -23,13 +23,15 @@ TAU = 5.0  # detection threshold in planet-free standard deviations
 def likelihood_quantities(budget, record):
     """Counts, log p(f, pos | theta) and P(null | theta) under the joint law.
 
-    `s` is the standard deviation of the measured counts, `s0` the planet-free one
-    (background and detector), the position error per axis is (lambda/D) / snr with
-    the snr from the record's observables only.
+    `s` is the standard deviation the candidate predicts for the measured counts. The
+    record is the observation and stays fixed: its counts, position, lambda/D and
+    `limit_counts = TAU * s0`, the planet-free reference published with it. The
+    position error per axis is (lambda/D) / snr with the snr from the record's
+    observables only.
     """
     s = jnp.sqrt(budget.variance)
-    s0 = jnp.sqrt(budget.var_background + budget.var_detector)
-    f, ra, dec, lod = record
+    f, ra, dec, lod, limit_counts = record
+    s0 = limit_counts / TAU
     snr = f / jnp.sqrt(s0**2 + f)
     sigma = lod / snr
     log_p = (
@@ -37,7 +39,7 @@ def likelihood_quantities(budget, record):
         + norm.logpdf(ra, budget.ra_arcsec, sigma)
         + norm.logpdf(dec, budget.dec_arcsec, sigma)
     )
-    p_null = norm.cdf((TAU * s0 - budget.planet) / s)
+    p_null = norm.cdf((limit_counts - budget.planet) / s)
     return np.array([float(budget.planet), float(log_p), float(p_null)])
 
 
@@ -48,7 +50,8 @@ def test_b4_time_refinement_of_the_likelihood_quantities(yip_report):
     A fast mover (a 0.6 AU edge-on orbit at 4 pc, 0.46 lambda/D of motion in a
     five-day exposure, along the throughput rise just outside the inner working
     angle, with the planet near the detection threshold) is integrated with 4, 8
-    and 16 Gauss-Legendre nodes against a 64-node reference. Each quantity either
+    and 16 Gauss-Legendre nodes against a 64-node reference, all scored against one
+    fixed observation (counts, position and limit counts). Each quantity either
     sits at roundoff from the first level (the counts: the throughput is one smooth
     table segment over the arc) or falls at every level with an observed order over
     the ladder of at least 2 (the midpoint rule's order; the leakage table is
@@ -90,11 +93,15 @@ def test_b4_time_refinement_of_the_likelihood_quantities(yip_report):
         return report.predict(theta, interval)
 
     reference = at(64)
+    # One fixed observation for every level: the threshold and the astrometric
+    # covariance it implies do not move along the ladder.
+    s0 = math.sqrt(float(reference.var_background + reference.var_detector))
     record = (
         0.9 * float(reference.planet),
         float(reference.ra_arcsec) + 1e-3,
         float(reference.dec_arcsec) - 1e-3,
         float(base.lod_arcsec),
+        TAU * s0,
     )
     truth = likelihood_quantities(reference, record)
     assert 0.05 < truth[2] < 0.95  # the null probability is informative
