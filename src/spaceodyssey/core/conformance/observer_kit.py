@@ -46,7 +46,7 @@ canonical refit also matched exactly.
 
 import dataclasses
 import math
-import numbers
+import operator
 from typing import NamedTuple
 
 import equinox as eqx
@@ -92,11 +92,21 @@ def t_quantile(df):
 def _positive(value):
     """Whether `value` is a positive, finite real number."""
     return (
-        isinstance(value, numbers.Real)
+        isinstance(value, (int, float))
         and not isinstance(value, bool)
         and math.isfinite(value)
         and value > 0
     )
+
+
+def _integer(value):
+    """`value` as an int if it is an integer (not a bool), else None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        return operator.index(value)
+    except TypeError:
+        return None
 
 
 class ParityMargin(NamedTuple):
@@ -143,11 +153,9 @@ def declared_margin(observer):
         )
     if not (_positive(margin) and _positive(se)):
         raise ValueError("margin and standard_error must be positive and finite")
-    if not all(
-        isinstance(s, numbers.Integral) and not isinstance(s, bool) for s in seeds
-    ):
+    seeds = tuple(_integer(s) for s in seeds)
+    if None in seeds:
         raise ValueError("seeds must be integers")
-    seeds = tuple(int(s) for s in seeds)
     if min(seeds) < 0 or max(seeds) >= 2**32 or len(set(seeds)) != len(seeds):
         raise ValueError("seeds must be distinct integers in [0, 2^32)")
     if margin < 4.0 * se:
