@@ -117,6 +117,8 @@ class ToyRunningMean(AbstractObserver):
     without touching the core.
     """
 
+    subject_leaves = ("mean", "n")
+
     measurement_kind: int = eqx.field(default=RECORD_MEASUREMENT)
     auxiliary_kind: int = eqx.field(default=RECORD_AUXILIARY)
 
@@ -197,6 +199,8 @@ class ToySampleObserver(ToyRunningMean):
     the running mean, which draws nothing. `noise` is the per-record standard
     deviation the posterior assumes, under a flat prior.
     """
+
+    subject_leaves = ("mean", "n", "sample", "draws")
 
     noise: jax.Array = eqx.field(default=1.0, converter=lambda x: jnp.asarray(x, F64))
     n_draws: int = eqx.field(default=8, static=True)

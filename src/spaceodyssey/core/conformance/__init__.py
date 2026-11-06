@@ -30,7 +30,13 @@ from spaceodyssey.core.conformance.observer_kit import (
     check_promotion_parity as check_promotion_parity,
 )
 from spaceodyssey.core.conformance.observer_kit import (
+    check_refit_calibration as check_refit_calibration,
+)
+from spaceodyssey.core.conformance.observer_kit import (
     declared_margin as declared_margin,
+)
+from spaceodyssey.core.conformance.observer_kit import (
+    refit_beliefs as refit_beliefs,
 )
 from spaceodyssey.core.conformance.observer_kit import release_order as release_order
 from spaceodyssey.core.conformance.observer_kit import (

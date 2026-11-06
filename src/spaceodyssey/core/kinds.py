@@ -79,12 +79,18 @@ class AbstractObserver(eqx.Module):
     whose refit of the same rows in canonical order is another sample of the same
     posterior, sets `order_sensitive`. Either declares, also as class attributes,
     the equivalence `margin` of its trace projection, the `seeds` of its refit keys
-    and the Monte Carlo `standard_error` the margin was sized against; the kit
-    refuses such an observer without them, and an exact one that declares them.
+    and the Monte Carlo `standard_error` the margin was sized against, and names in
+    `stochastic_leaves` the full-belief leaves that hold draws; every other leaf is
+    compared exactly. The kit refuses such an observer without them, and an exact
+    one that declares them. `subject_leaves` names the full-belief leaves whose
+    leading axis is the subject, the state `install` replaces; a refit-capable
+    observer declares it.
     """
 
     statistical: ClassVar[bool] = False
     order_sensitive: ClassVar[bool] = False
+    stochastic_leaves: ClassVar[tuple[str, ...]] = ()
+    subject_leaves: ClassVar[tuple[str, ...] | None] = None
     margin: ClassVar[float | None] = None
     seeds: ClassVar[tuple[int, ...]] = ()
     standard_error: ClassVar[float | None] = None
