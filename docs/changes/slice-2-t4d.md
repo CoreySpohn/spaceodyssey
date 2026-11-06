@@ -147,3 +147,10 @@ Worktree, entry-point install test deselected, `-n 2 --dist loadfile`, four thre
 decompressing`), written while another pytest process used the same cache directory; it passes alone (9 s). Three existing unit tests exceed the 5 s report budget
 (`test_statuses_agree_between_executors_and_replay`, `test_gain_enters_measurement`, `test_every_hand_study_reproduces_its_history`); none is touched by T4d. The golden-history
 test passed, so no history moved.
+
+## Review fixes
+
+- Masked columns: `OftiRefit.refit_batch` reads `Capacities.payload_audience` for every refit kind and each column OFTI uses. An audience that cannot read one gets every row marked not counting, so its entry is `NO_SUPPORT` with the belief unchanged, and it never shares another audience's computation. A medium test makes the RA observer-only: observer `OK`, policy `NO_SUPPORT`, policy belief unchanged (the test fails when the check is removed).
+- Mocked OFTI tests: an unrelated `RuntimeError` or `ValueError` propagates; oversized samples are cut to the layout count; undersized and non-finite samples are `FAILED`.
+- The document reload test is now in the slow tier (two cold study compiles and OFTI scorers on both executors) and runs the reloaded boundary on both executors.
+- `ofti_model` now names the anchor (highest signal-to-noise epoch), the phase convention (periapsis time back-computed from the scaled period) and the numeric eccentricity distribution (family and parameters). The model hash changed; nothing was pinned to it.

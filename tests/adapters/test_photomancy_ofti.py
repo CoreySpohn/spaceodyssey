@@ -21,9 +21,9 @@ from spaceodyssey.adapters.photomancy import (
     photomancy_bindings,
 )
 from spaceodyssey.codec import DocumentError, dump_run, load_run
-from spaceodyssey.core import CompiledExecutor, HostExecutor
+from spaceodyssey.core import HostExecutor
 from spaceodyssey.core.capacities import Capacities
-from spaceodyssey.core.enums import F64, I64, PUBLIC, RefitStatus
+from spaceodyssey.core.enums import F64, I64, PUBLIC, Audience, RefitStatus
 from spaceodyssey.core.executors.base import histories_equal, index_world
 from spaceodyssey.core.keys import refit_key
 from spaceodyssey.core.kinds import AbstractObserver, ObserverCapabilities
@@ -105,15 +105,23 @@ class AstrometryScript(ScriptedRecords):
         return carry, dataclasses.replace(rec, payload=rec.payload.at[:6].set(row))
 
 
-REGISTRY = KindRegistry(
-    (
-        RecordKind("none", ()),
-        toy.MEASUREMENT_KIND,
-        toy.AUXILIARY_KIND,
-        REFRESH_PRODUCT_KIND,
-        RecordKind("astrometry", tuple(PayloadColumn(n, PUBLIC) for n in COLUMN_NAMES)),
+def make_registry(ra_audience=PUBLIC):
+    """The toy kinds plus an astrometry kind; `ra_audience` says who reads the RA."""
+    columns = tuple(
+        PayloadColumn(n, ra_audience if n == "ra" else PUBLIC) for n in COLUMN_NAMES
     )
-)
+    return KindRegistry(
+        (
+            RecordKind("none", ()),
+            toy.MEASUREMENT_KIND,
+            toy.AUXILIARY_KIND,
+            REFRESH_PRODUCT_KIND,
+            RecordKind("astrometry", columns),
+        )
+    )
+
+
+REGISTRY = make_registry()
 KINDS = {
     ("observer", "test.ofti_observer", 1): OftiObserver,
     ("process", "test.astrometry_script", 1): AstrometryScript,
@@ -146,9 +154,9 @@ def astrometry_table():
     return tuple(tuple(float(x) for x in r) for r in rows)
 
 
-def ofti_study(ticks=(10, 40, 70), every=100):
+def ofti_study(ticks=(10, 40, 70), every=100, registry=REGISTRY):
     observer = OftiObserver()
-    caps = REGISTRY.lower(Capacities(rows_per_subject=8, refit_lanes=2), observer)
+    caps = registry.lower(Capacities(rows_per_subject=8, refit_lanes=2), observer)
     table = astrometry_table()[: len(ticks)]
     n = len(ticks)
     process = AstrometryScript(
@@ -224,6 +232,79 @@ def test_a_failed_or_unsupported_entry_is_a_status_never_an_exception():
     wrong = types.SimpleNamespace(observer=toy.ToyRunningMean(), caps=Capacities())
     with pytest.raises(ValueError, match="subject leaves"):
         fit(wrong, entry_of(table, KEY))
+
+
+def fake_ofti(monkeypatch, samples=None, error=None):
+    """Replace the OFTI the adapter calls with one that returns or raises."""
+
+    def fake(data, **kw):
+        if error is not None:
+            raise error
+        return types.SimpleNamespace(samples=samples(kw["n_accept"]))
+
+    monkeypatch.setattr("spaceodyssey.adapters.photomancy.ofti", fake)
+
+
+@pytest.mark.parametrize(
+    ("make", "status"),
+    [
+        (lambda n: np.ones((2 * n, 7)), RefitStatus.OK),
+        (lambda n: np.ones((n - 1, 7)), RefitStatus.FAILED),
+        (lambda n: np.full((n, 7), np.nan), RefitStatus.FAILED),
+    ],
+    ids=["oversized", "undersized", "nonfinite"],
+)
+def test_returned_samples_are_cut_to_the_layout_count_or_refused(
+    monkeypatch, make, status
+):
+    """Extra samples are cut to the layout count; a short or non-finite set fails.
+
+    Fails if the adapter installs more particles than the leaf holds, installs a
+    short or NaN set, or relies on OFTI to truncate.
+    """
+    fake_ofti(monkeypatch, samples=make)
+    slices, got, _ = refit()._fit(stub_study(), entry_of(astrometry_table(), KEY))
+    assert got == status
+    if status == RefitStatus.OK:
+        assert slices[0].shape == (N_PARTICLES, 7)
+    else:
+        assert slices is None
+
+
+def test_an_unrelated_error_is_not_a_status(monkeypatch):
+    """Only OFTI's exhaustion message maps to NO_SUPPORT.
+
+    Fails if every RuntimeError (a device failure, say) is swallowed as a status.
+    """
+    fake_ofti(monkeypatch, error=RuntimeError("device lost"))
+    with pytest.raises(RuntimeError, match="device lost"):
+        refit()._fit(stub_study(), entry_of(astrometry_table(), KEY))
+    fake_ofti(monkeypatch, error=ValueError("bad"))
+    with pytest.raises(ValueError, match="bad"):
+        refit()._fit(stub_study(), entry_of(astrometry_table(), KEY))
+
+
+@pytest.mark.medium
+def test_a_column_one_audience_cannot_read_is_no_support_for_that_audience():
+    """An observer-only RA gives the policy NO_SUPPORT and the observer a fit.
+
+    Fails if the policy fits the zeros its masked RA column holds, or the blind
+    audience's answer is installed or shared with the sighted one.
+    """
+    registry = make_registry(ra_audience=Audience.OBSERVER)
+    study = ofti_study(registry=registry)
+    truths, roots = worlds(1)
+    held = HostExecutor().run(study, index_world(truths, 0), roots[0], 30)
+    done = answer_refresh(held.carry, roots[0], study, refit())
+    assert np.asarray(done.refresh_status)[:, 0].tolist() == [
+        RefitStatus.OK,
+        RefitStatus.NO_SUPPORT,
+    ]
+    assert int(done.belief.n[0]) == 3
+    assert np.asarray(done.pbelief.samples).tobytes() == (
+        np.asarray(held.carry.pbelief.samples).tobytes()
+    )
+    assert not np.asarray(done.refresh_dirty).any()
 
 
 def test_the_same_rows_and_key_give_the_same_particles_and_a_new_set_a_new_key():
@@ -326,18 +407,20 @@ def test_exhausted_batches_leave_the_belief_unchanged(held):
     assert not np.asarray(done.refresh_dirty).any()
 
 
-@pytest.mark.medium
+@pytest.mark.slow  # two cold study compiles and two OFTI scorers on both executors
 def test_a_reloaded_run_document_reproduces_the_host_and_compiled_histories():
     """A document naming the OFTI boundary reloads to the same run on both executors.
 
     Fails if the binding loses its configuration or model hash, or if the compiled
-    chunked driver answers a host boundary differently from the host executor.
+    chunked driver answers the reloaded host boundary differently from the host
+    executor.
     """
     study = ofti_study()
     boundary = refit()
     truths, roots = worlds(1)
-    world = index_world(truths, 0)
-    mine = HostExecutor().run(study, world, roots[0], 30, refit=boundary)
+    mine = HostExecutor().run(
+        study, index_world(truths, 0), roots[0], 30, refit=boundary
+    )
     assert int(mine.carry.belief.n[0]) == 3
     doc = dump_run(
         study,
@@ -348,7 +431,7 @@ def test_a_reloaded_run_document_reproduces_the_host_and_compiled_histories():
         kinds=KINDS,
     )
     run = load_run(doc.to_json(), photomancy_bindings(), KINDS)
-    again = run.execute(truths, roots, 30, executor="host")
-    assert histories_equal(mine.history(), again.history(0)).ok
-    compiled = CompiledExecutor().run(study, truths, roots, 30, refit=boundary, chunk=7)
-    assert histories_equal(mine.history(), compiled.history(0)).ok
+    assert run.refit["host"] is not boundary
+    for executor in ("host", "compiled"):
+        again = run.execute(truths, roots, 30, executor=executor)
+        assert histories_equal(mine.history(), again.history(0)).ok, executor

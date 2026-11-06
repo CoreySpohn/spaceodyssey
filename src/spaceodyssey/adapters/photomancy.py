@@ -32,10 +32,11 @@ import jax.numpy as jnp
 import numpy as np
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.ofti import PARAM_NAMES, ofti
+from photomancy.orbit.priors import ecc_distribution
 
 from spaceodyssey.codec.bindings import BindingKind, Bindings
 from spaceodyssey.core.capacities import require_x64
-from spaceodyssey.core.enums import RefitStatus
+from spaceodyssey.core.enums import Audience, RefitStatus
 from spaceodyssey.core.refresh import HostLoopRefit, slice_spec
 
 # Payload columns an astrometry row carries, in this order: epoch (days), east and
@@ -80,6 +81,13 @@ class InferenceModel:
         return int.from_bytes(hashlib.sha256(text.encode()).digest()[:_HASH_BYTES])
 
 
+def _eccentricity(name):
+    """The numeric eccentricity distribution a prior name stands for."""
+    dist = ecc_distribution(name)
+    params = {k: float(getattr(dist, k)) for k in dist.arg_constraints}
+    return {"name": str(name), "family": type(dist).__name__, "parameters": params}
+
+
 def ofti_model(
     *,
     stellar_mass_kg,
@@ -101,15 +109,17 @@ def ofti_model(
         name="physical_fixed_mass",
         prior={
             "orientation": "isotropic",
-            "eccentricity": str(ecc_prior),
+            "eccentricity": _eccentricity(ecc_prior),
             "semimajor_axis_and_node": "induced by scale-and-rotate",
             "mean_anomaly": "uniform at the reference epoch",
+            "phase": "time of periapsis back-computed from the scaled period",
         },
         likelihood={
             "data": "relative astrometry",
             "form": "bivariate Gaussian with correlation",
             "epochs": "valid nonreference epochs by rejection",
             "reference_epoch": "conditioned through a noised target",
+            "anchor": "highest signal-to-noise valid epoch",
         },
         support={"log10_period_days": [lo, hi], "eccentricity_max": float(e_max)},
         parameterization=tuple(PARAM_NAMES),
@@ -210,6 +220,44 @@ class OftiRefit(HostLoopRefit):
             "max_batches": self.max_batches,
             "loglike_ref": self.loglike_ref,
         }
+
+    def _readable(self, study):
+        """Per audience, whether OFTI can read every column of every refit kind."""
+        caps = study.caps
+        out = []
+        for audience in (Audience.OBSERVER, Audience.POLICY):
+            seen = all(
+                int(caps.payload_audience[kind][col]) & int(audience)
+                for kind in caps.refit_kinds
+                for col in self.columns
+            )
+            out.append(bool(seen))
+        return np.asarray(out)
+
+    def refit_batch(self, study, requests):
+        """Fit the entries; an audience that cannot read a needed column gets none.
+
+        A masked column reaches the request as zeros, which would fit as a real
+        measurement. For such an audience every row is marked not counting, so its
+        entry is `NO_SUPPORT` and installs nothing, and it never shares another
+        audience's computation.
+        """
+        readable = self._readable(study)
+        if readable.all():
+            return super().refit_batch(study, requests)
+        seen = jnp.asarray(readable)
+        keep = seen[None, :, None]
+        rows = dataclasses.replace(
+            requests.rows, valid=requests.rows.valid & keep[..., None]
+        )
+        count = requests.dirty.shape[-1]
+        own = jnp.arange(2 * count, dtype=requests.source.dtype).reshape(2, count)
+        source = jnp.where(keep, requests.source, own)
+        # an entry that pointed at a blind audience's computation computes itself
+        source = jnp.where(seen[source // count], source, own)
+        return super().refit_batch(
+            study, dataclasses.replace(requests, rows=rows, source=source)
+        )
 
     def _layout(self, study):
         """The particle count, checked against the observer's subject leaves."""
