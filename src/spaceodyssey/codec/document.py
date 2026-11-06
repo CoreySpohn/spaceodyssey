@@ -47,7 +47,7 @@ import math
 FORMAT = "spaceodyssey.study"
 SCHEMA_VERSION = 1
 
-_DOCUMENT_KEYS = frozenset({"format", "schema_version", "study", "content_hash"})
+DOCUMENT_KEYS = frozenset({"format", "schema_version", "study", "content_hash"})
 
 
 class DocumentError(ValueError):
@@ -126,15 +126,10 @@ class StudyDocument:
         The text need not be canonical: the hash is checked against the canonical
         bytes of what it parses to. A document without `content_hash` is accepted.
         """
-        try:
-            data = json.loads(text, object_pairs_hook=_Pairs, parse_constant=float)
-        except json.JSONDecodeError as err:
-            raise DocumentError(f"malformed JSON: {err}", "") from err
-        check_parsed(data)
-        data = _plain(data)
+        data = parse_text(text)
         if not isinstance(data, dict):
             raise DocumentError("a document is a JSON object", "")
-        extra = sorted(set(data) - _DOCUMENT_KEYS)
+        extra = sorted(set(data) - DOCUMENT_KEYS)
         if extra:
             raise DocumentError(
                 f"unknown document key {extra[0]!r}", pointer(extra[:1])
@@ -154,6 +149,20 @@ class StudyDocument:
                 "/content_hash",
             )
         return doc
+
+
+def parse_text(text):
+    """Parsed document text as plain dicts and lists.
+
+    Malformed JSON, a key written twice and a non-finite number (bare NaN or
+    Infinity, or an overflowing number) are each a `DocumentError` with a pointer.
+    """
+    try:
+        data = json.loads(text, object_pairs_hook=_Pairs, parse_constant=float)
+    except json.JSONDecodeError as err:
+        raise DocumentError(f"malformed JSON: {err}", "") from err
+    check_parsed(data)
+    return _plain(data)
 
 
 def check_schema_version(version):

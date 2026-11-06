@@ -16,7 +16,7 @@ from spaceodyssey.codec import (
     load_study,
     preflight_document,
 )
-from spaceodyssey.codec.preflight import DocumentCode, resolve_pointer
+from spaceodyssey.codec.preflight import DocumentCode, _follow, resolve_pointer
 from spaceodyssey.core.declarations import DRAW_COORDS
 from spaceodyssey.core.enums import (
     I64,
@@ -27,6 +27,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.keys import Coupling
 from spaceodyssey.core.preflight import FindingCode, preflight
+from spaceodyssey.plugins import RegistrationError
 from spaceodyssey.studies import toy
 from tests.codec.test_document import TOY_KINDS
 from tests.core.preflight_cases import (
@@ -168,51 +169,51 @@ CASES = {
     "F001": (
         FindingCode.F001,
         f001,
-        "/study/observer",
-        lambda v: v["reads"] == ["truth"],
+        "/study/observer/reads/0",
+        _is("truth"),
     ),
     "F002": (
         FindingCode.F002,
         f002,
-        "/study/observer",
-        lambda v: v["reads"] == ["scorer"],
+        "/study/observer/reads/0",
+        _is("scorer"),
     ),
     "C001": (
         FindingCode.C001,
         c001,
-        "/study/agenda/policies/0",
-        lambda v: v["needs"] == [[10, 0, 19]],
+        "/study/agenda/policies/0/needs/0",
+        _is([10, 0, 19]),
     ),
     "K001": (
         FindingCode.K001,
         k001,
-        "/study/channel_model",
-        lambda v: "acquisition_index" not in v["key_coords"],
+        "/study/channel_model/key_coords",
+        lambda v: "acquisition_index" not in v,
     ),
     "K002": (FindingCode.K002, k002, "/study/channels/id/data/1", _is(10)),
     "X001": (
         FindingCode.X001,
         x001,
-        "/study/agenda/policies/0",
-        lambda v: v["effects"] == [int(EffectKind.ALLOCATE)],
+        "/study/agenda/policies/0/effects/0",
+        _is(int(EffectKind.ALLOCATE)),
     ),
     "X002": (
         FindingCode.X002,
         x002,
-        "/study/assets/freeze_ticks",
-        lambda v: v["data"] == [5, 0],
+        "/study/assets/freeze_ticks/data/0",
+        _is(5),
     ),
     "T001": (
         FindingCode.T001,
         t001,
-        "/study/agenda/policies/0",
-        lambda v: v["stops"] == [[int(Scope.LANE), int(Disposition.DRAIN)]],
+        "/study/agenda/policies/0/stops/0",
+        _is([int(Scope.LANE), int(Disposition.DRAIN)]),
     ),
     "T002": (
         FindingCode.T002,
         t002,
-        "/study/channels/coincident_order",
-        lambda v: v["data"] == [0, 1, 7],
+        "/study/channels/coincident_order/data/2",
+        _is(7),
     ),
     "R001": (FindingCode.R001, r001, "/study/channels/kind/data/2", _is(9)),
     "D001": (
@@ -307,12 +308,12 @@ def test_all_findings_are_reported_not_only_the_first():
     found = _find(_doc(study), None)
     seen = sorted((str(f.code), f.pointer) for f in found)
     assert seen == [
-        ("C001", "/study/agenda/policies/0"),
-        ("F001", "/study/observer"),
-        ("F002", "/study/observer"),
+        ("C001", "/study/agenda/policies/0/needs/0"),
+        ("F001", "/study/observer/reads/0"),
+        ("F002", "/study/observer/reads/1"),
         ("K002", "/study/channels/id/data/1"),
         ("R001", "/study/channels/kind/data/1"),
-        ("T001", "/study/agenda/policies/0"),
+        ("T001", "/study/agenda/policies/0/stops/0"),
     ]
     assert [f.severity for f in found][-1] == "warning"
 
@@ -425,15 +426,6 @@ def test_incomplete_bindings_are_findings():
     assert {f.code for f in found} == {"D003"}
 
 
-def test_newer_schema_reports_only_d002_even_with_bad_kinds():
-    """Fails if a document of an unreadable schema is walked under today's rules."""
-    doc, _ = d002(True)
-    doc["study"]["observer"]["$kind"] = ["observer", "toy.no_such_kind", 1]
-    assert [(f.code, f.pointer) for f in _find(doc, None)] == [
-        ("D002", "/schema_version")
-    ]
-
-
 def test_kinds_none_means_the_core_kinds():
     """Fails if `kinds=None` reads anything but the core kinds, as `load_study` does."""
     doc = _doc(toy.survey_1())
@@ -452,33 +444,70 @@ def test_missing_id_is_a_finding_not_an_import_error():
     assert "antigravity" not in sys.modules
 
 
-def test_broken_installation_is_an_error_not_a_finding():
-    """Fails if a bad registration becomes a finding on the document."""
-    with pytest.raises(ValueError, match="already bound"):
-        preflight_document(
-            _text(_doc(toy.survey_1())), {("core", "study", 1): toy.ToyDesign}
-        )
+def test_broken_installation_is_a_registration_error_not_a_finding():
+    """Fails if a bad registration becomes a finding, or surfaces as a plain
+    ValueError instead of RegistrationError, or loses its cause.
+    """
+    text = _text(_doc(toy.survey_1()))
+    for bad in ({("core", "study", 1): toy.ToyDesign}, {("bad", "ref"): toy.ToyDesign}):
+        with pytest.raises(RegistrationError) as err:
+            preflight_document(text, bad)
+        assert type(err.value) is RegistrationError
+        assert type(err.value.__cause__) is ValueError
 
 
 @pytest.mark.parametrize(
-    "edit",
+    ("edit", "where"),
     [
-        lambda d: d["study"]["budget"].update(shape=[3, 4]),
-        lambda d: d.update(content_hash="0" * 64),
+        (lambda d: d["study"]["budget"].update(shape=[3, 4]), "/study/budget/data"),
+        (lambda d: d.update(content_hash="0" * 64), "/content_hash"),
+        (lambda d: d.update(format="other"), "/format"),
+        (lambda d: d.update(extra=1), "/extra"),
     ],
-    ids=["wrong-shape", "edited-hash"],
+    ids=["wrong-shape", "edited-hash", "wrong-format", "extra-key"],
 )
-def test_documents_that_cannot_load_raise_with_a_pointer(edit):
-    """Fails if a document that does not load for a reason outside the thirteen
-    codes returns findings, or raises without a pointer.
+def test_documents_that_cannot_decode_are_reported_not_raised(edit, where):
+    """Fails if a document that does not decode raises, or is reported without the
+    pointer of the failure, or hides an independent finding beside it.
     """
-    doc = _doc(toy.survey_1())
+    doc = _doc(toy.survey_1(policies=(DocPolicy(effects=(QUERY,)),)))
     edit(doc)
-    with pytest.raises(DocumentError) as err:
-        preflight_document(_text(doc), RESOLVER)
-    assert err.value.pointer
+    found = _find(doc, _run(compiled_hash=8))
+    assert sorted((str(f.code), f.pointer) for f in found) == sorted(
+        [("L001", where), ("D003", "/run/refit/compiled/model_hash")]
+    )
+    assert all(f.in_memory is None for f in found)
+
+
+def test_malformed_text_is_one_load_finding():
+    """Fails if malformed JSON raises."""
+    found = preflight_document("{not json", RESOLVER)
+    assert [(f.code, f.pointer) for f in found] == [("L001", "")]
+
+
+def test_repeated_key_and_non_finite_number_are_refused_like_the_loader():
+    """Fails if text that load_study refuses certifies clean: a key written twice
+    (the first value is dropped by a plain parse) or a number that overflows.
+    """
+    clean = json.dumps(_doc(toy.survey_1()))
+    twice = clean.replace(
+        '"schema_version": 1', '"schema_version": 1, "schema_version": 1'
+    )
+    assert twice != clean
     with pytest.raises(DocumentError):
-        preflight_document("{not json", RESOLVER)
+        load_study(twice, RESOLVER)
+    assert [(f.code, f.pointer) for f in preflight_document(twice, RESOLVER)] == [
+        ("L001", "/schema_version")
+    ]
+    doc = _doc(toy.survey_1())
+    doc["study"]["clock"]["tick_length_s"]["data"] = "huge"
+    huge = json.dumps(doc).replace('"huge"', "1e999")
+    with pytest.raises(DocumentError):
+        load_study(huge, RESOLVER)
+    found = preflight_document(huge, RESOLVER)
+    assert [(f.code, f.pointer) for f in found] == [
+        ("L001", "/study/clock/tick_length_s/data")
+    ]
 
 
 def test_resolve_pointer_follows_escapes_and_refuses_missing_values():
@@ -490,3 +519,258 @@ def test_resolve_pointer_follows_escapes_and_refuses_missing_values():
         resolve_pointer(root, "/a~1b/c~0d/2")
     with pytest.raises(KeyError):
         resolve_pointer(copy.deepcopy(root), "/missing")
+
+
+# ---- provenance: the value, through the document's own encoding -------------------
+
+
+def _variant_x001_requires(seed):
+    return _policy_doc(requires=("gradients",) if seed else ()), {"executor": "host"}
+
+
+def _variant_x001_executors(seed):
+    executors = ("host",) if seed else ("compiled", "host")
+    return _policy_doc(executors=executors), {"executor": "compiled"}
+
+
+def _variant_x002_charge(seed):
+    study = toy.survey_1()
+    charge = study.channels.cost.at[1, 2].set(2.0 if seed else 1.0)
+    return _doc(_with(study, channels=_channels(charge=charge))), None
+
+
+def _variant_x002_resource(seed):
+    study = toy.survey_1()
+    rows = jnp.asarray([-1, 0 if seed else -1], I64)
+    assets = dataclasses.replace(study.assets, disruptive_resource=rows)
+    return _doc(_with(study, assets=assets)), None
+
+
+def _variant_x002_policy(seed):
+    return _policy_doc(disruptive=seed), None
+
+
+def _variant_t002_shape(seed):
+    order = jnp.asarray([0, 1, 1] if not seed else [0, 1], I64)
+    return _doc(_with(toy.survey_1(), channels=_channels(coincident_order=order))), None
+
+
+def _variant_c001_second_need(seed):
+    return _policy_doc(needs=((10, 0, 500), (11, 0, 5) if seed else (11, 0, 500))), None
+
+
+def _variant_t001_second_drain(seed):
+    scope = Scope.ASSET if seed else Scope.CAMPAIGN
+    stops = ((int(Scope.CAMPAIGN), int(Disposition.DRAIN)), (int(scope), 1))
+    return _policy_doc(stops=stops), None
+
+
+VARIANTS = {
+    "X001-requires": (
+        FindingCode.X001,
+        _variant_x001_requires,
+        "/study/agenda/policies/0/requires/0",
+        _is("gradients"),
+    ),
+    "X001-executors": (
+        FindingCode.X001,
+        _variant_x001_executors,
+        "/study/agenda/policies/0/executors",
+        _is(["host"]),
+    ),
+    "X002-charge": (
+        FindingCode.X002,
+        _variant_x002_charge,
+        "/study/channels/charge/data/1/2",
+        _is(2.0),
+    ),
+    "X002-resource": (
+        FindingCode.X002,
+        _variant_x002_resource,
+        "/study/assets/disruptive_resource/data/1",
+        _is(0),
+    ),
+    "X002-policy": (
+        FindingCode.X002,
+        _variant_x002_policy,
+        "/study/agenda/policies/0/disruptive",
+        _is(True),
+    ),
+    "T002-shape": (
+        FindingCode.T002,
+        _variant_t002_shape,
+        "/study/channels/coincident_order",
+        lambda v: v["shape"] == [2],
+    ),
+    "C001-second-need": (
+        FindingCode.C001,
+        _variant_c001_second_need,
+        "/study/agenda/policies/0/needs/1",
+        _is([11, 0, 5]),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(VARIANTS))
+def test_each_declaration_is_located_at_its_own_value(name):
+    """Fails if a finding stops at the containing module or the whole column, or
+    points at another value of the same component.
+    """
+    code, build, where, offending = VARIANTS[name]
+    doc, run = build(True)
+    found = [f for f in _find(doc, run) if f.code == code]
+    assert found and {f.pointer for f in found} == {where}
+    assert offending(resolve_pointer(_root(doc, run), where))
+    clean_doc, clean_run = build(False)
+    assert _find(clean_doc, clean_run) == []
+
+
+def test_second_drain_is_located_at_the_second_pair():
+    """Fails if a later offending pair is attributed to an earlier one."""
+    doc, _ = _variant_t001_second_drain(True)
+    found = _find(doc, None)
+    assert [(f.code, f.pointer) for f in found] == [
+        ("T001", "/study/agenda/policies/0/stops/1")
+    ]
+
+
+def test_values_are_located_through_container_tags():
+    """Fails if a pointer assumes plain arrays: a field written as `$list` loads, and
+    its findings must point through the tag.
+    """
+    doc, _ = f001(True)
+    study_doc = _doc(toy.survey_1(policies=(DocPolicy(reads=("truth",)),)))
+    policies = study_doc["study"]["agenda"]["policies"]
+    study_doc["study"]["agenda"]["policies"] = {"$list": policies}
+    reads = study_doc["study"]["agenda"]["policies"]["$list"][0]["reads"]
+    study_doc["study"]["agenda"]["policies"]["$list"][0]["reads"] = {"$list": reads}
+    found = _find(study_doc, None)
+    assert [(f.code, f.pointer) for f in found] == [
+        ("F001", "/study/agenda/policies/$list/0/reads/$list/0")
+    ]
+    assert resolve_pointer(study_doc, found[0].pointer) == "truth"
+    assert doc  # the plain form of the same mistake is the F001 seed
+
+
+def test_follow_reads_dict_entries_and_array_rows():
+    """Fails if a `$dict` entry or a nested array element is not located."""
+    node = {"$dict": [["a", 1], ["b", [5, 6]]]}
+    assert _follow(node, ("b", 1), ()) == ("$dict", 1, 1, 1)
+    array = {"$array": "int64", "shape": [2, 2], "data": [[1, 2], [3, 4]]}
+    assert _follow(array, (1, 0), ()) == ("data", 1, 0)
+    assert _follow(array, (1, 5, 9), ()) == ("data", 1)
+
+
+def test_null_order_is_reported_beside_independent_findings():
+    """Fails if a null coincident order stops the load: the core reports T002 and the
+    other findings together.
+    """
+    doc = _doc(toy.survey_1(observer=DocObserver(reads=("truth",))))
+    doc["study"]["channels"]["coincident_order"] = None
+    found = _find(doc, None)
+    assert sorted((str(f.code), f.pointer) for f in found) == [
+        ("F001", "/study/observer/reads/0"),
+        ("T002", "/study/channels/coincident_order"),
+    ]
+
+
+# ---- independent checks always run ------------------------------------------------
+
+
+def test_document_and_binding_findings_are_reported_together():
+    """Fails if an unknown kind or a newer schema hides the binding mismatch, or a
+    newer schema hides the unknown kind.
+    """
+    doc, _ = d001(True)
+    found = _find(doc, _run(compiled_hash=8))
+    assert sorted((str(f.code), f.pointer) for f in found) == [
+        ("D001", "/study/observer/$kind"),
+        ("D003", "/run/refit/compiled/model_hash"),
+    ]
+    doc["schema_version"] = 2
+    found = _find(doc, _run(compiled_hash=8))
+    assert sorted((str(f.code), f.pointer) for f in found) == [
+        ("D001", "/study/observer/$kind"),
+        ("D002", "/schema_version"),
+        ("D003", "/run/refit/compiled/model_hash"),
+    ]
+
+
+def test_every_component_that_asks_a_query_needs_a_service():
+    """Fails if the service check misses a component the core pre-flight reads: a
+    channel model, a policy, the observer.
+    """
+    model = DocChannelModel(noise=toy.survey_1().channel_model.noise, effects=(QUERY,))
+    doc = _doc(toy.survey_1(channel_model=model))
+    found = _find(doc, {})
+    assert [(f.code, f.pointer) for f in found] == [("D003", "/run")]
+    assert "channel_model" in found[0].message
+    assert _find(doc, {"service": _run()["service"]}) == []
+
+
+@pytest.mark.parametrize(
+    ("edit", "where"),
+    [
+        (lambda r: r["service"].update(kind=None), "/run/service/kind"),
+        (lambda r: r["service"].update(version=0), "/run/service/version"),
+        (lambda r: r["service"].update(version=True), "/run/service/version"),
+        (lambda r: r["service"].update(configuration=[]), "/run/service/configuration"),
+        (lambda r: r.update(service=None), "/run/service"),
+        (lambda r: r.update(refit=None), "/run/refit"),
+        (lambda r: r.update(executor="gpu"), "/run/executor"),
+        (
+            lambda r: r["refit"]["host"].update(model_hash=None),
+            "/run/refit/host/model_hash",
+        ),
+        (
+            lambda r: r["refit"]["host"].update(model_hash=1.5),
+            "/run/refit/host/model_hash",
+        ),
+        (lambda r: r["refit"]["host"].update(kind=""), "/run/refit/host/kind"),
+    ],
+    ids=[
+        "null-kind",
+        "zero-version",
+        "bool-version",
+        "list-configuration",
+        "null-service",
+        "null-refit",
+        "unknown-executor",
+        "null-hash",
+        "float-hash",
+        "empty-kind",
+    ],
+)
+def test_binding_members_are_checked_against_the_schema(edit, where):
+    """Fails if a binding with every key present but a null, mistyped or empty value
+    passes as complete.
+    """
+    doc = _policy_doc(effects=(QUERY,))
+    run = _run()
+    edit(run)
+    pointers = [(str(f.code), f.pointer) for f in _find(doc, run)]
+    assert ("D003", where) in pointers
+    assert {c for c, _ in pointers} == {"D003"}
+
+
+def test_two_null_hashes_are_not_equal_hashes():
+    """Fails if two null model hashes pass as a match."""
+    run = _run()
+    run["refit"]["host"]["model_hash"] = None
+    run["refit"]["compiled"]["model_hash"] = None
+    found = _find(_policy_doc(), run)
+    assert sorted(f.pointer for f in found) == [
+        "/run/refit/compiled/model_hash",
+        "/run/refit/host/model_hash",
+    ]
+
+
+def test_an_incomplete_binding_does_not_hide_a_hash_mismatch():
+    """Fails if a missing member of one binding stops the hash comparison."""
+    run = _run(compiled_hash=8)
+    del run["refit"]["host"]["configuration"]
+    found = _find(_policy_doc(), run)
+    assert sorted(f.pointer for f in found) == [
+        "/run/refit/compiled/model_hash",
+        "/run/refit/host",
+    ]

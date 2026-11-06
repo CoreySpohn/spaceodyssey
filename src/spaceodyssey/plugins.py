@@ -20,7 +20,14 @@ This module sits outside the core, which may not load code dynamically.
 import re
 from importlib.metadata import entry_points
 
-from spaceodyssey.codec.kinds import CORE_KINDS, KindResolver, declared_version
+from spaceodyssey.codec.kinds import (
+    CORE_KINDS,
+    KindResolver,
+    declared_version,
+)
+from spaceodyssey.codec.kinds import (
+    RegistrationError as RegistrationError,
+)
 from spaceodyssey.core.kinds import (
     AbstractChannelModel,
     AbstractDesign,
@@ -47,10 +54,6 @@ FAMILIES = {
 _NAME = re.compile(
     r"(?P<id>[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)@(?P<version>[1-9][0-9]*)"
 )
-
-
-class RegistrationError(ValueError):
-    """An entry point that does not register a kind correctly."""
 
 
 def _origin(entry):

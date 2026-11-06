@@ -16,6 +16,8 @@ is refused:
 Every failure is a `DocumentError` at the pointer of the field or module.
 """
 
+import contextlib
+import contextvars
 import dataclasses
 import enum
 import math
@@ -39,6 +41,23 @@ from spaceodyssey.core.study import Study
 _FLOAT_TAGS = {"nan": math.nan, "inf": math.inf, "-inf": -math.inf}
 _ARRAY_KEYS = frozenset({"$array", "shape", "data", "weak", "type"})
 _WEAK_ZEROS = {"int64": 0, "float64": 0.0}
+
+
+_NULL_OK = contextvars.ContextVar("null_ok", default=frozenset())
+
+
+@contextlib.contextmanager
+def tolerating_null_arrays(names):
+    """Let the fields called `names` hold `None` where an array is annotated.
+
+    Pre-flight uses it so a missing value reaches the structural checks, which
+    report it with a code, instead of stopping the load.
+    """
+    token = _NULL_OK.set(frozenset(names))
+    try:
+        yield
+    finally:
+        _NULL_OK.reset(token)
 
 
 def load_study(document, kinds=None):
@@ -222,6 +241,8 @@ _CHECK_ERRORS = (ValueError, TypeError, AttributeError, IndexError, KeyError)
 
 def _check_field(field, value, path):
     """Refuse a value its converter would change or its annotation does not fit."""
+    if value is None and field.name in _NULL_OK.get():
+        return
     if field.type is jax.Array and not isinstance(value, (jax.Array, np.ndarray)):
         raise DocumentError(
             f"field {field.name!r} holds an array, not a {type(value).__name__}",

@@ -101,9 +101,13 @@ class DocChannelModel(toy.ToyPhotometry):
     """A channel model whose key coordinates a document states."""
 
     key_coords: tuple = _field(DRAW_COORDS)
+    effects: tuple = _field(())
 
     def declare(self):
-        return Declaration(key_coords=self.key_coords)
+        return Declaration(
+            key_coords=self.key_coords,
+            effects=frozenset(EffectKind(e) for e in self.effects),
+        )
 
 
 # The document kinds, to add to a resolver's mapping.

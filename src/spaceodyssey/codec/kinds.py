@@ -54,6 +54,10 @@ CORE_KINDS: Mapping[KindRef, type] = {
 }
 
 
+class RegistrationError(ValueError):
+    """A kind registration that is broken: the installation, not a document."""
+
+
 def is_kind_class(cls):
     """Whether `$kind` may name `cls`: a dataclass (or module) type, not an enum."""
     return (
