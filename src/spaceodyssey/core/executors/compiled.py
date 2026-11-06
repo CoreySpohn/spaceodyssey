@@ -127,7 +127,7 @@ class CompiledExecutor(AbstractExecutor):
                     answered = answer_pending(index_world(carries, w), study, service)
                     carries = _put_world(carries, w, answered)
             if refit is not None:
-                carries = answer_refreshes(carries, roots, study, refit)
+                carries = answer_refreshes(carries, roots, study, refit, left)
             # a world frozen on something nobody answers cannot go on
             stuck = (np.asarray(carries.request.valid) & (service is None)) | (
                 np.asarray(carries.refresh.valid) & (refit is None)

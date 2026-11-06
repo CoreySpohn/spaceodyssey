@@ -81,7 +81,7 @@ class HostExecutor(AbstractExecutor):
             )
             return RunResult(carry, trace, layout)
         traces = []
-        for _ in range(n_steps):
+        for step in range(n_steps):
             carry, trace, wake = adv(carry, roots, study, truths)
             if bool(wake):
                 if view_log is not None:
@@ -118,7 +118,9 @@ class HostExecutor(AbstractExecutor):
             if service is not None:
                 carry = answer_pending(carry, study, service)
             if refit is not None:
-                carry = answer_refresh(carry, roots, study, refit)
+                carry = answer_refresh(
+                    carry, roots, study, refit, can_finish=step + 1 < n_steps
+                )
         return RunResult(
             carry, jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces), layout
         )
