@@ -24,6 +24,12 @@ from spaceodyssey.core.conformance.observer_kit import (
     check_declared_margins as check_declared_margins,
 )
 from spaceodyssey.core.conformance.observer_kit import (
+    check_delayed_correction as check_delayed_correction,
+)
+from spaceodyssey.core.conformance.observer_kit import (
+    check_derived_summary as check_derived_summary,
+)
+from spaceodyssey.core.conformance.observer_kit import (
     check_folded_once as check_folded_once,
 )
 from spaceodyssey.core.conformance.observer_kit import (

@@ -1,4 +1,4 @@
-"""The observer kit: four checks an observer passes before its refit is trusted.
+"""The observer kit: six checks an observer passes before its refit is trusted.
 
 - `check_calibration`: the empirical distribution of the probability integral
   transforms (PITs) of the truth under the observer's posterior lies within an
@@ -14,6 +14,14 @@
 - `check_declared_margins`: an observer judged within a margin declares the margin,
   its seeds, its Monte Carlo standard error and its stochastic leaves as class
   attributes (`AbstractObserver.statistical`, `AbstractObserver.order_sensitive`).
+- `check_delayed_correction`: after a revision released later than the row it
+  supersedes, the belief of the corrected subject equals a flat-prior refit of the
+  corrected rows alone, so the superseded row is not kept.
+- `check_derived_summary`: a derived summary of folded rows adds nothing to the
+  belief, so the belief equals a refit that counts each datum once.
+
+Every refit the kit makes is keyed by `keys.refit_key(root, subject, digest)`, where
+the digest names the revision set the refit reads, never a fold count.
 
 Every check takes a batched `RunResult` (a leading world axis, as
 `CompiledExecutor.run` and `HostExecutor.run_worlds` return it) and returns a
@@ -58,16 +66,25 @@ from jax import lax
 
 from spaceodyssey.core import handlers
 from spaceodyssey.core.battery.result import make_result, tree_bits_equal
-from spaceodyssey.core.enums import I64, Audience, EventKind, RecordStatus, Stage
+from spaceodyssey.core.enums import (
+    I64,
+    Audience,
+    Capacity,
+    EventKind,
+    RecordStatus,
+    RunStatus,
+    Stage,
+)
 from spaceodyssey.core.events import empty_event_row, where_tree
 from spaceodyssey.core.executors.base import GO_TOLERANCE, index_world
-from spaceodyssey.core.keys import fold_keys
+from spaceodyssey.core.keys import fold_keys, refit_key
 from spaceodyssey.core.records import (
     derived_rows,
     log_records,
     masked_record,
     refit_rows,
 )
+from spaceodyssey.core.refresh import revision_set_digest
 from spaceodyssey.core.snapshot import named_leaves
 
 # confidence level of every equivalence statement
@@ -472,11 +489,25 @@ def _shifted(tree):
     return jax.tree_util.tree_map(shift, tree)
 
 
+def _seeded(root, seed):
+    """The root of a declared seed: the run's own root at seed 0, another one else."""
+    return jnp.where(seed == 0, root, jr.fold_in(root, seed))
+
+
+def _set_key(root, seed, subject, rows):
+    """The refit key of a revision set, as the refresh protocol derives it.
+
+    `rows` are the set's rows in canonical order (`revision_set_digest` hashes them in
+    the order they come in), so one set gets one key whichever order it was gathered.
+    """
+    return refit_key(_seeded(root, seed), subject, revision_set_digest(rows))
+
+
 def _refit_subject(observer, study, log, root, seed, subject):
     """`refit` of `subject` from `refit_rows` of `log`, keyed by `seed`."""
     caps = study.caps
     rows = refit_rows(log, caps, Audience.OBSERVER, subject)
-    key = jr.fold_in(jr.fold_in(root, seed), subject)
+    key = _set_key(root, seed, subject, rows)
     return observer.refit(
         observer.init(caps), rows, caps, key, fold_keys(root, rows, study)
     )
@@ -519,11 +550,25 @@ def _promotions(
         def promote(k, seed):
             subject = rows.subject[k]
             current = jax.tree_util.tree_map(lambda x: x[k], incremental)
-            key = jr.fold_in(jr.fold_in(root, seed), subject)
             take = counting & (pos <= k) & (rows.subject == subject)
             first = jnp.argsort(~take, stable=True)
             picked = jax.tree_util.tree_map(
                 lambda x: x[first], dataclasses.replace(seen, valid=take)
+            )
+            # the key names the set, not the release order the rows came in
+            in_order = jnp.lexsort(
+                (
+                    picked.revision,
+                    picked.acquisition_index,
+                    picked.channel,
+                    ~picked.valid,
+                )
+            )
+            key = _set_key(
+                root,
+                seed,
+                subject,
+                jax.tree_util.tree_map(lambda x: x[in_order], picked),
             )
             fitted = observer.refit(observer.init(caps), picked, caps, key, keys[first])
             released_ = observer.analyze(observer.install(current, fitted, subject))
@@ -900,3 +945,246 @@ def check_refit_calibration(study, run, truths, roots, pit, *, margin, observer=
                 failures.append(f"seed {seed}, {label}: {result.diagnostic}")
         detail[f"seed {seed}"] = per_depth
     return make_result("refit_calibration", failures, **detail)
+
+
+def _corrected_slots(log, caps, subject, exclude=()):
+    """Log slots of a subject's corrected rows in canonical order.
+
+    Written from the rule and not from `records.revision_set`, so the check does not
+    trust the code it audits: among the rows the observer accepted, other than
+    derived ones and the kinds in `exclude`, each acquisition keeps its highest
+    revision; that row counts when its kind and status are listed for refit; the
+    counting rows sort by channel, acquisition index and revision.
+    """
+    col = {
+        name: np.asarray(getattr(log, name))
+        for name in (
+            "valid",
+            "accepted_tick",
+            "subject",
+            "kind",
+            "status",
+            "acquisition_id",
+            "revision",
+            "channel",
+            "acquisition_index",
+        )
+    }
+    out = tuple(caps.derived_kinds) + tuple(exclude)
+    mine = (
+        col["valid"]
+        & (col["accepted_tick"] >= 0)
+        & (col["subject"] == subject)
+        & ~np.isin(col["kind"], out)
+    )
+    latest = {}
+    for slot in np.flatnonzero(mine):
+        acquisition = int(col["acquisition_id"][slot])
+        held = latest.get(acquisition)
+        if held is None or col["revision"][slot] > col["revision"][held]:
+            latest[acquisition] = slot
+    counting = [
+        slot
+        for slot in latest.values()
+        if int(col["kind"][slot]) in caps.refit_kinds
+        and int(col["status"][slot]) in caps.refit_statuses
+    ]
+    return sorted(
+        counting,
+        key=lambda s: (
+            int(col["channel"][s]),
+            int(col["acquisition_index"][s]),
+            int(col["revision"][s]),
+        ),
+    )
+
+
+@eqx.filter_jit
+def _flat_prior_refit(observer, study, log, root, order, count, subject):
+    """The subject's leaves of a flat-prior refit of the log rows `order[:count]`.
+
+    The rows are masked for the observer and zeroed where they do not count, the
+    refit key is the refresh protocol's (`refit_key` of the set's digest), and the
+    refit is installed into a fresh belief and analyzed, as a refresh installs it.
+    """
+    caps = study.caps
+    valid = jnp.arange(order.shape[0]) < count
+    rows = log_records(jax.tree_util.tree_map(lambda x: x[order], log), valid=valid)
+    rows = masked_record(rows, caps, Audience.OBSERVER)
+    rows = jax.tree_util.tree_map(
+        lambda x: jnp.where(
+            valid.reshape((-1,) + (1,) * (x.ndim - 1)), x, jnp.zeros_like(x)
+        ),
+        rows,
+    )
+    key = refit_key(root, subject, revision_set_digest(rows))
+    fitted = observer.refit(
+        observer.init(caps), rows, caps, key, fold_keys(root, rows, study)
+    )
+    belief = observer.analyze(observer.install(observer.init(caps), fitted, subject))
+    return named_leaves(belief)
+
+
+def _refit_capable(study):
+    """The observer and the leaf names an installed refit owns, or a refusal."""
+    caps = study.caps
+    if caps.rows_per_subject <= 0:
+        raise ValueError("the study has no refresh protocol: rows_per_subject is 0")
+    observer = study.observer
+    if not observer.capabilities().refit:
+        raise ValueError("the observer is not refit-capable")
+    _leaf_roles(observer, caps)
+    return observer, observer.subject_leaves
+
+
+def _unfinished(run):
+    """A refusal text if a world stopped before its queue drained, else None.
+
+    `COMPLETE` and `IDLE` both mean nothing was left to run, so no refresh
+    checkpoint is pending; every other status leaves the last refresh possibly unread.
+    """
+    status = np.asarray(run.status)
+    done = (status == RunStatus.COMPLETE) | (status == RunStatus.IDLE)
+    if done.all():
+        return None
+    bad = sorted({RunStatus(int(x)).name for x in status[~done]})
+    return f"a run stopped early ({', '.join(bad)}): its last refresh may be unread"
+
+
+def _refit_comparison(name, study, run, roots, picks, exclude=()):
+    """Compare each world's final belief at `picks[w]` with a flat-prior refit.
+
+    The reference is `_corrected_slots` of the final log, refit from a flat prior
+    by the observer; the run's belief holds what the last refresh installed, so the
+    two agree when the protocol replaced superseded rows and counted no summary.
+    """
+    study_caps = study.caps
+    observer, owned = _refit_capable(study)
+    failures, subjects_seen = [], set()
+    carry = jax.device_get(run.carry)
+    width = max(study_caps.rows_per_subject, study_caps.n_log)
+    for w, subjects in enumerate(picks):
+        log = index_world(carry.log, w)
+        for subject in sorted(subjects):
+            slots = _corrected_slots(log, study_caps, subject, exclude)
+            if len(slots) > study_caps.rows_per_subject:
+                raise ValueError(
+                    f"world {w}, subject {subject}: {len(slots)} rows exceed "
+                    f"rows_per_subject = {study_caps.rows_per_subject}"
+                )
+            order = np.zeros(width, np.int64)
+            order[: len(slots)] = slots
+            want = _flat_prior_refit(
+                observer,
+                study,
+                log,
+                roots[w],
+                jnp.asarray(order),
+                jnp.asarray(len(slots)),
+                jnp.asarray(subject, I64),
+            )
+            have = named_leaves(index_world(carry.belief, w))
+            subjects_seen.add(subject)
+            for leaf in owned:
+                got, ref = (
+                    np.asarray(have[leaf][subject]),
+                    np.asarray(want[leaf][subject]),
+                )
+                ok = (
+                    np.array_equal(got, ref)
+                    if got.dtype.kind != "f"
+                    else bool(np.all(np.abs(got - ref) <= GO_TOLERANCE))
+                )
+                if not ok:
+                    failures.append(
+                        f"world {w}, subject {subject}: {leaf} is {got.tolist()} but "
+                        f"a flat-prior refit of its {len(slots)} corrected rows gives "
+                        f"{ref.tolist()}"
+                    )
+    return make_result(
+        name, failures, n_worlds=len(picks), subjects=sorted(subjects_seen)
+    )
+
+
+def check_delayed_correction(study, run, roots):
+    """Check 5: a revision released after acceptance replaces the row it corrects.
+
+    `run` is a batched run of a refit-capable observer under the refresh protocol
+    (a boundary bound, every world complete) whose log holds a correction: a row of
+    a higher revision accepted at a later tick than the revision it supersedes. At
+    the end of the run the belief of every corrected subject must equal a
+    flat-prior refit of the corrected rows, each acquisition at its latest revision
+    and listed status. An observer that keeps the superseded row (an `install`
+    that merges into what the subject holds, a refit that reads rows the protocol
+    dropped) differs from that refit and fails.
+    """
+    _refit_capable(study)
+    if (why := _unfinished(run)) is not None:
+        raise ValueError(why)
+    carry = jax.device_get(run.carry)
+    picks = []
+    for w in range(np.asarray(carry.log.valid).shape[0]):
+        log = index_world(carry.log, w)
+        valid = np.asarray(log.valid) & (np.asarray(log.accepted_tick) >= 0)
+        acquisition, revision = np.asarray(log.acquisition_id), np.asarray(log.revision)
+        accepted, subject = np.asarray(log.accepted_tick), np.asarray(log.subject)
+        late = set()
+        for i in np.flatnonzero(valid & (revision > 0)):
+            earlier = (
+                valid
+                & (acquisition == acquisition[i])
+                & (revision < revision[i])
+                & (accepted < accepted[i])
+            )
+            if earlier.any():
+                late.add(int(subject[i]))
+        picks.append(late)
+    if not any(picks):
+        raise ValueError(
+            "no world holds a correction accepted after the row it corrects"
+        )
+    return _refit_comparison("delayed_correction", study, run, roots, picks)
+
+
+def check_derived_summary(study, run, roots, *, summary_kind):
+    """Check 6: a derived summary of folded rows adds nothing to the belief.
+
+    `summary_kind` names the record kind of a summary computed from rows the
+    observer also folded (a pedigree overlapping the revision set). Each world must
+    hold at least one accepted row of that kind. The belief of every subject with a
+    summary must equal a flat-prior refit that counts each datum once: the summary
+    kind is left out of the reference whether or not the study registers it as
+    derived, so a summary registered as an ordinary kind and counted by the observer
+    fails. A summary is a new acquisition: the core refuses a correction that reuses
+    a derived acquisition id (`Capacity.INVALID_CORRECTION`), and a run that hit
+    that refusal is refused here, because its log is not the one the study sent.
+    """
+    _refit_capable(study)
+    names = study.caps.kind_names
+    if summary_kind not in names:
+        raise ValueError(
+            f"no record kind named {summary_kind!r}; the study has {names}"
+        )
+    kind = names.index(summary_kind)
+    carry = jax.device_get(run.carry)
+    if np.any(np.asarray(carry.overflow_mask) & int(Capacity.INVALID_CORRECTION)):
+        raise ValueError(
+            "a summary was refused as a correction: "
+            "give each summary its own acquisition"
+        )
+    if (why := _unfinished(run)) is not None:
+        raise ValueError(why)
+    picks = []
+    for w in range(np.asarray(carry.log.valid).shape[0]):
+        log = index_world(carry.log, w)
+        held = (
+            np.asarray(log.valid)
+            & (np.asarray(log.accepted_tick) >= 0)
+            & (np.asarray(log.kind) == kind)
+        )
+        picks.append({int(x) for x in np.asarray(log.subject)[held]})
+    if not all(picks):
+        raise ValueError(f"a world holds no accepted {summary_kind!r} row to judge")
+    return _refit_comparison(
+        "derived_summary", study, run, roots, picks, exclude=(kind,)
+    )
