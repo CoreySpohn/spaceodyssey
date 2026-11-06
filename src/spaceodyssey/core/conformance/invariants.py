@@ -589,7 +589,24 @@ def installs_match_product_rows(run):
             )
     t = run.trace
     mean = np.asarray(t.belief_mean)
+    every, offset = int(sched.every_ticks), int(sched.offset_ticks)
     for step, hold, slots_at, _ in _received_sets(run):
+        tick = int(t.tick[step])
+        # a product is indexed by the grid ordinal of its checkpoint, at revision 0
+        # and at that checkpoint's tick, whatever the log order
+        ordinal = (tick - offset) // every if every > 0 else 0
+        for p in slots_at:
+            who = f"product row {p}"
+            if int(log.acquisition_index[p]) != ordinal:
+                failures.append(
+                    f"{who} is indexed {int(log.acquisition_index[p])}, but its "
+                    f"checkpoint at tick {tick} is grid ordinal {ordinal}"
+                )
+            if int(log.revision[p]) != 0 or int(log.available_tick[p]) != tick:
+                failures.append(
+                    f"{who} has revision {int(log.revision[p])} at tick "
+                    f"{int(log.available_tick[p])}, not revision 0 at tick {tick}"
+                )
         for p in slots_at:
             subject = int(log.subject[p])
             installs = int(log.payload[p, 0]) in {int(x) for x in INSTALLING_STATUSES}

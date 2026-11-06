@@ -62,7 +62,12 @@ from spaceodyssey.core.enums import I64, Audience, EventKind, RecordStatus, Stag
 from spaceodyssey.core.events import empty_event_row, where_tree
 from spaceodyssey.core.executors.base import GO_TOLERANCE, index_world
 from spaceodyssey.core.keys import fold_keys
-from spaceodyssey.core.records import log_records, masked_record, refit_rows
+from spaceodyssey.core.records import (
+    derived_rows,
+    log_records,
+    masked_record,
+    refit_rows,
+)
 from spaceodyssey.core.snapshot import named_leaves
 
 # confidence level of every equivalence statement
@@ -383,6 +388,9 @@ def _presented_rows(log, order, n, stamps, caps):
     """The rows `order[:n]` as the release handler presented them to a fold."""
     accepted, released = stamps
     rows = _log_rows(log, order, jnp.arange(order.shape[0]) < n, caps)
+    if caps.derived_kinds:
+        # a derived row is presented to no fold
+        rows = dataclasses.replace(rows, valid=rows.valid & ~derived_rows(rows, caps))
     return dataclasses.replace(rows, accepted_tick=accepted, released_tick=released)
 
 

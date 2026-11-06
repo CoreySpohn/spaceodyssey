@@ -305,6 +305,11 @@ def write_log(carry, rec, caps):
     return out, s
 
 
+def derived_rows(log, caps):
+    """Boolean per log row: its kind is derived (a product or a declared summary)."""
+    return jnp.isin(log.kind, jnp.asarray(caps.derived_kinds, I64))
+
+
 def revision_set(log, caps, audience, subject):
     """`(counts, replaced)` over the log rows: the revision set of a subject.
 
@@ -319,7 +324,10 @@ def revision_set(log, caps, audience, subject):
     A derived kind is never in `refit_kinds`, so a product is never in a set.
     """
     seen = log.accepted_tick if audience == Audience.OBSERVER else log.released_tick
+    # a derived row neither replaces nor is replaced: it has its own internal id, and a
+    # correction that reuses one never touches a source row
     mine = log.valid & (seen >= 0) & (log.subject == subject)
+    mine = mine & ~derived_rows(log, caps)
     same = (log.acquisition_id[:, None] == log.acquisition_id[None, :]) & mine[None, :]
     later = same & (log.revision[None, :] > log.revision[:, None])
     newer = later.any(axis=1)

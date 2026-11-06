@@ -64,6 +64,9 @@ def replay_belief(study, carry, trace, root=None):
             raise ValueError(f"release at tick {tick} matches no log row at slot {i}")
         if log.status[i] == RecordStatus.UNRELEASED:
             continue
+        if int(log.kind[i]) in study.caps.derived_kinds:
+            # a derived row (a product or a declared summary) is never folded
+            continue
         if not int(log.audience[i]) & Audience.OBSERVER:
             # a row the observer may not read is never folded into its belief
             continue

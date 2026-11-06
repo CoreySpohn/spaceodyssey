@@ -21,7 +21,13 @@ from spaceodyssey.core.enums import (
 from spaceodyssey.core.events import enqueue, requeue, where_tree
 from spaceodyssey.core.keys import draw_key, fold_key
 from spaceodyssey.core.ledger import _resource_rows
-from spaceodyssey.core.records import Record, masked_record, record_none, write_log
+from spaceodyssey.core.records import (
+    Record,
+    derived_rows,
+    masked_record,
+    record_none,
+    write_log,
+)
 from spaceodyssey.core.refresh import refresh_enabled, schedule_refresh
 
 
@@ -155,6 +161,10 @@ def h_release(c, ev, study, truth, root):
         & (log.acquisition_id == rec.acquisition_id)
         & (jnp.arange(caps.n_log) != slot)
     )
+    # a derived row neither replaces nor is replaced by another row
+    derived = jnp.isin(rec.kind, jnp.asarray(caps.derived_kinds, I64))
+    if caps.derived_kinds:
+        others = others & ~derived & ~derived_rows(log, caps)
     accepted = others & (log.accepted_tick >= 0)
     obs = masked_record(rec, caps, Audience.OBSERVER)
     # one key per record identity serves both audiences' folds
@@ -163,7 +173,6 @@ def h_release(c, ev, study, truth, root):
     incremental = study.observer.capabilities().incremental
     # a derived record (a product or a declared summary) is accepted and released like
     # any row but never folded: a product cannot count its own source data
-    derived = jnp.isin(rec.kind, jnp.asarray(caps.derived_kinds, I64))
     belief = c.belief
     if incremental:
         folded = study.observer.analyze(

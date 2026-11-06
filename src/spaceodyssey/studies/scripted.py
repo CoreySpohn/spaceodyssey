@@ -13,7 +13,7 @@ from spaceodyssey.core import (
     record_none,
 )
 from spaceodyssey.core.declarations import Declaration
-from spaceodyssey.core.enums import F64, I64, PUBLIC, RecordStatus
+from spaceodyssey.core.enums import F64, I64, PUBLIC, Capacity, RecordStatus
 from spaceodyssey.studies import toy
 
 # The channel scripted records are written on by default: neither an admission channel
@@ -65,24 +65,49 @@ class ScriptedRecords(AbstractProcess):
 
     def handle(self, carry, ev, study):
         """Write the scripted record of this fire."""
-        base = record_none(study.caps)
+        caps = study.caps
+        base = record_none(caps)
         pick = lambda xs, dt: jnp.asarray(xs, dt)[ev.group]  # noqa: E731
+        index = pick(self.ids, I64)
+        # The scripted id is the semantic index. The internal id comes from the shared
+        # allocator: the first fire of an id takes the next one, a correction reuses
+        # the id of the record it corrects, so no producer shares an internal id.
+        log = carry.log
+        same = (
+            log.valid & (log.channel == self.channel) & (log.acquisition_index == index)
+        )
+        found = same.any()
+        room = carry.next_sid < caps.max_sid
+        internal = jnp.where(
+            found, log.acquisition_id[jnp.argmax(same)], carry.next_sid
+        )
+        take = ~found & room
+        full = ~found & ~room
+        carry = eqx.tree_at(
+            lambda c: (c.next_sid, c.overflow, c.overflow_mask),
+            carry,
+            (
+                carry.next_sid + take.astype(I64),
+                carry.overflow | full,
+                carry.overflow_mask | jnp.where(full, Capacity.STABLE_IDS, 0),
+            ),
+        )
         rec = dataclasses.replace(
             base,
             kind=jnp.asarray(toy.RECORD_MEASUREMENT, I64),
             channel=jnp.asarray(self.channel, I64),
-            acquisition_index=pick(self.ids, I64),
+            acquisition_index=index,
             start_tick=ev.tick,
             end_tick=ev.tick,
             available_tick=ev.tick,
             status=pick(self.statuses, I64),
-            acquisition_id=pick(self.ids, I64),
+            acquisition_id=internal,
             revision=pick(self.revisions, I64),
             released_tick=jnp.asarray(-1, I64),
             accepted_tick=jnp.asarray(-1, I64),
             superseded_by=jnp.asarray(-1, I64),
             payload=base.payload.at[0].set(pick(self.values, F64)),
-            valid=jnp.asarray(True),
+            valid=~full,
         )
         return carry, rec
 

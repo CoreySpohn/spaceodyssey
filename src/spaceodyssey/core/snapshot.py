@@ -9,7 +9,12 @@ import jax.numpy as jnp
 import numpy as np
 
 from spaceodyssey.core.enums import I64, Audience, B, RecordStatus, version_slot
-from spaceodyssey.core.records import LOG_INT_FIELDS, RecordLog, payload_columns
+from spaceodyssey.core.records import (
+    LOG_INT_FIELDS,
+    RecordLog,
+    derived_rows,
+    payload_columns,
+)
 
 
 class MeanBelief(eqx.Module):
@@ -181,11 +186,16 @@ def visible_rows(log, audience):
     )
 
 
-def _superseded_in_view(log, vis):
-    """Revision that replaced each row, counting only rows the audience can see."""
+def _superseded_in_view(log, vis, caps):
+    """Revision that replaced each row, counting only rows the audience can see.
+
+    A derived row neither replaces nor is replaced.
+    """
+    vis = vis & ~derived_rows(log, caps)
     same = (log.acquisition_id[:, None] == log.acquisition_id[None, :]) & vis[None, :]
     newer = same & (log.revision[None, :] > log.revision[:, None])
-    return jnp.max(jnp.where(newer, log.revision[None, :], -1), axis=1)
+    out = jnp.max(jnp.where(newer, log.revision[None, :], -1), axis=1)
+    return jnp.where(derived_rows(log, caps), -1, out)
 
 
 def snapshot_view(carry, audience, caps):
@@ -204,7 +214,7 @@ def snapshot_view(carry, audience, caps):
     for name in (*LOG_INT_FIELDS, "cost", "charged", "payload", "valid"):
         col = getattr(log, name)
         if name == "superseded_by":
-            col = _superseded_in_view(log, vis)
+            col = _superseded_in_view(log, vis, caps)
         if name == "payload":
             col = jnp.where(payload_columns(caps, log.kind, audience), col, 0.0)
         mask = vis if col.ndim == 1 else vis[:, None]
@@ -270,6 +280,9 @@ def snapshot_fingerprint(view, layout):
     count = layout.count(view.belief)
     leaves = [getattr(log, n) for n in LOG_INT_FIELDS] + [log.valid]
     leaves += [view.n_rows, count, view.tick, view.n_dec, view.release_version]
+    if log.product.shape[-1] > 0:
+        # the pedigree the view shows; a width-0 column leaves the digest as it was
+        leaves.append(log.product)
     # Tag field boundaries, then chain all words in one scan.
     words = []
     for i, leaf in enumerate(leaves):
