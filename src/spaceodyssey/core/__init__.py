@@ -63,7 +63,9 @@ from spaceodyssey.core.executors.base import run_status as run_status
 from spaceodyssey.core.executors.base import tree_equal_report as tree_equal_report
 from spaceodyssey.core.executors.compiled import CompiledExecutor as CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor as HostExecutor
+from spaceodyssey.core.executors.replay import Replayed as Replayed
 from spaceodyssey.core.executors.replay import replay_belief as replay_belief
+from spaceodyssey.core.executors.replay import replay_run as replay_run
 from spaceodyssey.core.handlers import HANDLERS as HANDLERS
 from spaceodyssey.core.handlers import h_cancel as h_cancel
 from spaceodyssey.core.handlers import h_done as h_done

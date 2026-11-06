@@ -104,7 +104,7 @@ class CompiledExecutor(AbstractExecutor):
                 study, truths, roots, n_steps, wake_fn, service, refit, chunk
             )
         carry, trace = _scan_worlds(self, study, truths, roots, wake_fn, n_steps)
-        return RunResult(carry, trace, study.observer.layout(study.caps))
+        return RunResult(carry, trace, study.observer.layout(study.caps), roots)
 
     def run_worlds(self, study, truths, roots, n_steps, **kw):
         """Run a batch of worlds; the same call as `run`."""
@@ -141,4 +141,4 @@ class CompiledExecutor(AbstractExecutor):
             if finished.all():
                 break
         trace = jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=1), *traces)
-        return RunResult(carries, trace, study.observer.layout(study.caps))
+        return RunResult(carries, trace, study.observer.layout(study.caps), roots)

@@ -536,11 +536,14 @@ class RunResult(eqx.Module):
     """Final carry and per-step trace; unpackable as a pair.
 
     `layout` is the observer's `BeliefLayout`, which `history` compares through.
+    `roots` holds the world root keys the run used (one per world of a batched run), so
+    that a replay can derive the same keys.
     """
 
     carry: Carry
     trace: Trace
     layout: BeliefLayout = eqx.field(static=True)
+    roots: jax.Array | None = None
 
     def __iter__(self):
         """Iterate over the carry and trace."""
