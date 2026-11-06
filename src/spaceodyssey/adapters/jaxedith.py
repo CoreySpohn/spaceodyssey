@@ -102,8 +102,9 @@ YIP_NAME = "eac1_aavc_2d"
 YIP_RELEASE = "data-v2"
 YIP_DIGEST = "md5:1f4892faff18e55cbec9781a055bea4d"
 
-# Detector cadence modes and the integer code a record column carries for each.
-CADENCE_CODES = {"photon_counting_legacy": 0, "fixed_frame": 1}
+# Detector cadence modes and the integer code a record column carries for each (the
+# profile table's `cadence` column).
+CADENCE_CODES = {"fixed_frame": 0, "photon_counting_legacy": 1}
 
 # The only meaning of dQE the summary path defines: the surviving fraction of the
 # baseline quantum efficiency (1.0 is no degradation).

@@ -217,7 +217,8 @@ def test_detector_spec_and_report_refuse_undeclared_choices(observatory):
     assert spec.cadence_code == CADENCE_CODES["photon_counting_legacy"]
     fixed = DetectorSpec.fixture(cadence="fixed_frame")
     if hasattr(jaxedith, "count_variance_components_ayo"):
-        assert toy_report(observatory, spec=fixed).detector_spec.cadence_code == 1
+        code = toy_report(observatory, spec=fixed).detector_spec.cadence_code
+        assert code == CADENCE_CODES["fixed_frame"]
     else:
         with pytest.raises(NotImplementedError, match="finite-frame"):
             toy_report(observatory, spec=fixed)
