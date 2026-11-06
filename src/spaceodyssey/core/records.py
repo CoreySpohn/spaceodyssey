@@ -6,7 +6,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from spaceodyssey.core.capacities import Capacities
+from spaceodyssey.core.capacities import PEDIGREE_HEAD, PEDIGREE_TRIPLE, Capacities
 from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience, B, Capacity
 
 
@@ -248,6 +248,20 @@ class RecordLog(eqx.Module):
     charged: jax.Array  # F64[L, R]
     payload: jax.Array  # F64[L, P]
     valid: jax.Array
+    # Pedigree of a product row, I64[L, product_width]: audience, refit status, row
+    # count and the revision set as (channel, acquisition index, revision) triples. It
+    # is not a `Record` field: only a refresh writes it; every other row holds zeros.
+    product: jax.Array
+
+
+def log_records(log, **replace):
+    """The rows of `log` as a `Record` batch (the pedigree is not a record field).
+
+    Keyword arguments replace the named columns.
+    """
+    # `RecordLog` lists the fields of `Record` in order, then `product` last
+    rows = Record(*jax.tree_util.tree_leaves(log)[:-1])
+    return dataclasses.replace(rows, **replace)
 
 
 def empty_log(caps):
@@ -260,6 +274,7 @@ def empty_log(caps):
         charged=jnp.zeros((caps.n_log, caps.n_resources), F64),
         payload=jnp.zeros((caps.n_log, caps.payload_width), F64),
         valid=jnp.zeros(caps.n_log, B),
+        product=jnp.zeros((caps.n_log, caps.product_width), I64),
     )
 
 
@@ -276,7 +291,7 @@ def write_log(carry, rec, caps):
         col = getattr(carry.log, name)
         cols[name] = col.at[s].set(jnp.where(ok, getattr(rec, name), col[s]))
     cols["valid"] = carry.log.valid.at[s].set(jnp.where(ok, True, carry.log.valid[s]))
-    log = RecordLog(**cols)
+    log = RecordLog(**cols, product=carry.log.product)
     out = eqx.tree_at(
         lambda c: (c.log, c.n_log, c.overflow, c.overflow_mask),
         carry,
@@ -290,50 +305,72 @@ def write_log(carry, rec, caps):
     return out, s
 
 
-def refit_rows(log, caps, audience, subject):
-    """The rows a refit of `subject` for `audience` reads, as `n_log` log rows.
+def revision_set(log, caps, audience, subject):
+    """`(counts, replaced)` over the log rows: the revision set of a subject.
 
-    Selection takes, for each acquisition of the subject, the latest revision the
-    audience has received (accepted by the observer, released to the policy) first;
-    that row counts only when its kind is in `caps.refit_kinds` and its status in
-    `caps.refit_statuses`, so a correction with an unlisted status retracts the
-    acquisition rather than leaving its earlier value. Counting rows come first in
-    canonical order (channel, acquisition index, revision) with `valid` true; every
-    other row follows with `valid` false. Rows are masked for the audience.
+    For each acquisition of the subject, the latest revision the audience has received
+    (accepted by the observer, released to the policy) replaces every earlier one: that
+    is the replacement rule, and `replaced` is, per row, the revision that replaced it
+    as this audience sees it (-1 if none). A revision this audience has not received (an
+    observer-only correction, for the policy) replaces nothing. `counts` marks the rows
+    of the set: the current revision of each acquisition, when its kind is in
+    `caps.refit_kinds` and its status in `caps.refit_statuses`, so a correction with an
+    unlisted status retracts the acquisition rather than leaving its earlier value.
+    A derived kind is never in `refit_kinds`, so a product is never in a set.
     """
     seen = log.accepted_tick if audience == Audience.OBSERVER else log.released_tick
     mine = log.valid & (seen >= 0) & (log.subject == subject)
     same = (log.acquisition_id[:, None] == log.acquisition_id[None, :]) & mine[None, :]
     later = same & (log.revision[None, :] > log.revision[:, None])
     newer = later.any(axis=1)
-    # supersession as this audience sees it: a revision it has not received (an
-    # observer-only correction, for the policy) must not mark an earlier row
     replaced = jnp.max(jnp.where(later, log.revision[None, :], -1), axis=1)
     kinds = jnp.asarray(caps.refit_kinds, I64)
     statuses = jnp.asarray(caps.refit_statuses, I64)
     counts = mine & ~newer & jnp.isin(log.kind, kinds) & jnp.isin(log.status, statuses)
+    return counts, replaced
+
+
+def refit_rows(log, caps, audience, subject):
+    """The rows a refit of `subject` for `audience` reads, as `n_log` log rows.
+
+    The rows of the revision set (`revision_set`) come first in canonical order
+    (channel, acquisition index, revision) with `valid` true; every other row follows
+    with `valid` false. Rows are masked for the audience.
+    """
+    counts, replaced = revision_set(log, caps, audience, subject)
     last = (~counts).astype(I64)
     order = jnp.lexsort((log.revision, log.acquisition_index, log.channel, last))
-    # `RecordLog` holds the columns of `Record` in the same order, so the sorted
-    # log's leaves are a batch of records
-    picked = jax.tree_util.tree_map(
-        lambda x: x[order],
-        dataclasses.replace(log, valid=counts, superseded_by=replaced),
-    )
-    leaves = jax.tree_util.tree_leaves(picked)
-    rows = jax.tree_util.tree_unflatten(
-        jax.tree_util.tree_structure(record_none(caps)), leaves
+    rows = log_records(
+        jax.tree_util.tree_map(lambda x: x[order], log),
+        valid=counts[order],
+        superseded_by=replaced[order],
     )
     return masked_record(rows, caps, audience)
+
+
+def pedigree_of(log, slot):
+    """`(audience, status, triples)` of the product row at `slot`, read from the log.
+
+    `triples` is the revision set as `(channel, acquisition index, revision)` tuples in
+    canonical order. Meaningful only for a row a refresh wrote.
+    """
+    row = [int(x) for x in jnp.asarray(log.product)[slot]]
+    audience, status, n = row[:PEDIGREE_HEAD]
+    flat = row[PEDIGREE_HEAD : PEDIGREE_HEAD + PEDIGREE_TRIPLE * n]
+    triples = tuple(
+        tuple(flat[i : i + PEDIGREE_TRIPLE])
+        for i in range(0, len(flat), PEDIGREE_TRIPLE)
+    )
+    return audience, status, triples
 
 
 RECORD_INT_FIELDS = tuple(
     f.name
     for f in dataclasses.fields(Record)
-    if f.name not in ("cost", "charged", "payload", "valid")
+    if f.name not in ("cost", "charged", "payload", "valid", "product")
 )
 LOG_INT_FIELDS = tuple(
     f.name
     for f in dataclasses.fields(RecordLog)
-    if f.name not in ("cost", "charged", "payload", "valid")
+    if f.name not in ("cost", "charged", "payload", "valid", "product")
 )

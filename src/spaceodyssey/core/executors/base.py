@@ -93,6 +93,7 @@ CANONICAL_FIELDS = {
         "charged",
         "payload",
         "valid",
+        "product",
     ),
     "carry.ledger": (
         "balance",
@@ -195,7 +196,11 @@ LAYOUT_FIELDS = ("carry.belief", "carry.pbelief")
 # when the capacities do not carry it (their leaf has zero size), so no history of a
 # study without refresh moves.
 REFRESH_GROUPS = ("carry.refresh",)
-REFRESH_FIELDS = ("carry.refresh_dirty", "carry.refresh_status")
+REFRESH_FIELDS = (
+    "carry.refresh_dirty",
+    "carry.refresh_status",
+    "carry.log.product",
+)
 
 # Whole-field exclusions: dotted output path -> reason. Empty on purpose; invalid
 # queue/log rows and unhandled trace rows are masked in `canonical_history`, not

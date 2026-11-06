@@ -116,6 +116,12 @@ class CountingObserver(AbstractObserver):
         """The inner observer's capabilities."""
         return self.inner.capabilities()
 
+    @property
+    def subject_leaves(self):
+        """The inner observer's subject leaves, as paths inside the counted belief."""
+        names = self.inner.subject_leaves
+        return None if names is None else tuple(f"{RESERVED[0]}.{n}" for n in names)
+
     def fold(self, belief, rec, caps, key=None):
         """Count this acquisition whenever the caller commits the folded state."""
         value = self.inner.fold(plain(belief), rec, caps, key=key)

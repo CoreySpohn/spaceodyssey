@@ -19,6 +19,7 @@ from spaceodyssey.core.battery.result import make_result
 from spaceodyssey.core.conformance.corpus import public_events
 from spaceodyssey.core.conformance.observer_kit import double_fold_failures
 from spaceodyssey.core.enums import (
+    INSTALLING_STATUSES,
     AdmissionCode,
     Audience,
     Capacity,
@@ -26,6 +27,7 @@ from spaceodyssey.core.enums import (
     EventKind,
     RecordStatus,
 )
+from spaceodyssey.core.records import pedigree_of
 from spaceodyssey.core.snapshot import snapshot_view
 
 ATOL = 1e-9
@@ -90,11 +92,18 @@ def _fold_key(log, i):
     )
 
 
-def _expected_folds(log, rows, ticks):
-    """One key per acquisition id with a row whose `ticks` entry is set."""
+def _expected_folds(log, rows, ticks, derived=(), incremental=True):
+    """One key per acquisition id with a row whose `ticks` entry is set.
+
+    A derived row (a product or a declared summary) is never expected to be folded, so
+    a derived acquisition id has no key; an observer that is not incremental changes
+    only at checkpoints and folds nothing.
+    """
     first = {}
+    if not incremental:
+        return Counter()
     for i in rows:
-        if int(ticks[i]) >= 0:
+        if int(ticks[i]) >= 0 and int(log.kind[i]) not in derived:
             first.setdefault(int(log.acquisition_id[i]), _fold_key(log, i))
     return Counter(first.values())
 
@@ -118,7 +127,13 @@ def one_fold_per_acquisition(run):
         got = Counter(
             {int(k): int(n) for k, n in zip(ids, counts, strict=True) if n > 0}
         )
-        want = _expected_folds(log, rows, ticks)
+        want = _expected_folds(
+            log,
+            rows,
+            ticks,
+            run.study.caps.derived_kinds,
+            run.study.observer.capabilities().incremental,
+        )
         for key in sorted(got):
             if got[key] > 1:
                 failures.append(
@@ -134,10 +149,13 @@ def one_fold_per_acquisition(run):
             )
     failures += double_fold_failures(c)
     done = RecordStatus.COMPLETED
+    derived = run.study.caps.derived_kinds
     seen = {
         int(log.acquisition_id[i])
         for i in rows
-        if int(log.accepted_tick[i]) >= 0 and int(log.status[i]) == done
+        if int(log.accepted_tick[i]) >= 0
+        and int(log.status[i]) == done
+        and int(log.kind[i]) not in derived
     }
     layout = run.study.observer.layout(run.study.caps)
     folds = int(np.asarray(layout.count(c.belief)).sum())
@@ -146,7 +164,9 @@ def one_fold_per_acquisition(run):
     released = {
         int(log.acquisition_id[i])
         for i in rows
-        if int(log.released_tick[i]) >= 0 and int(log.status[i]) == done
+        if int(log.released_tick[i]) >= 0
+        and int(log.status[i]) == done
+        and int(log.kind[i]) not in derived
     }
     pfolds = int(np.asarray(layout.count(c.pbelief)).sum())
     if pfolds > len(released):
@@ -293,9 +313,14 @@ def _admission_evidence(run):
         note(int(ev.sid[i]), int(ev.subject[i]), int(ev.acquisition_index[i]), "queue")
     log = c.log
     kinds = set(np.asarray(study.channels.kind).tolist())
+    admission = set(np.asarray(study.channels.id).tolist())
     cut = (RecordStatus.PARTIAL, RecordStatus.FAILED)
     for i in _valid_rows(run):
         acq = int(log.acquisition_id[i])
+        # a row on a channel outside the admission table was written by a process, a
+        # service or a refresh: it names no admission
+        if int(log.channel[i]) not in admission:
+            continue
         if int(log.kind[i]) in kinds and (acq in named or int(log.status[i]) in cut):
             note(acq, int(log.subject[i]), int(log.acquisition_index[i]), "log")
     return named, failures
@@ -416,6 +441,169 @@ def no_scorer_column_in_snapshot(run):
     return make_result("no_scorer_column_in_snapshot", failures, n_views=len(run.views))
 
 
+def _product_slots(run):
+    """Valid log rows of the refresh product kind (none without the protocol)."""
+    study = run.study
+    if study.caps.rows_per_subject <= 0:
+        return []
+    log = run.carry.log
+    return [i for i in _valid_rows(run) if int(log.kind[i]) == int(study.refresh.kind)]
+
+
+def _received_sets(run):
+    """Per checkpoint completion: the product slots and what each audience had received.
+
+    Walks the handled steps of the trace in order, from the log and the trace alone: a
+    handled `RELEASE` or `RESULT` step delivers its row to the observer and the policy
+    as the event's audience and the row's audience allow, and a `REFRESH` step that
+    wrote rows is a completion whose product rows are the last `n_written` slots it
+    names. Yields `(step, hold_step, slots, received)`, `received` being one list of
+    slots per audience (observer, policy) at that moment.
+    """
+    t = run.trace
+    log = run.carry.log
+    kind, ev_aud = np.asarray(t.kind), np.asarray(t.audience)
+    slot, wrote = np.asarray(t.log_slot), np.asarray(t.n_written)
+    row_aud, status = np.asarray(log.audience), np.asarray(log.status)
+    received, hold, out = ([], []), None, []
+    for step in np.flatnonzero(np.asarray(t.handled)):
+        k = int(kind[step])
+        if k in (EventKind.RELEASE, EventKind.RESULT):
+            j = int(slot[step])
+            if int(status[j]) == RecordStatus.UNRELEASED:
+                continue
+            reach = int(ev_aud[step]) & int(row_aud[j])
+            for a, flag in enumerate((Audience.OBSERVER, Audience.POLICY)):
+                if reach & int(flag) and j not in received[a]:
+                    received[a].append(j)
+        elif k == EventKind.REFRESH and int(wrote[step]) == 0:
+            hold = int(step)
+        elif k == EventKind.REFRESH:
+            last = int(slot[step])
+            slots = list(range(last - int(wrote[step]) + 1, last + 1))
+            out.append((int(step), hold, slots, ([*received[0]], [*received[1]])))
+    return out
+
+
+def _expected_revision_set(run, slots, subject):
+    """The triples of the revision set of `subject` among the received log `slots`."""
+    log = run.carry.log
+    caps = run.study.caps
+    current = {}
+    for j in slots:
+        if int(log.subject[j]) != subject:
+            continue
+        key = int(log.acquisition_id[j])
+        if key not in current or int(log.revision[j]) > int(log.revision[current[key]]):
+            current[key] = j
+    return sorted(
+        (
+            int(log.channel[j]),
+            int(log.acquisition_index[j]),
+            int(log.revision[j]),
+        )
+        for j in current.values()
+        if int(log.kind[j]) in caps.refit_kinds
+        and int(log.status[j]) in caps.refit_statuses
+    )
+
+
+def refit_inputs_equal_revision_set(run):
+    """Each product row's pedigree is the revision set its audience had at that time.
+
+    The pedigree is read from the product column. The expected set is rebuilt from the
+    trace order and the log alone: the current revision of each acquisition among the
+    refit-kind rows the audience had received before the checkpoint completed, dropped
+    when its status is not a refit status. A study without the refresh protocol passes
+    with no rows checked.
+    """
+    failures, checked = [], 0
+    log = run.carry.log
+    for step, _, slots, received in _received_sets(run):
+        for p in slots:
+            a = 0 if int(log.audience[p]) == Audience.OBSERVER else 1
+            want = _expected_revision_set(run, received[a], int(log.subject[p]))
+            got = pedigree_of(log, p)[2]
+            checked += 1
+            if list(got) != want:
+                failures.append(
+                    f"product row {p} (step {step}, audience {a}, subject "
+                    f"{int(log.subject[p])}) names {list(got)} but the audience had "
+                    f"received {want}"
+                )
+                break
+    if not _product_slots(run):
+        return make_result("refit_inputs_equal_revision_set", [], n_checked=0)
+    if not checked:
+        failures.append("product rows exist but no checkpoint step wrote them")
+    return make_result("refit_inputs_equal_revision_set", failures, n_checked=checked)
+
+
+def installs_match_product_rows(run):
+    """Each install has one product row that says what was installed, and nothing else.
+
+    Per product row: its channel is its audience's product channel, its pedigree names
+    the same audience, status and row count as the row's payload, it sits at its
+    checkpoint's grid ordinal, and no audience, subject and ordinal repeat. The last
+    row of each audience and subject carries the status the carry recorded. An observer
+    entry whose status does not install leaves the trace's belief projection of that
+    subject as it was when the checkpoint held the world.
+    """
+    study, c = run.study, run.carry
+    log, failures = c.log, []
+    slots = _product_slots(run)
+    if not slots:
+        return make_result("installs_match_product_rows", [], n_products=0)
+    sched = study.refresh
+    channels = (int(sched.observer_channel), int(sched.policy_channel))
+    flags = (int(Audience.OBSERVER), int(Audience.POLICY))
+    last, seen = {}, set()
+    for p in slots:
+        flag = int(log.audience[p])
+        a = flags.index(flag) if flag in flags else -1
+        subject, ordinal = int(log.subject[p]), int(log.acquisition_index[p])
+        who = f"product row {p} (audience {a}, subject {subject})"
+        pedigree = pedigree_of(log, p)
+        status, n_rows = int(log.payload[p, 0]), int(log.payload[p, 1])
+        if a < 0 or int(log.channel[p]) != channels[a]:
+            failures.append(f"{who} is on channel {int(log.channel[p])}")
+        if pedigree[0] != flag or pedigree[1] != status:
+            failures.append(
+                f"{who}: the pedigree says {pedigree[:2]}, not {(flag, status)}"
+            )
+        if len(pedigree[2]) != n_rows:
+            failures.append(
+                f"{who} counts {n_rows} rows but its pedigree names {len(pedigree[2])}"
+            )
+        if (a, subject, ordinal) in seen:
+            failures.append(f"{who} repeats ordinal {ordinal}")
+        seen.add((a, subject, ordinal))
+        if (a, subject) not in last or ordinal >= last[a, subject][0]:
+            last[a, subject] = (ordinal, status)
+    recorded = np.asarray(c.refresh_status)
+    for (a, subject), (_, status) in sorted(last.items()):
+        if int(recorded[a, subject]) != status:
+            failures.append(
+                f"audience {a} subject {subject}: the last product row says status "
+                f"{status}, the carry {int(recorded[a, subject])}"
+            )
+    t = run.trace
+    mean = np.asarray(t.belief_mean)
+    for step, hold, slots_at, _ in _received_sets(run):
+        for p in slots_at:
+            subject = int(log.subject[p])
+            installs = int(log.payload[p, 0]) in {int(x) for x in INSTALLING_STATUSES}
+            if int(log.audience[p]) == Audience.OBSERVER and not installs:
+                if hold is None or not np.array_equal(
+                    mean[step, subject], mean[hold, subject]
+                ):
+                    failures.append(
+                        f"observer subject {subject}: status {int(log.payload[p, 0])} "
+                        "does not install but the belief moved"
+                    )
+    return make_result("installs_match_product_rows", failures, n_products=len(slots))
+
+
 def no_extra_wakes_under_private_events(run):
     """Private events add no wake and no decision, and move no other row."""
     if run.probe is None:
@@ -446,6 +634,8 @@ INVARIANTS = (
     release_not_before_available,
     no_scorer_column_in_snapshot,
     no_extra_wakes_under_private_events,
+    refit_inputs_equal_revision_set,
+    installs_match_product_rows,
 )
 
 

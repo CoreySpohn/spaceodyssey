@@ -24,9 +24,10 @@ from spaceodyssey.core.enums import (
     Stage,
     effect_mask,
 )
+from spaceodyssey.core.refresh import MaskedBatchRefit
 from spaceodyssey.studies import catalog, oracle
 from spaceodyssey.studies import toy as kinds
-from spaceodyssey.studies.scripted import scripted_study
+from spaceodyssey.studies.scripted import ScriptedRecords, scripted_study
 from spaceodyssey.studies.toy import RECORD_AUXILIARY
 
 S, R, A = Stage.SETTLE, Stage.RELEASE, Stage.ADMIT
@@ -394,7 +395,7 @@ HAND_ROWS = {
         (0, 0, 0, 1, 0),
         (0, 0, 0, 0, 1),
         (0, 0, 0, 0, 0),
-        (0, 0, 0, 0, 1),
+        (0, 0, 1, 0, 1),
         (0, 1, 0, 1, 0),
         (0, 1, 0, 0, 1),
         (0, 0, 1, 1, 0),
@@ -408,9 +409,9 @@ HAND_ROWS = {
     "revision": (
         (0, 0, 0, 0, 1),
         (0, 0, 0, 1, 0),
-        (0, 0, 0, 0, 1),
+        (0, 0, 7001, 0, 1),
         (0, 0, 0, 1, 0),
-        (0, 0, 0, 0, 1),
+        (0, 0, 7001, 0, 1),
     ),
 }
 
@@ -785,6 +786,28 @@ def _revision_study():
     )
 
 
+def _refresh_study():
+    """The toy plan on a checkpoint grid, with a scripted correction beside it.
+
+    The observer changes only at checkpoints (every 130 ticks). A scripted acquisition
+    (channel 50) lands at 150 and is corrected at 300, so the checkpoint at 260 reads
+    the first revision and the one at 390 its correction, beside the admitted rows.
+    """
+    process = ScriptedRecords(
+        ticks=(150, 300),
+        values=(5.0, 8.0),
+        ids=(7001, 7001),
+        revisions=(0, 1),
+        statuses=(int(RecordStatus.COMPLETED),) * 2,
+    )
+    return kinds.survey_refresh(130, process=process)
+
+
+def _refresh_boundary():
+    # the observer's own refit as a masked kernel: it runs through the counting wrapper
+    return MaskedBatchRefit()
+
+
 def _delayed_release_study():
     """Handle a transaction state update.
 
@@ -805,10 +828,25 @@ def _aux_changes_only_at_release(h):
 
 
 def _case(
-    name, make, hand=None, inv=(), forms=("array", "python"), n_seeds=64, service=None
+    name,
+    make,
+    hand=None,
+    inv=(),
+    forms=("array", "python"),
+    n_seeds=64,
+    service=None,
+    refit=None,
 ):
     return CorpusCase(
-        name, make, n_seeds, hand, tuple(inv), forms, HAND_ROWS.get(name), service
+        name,
+        make,
+        n_seeds,
+        hand,
+        tuple(inv),
+        forms,
+        HAND_ROWS.get(name),
+        service,
+        refit,
     )
 
 
@@ -924,6 +962,13 @@ def build_corpus():
             _revision_study,
             HAND_HISTORIES["revision"],
             HAND_INVARIANTS["revision"],
+        ),
+        _case(
+            "refresh",
+            _refresh_study,
+            None,
+            (),
+            refit=_refresh_boundary,
         ),
     ]
     return cases

@@ -68,6 +68,8 @@ EXPECTED_INVARIANTS = (
     "release_not_before_available",
     "no_scorer_column_in_snapshot",
     "no_extra_wakes_under_private_events",
+    "refit_inputs_equal_revision_set",
+    "installs_match_product_rows",
 )
 
 

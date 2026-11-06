@@ -209,6 +209,8 @@ def snapshot_view(carry, audience, caps):
             col = jnp.where(payload_columns(caps, log.kind, audience), col, 0.0)
         mask = vis if col.ndim == 1 else vis[:, None]
         cols[name] = jnp.where(mask, col, jnp.zeros_like(col))[order]
+    # a pedigree is shown only on the visible product rows that carry one
+    cols["product"] = jnp.where(vis[:, None], log.product, 0)[order]
     # Settlement ids shift when private events are queued; hide them from policies.
     cols["acquisition_id"] = jnp.zeros_like(cols["acquisition_id"])
     return Snapshot(

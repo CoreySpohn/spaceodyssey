@@ -62,7 +62,7 @@ from spaceodyssey.core.enums import I64, Audience, EventKind, RecordStatus, Stag
 from spaceodyssey.core.events import empty_event_row, where_tree
 from spaceodyssey.core.executors.base import GO_TOLERANCE, index_world
 from spaceodyssey.core.keys import fold_keys
-from spaceodyssey.core.records import masked_record, record_none, refit_rows
+from spaceodyssey.core.records import log_records, masked_record, refit_rows
 from spaceodyssey.core.snapshot import named_leaves
 
 # confidence level of every equivalence statement
@@ -375,11 +375,7 @@ def _orders(carry, trace, audience):
 
 def _log_rows(log, order, valid, caps):
     """Log rows `order` as a `Record` batch with `valid` replaced."""
-    # `RecordLog` holds the columns of `Record` in the same order (see `refit_rows`)
-    leaves = jax.tree_util.tree_leaves(jax.tree_util.tree_map(lambda x: x[order], log))
-    rows = jax.tree_util.tree_unflatten(
-        jax.tree_util.tree_structure(record_none(caps)), leaves
-    )
+    rows = log_records(jax.tree_util.tree_map(lambda x: x[order], log))
     return dataclasses.replace(rows, valid=valid)
 
 

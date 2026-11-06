@@ -12,8 +12,14 @@ from spaceodyssey.core import (
     enqueue,
     record_none,
 )
+from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, I64, PUBLIC, RecordStatus
 from spaceodyssey.studies import toy
+
+# The channel scripted records are written on by default: neither an admission channel
+# of the toy studies (10 to 13), a refresh product channel (90, 91) nor a service
+# channel.
+SCRIPTED_CHANNEL = 50
 
 
 class ScriptedRecords(AbstractProcess):
@@ -22,6 +28,12 @@ class ScriptedRecords(AbstractProcess):
     Fire i happens at `ticks[i]`, in the release stage, and logs a record of subject 0
     with the i-th status, acquisition id, revision and value. The record is released at
     its own tick to the process audience.
+
+    A scripted record is identified by the process's own coordinates, not by the
+    admission counters: its channel is the declared `channel` (never an admission
+    channel) and its acquisition index is its scripted acquisition id, kept across the
+    revisions of that acquisition. Repeated fires therefore never share the identity
+    `(channel, subject, acquisition index, revision)`.
     """
 
     ticks: tuple[int, ...] = eqx.field(static=True)
@@ -30,6 +42,11 @@ class ScriptedRecords(AbstractProcess):
     revisions: tuple[int, ...] = eqx.field(static=True)
     statuses: tuple[int, ...] = eqx.field(static=True)
     audience: int = eqx.field(default=PUBLIC)
+    channel: int = eqx.field(default=SCRIPTED_CHANNEL, static=True)
+
+    def declare(self):
+        """The record channel this process writes on, for pre-flight."""
+        return Declaration(channels=(self.channel,))
 
     def seed(self, carry, caps):
         """Queue one process event per scripted record."""
@@ -53,6 +70,8 @@ class ScriptedRecords(AbstractProcess):
         rec = dataclasses.replace(
             base,
             kind=jnp.asarray(toy.RECORD_MEASUREMENT, I64),
+            channel=jnp.asarray(self.channel, I64),
+            acquisition_index=pick(self.ids, I64),
             start_tick=ev.tick,
             end_tick=ev.tick,
             available_tick=ev.tick,
@@ -82,4 +101,30 @@ def scripted_study(ticks, values, ids, revisions=None, statuses=None, **kw):
     return toy.survey_1(policies=(toy.NullPolicy(),), process=process)
 
 
-__all__ = ["ScriptedRecords", "scripted_study"]
+def scripted_refresh_study(
+    ticks, values, ids, revisions=None, statuses=None, *, every=100, **kw
+):
+    """A scripted study on a refresh grid: a refit-only observer, a silent policy.
+
+    `kw` goes to `toy.survey_refresh` (an `observer`, capacities, a `refresh`); the
+    process is the scripted one.
+    """
+    n = len(ticks)
+    process = ScriptedRecords(
+        ticks=tuple(ticks),
+        values=tuple(values),
+        ids=tuple(ids),
+        revisions=tuple(revisions or (0,) * n),
+        statuses=tuple(statuses or (int(RecordStatus.COMPLETED),) * n),
+    )
+    return toy.survey_refresh(
+        every, policies=(toy.NullPolicy(),), process=process, **kw
+    )
+
+
+__all__ = [
+    "SCRIPTED_CHANNEL",
+    "ScriptedRecords",
+    "scripted_refresh_study",
+    "scripted_study",
+]
