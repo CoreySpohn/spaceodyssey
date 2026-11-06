@@ -2,6 +2,7 @@
 
 import dataclasses
 import functools
+import types
 
 import equinox as eqx
 import jax
@@ -9,20 +10,23 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import spaceodyssey.core.snapshot as snapshot
 from spaceodyssey.core import (
     Audience,
     HostExecutor,
     canonical_history,
     index_world,
+    init_carry,
     snapshot_fingerprint,
     snapshot_view,
 )
-from spaceodyssey.studies import catalog
+from spaceodyssey.studies import catalog, toy
 from tests.core.corpus import frozen
 from tests.core.helpers import (
     N_STEPS_CORPUS,
     baseline_host_run,
     hand_run,
+    one_world,
     worlds,
 )
 
@@ -133,3 +137,29 @@ def test_release_versions_count_the_releases_each_audience_can_read():
     kinds = np.asarray(trace.kind)[np.asarray(trace.handled)]
     assert np.all(steps[kinds != 2] == 0)
     assert np.array_equal(steps.sum(axis=0), np.asarray(carry.release_version))
+
+
+def test_an_empty_leaf_moves_the_fingerprint(monkeypatch):
+    """A listed leaf of size zero still changes the digest: its tag and count enter.
+
+    This is why a leaf whose capacity is zero must be left out of the list, as the
+    zero-width `product` column is, rather than hashed empty.
+    """
+    study = toy.survey_1()
+    truth, _ = one_world()
+    carry = eqx.filter_jit(init_carry)(study, truth)
+    view = snapshot_view(carry, Audience.POLICY, study.caps)
+    layout = study.observer.layout(study.caps)
+    names = (*snapshot.LOG_INT_FIELDS, "valid", "product")
+    log = types.SimpleNamespace(**{n: getattr(view.log, n) for n in names})
+    shim = types.SimpleNamespace(
+        log=log,
+        **{n: getattr(view, n) for n in ("belief", "n_rows", "tick", "n_dec")},
+        release_version=view.release_version,
+    )
+    base = int(snapshot_fingerprint(view, layout))
+    assert int(snapshot_fingerprint(shim, layout)) == base
+    assert view.log.product.shape[-1] == 0  # the conditional leaf, left out
+    log.extra = jnp.zeros(0, jnp.int64)
+    monkeypatch.setattr(snapshot, "LOG_INT_FIELDS", (*snapshot.LOG_INT_FIELDS, "extra"))
+    assert int(snapshot_fingerprint(shim, layout)) != base
