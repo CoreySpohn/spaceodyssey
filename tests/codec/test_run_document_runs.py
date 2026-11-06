@@ -1,8 +1,20 @@
-"""B3: a reloaded run reproduces the original run's history on both executors."""
+"""B3: a reloaded run reproduces the original run's history on both executors.
 
+`hash_pin.json` freezes the content hash of every corpus study's run document, and
+the schema version, as they stood at a recorded commit. Nothing regenerates it: a
+pinned hash that differs fails. It is written once, by running this file with
+`SPACEODYSSEY_CAPTURE_PIN=<full commit sha>` while no pin file exists.
+"""
+
+import json
+import os
+import re
+from pathlib import Path
+
+import equinox as eqx
 import pytest
 
-from spaceodyssey.codec import Bindings, dump_run, load_run
+from spaceodyssey.codec import SCHEMA_VERSION, Bindings, dump_run, load_run
 from spaceodyssey.core import CompiledExecutor, HostExecutor
 from spaceodyssey.core.conformance.corpus import make_worlds
 from spaceodyssey.core.executors.base import histories_equal
@@ -23,6 +35,9 @@ from tests.core.refresh_helpers import CorruptInstall
 N_WORLDS = 2
 N_STEPS = 60
 N_CASE_STEPS = 40
+HASH_PIN = Path(__file__).with_name("hash_pin.json")
+CAPTURE = os.environ.get("SPACEODYSSEY_CAPTURE_PIN", "")
+EXECUTORS = ("host", "compiled")
 
 
 def _original(executor, refit):
@@ -113,23 +128,75 @@ def _service_binding():
     return Bindings((run_cases._service_kind(),))
 
 
-@pytest.mark.parametrize("executor", ["host", "compiled"])
-@pytest.mark.parametrize("case", CORPUS, ids=lambda c: c.name)
-def test_every_corpus_run_reloads_to_the_same_hash_and_history(case, executor):
-    study = case.make_study()
-    registry = _registry_of(study.caps)
+def _corpus_document(case, executor, study=None):
+    """The run document of one corpus case on one executor."""
+    study = case.make_study() if study is None else study
     refit = None if case.make_refit is None else case.make_refit()
     service = None if case.make_service is None else case.make_service()
-    table = bindings()
-    doc = dump_run(
+    return dump_run(
         study,
-        registry,
+        _registry_of(study.caps),
         executor=executor,
-        bindings=table,
+        bindings=bindings(),
         service=service,
         refit=refit,
         kinds=TOY_KINDS,
     )
+
+
+def _capture(commit):
+    """Write the hash pin from the current documents; never replaces a pin."""
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("SPACEODYSSEY_CAPTURE_PIN names a full commit sha")
+    if HASH_PIN.exists():
+        raise FileExistsError(f"{HASH_PIN.name} exists; a pin is never rewritten")
+    documents = {
+        f"{case.name}/{executor}": _corpus_document(case, executor).content_hash
+        for case in CORPUS
+        for executor in EXECUTORS
+    }
+    pin = {
+        "source_commit": commit,
+        "schema_version": SCHEMA_VERSION,
+        "documents": documents,
+    }
+    HASH_PIN.write_text(json.dumps(pin, indent=1, sort_keys=True) + "\n")
+
+
+def _hash_pin():
+    if CAPTURE and not HASH_PIN.exists():
+        _capture(CAPTURE)
+    return json.loads(HASH_PIN.read_text())
+
+
+def test_the_hash_pin_names_its_commit_and_covers_every_corpus_document():
+    """Fails if the pin lost its commit or a document, or the schema version moved."""
+    pin = _hash_pin()
+    assert re.fullmatch(r"[0-9a-f]{40}", pin["source_commit"])
+    assert pin["schema_version"] == SCHEMA_VERSION
+    assert set(pin["documents"]) == {
+        f"{case.name}/{executor}" for case in CORPUS for executor in EXECUTORS
+    }
+
+
+def test_a_changed_study_misses_its_pinned_hash():
+    """Control: one changed declaration value must move the document hash."""
+    case = CORPUS[0]
+    study = case.make_study()
+    changed = eqx.tree_at(lambda s: s.horizon_tick, study, study.horizon_tick + 1)
+    pinned = _hash_pin()["documents"][f"{case.name}/host"]
+    assert _corpus_document(case, "host").content_hash == pinned
+    assert _corpus_document(case, "host", changed).content_hash != pinned
+
+
+@pytest.mark.parametrize("executor", EXECUTORS)
+@pytest.mark.parametrize("case", CORPUS, ids=lambda c: c.name)
+def test_every_corpus_run_reloads_to_the_same_hash_and_history(case, executor):
+    study = case.make_study()
+    refit = None if case.make_refit is None else case.make_refit()
+    table = bindings()
+    doc = _corpus_document(case, executor, study)
+    assert doc.content_hash == _hash_pin()["documents"][f"{case.name}/{executor}"]
     run = load_run(doc.to_json(), table, TOY_KINDS)
     again = dump_run(
         run.study,
