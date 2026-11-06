@@ -11,15 +11,16 @@ component separate. It answers two questions with one function:
 
 Both integrate over the science interval with Gauss-Legendre nodes in time. At each
 node the planet position and contrast come from photomancy's forward model and the
-count rates from jaxedith's primitives and intermediates, with the coronagraph
-response from optixstuff's `YippyCoronagraph`. Planet counts are linear in contrast
-only at fixed geometry: the core throughput, the stellar leakage and the exozodi
-rate all depend on the separation, so the rates are evaluated at every node of every
-proposal. What is cached is what does not depend on the geometry: the flux zero
-point, the stellar flux ratio, the collecting area, the optical throughput, the band,
-the detector, the exozodi surface brightness at 1 AU, and the stellar leakage curve
-at the host's diameter (tabulated once on the response's own radial nodes, since
-evaluating it at a finite diameter re-averages a whole stellar map).
+count rates from jaxedith's intermediates (which apply the detector the way jaxedith
+does), with the coronagraph response from optixstuff's `YippyCoronagraph`. Planet
+counts are linear in contrast only at fixed geometry: the core throughput, the
+stellar leakage and the exozodi rate all depend on the separation, so the rates are
+evaluated at every node of every proposal. What is cached is what does not depend
+on the geometry: the flux zero point, the stellar flux ratio, the band, the exozodi
+surface brightness at 1 AU, and the stellar leakage curve at the host's diameter
+(tabulated once on the response's own radial nodes, since evaluating it at a finite
+diameter re-averages a whole stellar map). The table is served to jaxedith through a
+coronagraph that delegates every other curve to the response.
 
 Declared conventions:
 
@@ -36,17 +37,21 @@ Declared conventions:
   value of `zodi_fn_ayo` (one zodi seen face-on at equivalent insolation).
 - Thermal emission is evaluated with the declared `eps_warm_T_cold` (0 switches it
   off whatever the temperature).
-- Detector quantum efficiency enters only where jaxedith applies it. A jaxedith that
-  does not multiply photon rates by the detector QE gives photon counts through the
-  optics; the adapter does not apply QE itself, so it is never applied twice.
+- Detector quantum efficiency and dQE enter only where jaxedith's intermediates apply
+  them. A jaxedith whose intermediates do not multiply photon rates by the detector QE
+  gives photon counts through the optics; the adapter does not apply QE itself, so it
+  is never applied twice.
 - The background variance multiplier `bg_multiplier` is declared (1 for one roll with
   a known mean subtracted). The systematic floor is `leakage / ppfact` and is off
   for an infinite `ppfact`. The exozodi floor is off.
-- Cadence: only `photon_counting_legacy` runs, jaxedith's rate-based detector term
-  whose clock-induced charge follows its photon-counting time. A detector declared
-  with the `fixed_frame` cadence is refused until jaxedith provides a finite-frame
-  variance. In the legacy cadence the background multiplier also scales the detector
-  term, as jaxedith's exposure-time equation does.
+- Cadence: `photon_counting_legacy` is jaxedith's rate-based detector term whose
+  clock-induced charge follows its photon-counting time; there the background
+  multiplier also scales the detector term, as jaxedith's exposure-time equation does.
+  `fixed_frame` takes the detector variance of the whole interval from jaxedith's
+  finite-frame variance (dark current per second, read noise and clock-induced charge
+  per frame including a partial last frame, no background multiplier), with the
+  aperture pixel count averaged over the nodes. A jaxedith without that API refuses
+  the `fixed_frame` cadence.
 
 The variance of the measured counts is
 ``planet + bg_multiplier * background + detector + systematic`` with
@@ -62,18 +67,24 @@ import equinox as eqx
 import interpax
 import jax
 import jax.numpy as jnp
+import jaxedith
 import numpy as np
 from hwoutils.constants import nm2m, rad2arcsec, s2d
 from hwoutils.conversions import jy_to_photons_per_nm_per_m2, mag_to_flux_jy
-from jaxedith import detector_noise, thermal_background, zodi_fn_ayo, zodi_fn_leinert
-from jaxedith.primitives import (
-    exozodi_rate,
-    noise_floor_stellar,
-    planet_rate,
-    stellar_leakage_rate,
-    zodi_rate,
+from jaxedith import (
+    ETCScene,
+    detector_noise,
+    exozodi_background,
+    planet_signal,
+    stellar_leakage,
+    stellar_noise_floor,
+    thermal_background,
+    zodi_background,
+    zodi_fn_ayo,
+    zodi_fn_leinert,
 )
 from optixstuff import (
+    AbstractScalarCoronagraph,
     ConstantThroughput,
     Detector,
     ExposureConfig,
@@ -103,6 +114,10 @@ PLANET_KEYS = ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp", "Lambda")
 
 # The summary path never forms an image, so the detector array size is nominal.
 _DETECTOR_SHAPE = (64, 64)
+
+# jaxedith's finite-frame variance budget, absent from releases without the
+# fixed-frame cadence.
+_FRAME_VARIANCE = getattr(jaxedith, "count_variance_components_ayo", None)
 
 
 def fetch_pinned_yip():
@@ -279,7 +294,8 @@ class ScienceInterval(eqx.Module):
 class RateComponents(eqx.Module):
     """Count rates [e/s] and geometry at a set of epochs, one value per epoch.
 
-    `detector` is jaxedith's legacy rate-based detector term; `floor` is the
+    `detector` is jaxedith's legacy rate-based detector term (the fixed-frame
+    cadence takes its detector variance per interval instead); `floor` is the
     systematic-floor rate `leakage / ppfact`. Positions are (east, north) offsets in
     arcsec; `in_field` is true where the separation lies inside the response field.
     """
@@ -348,6 +364,44 @@ class CountBudget(eqx.Module):
         return jnp.where(variance > 0, self.planet / jnp.sqrt(safe), 0.0)
 
 
+class TabulatedLeakageCoronagraph(AbstractScalarCoronagraph):
+    """A response whose stellar leakage is read from a table at one host diameter.
+
+    Throughput, core area and occulter transmission come from `response`; the
+    leakage per (lambda/D)^2 comes from `leakage_curve`, the response's own curve at
+    the host's diameter tabulated on its radial profile nodes, clipped to the table
+    beyond its last node. It serves the summary rates only and forms no images.
+    """
+
+    response: eqx.Module
+    leakage_curve: interpax.PchipInterpolator
+    leakage_max_lod: float
+    pixel_scale_lod: float
+    IWA: float
+    OWA: float
+
+    def throughput(self, separation_lod, wavelength_nm, *, time_s=0.0):
+        """Core throughput of the response."""
+        return self.response.throughput(separation_lod, wavelength_nm, time_s=time_s)
+
+    def core_area(self, separation_lod, wavelength_nm, *, time_s=0.0):
+        """Photometric aperture area of the response [(lambda/D)^2]."""
+        return self.response.core_area(separation_lod, wavelength_nm, time_s=time_s)
+
+    def core_mean_intensity(
+        self, separation_lod, wavelength_nm, *, time_s=0.0, stellar_diam_lod=0.0
+    ):
+        """Tabulated leakage per (lambda/D)^2 at the host's diameter."""
+        clipped = jnp.clip(jnp.asarray(separation_lod), 0.0, self.leakage_max_lod)
+        return self.leakage_curve(clipped)
+
+    def occulter_transmission(self, separation_lod, wavelength_nm, *, time_s=0.0):
+        """Sky transmission of the response."""
+        return self.response.occulter_transmission(
+            separation_lod, wavelength_nm, time_s=time_s
+        )
+
+
 class PreparedScene(eqx.Module):
     """Geometry-invariant factors of one scene, cached for repeated evaluation.
 
@@ -361,8 +415,13 @@ class PreparedScene(eqx.Module):
     dist_pc: jax.Array
     star_mass_kg: jax.Array
     stellar_diam_lod: jax.Array
-    leakage_curve: interpax.PchipInterpolator
+    optical_path: OpticalPath
     scene: SummaryScene
+
+    @property
+    def leakage_curve(self):
+        """The tabulated leakage per (lambda/D)^2 at this host's diameter."""
+        return self.optical_path.coronagraph.leakage_curve
 
 
 class SummaryReport(eqx.Module):
@@ -409,10 +468,10 @@ class SummaryReport(eqx.Module):
         """Validate the declarations and cache the nominal scene."""
         if not isinstance(detector_spec, DetectorSpec):
             raise TypeError("detector_spec must be a DetectorSpec")
-        if detector_spec.cadence != "photon_counting_legacy":
+        if detector_spec.cadence == "fixed_frame" and _FRAME_VARIANCE is None:
             msg = (
-                f"cadence {detector_spec.cadence!r} needs jaxedith's finite-frame "
-                "variance API, which this jaxedith does not provide"
+                "cadence 'fixed_frame' needs jaxedith's finite-frame variance API "
+                "(count_variance_components_ayo), which this jaxedith does not provide"
             )
             raise NotImplementedError(msg)
         if isinstance(n_time_nodes, bool) or not isinstance(n_time_nodes, int):
@@ -520,8 +579,17 @@ class SummaryReport(eqx.Module):
         diam_lod = jnp.asarray(scene.star_diameter_mas) / (1000.0 * self.lod_arcsec)
         n = round(self.leakage_max_lod / self.leakage_step_lod)
         grid = jnp.arange(n + 1, dtype=jnp.float64) * self.leakage_step_lod
-        leakage = self.optical_path.coronagraph.core_mean_intensity(
-            grid, wl, stellar_diam_lod=diam_lod
+        response = self.optical_path.coronagraph
+        leakage = response.core_mean_intensity(grid, wl, stellar_diam_lod=diam_lod)
+        tabulated = TabulatedLeakageCoronagraph(
+            response=response,
+            leakage_curve=interpax.PchipInterpolator(
+                grid, leakage, extrapolate=False, check=False
+            ),
+            leakage_max_lod=self.leakage_max_lod,
+            pixel_scale_lod=float(response.pixel_scale_lod),
+            IWA=float(response.IWA),
+            OWA=float(response.OWA),
         )
         return PreparedScene(
             zero_point=jnp.asarray(zero_point, dtype=jnp.float64),
@@ -532,8 +600,8 @@ class SummaryReport(eqx.Module):
             dist_pc=jnp.asarray(scene.dist_pc, dtype=jnp.float64),
             star_mass_kg=jnp.asarray(scene.star_mass_kg, dtype=jnp.float64),
             stellar_diam_lod=diam_lod,
-            leakage_curve=interpax.PchipInterpolator(
-                grid, leakage, extrapolate=False, check=False
+            optical_path=eqx.tree_at(
+                lambda p: p.coronagraph, self.optical_path, tabulated
             ),
             scene=scene,
         )
@@ -559,8 +627,6 @@ class SummaryReport(eqx.Module):
         """Count rates and geometry of `planet` against `prepared` at `times_jd`."""
         wl = self.wavelength_nm
         dl = self.bin_width_nm
-        path = self.optical_path
-        coro = path.coronagraph
         times_jd = jnp.atleast_1d(jnp.asarray(times_jd, dtype=jnp.float64))
         mp = planet.get("Mp", 0.0)
         orbit = (
@@ -585,39 +651,32 @@ class SummaryReport(eqx.Module):
             Mp=mp,
         )
         contrast = 10.0 ** (-0.4 * dmag)
-        lod = self.lod_arcsec
-        sep = alpha / lod
-        area = path.primary.area_m2
-        optics = path.system_throughput(wl)
-        n_ch = path.n_channels
-        core_tp = coro.throughput(sep, wl)
-        core_area = coro.core_area(sep, wl)
-        sky = coro.occulter_transmission(sep, wl)
-        intensity = prepared.leakage_curve(jnp.clip(sep, 0.0, self.leakage_max_lod))
+        sep = alpha / self.lod_arcsec
+        path = prepared.optical_path
         f0 = prepared.zero_point
         fs = prepared.star_ratio
+        n_ch = path.n_channels
+        diam = prepared.stellar_diam_lod
         fzodi = jax.vmap(
             lambda t: zodi_fn_leinert(
                 self.observatory, self._exposure(t), prepared.scene
             )
         )(times_jd)
-        planet_e = planet_rate(f0, fs, contrast, area, optics, core_tp, dl, n_ch)
-        leakage_e = stellar_leakage_rate(
-            f0, fs, area, optics, dl, n_ch, core_area, intensity
+        planet_e = planet_signal(path, wl, sep, dl, f0, fs, contrast, n_channels=n_ch)
+        leakage_e = stellar_leakage(
+            path, wl, sep, dl, f0, fs, n_channels=n_ch, stellar_diam_lod=diam
         )
-        zodi_e = zodi_rate(f0, fzodi, lod, sky, area, optics, dl, n_ch, core_area)
-        exozodi_e = exozodi_rate(
+        zodi_e = zodi_background(path, wl, sep, dl, f0, fzodi, n_channels=n_ch)
+        exozodi_e = exozodi_background(
+            path,
+            wl,
+            sep,
+            dl,
             f0,
             prepared.exozodi_1au,
-            lod,
-            sky,
-            area,
-            optics,
-            dl,
-            n_ch,
-            core_area,
             prepared.dist_pc,
             alpha,
+            n_channels=n_ch,
         )
         thermal_e = thermal_background(
             path,
@@ -634,8 +693,16 @@ class SummaryReport(eqx.Module):
             planet_e + leakage_e + zodi_e + exozodi_e,
             npix_multiplier=path.npix_multiplier,
         )
-        floor_e = noise_floor_stellar(
-            f0, fs, area, optics, dl, n_ch, intensity / self.ppfact, core_area
+        floor_e = stellar_noise_floor(
+            path,
+            wl,
+            sep,
+            dl,
+            f0,
+            fs,
+            n_channels=n_ch,
+            ppfact=self.ppfact,
+            stellar_diam_lod=diam,
         )
         return RateComponents(
             planet=planet_e,
@@ -680,7 +747,7 @@ class SummaryReport(eqx.Module):
             thermal=thermal_e,
             var_planet=planet_e,
             var_background=k * (leakage_e + zodi_e + exozodi_e + thermal_e),
-            var_detector=k * jnp.sum(w * r.detector),
+            var_detector=self._detector_variance(prepared, r, duration, w),
             var_systematic=jnp.sum(w * r.floor) ** 2,
             ra_arcsec=ra,
             dec_arcsec=dec,
@@ -688,6 +755,38 @@ class SummaryReport(eqx.Module):
             in_field=jnp.all(r.in_field),
             cadence=jnp.asarray(self.detector_spec.cadence_code),
         )
+
+    def _detector_variance(self, prepared, rates, duration, weights):
+        """Detector variance over the interval for the declared cadence."""
+        if self.detector_spec.cadence != "fixed_frame":
+            return self.bg_multiplier * jnp.sum(weights * rates.detector)
+
+        # Only the aperture pixel count at each node's separation enters the
+        # fixed-frame detector term; it is averaged over the nodes.
+        def at_node(contrast, sep):
+            scene = ETCScene(
+                F0=prepared.zero_point,
+                Fs_over_F0=prepared.star_ratio,
+                Fp_over_Fs=contrast,
+                dist_pc=prepared.dist_pc,
+                sep_arcsec=sep * self.lod_arcsec,
+            )
+            return _FRAME_VARIANCE(
+                prepared.optical_path,
+                scene,
+                self.wavelength_nm,
+                sep,
+                self.bin_width_nm,
+                duration,
+                cadence="fixed_frame",
+                bg_multiplier=self.bg_multiplier,
+                ppfact=self.ppfact,
+                temp_K=self.observatory.temperature_K,
+                eps_warm_T_cold=self.eps_warm_T_cold,
+            )["detector"]
+
+        per_node = jax.vmap(at_node)(rates.contrast, rates.separation_lod)
+        return jnp.sum(self.weights * per_node) / jnp.sum(self.weights)
 
     def expected(self, truth, interval):
         """The true planet's budget against the true scene (truth side only)."""

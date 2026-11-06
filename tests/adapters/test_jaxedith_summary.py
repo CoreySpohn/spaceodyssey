@@ -11,6 +11,7 @@ import math
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import jaxedith
 import numpy as np
 import pytest
 from astropy.io import fits
@@ -191,7 +192,8 @@ def test_detector_spec_and_report_refuse_undeclared_choices(observatory):
     """Fails if a detector without a name, family, dQE meaning or cadence is accepted.
 
     Also fails if the fixed-frame cadence runs on a jaxedith that has no finite-frame
-    variance, or if a non-finite or out-of-range hardware number passes.
+    variance (or is refused on one that has it), or if a non-finite or out-of-range
+    hardware number passes.
     """
     bad = [
         dict(name=""),
@@ -213,8 +215,12 @@ def test_detector_spec_and_report_refuse_undeclared_choices(observatory):
     spec = DetectorSpec.fixture()
     assert spec.cadence == "photon_counting_legacy"
     assert spec.cadence_code == CADENCE_CODES["photon_counting_legacy"]
-    with pytest.raises(NotImplementedError, match="finite-frame"):
-        toy_report(observatory, spec=DetectorSpec.fixture(cadence="fixed_frame"))
+    fixed = DetectorSpec.fixture(cadence="fixed_frame")
+    if hasattr(jaxedith, "count_variance_components_ayo"):
+        assert toy_report(observatory, spec=fixed).detector_spec.cadence_code == 1
+    else:
+        with pytest.raises(NotImplementedError, match="finite-frame"):
+            toy_report(observatory, spec=fixed)
     for kwargs in (
         dict(n_time_nodes=0),
         dict(bg_multiplier=0.0),
@@ -341,7 +347,8 @@ def test_moving_planet_counts_and_centroid_match_a_fine_grid(observatory):
     time, or one that evaluates the midpoint only, misses by more than the match.
     """
     scene = toy_scene(dist_pc=3.0)
-    report = toy_report(observatory, scene=scene)
+    spec = DetectorSpec.fixture(quantum_efficiency=1.0, dqe=1.0)
+    report = toy_report(observatory, spec=spec, scene=scene)
     theta = nominal_planet(
         a_au=0.5,
         e=0.0,
