@@ -246,6 +246,10 @@ def test_core_imports_catches_fixtures(tmp_path, fixture):
         "from .. import studies\n",
         "from ... import core\n",
         "if False:\n    import orbix\n",
+        "from spaceodyssey import plugins\n",
+        "from spaceodyssey.codec import load_study\n",
+        "from .. import codec\n",
+        "import spaceodyssey.adapters.photomancy\n",
     ],
 )
 def test_core_imports_rejects_outside_boundary(tmp_path, source):
@@ -263,6 +267,29 @@ def test_core_imports_passes_clean_fixture(tmp_path):
     )
     result = run_lint("check_core_imports.py", "--core-dir", root)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_plugins_and_codec_are_allowed_only_outside_the_core(tmp_path):
+    """Fails if `plugins.py` or the codec, copied into a core tree, passes the core
+    lints (the import lint must refuse the entry-point loader, the dispatch gate the
+    codec's field walk), or if the repository core lint does not pass with both
+    living outside the core.
+    """
+    from tests.core.gate_helpers import study_branches
+
+    package = REPO / "src/spaceodyssey"
+    root, path = fixture_core(tmp_path, (package / "plugins.py").read_text())
+    result = run_lint("check_core_imports.py", "--core-dir", root)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"{path}:" in result.stdout and "dynamic loading via importlib" in (
+        result.stdout
+    )
+    codec_root = tmp_path / "codec_core"
+    codec_root.mkdir()
+    for source in (package / "codec").glob("*.py"):
+        (codec_root / source.name).write_text(source.read_text())
+    assert study_branches(codec_root)
+    assert run_lint("check_core_imports.py").returncode == 0
 
 
 def test_core_imports_clean():
