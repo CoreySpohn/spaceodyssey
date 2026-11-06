@@ -27,8 +27,19 @@ RESULT_FIELDS = (*_field_paths(Carry, "carry"), *_field_paths(Trace, "trace"))
 _STUDY = toy.survey_1()
 _LAYOUT = _STUDY.observer.layout(_STUDY.caps)
 # The belief fields' leaves come from the observer layout; mutate each of the toy's.
+# The conditional refresh leaves are zero-size in a study without the protocol; the
+# refresh-study mutation pair in `test_refresh_runs.py` covers them.
+REFRESH_ONLY = {
+    f
+    for f in RESULT_FIELDS
+    if f in base.REFRESH_FIELDS or f.rsplit(".", 1)[0] in base.REFRESH_GROUPS
+}
 MUTATED_FIELDS = (
-    *(f for f in RESULT_FIELDS if f not in base.LAYOUT_FIELDS),
+    *(
+        f
+        for f in RESULT_FIELDS
+        if f not in base.LAYOUT_FIELDS and f not in REFRESH_ONLY
+    ),
     *(f"carry.belief.{name}" for name in _LAYOUT.belief_leaves),
     *(f"carry.pbelief.{name}" for name in _LAYOUT.summary_leaves),
 )
