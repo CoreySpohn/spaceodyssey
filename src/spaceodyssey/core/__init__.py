@@ -114,10 +114,13 @@ from spaceodyssey.core.service import answer_pending as answer_pending
 from spaceodyssey.core.service import commit_result as commit_result
 from spaceodyssey.core.service import read_request as read_request
 from spaceodyssey.core.snapshot import EFFECT_FIELDS as EFFECT_FIELDS
+from spaceodyssey.core.snapshot import BeliefLayout as BeliefLayout
 from spaceodyssey.core.snapshot import EffectTable as EffectTable
 from spaceodyssey.core.snapshot import MeanBelief as MeanBelief
 from spaceodyssey.core.snapshot import Snapshot as Snapshot
 from spaceodyssey.core.snapshot import effects_none as effects_none
+from spaceodyssey.core.snapshot import mean_layout as mean_layout
+from spaceodyssey.core.snapshot import project_mean as project_mean
 from spaceodyssey.core.snapshot import snapshot_fingerprint as snapshot_fingerprint
 from spaceodyssey.core.snapshot import snapshot_view as snapshot_view
 from spaceodyssey.core.snapshot import visible_rows as visible_rows

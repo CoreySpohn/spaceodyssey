@@ -96,7 +96,9 @@ def test_campaign_drain_waits_for_host_answer(pending):
         tick=carry.tick,
         stage=core.Stage.ADMIT,
         audience=core.Audience.POLICY,
-        snapshot_fp=eqx.filter_jit(core.snapshot_fingerprint)(view),
+        snapshot_fp=eqx.filter_jit(core.snapshot_fingerprint)(
+            view, study.observer.layout(study.caps)
+        ),
         decision=view.n_dec,
         version=view.release_version,
         caps=study.caps,
@@ -194,7 +196,9 @@ def test_result_precedes_queued_peers_without_reordering_them():
         stage=jnp.asarray(int(core.Stage.ADMIT)),
         micro=jnp.asarray(1),
         audience=jnp.asarray(int(core.Audience.POLICY)),
-        snapshot_fp=eqx.filter_jit(core.snapshot_fingerprint)(view),
+        snapshot_fp=eqx.filter_jit(core.snapshot_fingerprint)(
+            view, study.observer.layout(study.caps)
+        ),
         decision=view.n_dec,
         version=view.release_version,
     )

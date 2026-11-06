@@ -40,12 +40,14 @@ def _catalog():
 
 
 def _fp(carry, study, audience=Audience.POLICY):
-    return int(fingerprint_j(snapshot_view(carry, audience, study.caps)))
+    view = snapshot_view(carry, audience, study.caps)
+    return int(fingerprint_j(view, study.observer.layout(study.caps)))
 
 
 def test_snapshot_fingerprint_recorded():
-    _, baseline, views = baseline_host_run()
+    study, baseline, views = baseline_host_run()
     carry, trace = baseline
+    layout = study.observer.layout(study.caps)
     woke = np.asarray(trace.wake)
     fps = np.asarray(trace.snapshot_fp)
     assert woke.sum() == len(views) == 6
@@ -54,7 +56,8 @@ def test_snapshot_fingerprint_recorded():
     assert np.all(fps[woke] != 0) and len(set(fps[woke].tolist())) == len(views)
     # each recorded value is the fingerprint of the view that decision was handed
     for fp, view in zip(fps[woke], views, strict=True):
-        assert int(fingerprint_j(jax.tree_util.tree_map(jnp.asarray, view))) == int(fp)
+        view = jax.tree_util.tree_map(jnp.asarray, view)
+        assert int(fingerprint_j(view, layout)) == int(fp)
     # the history carries it, and the compiled executor records the same values
     h = canonical_history(carry, trace)
     assert np.array_equal(h.ints["snapshot_fp"][h.ints["wake"] == 1], fps[woke])
@@ -76,7 +79,8 @@ def test_the_fingerprint_hashes_the_masked_view_not_the_raw_log():
 
     def raw(c):
         view = snapshot_view(c, Audience.POLICY, study.caps)
-        return int(fingerprint_j(dataclasses.replace(view, log=c.log)))
+        layout = study.observer.layout(study.caps)
+        return int(fingerprint_j(dataclasses.replace(view, log=c.log), layout))
 
     # a row the policy cannot see: its integers and its timing do not move it
     hidden = edit("subject", obs_rows, 3)

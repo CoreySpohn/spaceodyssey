@@ -85,6 +85,8 @@ def advance(carry, root, study, truth, *, wake_fn=wake_by_audience):
     def g(x):
         return jnp.where(handled, x, z)
 
+    belief_mean, belief_aux = study.observer.layout(caps).project(c5.belief)
+
     trace = dataclasses.replace(
         empty_trace(caps),
         handled=handled,
@@ -107,8 +109,8 @@ def advance(carry, root, study, truth, *, wake_fn=wake_by_audience):
         n_dec=c5.n_dec,
         event_fp=g(ev.snapshot_fp),
         release_version=c5.release_version,
-        belief_mean=c5.belief.mean,
-        belief_aux=c5.belief.aux,
+        belief_mean=belief_mean,
+        belief_aux=belief_aux,
         n_log=c5.n_log,
     )
     return c5, trace, wake
@@ -159,10 +161,14 @@ def decide(carry, root, study):
     )
 
 
+def _policy_fingerprint(view, study):
+    return snapshot_fingerprint(view, study.observer.layout(study.caps))
+
+
 def decision_fingerprint(carry, study):
     """Fingerprint of the snapshot the policy reads at the current state."""
-    return eqx.filter_jit(snapshot_fingerprint)(
-        eqx.filter_jit(snapshot_view)(carry, Audience.POLICY, study.caps)
+    return eqx.filter_jit(_policy_fingerprint)(
+        eqx.filter_jit(snapshot_view)(carry, Audience.POLICY, study.caps), study
     )
 
 
@@ -468,12 +474,14 @@ def close_decision(carry, effects, pstate, wake, study):
     )
 
 
-def finish_trace(trace, effects, codes, u, wake, carry, snapshot_fp=0):
+def finish_trace(trace, effects, codes, u, wake, carry, study, snapshot_fp=0):
     """Attach decision outputs and final belief state to a trace row.
 
+    The belief state is the observer layout's trace projection of the full belief.
     `snapshot_fp` is the fingerprint of the snapshot the decision read; it is recorded
     for a woken step and zero otherwise.
     """
+    belief_mean, belief_aux = study.observer.layout(study.caps).project(carry.belief)
     return dataclasses.replace(
         trace,
         n_dec=carry.n_dec,
@@ -482,8 +490,8 @@ def finish_trace(trace, effects, codes, u, wake, carry, snapshot_fp=0):
         eff_disruptive=effects.disruptive,
         admit_code=codes,
         pol_u=jnp.where(wake, u, 0.0),
-        belief_mean=carry.belief.mean,
-        belief_aux=carry.belief.aux,
+        belief_mean=belief_mean,
+        belief_aux=belief_aux,
         n_log=carry.n_log,
     )
 
@@ -496,4 +504,4 @@ def transition(carry, i, root, study, truth, *, wake_fn=wake_by_audience):
     fp = decision_fingerprint(c, study)
     c, codes = admit(c, eff, study, fp)
     c = close_decision(c, eff, pstate, wake, study)
-    return c, finish_trace(trace, eff, codes, u, wake, c, fp)
+    return c, finish_trace(trace, eff, codes, u, wake, c, study, fp)

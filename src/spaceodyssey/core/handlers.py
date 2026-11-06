@@ -158,7 +158,7 @@ def h_release(c, ev, study, truth, root):
     obs = masked_record(rec, caps, Audience.OBSERVER)
     folded = study.observer.analyze(study.observer.fold(c.belief, obs, caps))
     belief = where_tree(to_observer & ~already & ~accepted.any(), folded, c.belief)
-    # the policy's belief folds only records released to the policy audience, once
+    # the policy summary folds only records released to the policy audience, once
     seen = log.released_tick[slot] >= 0
     released = others & (log.released_tick >= 0)
     # The policy fold sees supersession only from revisions it can read, just
@@ -170,7 +170,7 @@ def h_release(c, ev, study, truth, root):
         ),
     )
     pol = masked_record(pol_rec, caps, Audience.POLICY)
-    pfolded = study.observer.analyze(study.observer.fold(c.pbelief, pol, caps))
+    pfolded = study.observer.fold_summary(c.pbelief, pol, caps)
     pbelief = where_tree(public & ~seen & ~released.any(), pfolded, c.pbelief)
     older = jnp.where(accepted & (log.revision < rec.revision), rec.revision, -1)
     newer = jnp.max(jnp.where(accepted, log.revision, -1))

@@ -68,7 +68,7 @@ class Study(eqx.Module):
     fork: Fork = eqx.field(default_factory=Fork)
 
     def __check_init__(self):
-        """Validate the arithmetic precision and that record kinds are registered.
+        """Validate precision, registered record kinds and the observer's layout.
 
         Payload column audiences come from the registered record kinds. Capacities with
         no registered kinds would leave every column readable by every audience, so a
@@ -79,4 +79,26 @@ class Study(eqx.Module):
             raise ValueError(
                 "Study capacities have no registered record kinds; lower a registry "
                 "into the capacities so payload columns carry their audiences"
+            )
+        _check_layout(self.observer, self.caps)
+
+
+def _shapes(tree):
+    """Leaf paths, shapes and dtypes of a pytree, comparable with `==`."""
+    paths, _ = jax.tree_util.tree_flatten_with_path(tree)
+    return [(path, leaf.shape, leaf.dtype) for path, leaf in paths]
+
+
+def _check_layout(observer, caps):
+    """Require the observer's layout to describe the beliefs it initializes."""
+    layout = observer.layout(caps)
+    belief = jax.eval_shape(lambda: observer.init(caps))
+    summary = jax.eval_shape(lambda: observer.init_summary(caps))
+    for which, declared, made in (
+        ("belief", layout.belief, belief),
+        ("summary", layout.summary, summary),
+    ):
+        if _shapes(declared) != _shapes(made):
+            raise ValueError(
+                f"the observer's layout does not describe the {which} it initializes"
             )

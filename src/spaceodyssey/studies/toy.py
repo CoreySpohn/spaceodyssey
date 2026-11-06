@@ -41,7 +41,13 @@ from spaceodyssey.core.records import (
     RecordKind,
     record_none,
 )
-from spaceodyssey.core.snapshot import EffectTable, MeanBelief, effects_none
+from spaceodyssey.core.snapshot import (
+    BeliefLayout,
+    EffectTable,
+    MeanBelief,
+    effects_none,
+    project_mean,
+)
 from spaceodyssey.core.study import Agenda, Clock, Study
 
 RECORD_NONE, RECORD_MEASUREMENT, RECORD_AUXILIARY = range(3)
@@ -113,6 +119,17 @@ class ToyRunningMean(AbstractObserver):
 
     measurement_kind: int = eqx.field(default=RECORD_MEASUREMENT)
     auxiliary_kind: int = eqx.field(default=RECORD_AUXILIARY)
+
+    def layout(self, caps):
+        """`MeanBelief` for both types: the summary is the belief, counted by `n`."""
+        belief = MeanBelief(
+            mean=jax.ShapeDtypeStruct((caps.n_subjects,), F64),
+            n=jax.ShapeDtypeStruct((caps.n_subjects,), I64),
+            aux=jax.ShapeDtypeStruct((caps.n_an,), F64),
+        )
+        return BeliefLayout(
+            belief=belief, summary=belief, count_leaf="n", project=project_mean
+        )
 
     def fold(self, belief, rec, caps):
         """Update completed measurement means and auxiliary values."""

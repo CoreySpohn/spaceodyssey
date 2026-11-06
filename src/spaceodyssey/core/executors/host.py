@@ -109,7 +109,7 @@ class HostExecutor(AbstractExecutor):
             fp = _fp(carry, study) if bool(wake) else jnp.asarray(0, jnp.int64)
             carry, codes = adm(carry, eff, study, fp)
             carry = close(carry, eff, pstate, wake, study)
-            traces.append(fin(trace, eff, codes, u, wake, carry, fp))
+            traces.append(fin(trace, eff, codes, u, wake, carry, study, fp))
             if service is not None:
                 carry = answer_pending(carry, study, service)
         return RunResult(

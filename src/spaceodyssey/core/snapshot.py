@@ -19,12 +19,113 @@ class MeanBelief(eqx.Module):
     aux: jax.Array
 
 
+def named_leaves(tree):
+    """Map each dotted field path of a pytree to its leaf."""
+    paths, _ = jax.tree_util.tree_flatten_with_path(tree)
+    return {
+        jax.tree_util.keystr(p, simple=True, separator="."): leaf for p, leaf in paths
+    }
+
+
+def project_mean(belief):
+    """The trace projection of a `MeanBelief`: its means and auxiliary state."""
+    return belief.mean, belief.aux
+
+
+def _as_shapes(tree):
+    """The shapes of a pytree of arrays or of `jax.ShapeDtypeStruct`s."""
+    return jax.tree_util.tree_map(
+        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), tree
+    )
+
+
+class BeliefLayout(eqx.Module):
+    """How the core reads an observer's two belief types.
+
+    `belief` and `summary` are the shapes (pytrees of `jax.ShapeDtypeStruct`, taken
+    from example values when given those) of the full belief, held in `Carry.belief`,
+    and of the policy summary, held in `Carry.pbelief` and the only belief a policy
+    reads. `count_leaf` names the integer leaf, present with one shape in both, that
+    counts the acquisitions folded per subject; the snapshot fingerprint reads it.
+    `project` maps a full belief to the pair the trace records as `belief_mean`
+    (F64[n_subjects]) and `belief_aux` (F64[n_an]); `project_summary` does the same
+    for a summary and defaults to `project`. A leaf of zero size is left out of the
+    comparator names, so a leaf whose capacity is zero changes no canonical history.
+
+    The projections are static and compared by identity. The core builds a layout
+    inside traced code (`observer.layout(caps)`); a layout passed to a compiled
+    function recompiles it unless its projections are module-level functions.
+    """
+
+    belief: object = eqx.field(static=True, converter=_as_shapes)
+    summary: object = eqx.field(static=True, converter=_as_shapes)
+    count_leaf: str = eqx.field(static=True)
+    project: object = eqx.field(static=True)
+    project_summary: object = eqx.field(default=None, static=True)
+
+    def __check_init__(self):
+        """Refuse a layout whose count leaf is missing, not integer, or mismatched."""
+        if not isinstance(self.count_leaf, str) or not self.count_leaf:
+            raise ValueError("a belief layout needs a count leaf")
+        belief, summary = named_leaves(self.belief), named_leaves(self.summary)
+        for which, leaves in (("belief", belief), ("summary", summary)):
+            leaf = leaves.get(self.count_leaf)
+            if leaf is None:
+                raise ValueError(
+                    f"the count leaf {self.count_leaf!r} is not a leaf of the {which}"
+                )
+            if not jnp.issubdtype(leaf.dtype, jnp.integer):
+                raise ValueError(f"the count leaf of the {which} must be an integer")
+        if belief[self.count_leaf].shape != summary[self.count_leaf].shape:
+            raise ValueError("the count leaf has different shapes in the two types")
+
+    @property
+    def belief_leaves(self):
+        """Comparator names of the full belief: its leaves of nonzero size."""
+        return _sized(self.belief)
+
+    @property
+    def summary_leaves(self):
+        """Comparator names of the policy summary: its leaves of nonzero size."""
+        return _sized(self.summary)
+
+    def count(self, belief):
+        """The count leaf of a full belief or a summary."""
+        return named_leaves(belief)[self.count_leaf]
+
+    def summary_projection(self, summary):
+        """`(mean, aux)` of a policy summary, by `project_summary` or `project`."""
+        if self.project_summary is None:
+            return self.project(summary)
+        return self.project_summary(summary)
+
+
+def _sized(shapes):
+    leaves = named_leaves(shapes)
+    return tuple(name for name, leaf in leaves.items() if np.prod(leaf.shape) > 0)
+
+
+def mean_layout(belief, summary):
+    """The layout of beliefs that carry `MeanBelief`'s `mean`, `n` and `aux`.
+
+    `belief` and `summary` are shape pytrees (or example values) of the two types;
+    the count leaf is `n` and both projections read `mean` and `aux`.
+    """
+    return BeliefLayout(
+        belief=belief, summary=summary, count_leaf="n", project=project_mean
+    )
+
+
 class Snapshot(eqx.Module):
-    """What a policy sees: released rows compacted to the front, zeros elsewhere."""
+    """What a policy sees: released rows compacted to the front, zeros elsewhere.
+
+    `belief` is the audience's belief: the policy summary for the policy, the full
+    belief for the observer.
+    """
 
     log: RecordLog
     n_rows: jax.Array
-    belief: MeanBelief
+    belief: object
     tick: jax.Array
     n_dec: jax.Array
     release_version: jax.Array  # releases this audience has received so far
@@ -141,19 +242,21 @@ def _digest(a, salt):
     return _mix(h ^ jnp.asarray(flat.size, jnp.uint64))
 
 
-def snapshot_fingerprint(view):
+def snapshot_fingerprint(view, layout):
     """Identity of the decision snapshot a view holds, as an int64.
 
     The digest covers the integer content of the view only: every integer column of
-    the visible rows, the row count, the belief sample counts, the tick, the decision
-    index and the release version. It is taken from the masked view, so a row, column
-    or event the audience cannot see leaves it unchanged. Floating-point content is
-    left out on purpose: it is computed from the prefix the integers name, and two
-    executors may differ in it by rounding, which must not make their identities differ.
+    the visible rows, the row count, the belief's count leaf (named by the observer's
+    `BeliefLayout`), the tick, the decision index and the release version. It is
+    taken from the masked view, so a row, column or event the audience cannot see
+    leaves it unchanged. Floating-point content is left out on purpose: it is computed
+    from the prefix the integers name, and two executors may differ in it by rounding,
+    which must not make their identities differ.
     """
     log = view.log
+    count = layout.count(view.belief)
     leaves = [getattr(log, n) for n in LOG_INT_FIELDS] + [log.valid]
-    leaves += [view.n_rows, view.belief.n, view.tick, view.n_dec, view.release_version]
+    leaves += [view.n_rows, count, view.tick, view.n_dec, view.release_version]
     # Tag field boundaries, then chain all words in one scan.
     words = []
     for i, leaf in enumerate(leaves):

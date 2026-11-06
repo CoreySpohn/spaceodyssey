@@ -1,15 +1,25 @@
 """Kinds."""
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 
 from spaceodyssey.core.enums import F64, I64
 from spaceodyssey.core.records import record_none
-from spaceodyssey.core.snapshot import MeanBelief
+from spaceodyssey.core.snapshot import MeanBelief, mean_layout
 
 
 class AbstractObserver(eqx.Module):
-    """Observer contract for record folding and analysis."""
+    """Observer contract for record folding and analysis.
+
+    An observer keeps two belief types: the full belief (`Carry.belief`), built from
+    the records the observer accepted, and the policy summary (`Carry.pbelief`),
+    built from the records released to the policy and the only belief a policy
+    reads. `layout` declares both types to the core. The defaults make the summary
+    the full belief itself: `init_summary` is `init`, `fold_summary` folds and
+    analyzes like the observer's own belief, and the layout is the `MeanBelief`
+    layout of `init`.
+    """
 
     version: int = eqx.field(default=1, kw_only=True)
 
@@ -21,9 +31,24 @@ class AbstractObserver(eqx.Module):
             aux=jnp.zeros(caps.n_an, F64),
         )
 
+    def init_summary(self, caps):
+        """Initialize the policy summary."""
+        return self.init(caps)
+
+    def layout(self, caps):
+        """The `BeliefLayout` of this observer's belief and summary."""
+        return mean_layout(
+            jax.eval_shape(lambda: self.init(caps)),
+            jax.eval_shape(lambda: self.init_summary(caps)),
+        )
+
     def fold(self, belief, rec, caps):
         """Fold a single released record into the belief."""
         raise NotImplementedError
+
+    def fold_summary(self, summary, rec, caps):
+        """Fold a record released to the policy into the summary, then analyze it."""
+        return self.analyze(self.fold(summary, rec, caps))
 
     def analyze(self, belief):
         """Analyze the folded belief."""

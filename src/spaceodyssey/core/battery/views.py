@@ -42,9 +42,8 @@ class _RecordingPolicy(AbstractPolicy):
 
     def decide(self, pstate, view, study, key):
         effects, state, draw = self.inner.decide(pstate, view, study, key)
-        leaves, layout = jax.tree_util.tree_flatten(
-            (snapshot_fingerprint(view), view, effects)
-        )
+        fingerprint = snapshot_fingerprint(view, study.observer.layout(study.caps))
+        leaves, layout = jax.tree_util.tree_flatten((fingerprint, view, effects))
         specs = [(x.shape, np.dtype(x.dtype)) for x in leaves]
         # Callback workers can use 32-bit mode even when the caller enables x64.
         # Transport 64-bit values as words so their bytes survive device placement.
@@ -67,9 +66,8 @@ class _RecordingPolicy(AbstractPolicy):
     def decide_py(self, pstate, view_np, study, key):
         effects, state, draw = self.inner.decide_py(pstate, view_np, study, key)
         # Host-form policies run eagerly on the exact view the executor built.
-        _deliver(
-            self.slot, key, self.phase, snapshot_fingerprint(view_np), view_np, effects
-        )
+        fingerprint = snapshot_fingerprint(view_np, study.observer.layout(study.caps))
+        _deliver(self.slot, key, self.phase, fingerprint, view_np, effects)
         return effects, state, draw
 
 

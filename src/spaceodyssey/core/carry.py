@@ -37,8 +37,8 @@ class Carry(eqx.Module):
     log: RecordLog
     n_log: jax.Array
     ledger: Ledger
-    belief: MeanBelief
-    pbelief: MeanBelief
+    belief: object  # the observer's full belief (`BeliefLayout.belief`)
+    pbelief: object  # the policy summary (`BeliefLayout.summary`)
     acquisition_counts: jax.Array
     pstate: jax.Array
     woke: jax.Array
@@ -69,7 +69,11 @@ def _zero_belief(caps):
 
 
 def empty_carry(caps, balance=None):
-    """A zeroed carry at tick 0, stage Stage.SETTLE, with an empty queue and log."""
+    """A zeroed carry at tick 0, stage Stage.SETTLE, with an empty queue and log.
+
+    Both beliefs are zeroed `MeanBelief`s; `init_carry` replaces them with the
+    observer's own types.
+    """
     z = jnp.asarray(0, I64)
     f = jnp.asarray(False)
     br, nr = caps.n_balance_rows, caps.n_resources
@@ -215,7 +219,7 @@ def init_carry(study, truth):
     caps = study.caps
     c = empty_carry(caps, balance=study.budget)
     c = _tree_set(
-        c, belief=study.observer.init(caps), pbelief=study.observer.init(caps)
+        c, belief=study.observer.init(caps), pbelief=study.observer.init_summary(caps)
     )
     c = enqueue(
         c,

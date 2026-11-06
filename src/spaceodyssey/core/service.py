@@ -131,10 +131,11 @@ def commit_result(carry, payload, kind, study):
 
 
 @eqx.filter_jit
-def _snapshot_for(carry, audience, decision, caps):
+def _snapshot_for(carry, audience, decision, study):
+    caps = study.caps
     view = snapshot_view(carry, audience, caps)
     view = dataclasses.replace(view, n_dec=decision)
-    return view, snapshot_fingerprint(view)
+    return view, snapshot_fingerprint(view, study.observer.layout(caps))
 
 
 _commit = eqx.filter_jit(commit_result)
@@ -153,7 +154,7 @@ def answer_pending(carry, study, service):
         return carry
     caps = study.caps
     view, fp = _snapshot_for(
-        carry, Audience(request.audience), np.int64(request.decision), caps
+        carry, Audience(request.audience), np.int64(request.decision), study
     )
     if int(fp) != request.snapshot_fp:
         raise RuntimeError("the snapshot changed between the request and its answer")

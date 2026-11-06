@@ -117,7 +117,8 @@ def test_fingerprint_distinguishes_exchanged_integer_contributions():
     study, before, changed = _changed_revisions()
     after = core.snapshot_view(changed, core.Audience.POLICY, study.caps)
     assert not np.array_equal(before.log.revision, after.log.revision)
-    assert int(fp_j(before)) != int(fp_j(after))
+    layout = study.observer.layout(study.caps)
+    assert int(fp_j(before, layout)) != int(fp_j(after, layout))
 
 
 def test_pending_request_rejects_changed_visible_revisions():
@@ -128,7 +129,7 @@ def test_pending_request_rejects_changed_visible_revisions():
         tick=changed.tick,
         stage=jnp.asarray(int(core.Stage.ADMIT)),
         audience=jnp.asarray(int(core.Audience.POLICY)),
-        snapshot_fp=fp_j(before),
+        snapshot_fp=fp_j(before, study.observer.layout(study.caps)),
         version=before.release_version,
         decision=before.n_dec,
     )
