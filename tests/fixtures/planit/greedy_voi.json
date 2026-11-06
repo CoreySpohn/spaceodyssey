@@ -1,0 +1,160 @@
+{
+  "schema": {
+    "schema": "Field paths mapped to one-line descriptions; * denotes any policy name.",
+    "version": "Integer fixture format version.",
+    "evidence": "MEASURED means expected values were computed by a deterministic toy campaign.",
+    "inputs.targets": "Target names in index and tie-break order.",
+    "inputs.epochs_d": "Fixed visit start epochs in days, ordered by slot.",
+    "inputs.visibility": "Boolean target-by-slot masks, sufficient to replay the known-orbit toy.",
+    "inputs.detection_rewards": "Reward for the first visible visit to each target.",
+    "inputs.characterization_reward": "Reward for the second visible visit; later visits earn zero.",
+    "inputs.initial_state": "Initial successful-visit counts, in target order.",
+    "inputs.horizon_slots": "Number of slots; at most one target or wait per slot.",
+    "inputs.visit_cost_slots": "Every visit consumes one slot, including unsuccessful visits.",
+    "inputs.wait_cost_slots": "Waiting consumes one slot and earns zero.",
+    "inputs.integration_d": "Planit action duration in days; slot occupancy is the binding cost.",
+    "inputs.overhead_d": "Zero slew and other overhead in this abstraction.",
+    "inputs.seed": "Null because the problem and all policies are deterministic.",
+    "inputs.transition": "State, visibility and observing-mode rules.",
+    "policies.*": "Algorithm, planning depth and deterministic tie rules for each expected result.",
+    "expected.*.utility": "Computed Python float serialized without rounding.",
+    "expected.*.sequence": "Chronological target names or wait; modes follow the transition rule.",
+    "expected.*.detections": "Number of targets with at least one successful visit.",
+    "expected.*.characterizations": "Number of targets with two successful visits.",
+    "tolerance.absolute": "Absolute tolerance for utility comparisons.",
+    "tolerance.relative": "Relative tolerance for utility comparisons; zero disables it."
+  },
+  "version": 1,
+  "evidence": "MEASURED",
+  "inputs": {
+    "targets": [
+      "A",
+      "B",
+      "C"
+    ],
+    "epochs_d": [
+      0.0,
+      90.0,
+      180.0,
+      270.0
+    ],
+    "visibility": [
+      [
+        true,
+        true,
+        true,
+        true
+      ],
+      [
+        true,
+        false,
+        true,
+        false
+      ],
+      [
+        false,
+        true,
+        false,
+        true
+      ]
+    ],
+    "detection_rewards": [
+      0.11,
+      0.1,
+      0.1
+    ],
+    "characterization_reward": 1.0,
+    "initial_state": [
+      0,
+      0,
+      0
+    ],
+    "horizon_slots": 4,
+    "visit_cost_slots": 1,
+    "wait_cost_slots": 1,
+    "integration_d": 0.001,
+    "overhead_d": 0.0,
+    "seed": null,
+    "transition": "Wait or invisible visits leave state unchanged. First visible visit earns detection (imaging); second earns characterization (ifs); counts cap at two. All target choices remain allowed, including zero-gain visits."
+  },
+  "policies": {
+    "greedy": "Receding lookahead of 1 visits including current slot, clipped at horizon; zero terminal value. Maximize total gain rounded to 12 decimal places, then immediate gain, then order wait,A,B,C.",
+    "rollout_2": "Receding lookahead of 2 visits including current slot, clipped at horizon; zero terminal value. Maximize total gain rounded to 12 decimal places, then immediate gain, then order wait,A,B,C.",
+    "rollout_3": "Receding lookahead of 3 visits including current slot, clipped at horizon; zero terminal value. Maximize total gain rounded to 12 decimal places, then immediate gain, then order wait,A,B,C.",
+    "full_horizon": "Receding lookahead of 4 visits including current slot, clipped at horizon; zero terminal value. Maximize total gain rounded to 12 decimal places, then immediate gain, then order wait,A,B,C.",
+    "optimal": "Enumerate all 4^4 sequences lexicographically in order wait,A,B,C; replace incumbent only if gain exceeds it by more than 1e-12.",
+    "exact_package_selection": "Per target in A,B,C order, enumerate empty, visible singletons, then ascending visible pairs; take Cartesian product, reject slot conflicts, retain first strict maximum of summed package rewards."
+  },
+  "expected": {
+    "greedy": {
+      "utility": 1.3100000000000003,
+      "sequence": [
+        "A",
+        "A",
+        "B",
+        "C"
+      ],
+      "detections": 3,
+      "characterizations": 1
+    },
+    "rollout_2": {
+      "utility": 1.3100000000000003,
+      "sequence": [
+        "A",
+        "A",
+        "B",
+        "C"
+      ],
+      "detections": 3,
+      "characterizations": 1
+    },
+    "rollout_3": {
+      "utility": 2.21,
+      "sequence": [
+        "A",
+        "C",
+        "A",
+        "C"
+      ],
+      "detections": 2,
+      "characterizations": 2
+    },
+    "full_horizon": {
+      "utility": 2.21,
+      "sequence": [
+        "A",
+        "C",
+        "A",
+        "C"
+      ],
+      "detections": 2,
+      "characterizations": 2
+    },
+    "optimal": {
+      "utility": 2.21,
+      "sequence": [
+        "A",
+        "C",
+        "A",
+        "C"
+      ],
+      "detections": 2,
+      "characterizations": 2
+    },
+    "exact_package_selection": {
+      "utility": 2.21,
+      "sequence": [
+        "A",
+        "C",
+        "A",
+        "C"
+      ],
+      "detections": 2,
+      "characterizations": 2
+    }
+  },
+  "tolerance": {
+    "absolute": 1e-12,
+    "relative": 0.0
+  }
+}

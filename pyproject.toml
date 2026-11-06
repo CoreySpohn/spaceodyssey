@@ -24,7 +24,8 @@ dependencies = [
     "scipy>=1.13",
     "numpy>=2.1.2",
     "photomancy>=0.3",
-    "planit-py>=0.1.0",
+    "planit-py>=0.2.0",
+    "hwoutils>=1.10.0",
 ]
 
 [project.urls]
