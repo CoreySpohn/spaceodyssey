@@ -6,6 +6,7 @@ checks on runs are in `test_observer_kit_runs.py` (four host worlds) and
 compile alone is over the unit budget.
 """
 
+import dataclasses
 import math
 
 import jax.numpy as jnp
@@ -17,18 +18,31 @@ from spaceodyssey.core.conformance import (
     calibration_size,
     check_calibration,
     check_declared_margins,
+    check_delayed_correction,
+    check_derived_summary,
     check_promotion_parity,
     check_refit_calibration,
     declared_margin,
     t_quantile,
 )
-from spaceodyssey.core.conformance.observer_kit import _shifted, _stratum_failures
+from spaceodyssey.core.conformance.observer_kit import (
+    _corrected_slots,
+    _set_key,
+    _shifted,
+    _stratum_failures,
+)
+from spaceodyssey.core.enums import RecordStatus
+from spaceodyssey.core.keys import refit_key
+from spaceodyssey.core.records import empty_log, log_records
+from spaceodyssey.core.refresh import revision_set_digest
 from tests.core.kit_helpers import (
     NOISE,
     OBSERVERS,
+    KeepsSuperseded,
     RefitMean,
     RefitSample,
     ResampleSample,
+    correction_study,
     kit_study,
     pit_of_mean,
 )
@@ -218,3 +232,97 @@ def test_calibration_margin_must_be_positive_and_finite(margin):
         calibration_size(margin, 4)
     with pytest.raises(ValueError, match="positive and finite"):
         check_refit_calibration(STUDY, None, None, None, pit_of_mean, margin=margin)
+
+
+def test_the_corrected_rows_follow_the_replacement_rule():
+    """Fails if the kit's own reading of the rule keeps a superseded revision, counts
+    a derived or unaccepted row or another subject's, keeps a retracted acquisition, or
+    sorts the rows other than by channel, acquisition index and revision.
+    """
+    caps = correction_study(KeepsSuperseded()).caps
+    ok, bad = int(RecordStatus.COMPLETED), int(RecordStatus.FAILED)
+    derived = caps.derived_kinds[0]
+    # slot: (subject, kind, status, acquisition, revision, channel, index, accepted)
+    rows = [
+        (0, 1, ok, 10, 0, 20, 0, 5),  # superseded by slot 1
+        (0, 1, ok, 10, 1, 20, 0, 9),  # the correction
+        (0, 1, ok, 11, 0, 19, 1, 6),
+        (0, derived, ok, 12, 0, 20, 2, 7),  # a derived row is no datum
+        (0, 1, ok, 13, 0, 20, 3, 5),
+        (0, 1, bad, 13, 1, 20, 3, 8),  # retracts acquisition 13
+        (0, 1, ok, 14, 0, 20, 4, -1),  # never accepted
+        (1, 1, ok, 15, 0, 20, 5, 5),  # another subject
+    ]
+    fields = (
+        "subject",
+        "kind",
+        "status",
+        "acquisition_id",
+        "revision",
+        "channel",
+        "acquisition_index",
+        "accepted_tick",
+    )
+    log = empty_log(caps)
+    cols = {name: np.asarray(getattr(log, name)).copy() for name in fields}
+    for slot, row in enumerate(rows):
+        for name, value in zip(fields, row, strict=True):
+            cols[name][slot] = value
+    valid = np.zeros(caps.n_log, bool)
+    valid[: len(rows)] = True
+    log = dataclasses.replace(
+        log, valid=jnp.asarray(valid), **{k: jnp.asarray(v) for k, v in cols.items()}
+    )
+    assert _corrected_slots(log, caps, 0) == [2, 1]  # channel 19 before channel 20
+    assert _corrected_slots(log, caps, 1) == [7]
+    assert _corrected_slots(log, caps, 0, exclude=(1,)) == []
+
+
+def test_the_kit_refit_key_is_the_refresh_protocols():
+    """Fails if a kit refit is keyed by a seed and a subject alone, so that the set it
+    refits does not move its key, or if seed 0 is not the run's own key.
+    """
+    study = correction_study(KeepsSuperseded())
+    log = empty_log(study.caps)
+    n = study.caps.n_log
+    valid = jnp.arange(n) < 2
+    index = jnp.asarray([3, 4] + [0] * (n - 2))
+    first = log_records(log, valid=valid, acquisition_index=index)
+    second = log_records(log, valid=valid, acquisition_index=index.at[1].set(9))
+    root = jnp.asarray([0, 7], jnp.uint32)
+    subject = jnp.asarray(0)
+    key = _set_key(root, jnp.asarray(0), subject, first)
+    np.testing.assert_array_equal(
+        key, refit_key(root, subject, revision_set_digest(first))
+    )
+    other_set = _set_key(root, jnp.asarray(0), subject, second)
+    other_seed = _set_key(root, jnp.asarray(1), subject, first)
+    assert not np.array_equal(key, other_set)
+    assert not np.array_equal(key, other_seed)
+
+
+@pytest.mark.parametrize(
+    "build, call, match",
+    [
+        (
+            lambda: kit_study(OBSERVERS["mean"]),
+            check_delayed_correction,
+            "no refresh protocol",
+        ),
+        (
+            lambda: correction_study(KeepsSuperseded()),
+            lambda study, run, roots: check_derived_summary(
+                study, run, roots, summary_kind="summary"
+            ),
+            "no record kind named 'summary'",
+        ),
+    ],
+    ids=["no_refresh", "no_summary_kind"],
+)
+def test_the_correction_checks_refuse_what_they_cannot_judge(build, call, match):
+    """Fails if a correction check judges a study with no refresh protocol or a summary
+    kind the study does not register (an observer that cannot refit never reaches the
+    check: the study refuses it under a refresh grid).
+    """
+    with pytest.raises(ValueError, match=match):
+        call(build(), None, None)
