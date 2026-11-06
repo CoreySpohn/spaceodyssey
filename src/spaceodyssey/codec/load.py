@@ -27,14 +27,12 @@ import numpy as np
 
 from spaceodyssey.codec.document import (
     DocumentError,
-    KindTable,
     StudyDocument,
     check_schema_version,
-    is_kind_class,
-    is_version_field,
     pointer,
 )
 from spaceodyssey.codec.dump import ARRAY_DTYPES
+from spaceodyssey.codec.kinds import as_resolver, is_kind_class, is_version_field
 from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.study import Study
 
@@ -46,16 +44,18 @@ _WEAK_ZEROS = {"int64": 0, "float64": 0.0}
 def load_study(document, kinds=None):
     """Rebuild the `Study` a `StudyDocument` (or its JSON text) describes.
 
-    `kinds` is the mapping `dump_study` took. An unknown kind reference, a field
-    missing or unknown, an array whose data does not match its declared shape or
-    dtype, and a module whose validation fails each raise `DocumentError` carrying
-    the JSON pointer of the offending value.
+    `kinds` is a `KindResolver` or the mapping `dump_study` took. A module stored
+    at an older kind version is rebuilt at the registered version through its
+    class's `migrate`. An unknown kind id or version, a field missing or unknown,
+    an array whose data does not match its declared shape or dtype, and a module
+    whose validation fails each raise `DocumentError` carrying the JSON pointer of
+    the offending value.
     """
     require_x64()
     if isinstance(document, str):
         document = StudyDocument.from_json(document)
     check_schema_version(document.schema_version)
-    study = decode(document.study, ("study",), KindTable(kinds))
+    study = decode(document.study, ("study",), as_resolver(kinds))
     if not isinstance(study, Study):
         raise DocumentError("the document's study is not a Study", "/study")
     return study
@@ -167,18 +167,27 @@ def _decode_kind(node, path, table):
         )
     fields = dataclasses.fields(cls)
     stored = [f.name for f in fields if not is_version_field(cls, f.name)]
-    _only(node, {"$kind", *stored}, path)
-    missing = [n for n in stored if n not in node]
-    if missing:
-        raise DocumentError(f"field {missing[0]!r} is missing", pointer(path))
+    version = table.current_version(ref[0], ref[1])
+    migrated = None
+    if ref[2] == version:
+        _only(node, {"$kind", *stored}, path)
+        missing = [n for n in stored if n not in node]
+        if missing:
+            raise DocumentError(f"field {missing[0]!r} is missing", pointer(path))
+    else:
+        migrated = _migrated(node, ref, stored, path, table)
     obj = object.__new__(cls)
     values = {}
     for field in fields:
+        where = (*path, field.name)
         if is_version_field(cls, field.name):
-            value = ref[2]
+            value = version
+        elif migrated is None:
+            value = decode(node[field.name], where, table)
+            _check_field(field, value, where)
         else:
-            value = decode(node[field.name], (*path, field.name), table)
-            _check_field(field, value, (*path, field.name))
+            value = migrated[field.name]
+            _check_field(field, value, where if field.name in node else path)
         values[field.name] = value
         object.__setattr__(obj, field.name, value)
     try:
@@ -188,6 +197,23 @@ def _decode_kind(node, path, table):
     except _CHECK_ERRORS as err:
         raise DocumentError(f"{cls.__qualname__}: {err}", pointer(path)) from err
     return obj
+
+
+def _migrated(node, ref, stored, path, table):
+    """The current version's fields, from a module stored at an older version."""
+    params = {
+        key: decode(value, (*path, key), table)
+        for key, value in node.items()
+        if key != "$kind"
+    }
+    out = table.migrate(ref, params, path)
+    if sorted(out) != sorted(stored):
+        raise DocumentError(
+            f"migrating kind {list(ref)} gives fields {sorted(out)}, "
+            f"not {sorted(stored)}",
+            pointer(path),
+        )
+    return out
 
 
 # What a validation hook raises for a bad value; anything else propagates.
