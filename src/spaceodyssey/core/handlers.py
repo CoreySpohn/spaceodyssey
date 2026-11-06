@@ -166,7 +166,7 @@ def h_release(c, ev, study, truth, root):
         folded = study.observer.analyze(
             study.observer.fold(c.belief, obs, caps, key=key)
         )
-        belief = where_tree(to_observer & ~already & ~accepted.any(), folded, belief)
+        belief = where_tree(to_observer & ~already & ~accepted.any(), folded, c.belief)
     # the policy summary folds only records released to the policy audience, once
     seen = log.released_tick[slot] >= 0
     released = others & (log.released_tick >= 0)
@@ -182,7 +182,7 @@ def h_release(c, ev, study, truth, root):
     pbelief = c.pbelief
     if incremental:
         pfolded = study.observer.fold_summary(c.pbelief, pol, caps, key=key)
-        pbelief = where_tree(public & ~seen & ~released.any(), pfolded, pbelief)
+        pbelief = where_tree(public & ~seen & ~released.any(), pfolded, c.pbelief)
     older = jnp.where(accepted & (log.revision < rec.revision), rec.revision, -1)
     newer = jnp.max(jnp.where(accepted, log.revision, -1))
     newer = jnp.where(newer > rec.revision, newer, -1)

@@ -195,8 +195,12 @@ def requeue(carry, row, ok):
     free = ~carry.ev.valid
     i = jnp.argmax(free)
     write = jnp.asarray(ok, B) & free.any()
-    fields = {n: getattr(row, n) for n in EVENT_INT_FIELDS}
-    ev = _set_row(carry.ev, i, write, **fields, valid=jnp.asarray(True))
+    ev = jax.tree_util.tree_map(
+        lambda col, x: col.at[i].set(jnp.where(write, x, col[i])), carry.ev, row
+    )
+    ev = eqx.tree_at(
+        lambda e: e.valid, ev, carry.ev.valid.at[i].set(carry.ev.valid[i] | write)
+    )
     return eqx.tree_at(lambda c: c.ev, carry, ev)
 
 
