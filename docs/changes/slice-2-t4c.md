@@ -51,7 +51,7 @@ golden history moved.
   bounds, so a product row's `phase` and `vintage` are checked, not read. The reserved
   `acquisition_id` of a product row is checked to be above every earlier row id, to
   rise consecutively through the checkpoint and to be held by no other row. The first
-  id is still seeded from the run's row: the trace carries no allocator state
+  id is still seeded from the run's row: the trace carries no id-counter state
   (`next_sid`). A per-step `next_sid` in the trace would make replay fully independent
   of the run's rows; it is not added here and needs a decision.
 - **Refusals.** A checkpoint refused for rows, ids or log room replays as a refusal:
@@ -59,7 +59,7 @@ golden history moved.
   hold with no completion, and `overflow_mask` is the run's. A refusal the replay
   reaches that the run did not raise is an error. A derived-row correction refused with
   `INVALID_CORRECTION` replays with neither field set and the bit in `overflow_mask`.
-  The replay seeds a refused checkpoint's allocator with the run's final `next_sid`.
+  The replay seeds a refused checkpoint's id counter with the run's final `next_sid`.
 
 ## Tests
 
