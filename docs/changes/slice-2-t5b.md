@@ -70,10 +70,16 @@ existing study-document test is unchanged. For a run document:
 - `records` must decode and lower to the study's capacities, else `L001` at
   `/records` (or the entry that fails);
 - with `bindings=`, a service or boundary naming an unknown kind or a newer version
-  is `D001` at `/run/.../kind` or `/version`.
+  is `D001` at `/run/.../kind` or `/version`, and each is rebuilt as `load_run`
+  rebuilds it: a configuration its kind rejects, or a rebuilt `model_hash` that is not
+  the stored one, is `D003`;
+- a `null` run record in a run document is `D003`; `files=` and `max_file_bytes=` are
+  forwarded to the loader, so file-backed documents are checked, integrity included.
 
-`load_run` runs the same record and service checks, so the first problem pre-flight
-would list is the error `load_run` raises.
+`load_run` calls `preflight_document` with the same arguments and raises the first
+document-level error it lists (`D001`, `D002`, `D003`, `L001`), so the two always
+agree on what is wrong first; a callable member or tag is raised as
+`CallableRefused` at the same pointer.
 
 ## File references
 
@@ -90,6 +96,17 @@ does not match its `sha256` (so no path can be named), a missing file (`name`), 
 file of another size (`bytes`), bytes that do not hash to the stored value
 (`sha256`), a shape that does not fit the byte count, and a node with both `data` and
 `file`. NaN, infinities and `-0.0` are preserved bit for bit.
+
+File access is safe against a hostile directory. A dump writes through an
+exclusively created temporary file with an unpredictable name and moves it into
+place with `os.replace`, so a planted symlink is never written through. An existing
+file under the digest name is reused only when it is a regular file whose bytes hash
+to the name; otherwise it is replaced (a replaced symlink loses only the link). A
+load opens the name relative to the directory with `O_NOFOLLOW` and `O_NONBLOCK`,
+requires a regular file by `fstat` (so a symlink or a FIFO is refused at `name`
+without blocking), checks the reference size against the size the dtype and shape
+imply and against `max_file_bytes` (default 1 GiB) before opening, and reads exactly
+that many bytes.
 
 ## Callable refusal
 
@@ -129,7 +146,7 @@ Added to `spaceodyssey.codec`: `dump_run`, `load_run`, `RunDocument`, `Run`,
 
 ## Tests
 
-`tests/codec/test_run_document.py` (unit tier, 82 cases; no executor run):
+`tests/codec/test_run_document.py` (unit tier, 120 cases; no executor run):
 
 - round trip of the oracle refresh run (service, masked boundary, registry,
   executor), including a second dump equal to the first;
@@ -162,15 +179,31 @@ host and a masked boundary on the compiled executor agrees across executors and 
 the original; a run through array files is equal; and a corrupted boundary gives a
 different history, so the equality is not vacuous.
 
+## Review fixes
+
+A review found eight defects, fixed in follow-on commits: a predictable temporary
+name written through (symlink truncation); loads that followed symlinks and opened
+special files; a full read before the size check; pre-flight that skipped a `null` run,
+never rebuilt bindings and ordered errors differently from `load_run`; pre-flight
+without `files=`; a dump that reused an existing file on length alone; B3 on one study;
+and no test that the registry is hashed. Tests added: planted symlinks at the old
+temporary names and the digest name, FIFOs on dump and load, oversize and undersize
+files, a same-length corruption healed by a dump, the byte limit, parity of
+`load_run` with pre-flight over every binding failure fixture plus `null` run, mixed
+errors and callables, independent registry mutations (names, audiences, derived flags,
+column names) each changing the hash, and in the slow tier every corpus study on both
+executors reloaded to an equal hash and an equal history (56 cases; column names in
+the registry are synthesized there, since capacities keep none).
+
 ## Timing
 
 Local runs on the four-thread compute launcher.
 
 | Run | Result |
 |---|---|
-| `test_run_document.py` | 82 passed, 1.8 s wall; no case near 5 s |
-| `test_run_document_runs.py` | 5 passed, 24.2 s wall; compiled case 13.9 s, host case 7.7 s (cold compile) |
-| Full suite (entry-point install test deselected in the worktree), `-n 2 --dist loadfile` | 2,915 passed, 1,329 s wall, peak footprint 10.5 GiB; the two unit-budget reports are the two known tests outside the codec |
+| `test_run_document.py` | 120 passed, 2.5 s wall; no case near 5 s |
+| `test_run_document_runs.py` | 61 passed, 81.9 s wall (5 refresh-run cases plus 56 corpus cases) |
+| Full suite after the review fixes (entry-point install test deselected in the worktree), `-n 2 --dist loadfile` | 3,009 passed, 1,037 s wall, peak footprint 9.7 GiB; one unit-budget report, a known test outside the codec |
 
 ## Remaining
 
