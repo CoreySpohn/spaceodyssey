@@ -26,7 +26,8 @@ An array also carries `"weak": true` when it is a weakly typed JAX array, and
 `"type": "numpy"` or `"type": "numpy_scalar"` when it is a NumPy array or scalar
 rather than a JAX array. Float elements use the same non-finite tags; a NaN is
 written as the one tag whatever its sign or payload bits. Floats narrower than 64
-bits are written as the exact float64 value of each element.
+bits are written as the exact float64 value of each element. An array in a
+non-native byte order is refused rather than silently converted.
 
 A kind reference names a class by `(group, id, version)` through a mapping the
 caller passes (`kinds`); `CORE_KINDS` holds the core's own types and is always

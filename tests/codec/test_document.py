@@ -190,6 +190,32 @@ def test_dict_order_is_content():
         assert list(load_study(doc.to_json(), TOY_KINDS).design.labels) == order
 
 
+def _big_endian_noise(study):
+    noise = np.array([0.5, 0.3, 0.8], ">f8")
+    return eqx.tree_at(lambda s: s.channel_model.noise, study, noise)
+
+
+def _big_endian_ids(study):
+    return eqx.tree_at(lambda s: s.channels.id, study, np.array([10, 11, 12], ">i8"))
+
+
+@pytest.mark.parametrize(
+    ("swap", "where"),
+    [
+        (_big_endian_noise, "/study/channel_model/noise"),
+        (_big_endian_ids, "/study/channels/id"),
+    ],
+    ids=[">f8", ">i8"],
+)
+def test_non_native_byte_order_is_refused(swap, where):
+    """Fails if a big-endian array is written as if native, losing its byte order
+    on reload and in the hash.
+    """
+    with pytest.raises(DocumentError) as err:
+        dump_study(swap(toy.survey_1()), TOY_KINDS)
+    assert err.value.pointer == where
+
+
 def _set_budget_shape(doc):
     doc["study"]["budget"]["shape"] = [3, 4]
 

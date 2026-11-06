@@ -113,6 +113,11 @@ def _encode_array(arr, path, *, weak=False, container=None):
     name = arr.dtype.name
     if name not in ARRAY_DTYPES:
         raise DocumentError(f"no document form for dtype {name}", pointer(path))
+    if not arr.dtype.isnative:
+        raise DocumentError(
+            f"dtype {arr.dtype.str} is not in native byte order; convert it first",
+            pointer(path),
+        )
     if np.issubdtype(arr.dtype, np.floating) or name == "bfloat16":
         data = _tag_floats(arr.astype(np.float64).tolist())
     else:
