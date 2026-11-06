@@ -71,12 +71,22 @@ def is_version_field(cls, name):
 
 
 def declared_version(cls):
-    """The default of a kind class's `version` field, or `None` if it has none."""
+    """The default of a kind class's `version` field, or `None` if it has none.
+
+    A `version` field without a positive integer default (a factory, a missing
+    default, a value of another type) raises `ValueError`: a default instance of
+    such a class has no version a registration can match.
+    """
     if not is_kind_class(cls):
         return None
     for field in dataclasses.fields(cls):
         if field.name == "version":
-            return field.default if type(field.default) is int else None
+            if type(field.default) is not int or field.default < 1:
+                raise ValueError(
+                    f"the version field of {_name(cls)} needs a positive integer "
+                    "default"
+                )
+            return field.default
     return None
 
 

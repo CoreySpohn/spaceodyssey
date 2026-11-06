@@ -113,7 +113,10 @@ def _checked(entry, ref, cls):
         raise RegistrationError(
             f"{_origin(entry)}: a {ref[0]} kind subclasses {base.__name__}"
         )
-    version = declared_version(cls)
+    try:
+        version = declared_version(cls)
+    except ValueError as err:
+        raise RegistrationError(f"{_origin(entry)}: {err}") from err
     if version is not None and version != ref[2]:
         raise RegistrationError(
             f"{_origin(entry)}: the class's version field defaults to {version}"
