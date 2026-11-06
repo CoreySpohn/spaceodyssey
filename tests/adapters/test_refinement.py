@@ -8,38 +8,51 @@ import numpy as np
 import pytest
 from hwoutils.constants import Rearth2AU
 from hwoutils.conversions import Msun_to_kg
-from jax.scipy.stats import norm
 
 from spaceodyssey.adapters.jaxedith import (
+    ReportingLaw,
     ScienceInterval,
+    SummaryRow,
     SummaryScene,
+    loglike_report,
     nominal_planet,
+    observed_snr,
 )
 from tests.adapters.conftest import EPOCH_JD
 
-TAU = 5.0  # detection threshold in planet-free standard deviations
+LAW = ReportingLaw()  # the declared law: threshold 5, kappa 1, corr 0
 
 
-def likelihood_quantities(budget, record):
-    """Counts, log p(f, pos | theta) and P(null | theta) under the joint law.
+def likelihood_quantities(budget, record, lod_arcsec):
+    """Counts, log p(f, pos | theta) and P(null | theta) under the reporting law.
 
-    `s` is the standard deviation the candidate predicts for the measured counts. The
-    record is the observation and stays fixed: its counts, position, lambda/D and
-    `limit_counts = TAU * s0`, the planet-free reference published with it. The
-    position error per axis is (lambda/D) / snr with the snr from the record's
-    observables only.
+    The record is the observation and stays fixed: a detection with its counts,
+    position and the planet-free `limit_counts` published with it; its snr and
+    position errors come from those observables. The null probability is the one the
+    same record's limit implies.
     """
-    s = jnp.sqrt(budget.variance)
-    f, ra, dec, lod, limit_counts = record
-    s0 = limit_counts / TAU
-    snr = f / jnp.sqrt(s0**2 + f)
-    sigma = lod / snr
-    log_p = (
-        norm.logpdf(f, budget.planet, s)
-        + norm.logpdf(ra, budget.ra_arcsec, sigma)
-        + norm.logpdf(dec, budget.dec_arcsec, sigma)
+    f, ra, dec, limit_counts = record
+    snr = observed_snr(jnp.asarray(f), limit_counts)
+    sigma = LAW.position_error(snr, lod_arcsec)
+    row = SummaryRow(
+        time_d=jnp.asarray(0.0),
+        science_s=budget.science_s,
+        occupied_s=budget.science_s,
+        detected=jnp.asarray(1.0),
+        counts=jnp.asarray(f),
+        limit_counts=jnp.asarray(limit_counts),
+        snr=snr,
+        ra=jnp.asarray(ra),
+        dec=jnp.asarray(dec),
+        ra_err=sigma,
+        dec_err=sigma,
+        corr=jnp.asarray(0.0),
+        cadence=jnp.asarray(1.0),
+        calibration_id=jnp.asarray(1.0),
+        valid_science=jnp.asarray(1.0),
     )
-    p_null = norm.cdf((limit_counts - budget.planet) / s)
+    log_p = loglike_report(LAW, row, budget)
+    p_null = jnp.exp(LAW.log_null_probability(limit_counts, budget))
     return np.array([float(budget.planet), float(log_p), float(p_null)])
 
 
@@ -94,19 +107,24 @@ def test_b4_time_refinement_of_the_likelihood_quantities(yip_report):
 
     reference = at(64)
     # One fixed observation for every level: the threshold and the astrometric
-    # covariance it implies do not move along the ladder.
-    s0 = math.sqrt(float(reference.var_background + reference.var_detector))
+    # covariance it implies do not move along the ladder. The planet-free limit is
+    # the reference's own background and detector variance.
+    s0 = float(LAW.limit_counts(reference))
     record = (
-        0.9 * float(reference.planet),
+        1.1 * float(reference.planet),
         float(reference.ra_arcsec) + 1e-3,
         float(reference.dec_arcsec) - 1e-3,
-        float(base.lod_arcsec),
-        TAU * s0,
+        s0,
     )
-    truth = likelihood_quantities(reference, record)
+    assert record[0] >= LAW.threshold * s0  # a detection
+    lod = float(base.lod_arcsec)
+    truth = likelihood_quantities(reference, record, lod)
     assert 0.05 < truth[2] < 0.95  # the null probability is informative
     errors = np.array(
-        [np.abs(likelihood_quantities(at(n), record) - truth) for n in (1, 4, 8, 16)]
+        [
+            np.abs(likelihood_quantities(at(n), record, lod) - truth)
+            for n in (1, 4, 8, 16)
+        ]
     )
     errors[:, 0] /= truth[0]
     allocation = np.array([1e-4, 1e-2, 1e-3])
