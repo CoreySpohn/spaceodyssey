@@ -1,10 +1,19 @@
 """Rebuild a study from a `StudyDocument` by the inverse field walk.
 
 Each module is rebuilt from its stored field values as they are, the way a pytree
-is unflattened: neither `__init__` nor a field converter runs, so array dtypes,
-weak types and Python types come back exactly as written. Validation does run:
-each class's `__check_init__` (an `eqx.Module`) or `__post_init__` (a plain
-dataclass), and an error it raises is reported at the module's pointer.
+is unflattened, so array dtypes, weak types and Python types come back exactly as
+written; `__init__` does not run. The guarantees construction gives are checked
+instead, never applied, so a valid stored value is not coerced and an invalid one
+is refused:
+
+- a field with a converter must hold a value the converter returns unchanged
+  (same type, dtype, shape, weak type and bytes): an `int64` tick stored as
+  `10.75` is refused, not truncated;
+- a field annotated `jax.Array` must hold an array;
+- a class's `__post_init__`, where it defines one, runs and must leave every field
+  as stored; then each `__check_init__` runs.
+
+Every failure is a `DocumentError` at the pointer of the field or module.
 """
 
 import dataclasses
@@ -156,37 +165,99 @@ def _decode_kind(node, path, table):
             f"{cls.__qualname__} is not a module or dataclass",
             pointer((*path, "$kind")),
         )
-    fields = [f.name for f in dataclasses.fields(cls)]
-    stored = [n for n in fields if not is_version_field(cls, n)]
+    fields = dataclasses.fields(cls)
+    stored = [f.name for f in fields if not is_version_field(cls, f.name)]
     _only(node, {"$kind", *stored}, path)
     missing = [n for n in stored if n not in node]
     if missing:
         raise DocumentError(f"field {missing[0]!r} is missing", pointer(path))
     obj = object.__new__(cls)
-    for name in fields:
-        if is_version_field(cls, name):
+    values = {}
+    for field in fields:
+        if is_version_field(cls, field.name):
             value = ref[2]
         else:
-            value = decode(node[name], (*path, name), table)
-        object.__setattr__(obj, name, value)
+            value = decode(node[field.name], (*path, field.name), table)
+            _check_field(field, value, (*path, field.name))
+        values[field.name] = value
+        object.__setattr__(obj, field.name, value)
     try:
-        _validate(obj, cls)
+        _validate(obj, cls, values, path)
     except DocumentError:
         raise
-    except (ValueError, TypeError) as err:
+    except _CHECK_ERRORS as err:
         raise DocumentError(f"{cls.__qualname__}: {err}", pointer(path)) from err
     return obj
 
 
-def _validate(obj, cls):
-    """Run the checks construction would have run."""
+# What a validation hook raises for a bad value; anything else propagates.
+_CHECK_ERRORS = (ValueError, TypeError, AttributeError, IndexError, KeyError)
+
+
+def _check_field(field, value, path):
+    """Refuse a value its converter would change or its annotation does not fit."""
+    if field.type is jax.Array and not isinstance(value, (jax.Array, np.ndarray)):
+        raise DocumentError(
+            f"field {field.name!r} holds an array, not a {type(value).__name__}",
+            pointer(path),
+        )
+    converter = field.metadata.get("converter")
+    if converter is None:
+        return
+    try:
+        converted = converter(value)
+    except _CHECK_ERRORS as err:
+        raise DocumentError(f"field {field.name!r}: {err}", pointer(path)) from err
+    if not same_value(converted, value):
+        raise DocumentError(
+            f"field {field.name!r} is not stored as its converter makes it "
+            "(type, dtype, shape or value differs)",
+            pointer(path),
+        )
+
+
+def _validate(obj, cls, values, path):
+    """Run the hooks construction runs, requiring them to leave the fields alone."""
+    if hasattr(cls, "__post_init__"):
+        obj.__post_init__()
+        for name, value in values.items():
+            if not same_value(getattr(obj, name), value):
+                raise DocumentError(
+                    f"{cls.__qualname__}.__post_init__ changes field {name!r}",
+                    pointer((*path, name)),
+                )
     if isinstance(obj, eqx.Module):
         for kls in cls.__mro__:
             check = kls.__dict__.get("__check_init__")
             if check is not None:
                 check(obj)
-    elif hasattr(cls, "__post_init__"):
-        obj.__post_init__()
+
+
+def same_value(a, b):
+    """Equal in type and content: dtype, shape, weak type and bytes for arrays."""
+    if a is b:
+        return True
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, jax.Array):
+        if a.weak_type != b.weak_type:
+            return False
+        a, b = np.asarray(a), np.asarray(b)
+    if isinstance(a, (np.ndarray, np.generic)):
+        return (a.dtype, a.shape) == (b.dtype, b.shape) and a.tobytes() == b.tobytes()
+    if type(a) in (tuple, list):
+        return len(a) == len(b) and all(map(same_value, a, b))
+    if type(a) is dict:
+        return list(a) == list(b) and all(same_value(a[k], b[k]) for k in a)
+    if type(a) is float:
+        both_nan = math.isnan(a) and math.isnan(b)
+        return both_nan or (a == b and math.copysign(1, a) == math.copysign(1, b))
+    if is_kind_class(type(a)):
+        return all(
+            same_value(getattr(a, f.name), getattr(b, f.name))
+            for f in dataclasses.fields(a)
+        )
+    return a == b
 
 
 def _decode_array(node, path):

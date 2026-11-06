@@ -104,7 +104,14 @@ def _encode_kind(value, path, table):
     for field in dataclasses.fields(value):
         if is_version_field(cls, field.name):
             continue
-        out[field.name] = encode(getattr(value, field.name), (*path, field.name), table)
+        item = getattr(value, field.name)
+        if field.type is jax.Array and not isinstance(item, (jax.Array, np.ndarray)):
+            raise DocumentError(
+                f"field {field.name!r} is annotated as an array but holds a "
+                f"{type(item).__name__}",
+                pointer((*path, field.name)),
+            )
+        out[field.name] = encode(item, (*path, field.name), table)
     return out
 
 

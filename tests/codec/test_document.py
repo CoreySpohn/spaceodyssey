@@ -19,7 +19,8 @@ from spaceodyssey.core.executors.base import histories_equal
 from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.core.keys import Coupling
 from spaceodyssey.core.kinds import AbstractDesign
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import catalog, oracle, scripted, toy
+from spaceodyssey.studies.conformance import CORPUS
 from tests.core.helpers import one_world
 
 
@@ -45,6 +46,11 @@ TOY_KINDS = {
     ("channel_model", "toy.photometry", 1): toy.ToyPhotometry,
     ("design", "toy.gain", 1): toy.ToyDesign,
     ("objective", "toy.threshold", 1): toy.ToyObjective,
+    ("policy", "toy.spin_wait", 1): toy.SpinWaitPolicy,
+    ("policy", "toy.null", 1): toy.NullPolicy,
+    ("observer", "catalog.observer", 1): catalog.CatalogObserver,
+    ("policy", "oracle.query", 1): oracle.QueryPolicy,
+    ("process", "scripted.records", 1): scripted.ScriptedRecords,
     ("design", "test.labelled", 1): LabelledDesign,
 }
 
@@ -110,6 +116,16 @@ def test_toy_round_trip_is_exact():
     assert type(loaded.coupling.shared[0][0]) is Purpose
     assert any(x.weak_type for x in jax.tree_util.tree_leaves(loaded.channels))
     assert dump_study(loaded, TOY_KINDS).to_json() == text
+
+
+def test_every_corpus_study_round_trips_exactly():
+    """Fails if restore validation refuses a valid corpus study (a converter or
+    `__post_init__` that does not accept its own output), or if any corpus study
+    reloads with a different treedef, static part or leaf, which would recompile.
+    """
+    for case in CORPUS:
+        study = case.make_study()
+        assert_same_pytree(study, load_study(dump_study(study, TOY_KINDS), TOY_KINDS))
 
 
 def test_reloaded_study_runs_and_reuses_the_compiled_program():
@@ -179,7 +195,8 @@ def test_dtypes_non_finite_floats_and_negative_zero_survive():
 
 def test_dict_order_is_content():
     """Fails if a dict's insertion order is lost on reload or left out of the hash
-    (a policy reading the first key would change behavior unseen).
+    (a policy reading the first key would change behavior unseen), or if a stored
+    field that `__post_init__` derives differently is accepted.
     """
     docs = [
         dump_study(toy.survey_1(design=LabelledDesign(labels=labels)), TOY_KINDS)
@@ -188,6 +205,12 @@ def test_dict_order_is_content():
     assert docs[0].content_hash != docs[1].content_hash
     for doc, order in zip(docs, (["z", "a"], ["a", "z"]), strict=True):
         assert list(load_study(doc.to_json(), TOY_KINDS).design.labels) == order
+    tampered = json.loads(docs[0].to_json())
+    tampered.pop("content_hash")
+    tampered["study"]["design"]["n_labels"] = 5
+    with pytest.raises(DocumentError) as err:
+        load_study(json.dumps(tampered), TOY_KINDS)
+    assert err.value.pointer == "/study/design/n_labels"
 
 
 def _big_endian_noise(study):
@@ -252,6 +275,13 @@ def _put(*path_and_value):
         (_drop_a_level, "/study/agenda", None),
         (_unknown_observer, "/study/observer/$kind", "D001"),
         (_edit_hash, "/content_hash", None),
+        (_put("clock", "tick_length_s", "hello"), "/study/clock/tick_length_s", None),
+        (
+            _put("horizon_tick", {"$array": "float64", "shape": [], "data": 10.75}),
+            "/study/horizon_tick",
+            None,
+        ),
+        (_put("agenda", "levels", [3]), "/study/agenda/levels", None),
         (
             _put("observer", {"$enum": ["core", "clock", 1], "value": 1.0}),
             "/study/observer/$enum",
@@ -269,6 +299,9 @@ def _put(*path_and_value):
         "module-check",
         "unknown-kind",
         "edited-hash",
+        "string-for-float",
+        "float-for-int-tick",
+        "tuple-for-array",
         "enum-tag-on-module",
         "kind-tag-on-enum",
         "enum-without-value",
@@ -277,8 +310,9 @@ def _put(*path_and_value):
 def test_bad_document_fails_with_a_pointer(edit, where, code):
     """Fails if a bad document loads, or fails without the pointer of the offending
     value: data that does not match its declared shape, a field that breaks its
-    module's check, an unknown kind, a hand-edited hash, or a tag naming the wrong
-    category of class.
+    module's check, an unknown kind, a hand-edited hash, a value its converter
+    would coerce (a string clock, a fractional tick), a tuple where an array is
+    expected, or a tag naming the wrong category of class.
     """
     doc = json.loads(dump_study(toy.survey_1(), TOY_KINDS).to_json())
     doc.pop("content_hash")  # a document without a hash loads unchecked
