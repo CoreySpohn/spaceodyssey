@@ -58,9 +58,19 @@ The variance of the measured counts is
 ``systematic = (integral of leakage / ppfact dt)**2``. The flux-weighted centroid
 uses the same detected planet rates as weights, so a throughput change along the arc
 moves it.
+
+The reporting law turns budgets into records. `ReportingLaw` is one normalized
+joint law of measured counts and position: detection when the counts reach
+`threshold` times the planet-free noise of the model's nominal scene
+(`limit_counts`), null otherwise. `sample_report` draws a `SummaryRow` from the
+truth side's budget and `loglike_report` scores a row against a proposal's
+predicted budget. Every reported uncertainty comes from the row's own observables.
+`summary_kind` is the record kind, its payload columns and audiences read from the
+profile table; `calibration_id` digests the declarations a row was made under.
 """
 
 import dataclasses
+import hashlib
 import math
 
 import equinox as eqx
@@ -71,6 +81,8 @@ import jaxedith
 import numpy as np
 from hwoutils.constants import nm2m, rad2arcsec, s2d
 from hwoutils.conversions import jy_to_photons_per_nm_per_m2, mag_to_flux_jy
+from jax.scipy.special import log_ndtr
+from jax.scipy.stats import norm
 from jaxedith import (
     ETCScene,
     detector_noise,
@@ -92,10 +104,20 @@ from optixstuff import (
     SimplePrimary,
     YippyCoronagraph,
 )
+from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
+from photomancy.orbit.likelihoods import loglike_relative_astrom
 from yippy import EqxCoronagraph, fetch_yip
 from yippy.datasets import CATALOG, DATA_RELEASE_TAG
 from yippy.performance import PROFILE_STEP_PIX
+
+from spaceodyssey.adapters.physical_profile import (
+    audience_flags,
+    check_profile,
+    load_profile,
+    payload_column_names,
+)
+from spaceodyssey.core.records import PayloadColumn, RecordKind
 
 # The public response package, release and digest the summary path is pinned to.
 YIP_NAME = "eac1_aavc_2d"
@@ -811,3 +833,371 @@ def nominal_planet(*, a_au, e, inclination_rad, W_rad, w_rad, tp_d, Rp_au, Ag):
         "Lambda": jnp.asarray(Ag, dtype=jnp.float64)
         * jnp.asarray(Rp_au, dtype=jnp.float64) ** 2,
     }
+
+
+def planet_free(planet):
+    """`planet` with no reflected light: the geometry stays, the counts are zero.
+
+    The budget of a planet-free planet is the reference the detection limit is
+    built from (`ReportingLaw.limit_counts`).
+    """
+    out = dict(planet)
+    out["Lambda"] = jnp.zeros_like(jnp.asarray(planet["Lambda"], dtype=jnp.float64))
+    return out
+
+
+# -- Reporting law and record kind ---------------------------------------------
+
+SUMMARY_KIND_NAME = "summary_measurement"
+
+# The summary record's payload columns, in record order (the profile table's).
+SUMMARY_COLUMNS = (
+    "time_d",
+    "science_s",
+    "occupied_s",
+    "detected",
+    "counts",
+    "limit_counts",
+    "snr",
+    "ra",
+    "dec",
+    "ra_err",
+    "dec_err",
+    "corr",
+    "cadence",
+    "calibration_id",
+    "valid_science",
+)
+
+# A calibration id is six bytes: every value is an integer a float64 holds exactly.
+CALIBRATION_ID_BYTES = 6
+
+
+def summary_kind(profile=None):
+    """The summary record kind, its columns and audiences read from the profile.
+
+    Refuses a profile that is incomplete (KP5: every column needs a unit, a sign, a
+    measure and an audience) or whose columns are not `SUMMARY_COLUMNS` in order.
+    """
+    profile = load_profile() if profile is None else profile
+    problems = check_profile(profile)
+    if problems:
+        raise ValueError(f"the profile is incomplete: {problems}")
+    names = payload_column_names(profile)
+    if names != SUMMARY_COLUMNS:
+        msg = f"profile columns {names} are not the summary columns {SUMMARY_COLUMNS}"
+        raise ValueError(msg)
+    columns = tuple(
+        PayloadColumn(c["name"], audience_flags(c["audience"]))
+        for c in profile["payload_columns"]
+    )
+    return RecordKind(SUMMARY_KIND_NAME, columns)
+
+
+class SummaryRow(eqx.Module):
+    """One summary record's payload, one field per column (see `SUMMARY_COLUMNS`).
+
+    `detected` and `valid_science` are 0 or 1. A null row carries its epoch,
+    durations, `limit_counts`, `corr`, `cadence` and `calibration_id`, and zero
+    counts, signal-to-noise, position and errors. A row with no science interval
+    (`valid_science = 0`) carries zero `limit_counts` as well.
+    """
+
+    time_d: jax.Array
+    science_s: jax.Array
+    occupied_s: jax.Array
+    detected: jax.Array
+    counts: jax.Array
+    limit_counts: jax.Array
+    snr: jax.Array
+    ra: jax.Array
+    dec: jax.Array
+    ra_err: jax.Array
+    dec_err: jax.Array
+    corr: jax.Array
+    cadence: jax.Array
+    calibration_id: jax.Array
+    valid_science: jax.Array
+
+    def payload(self):
+        """The payload vector, float64 in column order (batched rows stack last)."""
+        return jnp.stack(
+            [jnp.asarray(getattr(self, n), jnp.float64) for n in SUMMARY_COLUMNS],
+            axis=-1,
+        )
+
+    @classmethod
+    def from_payload(cls, payload):
+        """The row a payload vector holds (the inverse of `payload`)."""
+        payload = jnp.asarray(payload, jnp.float64)
+        if payload.shape[-1] != len(SUMMARY_COLUMNS):
+            msg = f"a summary payload has {len(SUMMARY_COLUMNS)} columns"
+            raise ValueError(f"{msg}, got {payload.shape[-1]}")
+        return cls(**{n: payload[..., i] for i, n in enumerate(SUMMARY_COLUMNS)})
+
+
+def observed_snr(counts, limit_counts):
+    """Signal-to-noise from observables: counts over sqrt(limit^2 + max(counts, 0)).
+
+    Zero where the noise estimate is zero (a row with no science interval).
+    """
+    noise2 = limit_counts**2 + jnp.maximum(counts, 0.0)
+    safe = jnp.where(noise2 > 0, noise2, 1.0)
+    return jnp.where(noise2 > 0, counts / jnp.sqrt(safe), 0.0)
+
+
+class ReportingLaw(eqx.Module):
+    """One normalized joint law of measured counts and position, detection and null.
+
+    Per exposure with expected planet counts `N` and total count variance `s^2`
+    (planet shot noise, background, detector and systematic floor; `CountBudget`):
+
+    - the measured counts are ``f = N + s * eps1``;
+    - a detection is the event ``f >= threshold * limit_counts``, where
+      `limit_counts` is the planet-free noise standard deviation of the model's
+      nominal scene (`limit_counts`); a null is the complementary event;
+    - on a detection the row reports `f`, the observable signal-to-noise
+      `observed_snr(f, limit_counts)`, and a position drawn about the flux-weighted
+      centroid with per-axis standard deviation ``kappa * (lambda/D) / snr`` and
+      correlation `corr`.
+
+    The detection density is ``Normal(f; N, s^2) * Normal2(pos; mu, Sigma(f))`` on
+    ``f >= threshold * limit_counts`` and the null probability is
+    ``Phi((threshold * limit_counts - N) / s)``; together they integrate to one.
+    `Sigma` depends on the observable `f` only, so the photometric, astrometric and
+    selection terms separate given the row. Every reported uncertainty is computed
+    from the row's own observables; no expected signal-to-noise is reported.
+
+    Attributes:
+        threshold: Detection threshold in planet-free standard deviations.
+        kappa: Centroid error per axis in units of (lambda/D) / snr.
+        corr: Correlation of the east and north position errors.
+    """
+
+    threshold: float = eqx.field(static=True, default=5.0)
+    kappa: float = eqx.field(static=True, default=1.0)
+    corr: float = eqx.field(static=True, default=0.0)
+
+    def __check_init__(self):
+        """Refuse a nonpositive threshold or kappa, or a correlation outside (-1, 1)."""
+        _finite("threshold", self.threshold, low=0.0, low_open=True)
+        _finite("kappa", self.kappa, low=0.0, low_open=True)
+        _finite("corr", self.corr)
+        if not -1.0 < self.corr < 1.0:
+            raise ValueError(f"corr must lie in (-1, 1), got {self.corr!r}")
+
+    @staticmethod
+    def limit_counts(reference):
+        """Planet-free noise standard deviation of a reference budget [e-].
+
+        `reference` is the model's budget of the planned planet with no reflected
+        light (`planet_free`) against the nominal scene over the realized science
+        interval: the background, detector and systematic variances only.
+        """
+        variance = (
+            reference.var_background + reference.var_detector + reference.var_systematic
+        )
+        return jnp.sqrt(jnp.maximum(variance, 0.0))
+
+    def position_error(self, snr, lod_arcsec):
+        """Per-axis position standard deviation [arcsec]; zero where snr is zero."""
+        safe = jnp.where(snr > 0, snr, 1.0)
+        return jnp.where(snr > 0, self.kappa * lod_arcsec / safe, 0.0)
+
+    def log_null_probability(self, limit_counts, budget):
+        """The log probability of a null, log P(null | theta)."""
+        s = _noise(budget)
+        return log_ndtr((self.threshold * limit_counts - budget.planet) / s)
+
+    def log_counts_density(self, counts, limit_counts, budget):
+        """Log density of the measured counts on the detection region; -inf below."""
+        s = _noise(budget)
+        inside = counts >= self.threshold * limit_counts
+        return jnp.where(inside, norm.logpdf(counts, budget.planet, s), -jnp.inf)
+
+    @staticmethod
+    def log_position_density(row, budget, valid):
+        """Log density of the reported position given its reported covariance.
+
+        Masked to zero where `valid` is false (photomancy's relative-astrometry
+        likelihood with the row's errors and correlation).
+        """
+        has_errors = (row.ra_err > 0) & (row.dec_err > 0)
+        data = RelativeAstromData(
+            times=jnp.zeros(1),
+            ra=jnp.atleast_1d(row.ra),
+            dec=jnp.atleast_1d(row.dec),
+            ra_err=jnp.atleast_1d(jnp.where(has_errors, row.ra_err, 1.0)),
+            dec_err=jnp.atleast_1d(jnp.where(has_errors, row.dec_err, 1.0)),
+            corr=jnp.atleast_1d(row.corr),
+            planet_id=jnp.zeros(1, dtype=int),
+            is_valid=jnp.atleast_1d(valid & has_errors),
+        )
+        ll = loglike_relative_astrom(
+            jnp.atleast_1d(budget.ra_arcsec), jnp.atleast_1d(budget.dec_arcsec), data
+        )
+        return jnp.where(valid & ~has_errors, -jnp.inf, ll)
+
+
+def _noise(budget):
+    """Standard deviation of the measured counts; 1 where the variance is not > 0."""
+    variance = budget.variance
+    return jnp.sqrt(jnp.where(variance > 0, variance, 1.0))
+
+
+def sample_report(
+    key,
+    law,
+    expected,
+    limit_counts,
+    *,
+    lod_arcsec,
+    time_d,
+    occupied_s,
+    calibration_id,
+    valid_science=True,
+):
+    """Draw one summary row under `law` from the truth side's budget.
+
+    Args:
+        key: PRNG key; three standard normals are drawn (counts, then position).
+        law: The `ReportingLaw`.
+        expected: The true planet's `CountBudget` against the true scene over the
+            realized science interval (`SummaryReport.expected`).
+        limit_counts: The planet-free noise standard deviation of the model's
+            nominal scene at the same interval (`ReportingLaw.limit_counts`).
+        lod_arcsec: lambda/D at the band center [arcsec].
+        time_d: Julian Date (TDB) of the science-interval midpoint.
+        occupied_s: Executed occupancy, settling plus science [s].
+        calibration_id: The declarations' digest (`calibration_id`).
+        valid_science: False when the visit produced no certified science interval.
+
+    Returns:
+        A `SummaryRow`. A row whose science duration or limit is zero, or whose
+        `valid_science` is false, has no science: zero counts and limit. Non-finite
+        expected counts, variance or limit give NaN `detected`, `counts` and
+        `limit_counts`, never a silent null.
+    """
+    eps = jax.random.normal(key, (3,), dtype=jnp.float64)
+    limit = jnp.asarray(limit_counts, jnp.float64)
+    science = jnp.asarray(expected.science_s, jnp.float64)
+    valid = jnp.asarray(valid_science) & (science > 0) & (limit > 0)
+    finite = (
+        jnp.isfinite(expected.planet)
+        & jnp.isfinite(expected.variance)
+        & jnp.isfinite(limit)
+    )
+    counts = expected.planet + _noise(expected) * eps[0]
+    detected = valid & (counts >= law.threshold * limit)
+    counts = jnp.where(detected, counts, 0.0)
+    snr = observed_snr(counts, limit)
+    sigma = law.position_error(snr, lod_arcsec)
+    rho = law.corr
+    ra = expected.ra_arcsec + sigma * eps[1]
+    dec = expected.dec_arcsec + sigma * (rho * eps[1] + math.sqrt(1 - rho**2) * eps[2])
+    nan = jnp.asarray(jnp.nan)
+    zero = jnp.asarray(0.0)
+    return SummaryRow(
+        time_d=jnp.asarray(time_d, jnp.float64),
+        science_s=jnp.where(valid, science, zero),
+        occupied_s=jnp.asarray(occupied_s, jnp.float64),
+        detected=jnp.where(finite, detected.astype(jnp.float64), nan),
+        counts=jnp.where(finite, counts, nan),
+        limit_counts=jnp.where(finite, jnp.where(valid, limit, zero), nan),
+        snr=snr,
+        ra=jnp.where(detected, ra, zero),
+        dec=jnp.where(detected, dec, zero),
+        ra_err=sigma,
+        dec_err=sigma,
+        corr=jnp.asarray(rho, jnp.float64),
+        cadence=jnp.asarray(expected.cadence, jnp.float64),
+        calibration_id=jnp.asarray(calibration_id, jnp.float64),
+        valid_science=valid.astype(jnp.float64),
+    )
+
+
+def loglike_report(law, row, predicted):
+    """The log likelihood log p(row | theta) under `law`, from a predicted budget.
+
+    `predicted` is `SummaryReport.predict(theta, interval)` over the row's science
+    interval. A detection contributes the counts density on the detection region
+    plus the position density with the row's own errors and correlation; a null
+    contributes log P(null | theta) at the row's `limit_counts`; a row with no
+    science contributes zero.
+    """
+    valid = row.valid_science > 0.5
+    detected = valid & (row.detected > 0.5)
+    log_det = law.log_counts_density(
+        row.counts, row.limit_counts, predicted
+    ) + law.log_position_density(row, predicted, detected)
+    log_null = law.log_null_probability(row.limit_counts, predicted)
+    out = jnp.where(detected, log_det, jnp.where(valid, log_null, 0.0))
+    # A NaN detection flag (a non-finite draw) never reads as a null.
+    return jnp.where(jnp.isnan(row.detected), jnp.nan, out)
+
+
+def _canonical(value):
+    """A platform-stable text form of a declaration (floats to 12 digits)."""
+    if isinstance(value, dict):
+        items = (f"{k}:{_canonical(value[k])}" for k in sorted(value))
+        return "{" + ",".join(items) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_canonical(v) for v in value) + "]"
+    if isinstance(value, str):
+        return repr(value)
+    array = np.asarray(value, dtype=np.float64)
+    if array.ndim == 0:
+        return f"{float(array):.12g}"
+    # Curves are digested to 9 digits so the last bits of a platform do not move it.
+    return "[" + ",".join(f"{v:.9g}" for v in array.ravel()) + "]"
+
+
+def calibration_id(report, law):
+    """Six-byte digest of the report's and the law's declarations, as an integer.
+
+    Covers the detector and its cadence, the optics (aperture, obscuration,
+    attenuating elements), the response (working angles, pixel scale and its
+    throughput, core area and stellar leakage curves at the nominal host), the band,
+    the variance declarations, the nominal scene and the law. The integer is below
+    2^48, so a float64 payload column holds it exactly; it is never zero.
+    """
+    path = report.optical_path
+    coronagraph = report.nominal.optical_path.coronagraph
+    grid = jnp.arange(0.0, report.leakage_max_lod, report.leakage_step_lod)
+    wl = report.wavelength_nm
+    declarations = {
+        "detector": dataclasses.asdict(report.detector_spec),
+        "optics": {
+            "diameter_m": path.primary.diameter_m,
+            "obscuration": path.primary.obscuration,
+            "elements": [
+                [type(e).__name__, getattr(e, "name", ""), getattr(e, "throughput", 0)]
+                for e in path.attenuating_elements
+            ],
+        },
+        "response": {
+            "IWA": coronagraph.IWA,
+            "OWA": coronagraph.OWA,
+            "pixel_scale_lod": coronagraph.pixel_scale_lod,
+            "throughput": coronagraph.throughput(grid, wl),
+            "core_area": coronagraph.core_area(grid, wl),
+            "leakage": coronagraph.core_mean_intensity(grid, wl),
+            "field_radius_lod": report.field_radius_lod,
+        },
+        "band": {"wavelength_nm": wl, "bin_width_nm": report.bin_width_nm},
+        "variance": {
+            "bg_multiplier": report.bg_multiplier,
+            "ppfact": "inf" if math.isinf(report.ppfact) else report.ppfact,
+            "eps_warm_T_cold": report.eps_warm_T_cold,
+            "n_time_nodes": int(report.nodes.shape[0]),
+            "orbit_epoch_jd": report.orbit_epoch_jd,
+        },
+        "nominal_scene": {
+            f.name: getattr(report.nominal.scene, f.name)
+            for f in dataclasses.fields(report.nominal.scene)
+        },
+        "law": {"threshold": law.threshold, "kappa": law.kappa, "corr": law.corr},
+    }
+    text = _canonical(declarations).encode("utf-8")
+    digest = hashlib.blake2b(text, digest_size=CALIBRATION_ID_BYTES).digest()
+    return int.from_bytes(digest, "big") or 1
