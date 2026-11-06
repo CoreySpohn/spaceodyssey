@@ -71,7 +71,9 @@ the cost of divergent handler branches under `vmap`.
    projection the trace records. The default is `MeanBelief` for both types, and a
    `Study` refuses an observer whose layout does not describe what it initializes.
    Put phase policies, boundaries and permitted effects into an `Agenda`, then
-   compose a `Study`.
+   compose a `Study`. Each phase also carries a level from 0 to 3, whose mask
+   (`LEVEL_EFFECTS`) admission intersects with the phase mask; the levels are
+   nested, and the default, level 3, permits every effect.
 4. Run pre-flight for the intended executor and resolve its findings. Declarations
    are assertions by the components, so a clean result does not prove scientific
    correctness or detect an undeclared dependency hidden in a closure.

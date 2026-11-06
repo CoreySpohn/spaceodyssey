@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 
 from spaceodyssey.core.capacities import Capacities, require_x64
-from spaceodyssey.core.enums import F64, I64
+from spaceodyssey.core.enums import F64, I64, LEVEL_EFFECTS
 from spaceodyssey.core.keys import DEFAULT_COUPLING, Coupling, Fork
 from spaceodyssey.core.kinds import (
     AbstractChannelModel,
@@ -35,17 +35,37 @@ class Agenda(eqx.Module):
     """Policies, the phase boundaries that select them, and what each phase may ask.
 
     `permitted_effects` holds one bitmask over `EffectKind` per phase (see
-    `effect_mask`); admission refuses an effect whose bit is clear.
+    `effect_mask`), and `levels` one level number (0 to 3) per phase, whose mask is
+    `LEVEL_EFFECTS[level]`. Admission refuses an effect whose bit is clear in the
+    intersection of the two (`effective_effects`). Levels default to the top level,
+    which permits every effect, so the phase masks alone decide.
     """
 
     policies: tuple[AbstractPolicy, ...]
     phase_until: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, I64))
     permitted_effects: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, I64))
+    levels: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, I64))
+
+    def __init__(self, policies, phase_until, permitted_effects, levels=None):
+        """Store the fields; `levels=None` puts every phase at the top level."""
+        self.policies = policies
+        self.phase_until = phase_until
+        self.permitted_effects = permitted_effects
+        top = len(LEVEL_EFFECTS) - 1
+        self.levels = (top,) * len(policies) if levels is None else levels
 
     def __check_init__(self):
-        """Require one mask per phase."""
+        """Require one mask and one known level per phase."""
         if len(self.permitted_effects) != len(self.policies):
             raise ValueError("permitted_effects needs one mask per policy phase")
+        if self.levels.shape != (len(self.policies),):
+            raise ValueError("levels needs one level per policy phase")
+        if bool(jnp.any((self.levels < 0) | (self.levels >= len(LEVEL_EFFECTS)))):
+            raise ValueError(f"levels must lie in 0 to {len(LEVEL_EFFECTS) - 1}")
+
+    def effective_effects(self):
+        """Per-phase mask admission applies: the phase mask and the level mask."""
+        return self.permitted_effects & jnp.asarray(LEVEL_EFFECTS, I64)[self.levels]
 
 
 class Study(eqx.Module):

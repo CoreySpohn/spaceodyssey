@@ -16,6 +16,7 @@ from spaceodyssey.core.enums import BIG as BIG
 from spaceodyssey.core.enums import EVERYONE as EVERYONE
 from spaceodyssey.core.enums import F64 as F64
 from spaceodyssey.core.enums import I64 as I64
+from spaceodyssey.core.enums import LEVEL_EFFECTS as LEVEL_EFFECTS
 from spaceodyssey.core.enums import N_STAGES as N_STAGES
 from spaceodyssey.core.enums import N_TIES as N_TIES
 from spaceodyssey.core.enums import PUBLIC as PUBLIC

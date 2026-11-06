@@ -26,7 +26,9 @@ FIXTURES = REPO / "tests/core/lint_fixtures"
 DENIED = frozenset(
     "planet star exoplanet coronagraph telescope exposure slew keepout band "
     "wavelength flux magnitude orbit ephemeris exozodi tdb visit mission target "
-    "facility nondetection completeness photometry detection".split()
+    "facility nondetection completeness photometry detection "
+    # Agenda levels are numbers in the core; their role names stay outside it.
+    "planner allocator integration".split()
 )
 PLURALS = {
     word[:-1] + "ies"

@@ -180,8 +180,8 @@ def mask_effects(effects, wake):
 
 
 def _phase_mask(c, study):
-    """Bitmask of the effects the current phase may ask for."""
-    masks = jnp.asarray(study.agenda.permitted_effects, I64)
+    """Bitmask of the effects the current phase may ask for, its level included."""
+    masks = jnp.asarray(study.agenda.effective_effects(), I64)
     return masks[jnp.clip(c.phase, 0, masks.shape[0] - 1)]
 
 
@@ -433,7 +433,8 @@ def admit(carry, effects, study, snapshot_fp=None):
     Observe rows sharing a `group` id are judged together: summed demand per resource
     row, lane availability and queue room for all of them, then every row is admitted or
     none is, and a refused group takes no acquisition index. An effect whose bit is
-    clear in the phase's permitted mask is refused as forbidden and changes nothing.
+    clear in the phase's effective mask (`Agenda.effective_effects`: the phase mask
+    and its level mask) is refused as forbidden and changes nothing.
 
     A Query is not charged. It queues a request row at the current tick in the admit
     stage, addressed to the policy audience and stamped with the fingerprint of the

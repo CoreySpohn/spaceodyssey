@@ -16,7 +16,8 @@ FIXTURES = Path(__file__).with_name("lint_fixtures")
 DENIED = (
     "planet star exoplanet coronagraph telescope exposure slew keepout band "
     "wavelength flux magnitude orbit ephemeris exozodi tdb visit mission target "
-    "facility nondetection completeness photometry detection"
+    "facility nondetection completeness photometry detection "
+    "planner allocator integration"
 ).split()
 PHYSICS = (
     "orbix jaxedith photomancy skyscapes coronagraphoto coronachrome coronalyze "

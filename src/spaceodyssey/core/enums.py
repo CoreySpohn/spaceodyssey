@@ -184,3 +184,12 @@ def effect_mask(*kinds):
 
 
 ALL_EFFECTS = effect_mask(*EffectKind)
+
+# Effects each Agenda level permits, by level number. The levels are nested: each
+# mask holds every bit of the one before it.
+_LEVEL_0 = effect_mask(EffectKind.NONE, EffectKind.CANCEL)
+_LEVEL_1 = _LEVEL_0 | effect_mask(
+    EffectKind.OBSERVE, EffectKind.WAIT, EffectKind.QUERY, EffectKind.STOP
+)
+_LEVEL_3 = _LEVEL_1 | effect_mask(EffectKind.ALLOCATE)
+LEVEL_EFFECTS = (_LEVEL_0, _LEVEL_1, _LEVEL_1, _LEVEL_3)
