@@ -7,13 +7,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from spaceodyssey.engines.analytic import (
+from spaceodyssey.metrics import CertifiedYield
+from spaceodyssey.reporting import (
     CHANNELS,
     certified_yield,
     paired_difference,
     replicate_yields,
 )
-from spaceodyssey.metrics import CertifiedYield
 from tests.test_plan import make_outcome
 
 

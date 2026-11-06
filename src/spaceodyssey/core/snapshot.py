@@ -34,7 +34,7 @@ def project_mean(belief):
 
 
 def _as_shapes(tree):
-    """The shapes of a pytree of arrays or of `jax.ShapeDtypeStruct`s."""
+    """The shapes of a pytree of arrays or of `jax.ShapeDtypeStruct` values."""
     return jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), tree
     )

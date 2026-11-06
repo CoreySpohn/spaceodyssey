@@ -1,13 +1,9 @@
 """The predictive-distribution waist.
 
-Every measurement model returns a predictive distribution over its dataset;
-what a run does with that distribution is the outcome operator. The sampling
-engine draws from it against a drawn truth, the belief-space engine pushes
-its moments, and the closed-form engine integrates functionals against it.
-One distribution type serves all three, and an implementation that cannot
-support a method raises :class:`spaceodyssey.errors.UnsupportedOperator`; the
-declared capability lives in registry metadata and is checked at
-configuration-validation time, never discovered mid-run.
+Every measurement model returns a predictive distribution over its dataset.
+One distribution type serves drawing a realized dataset, pushing moments and
+integrating functionals against it. An implementation that cannot support a
+method raises :class:`spaceodyssey.errors.UnsupportedOperator`.
 
 Method names deliberately mirror the prior layer of the inference library
 (``sample``, ``log_prob``) so likelihood factories and belief code read the

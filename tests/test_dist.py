@@ -6,7 +6,7 @@ import pytest
 
 from spaceodyssey.dist import AbstractPredictive, GaussianSummary
 from spaceodyssey.errors import UnsupportedOperator
-from spaceodyssey.testing import check_predictive
+from tests.doubles import check_predictive
 
 
 def make_predictive() -> GaussianSummary:
