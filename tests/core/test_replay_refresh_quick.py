@@ -23,9 +23,11 @@ from spaceodyssey.core.carry import _tree_set, empty_trace
 from spaceodyssey.core.enums import F64, I64, Capacity, RecordStatus, RefitStatus, Stage
 from spaceodyssey.core.events import empty_event_row
 from spaceodyssey.core.executors import replay
+from spaceodyssey.core.handlers import h_release
 from spaceodyssey.core.records import record_none, write_log
 from spaceodyssey.core.refresh import AbstractRefitBoundary, RefitResult
 from spaceodyssey.studies import toy
+from tests.core.test_replay_refresh import FoldTimeMean
 
 ROOT = jnp.asarray([3, 5], jnp.uint32)
 ACQUISITION = 1
@@ -79,8 +81,15 @@ def _step(caps, **fields):
 
 @functools.cache
 def study():
-    caps = Capacities(rows_per_subject=1, refit_lanes=1, n_log=4)
+    caps = Capacities(n_subjects=1, n_an=1, rows_per_subject=1, refit_lanes=1, n_log=4)
     return toy.survey_refresh(100, caps=caps, policies=(toy.NullPolicy(),))
+
+
+def _install(c, s):
+    request = core.refresh._gather(c, ROOT, s)
+    batch = jax.tree_util.tree_map(lambda x: x[None], request)
+    one = jax.tree_util.tree_map(lambda x: x[0], KeyedBoundary().refit_batch(s, batch))
+    return core.refresh._commit(c, request, one, s)
 
 
 def build(scenario="normal"):
@@ -88,7 +97,8 @@ def build(scenario="normal"):
 
     `scenario` is `normal`, `ids` (the id allocator is exhausted at the checkpoint),
     `rows` (the log has no room for the product rows) or `cut` (the run ends on the
-    hold, as a step budget would end it).
+    hold, as a step budget would end it), or `mixed` (a successful checkpoint followed
+    by a checkpoint refused for log space).
     """
     s = study()
     caps = s.caps
@@ -99,9 +109,9 @@ def build(scenario="normal"):
     )
     c, _ = write_log(c, _measurement(caps, 0, 2.0, 10), caps)
     c = _stamp(c, 0, 10)
-    if scenario == "rows":  # two unreleased rows of another subject fill the log
+    if scenario == "rows":  # two unreleased rows fill the log
         for k in (1, 2):
-            c, _ = write_log(c, _measurement(caps, 0, 1.0, 20, 1, 1 + k), caps)
+            c, _ = write_log(c, _measurement(caps, 0, 1.0, 20, 0, 1 + k), caps)
     c = _tree_set(
         c,
         refresh_dirty=c.refresh_dirty.at[:, 0].set(True),
@@ -116,10 +126,7 @@ def build(scenario="normal"):
         valid=jnp.asarray(True),
     )
     c = _tree_set(c, refresh=held)
-    request = core.refresh._gather(c, ROOT, s)
-    batch = jax.tree_util.tree_map(lambda x: x[None], request)
-    one = jax.tree_util.tree_map(lambda x: x[0], KeyedBoundary().refit_batch(s, batch))
-    done = core.refresh._commit(c, request, one, s)
+    done = _install(c, s)
     mean, aux = layout.project(done.belief)
     rows = [
         _step(
@@ -158,7 +165,7 @@ def build(scenario="normal"):
             belief_aux=aux,
         )
     )
-    if scenario == "normal":
+    if scenario in ("normal", "mixed"):
         correction = _measurement(caps, 1, 9.0, 100)
         done, _ = write_log(done, correction, caps)
         slot = int(done.n_log) - 1
@@ -177,6 +184,35 @@ def build(scenario="normal"):
                 audience=jnp.asarray(core.PUBLIC, I64),
                 n_log=done.n_log,
             )
+        )
+    if scenario == "mixed":
+        held = dataclasses.replace(
+            held, tick=jnp.asarray(200, I64), acquisition_index=jnp.asarray(2, I64)
+        )
+        c = _tree_set(
+            done, refresh=held, refresh_dirty=done.refresh_dirty.at[:, 0].set(True)
+        )
+        done = _install(c, s)
+        mean, aux = layout.project(done.belief)
+        hold = _step(
+            caps,
+            kind=jnp.asarray(EventKind.REFRESH, I64),
+            tick=held.tick,
+            stage=jnp.asarray(Stage.ANALYZE, I64),
+            acquisition_index=held.acquisition_index,
+            n_log=c.n_log,
+        )
+        rows.extend(
+            [
+                hold,
+                dataclasses.replace(
+                    hold,
+                    n_written=done.n_log - c.n_log,
+                    n_log=done.n_log,
+                    belief_mean=mean,
+                    belief_aux=aux,
+                ),
+            ]
         )
     return done, _stack(rows)
 
@@ -271,6 +307,77 @@ def test_a_refused_install_is_reported_as_a_refusal(scenario, bits):
     forged = _tree_set(carry, overflow_mask=jnp.asarray(0, I64))
     with pytest.raises(ValueError, match="refused in the replay only"):
         replayed(scenario, carry=forged)
+
+
+def test_replay_reports_only_the_checkpoint_that_refused(monkeypatch):
+    """Fails if checkpoint 2's log-space refusal is attributed to checkpoint 1.
+
+    Extends the single-refusal guard above with success followed by refusal; reading
+    the final mask is the negative control.
+    """
+
+    def check():
+        out = replayed("mixed")
+        assert out.refused == ((2, 4),)
+        assert out.checkpoints == 2 and out.products == 2
+        assert not out.unfinished
+
+    check()
+    real = replay._hold
+
+    def reads_final(study, carry, *args):
+        pending = real(study, carry, *args)
+        pending["new"] = _tree_set(pending["new"], overflow_mask=carry.overflow_mask)
+        return pending
+
+    monkeypatch.setattr(replay, "_hold", reads_final)
+    with pytest.raises(AssertionError):
+        check()
+
+
+def test_replay_belief_folds_live_metadata_before_a_later_correction():
+    """Fails if replay_belief leaks final ticks or supersession into an earlier fold.
+
+    The slow fold-time guard covers replay_run; this guards the log-only API using
+    just the live release handler, without an executor compile.
+    """
+    s = toy.survey_1(
+        caps=Capacities(n_log=2),
+        policies=(toy.NullPolicy(),),
+        observer=FoldTimeMean(),
+    )
+    c = _tree_set(
+        core.empty_carry(s.caps),
+        belief=s.observer.init(s.caps),
+        pbelief=s.observer.init_summary(s.caps),
+    )
+    release = eqx.filter_jit(h_release)
+    rows = []
+    for revision, tick in ((0, 10), (1, 20)):
+        c, _ = write_log(c, _measurement(s.caps, revision, 2.0, tick), s.caps)
+        ev = dataclasses.replace(
+            empty_event_row(),
+            tick=jnp.asarray(tick, I64),
+            slot=jnp.asarray(revision, I64),
+            audience=jnp.asarray(core.PUBLIC, I64),
+        )
+        c, _, _ = release(c, ev, s, None, ROOT)
+        rows.append(
+            _step(
+                s.caps,
+                kind=jnp.asarray(EventKind.RELEASE, I64),
+                tick=ev.tick,
+                channel=jnp.asarray(10, I64),
+                log_slot=ev.slot,
+                audience=ev.audience,
+            )
+        )
+    assert c.belief.aux[1:4].tolist() == [-1.0, -1.0, -1.0]
+    assert int(c.log.superseded_by[0]) == 1
+    assert int(c.log.accepted_tick[0]) == int(c.log.released_tick[0]) == 10
+    out = core.replay_belief(s, c, _stack(rows), ROOT)
+    np.testing.assert_array_equal(out.aux, c.belief.aux)
+    np.testing.assert_array_equal(out.n, c.belief.n)
 
 
 def test_a_run_cut_on_a_hold_is_unfinished_not_refused():

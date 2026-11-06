@@ -34,6 +34,17 @@ def _row(log, i):
     return Record(**fields)  # the full row; callers mask it for their audience
 
 
+def _fold_time_row(full, accepted, released):
+    """The row before this release stamped its ticks or later revisions replaced it."""
+    last = jnp.asarray(-1, I64)
+    return dataclasses.replace(
+        full,
+        accepted_tick=full.accepted_tick if accepted else last,
+        released_tick=full.released_tick if released else last,
+        superseded_by=last,
+    )
+
+
 def _numpy_log(carry):
     """The carry's log with its integer columns and `valid` as numpy arrays."""
     return dataclasses.replace(
@@ -76,21 +87,33 @@ def replay_belief(study, carry, trace, root=None):
     steps = zip(
         *(
             np.asarray(getattr(trace, n))[handled].tolist()
-            for n in ("log_slot", "tick", "subject", "acquisition_index", "channel")
+            for n in (
+                "log_slot",
+                "tick",
+                "subject",
+                "acquisition_index",
+                "channel",
+                "audience",
+            )
         ),
         strict=True,
     )
     belief = study.observer.init(study.caps)
     used = np.zeros(log.valid.shape[0], dtype=bool)
+    released = set()
     folded = set()
-    for i, tick, subject, acquisition_index, channel in steps:
+    for i, tick, subject, acquisition_index, channel, audience in steps:
         _check_release(log, i, tick, subject, acquisition_index, channel)
         if log.status[i] == RecordStatus.UNRELEASED:
             continue
         if int(log.kind[i]) in study.caps.derived_kinds:
             # a derived row (a product or a declared summary) is never folded
             continue
-        if not int(log.audience[i]) & Audience.OBSERVER:
+        reach = audience & int(log.audience[i])
+        was_released = i in released
+        if reach & Audience.POLICY:
+            released.add(i)
+        if not reach & Audience.OBSERVER:
             # a row the observer may not read is never folded into its belief
             continue
         if not used[i] and log.accepted_tick[i] != tick:
@@ -102,7 +125,7 @@ def replay_belief(study, carry, trace, root=None):
         if acquisition in folded:
             continue
         folded.add(acquisition)
-        full = _row(carry.log, i)
+        full = _fold_time_row(_row(carry.log, i), False, was_released)
         key = None if root is None else fold_key(root, full, study)
         belief = _fold(
             study, belief, masked_record(full, study.caps, Audience.OBSERVER), key
@@ -363,14 +386,7 @@ def _release(study, carry, log, roots, at, state, seen, incremental, refit_kinds
     full = _row(carry.log, i)
     key = fold_key(roots, full, study) if incremental else None
     eligible = kind in refit_kinds
-    last = jnp.asarray(-1, I64)
-    # the ticks the handler read: stamped only after the folds
-    before = dataclasses.replace(
-        full,
-        accepted_tick=full.accepted_tick if i in accepted else last,
-        released_tick=full.released_tick if i in released else last,
-        superseded_by=last,
-    )
+    before = _fold_time_row(full, i in accepted, i in released)
     if reach & Audience.OBSERVER and i not in accepted:
         if log.accepted_tick[i] != at["tick"]:
             raise ValueError(
@@ -455,6 +471,8 @@ def _hold(study, carry, roots, boundary, at, state):
         n_log=jnp.asarray(n_log, I64),
         next_sid=jnp.asarray(next_sid, I64),
         phase=jnp.asarray(phase, I64),
+        # Reconstruct this install's refusals, not those of later checkpoints.
+        overflow_mask=carry.overflow_mask & ~jnp.asarray(int(REFUSALS), I64),
     )
     request = _request(view, roots, study)
     batch = jax.tree_util.tree_map(lambda x: x[None], request)
