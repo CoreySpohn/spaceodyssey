@@ -435,7 +435,7 @@ class SeparationSupport(eqx.Module):
     owa_arcsec: float
 
     def separation_rate_bound(self, target):
-        """Upper bound on |d separation / dt| of target `target`'s planet, arcsec/d."""
+        """Upper bound on ``|d separation / dt|`` of `target`'s planet, arcsec/d."""
         system = self.systems[target]
         planet = system.planets[0]
         a_au, e = planet.orbit.a_AU[0], planet.orbit.e[0]
