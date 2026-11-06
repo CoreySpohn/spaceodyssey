@@ -1052,3 +1052,76 @@ def test_a_column_name_the_lowering_drops_loads_but_changes_the_hash():
     other = _mutated(REGISTRY_MUTATIONS["column-name"])
     run = load_run(other.to_json(), bindings(), KINDS)
     assert run.registry[1].columns[0].name == "renamed"
+
+
+# ---- review round two ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flag", ["O_NOFOLLOW", "O_NONBLOCK", "O_DIRECTORY"])
+def test_a_platform_without_a_safe_open_flag_refuses_files(tmp_path, monkeypatch, flag):
+    doc, _, path = _stored(tmp_path)
+    elsewhere = tmp_path / "copy"
+    elsewhere.write_bytes(path.read_bytes())
+    path.unlink()
+    path.symlink_to(elsewhere)  # would load if the symlink check were skipped
+    monkeypatch.delattr(os, flag)
+    with pytest.raises(DocumentError) as info:
+        load_study(doc.to_json(), PLAN_KINDS, files=tmp_path)
+    assert flag in str(info.value)
+    assert info.value.pointer == "/study/design/table/file/name"
+
+
+def test_a_platform_without_dir_fd_refuses_files(tmp_path, monkeypatch):
+    doc, _, _ = _stored(tmp_path)
+    monkeypatch.setattr(os, "supports_dir_fd", set())
+    with pytest.raises(DocumentError) as info:
+        load_study(doc.to_json(), PLAN_KINDS, files=tmp_path)
+    assert "dir_fd" in str(info.value)
+    assert info.value.pointer == "/study/design/table/file/name"
+
+
+def test_a_file_that_grows_while_it_is_read_is_refused(tmp_path, monkeypatch):
+    doc, _, path = _stored(tmp_path)
+    real = os.read
+    grown = []
+
+    def read_then_append(fd, count):
+        out = real(fd, count)
+        if not grown:
+            grown.append(True)
+            with path.open("ab") as handle:
+                handle.write(b"x")
+        return out
+
+    monkeypatch.setattr(os, "read", read_then_append)
+    where = _pointer_of(lambda: load_study(doc.to_json(), PLAN_KINDS, files=tmp_path))
+    assert where == "/study/design/table/file/bytes"
+
+
+def test_a_stateful_builder_cannot_change_the_model_hash_after_validation():
+    calls = []
+    base = run_cases._masked_kind()
+
+    def build(config, registry):
+        calls.append(1)
+        hashed = MODEL_HASH if len(calls) <= 2 else 999
+        return MaskedBatchRefit(toy.toy_mean_kernel, model_hash=hashed)
+
+    kind = dataclasses.replace(base, build=build)
+    table = Bindings((run_cases._service_kind(), kind))
+    with pytest.raises(DocumentError) as info:
+        load_run(_dump().to_json(), table, KINDS)
+    assert info.value.code == "D003"
+    assert info.value.pointer.endswith("/model_hash")
+
+
+def test_a_missing_schema_version_or_study_is_a_document_error_not_a_key_error():
+    for missing, pointer in (("schema_version", ""), ("study", "")):
+        data = _parsed()
+        data.pop(missing)
+        text = json.dumps({**data, "content_hash": "0" * 64})
+        with pytest.raises(DocumentError) as info:
+            load_run(text, bindings(), KINDS)
+        assert info.value.pointer == pointer
+        found = preflight_document(text, KINDS)
+        assert found and found[0].pointer == pointer
