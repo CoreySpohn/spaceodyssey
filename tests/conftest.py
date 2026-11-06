@@ -191,6 +191,9 @@ SLOW_FILES = frozenset(
         "test_canonical_fields.py",
         "test_golden_histories.py",
         "test_survey_25.py",
+        # survey runs on both executors, with round trips and the latency check
+        "test_survey_14.py",
+        "test_survey_5.py",
     }
 )
 
