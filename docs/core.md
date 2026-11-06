@@ -8,9 +8,8 @@ Astronomical models and study names live outside the core, in
 `spaceodyssey.studies` or application adapters.
 
 Import the core explicitly, for example `from spaceodyssey import core`.
-The package-level legacy APIs remain available separately. The core requires
-JAX 64-bit mode before constructing capacities or studies; it never changes that
-process setting itself. Shapes are fixed by `Capacities`. Changing those shapes
+The core requires JAX 64-bit mode before constructing capacities or studies; it
+never changes that process setting itself. Shapes are fixed by `Capacities`. Changing those shapes
 retraces compiled functions.
 
 ## Layers and contracts
