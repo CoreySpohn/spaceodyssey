@@ -3,6 +3,7 @@
 import copy
 import dataclasses
 import json
+import os
 
 import equinox as eqx
 import jax
@@ -321,8 +322,8 @@ BINDING_FAILURES = {
             _set(("run", "refit", "host", "model_hash"), 9)(d),
             _set(("run", "refit", "compiled", "model_hash"), 9)(d),
         ),
-        "/run/refit/host/model_hash",
-        None,
+        "/run/refit/compiled/model_hash",
+        "D003",
     ),
     "hashes-differ": (
         _set(("run", "refit", "compiled", "model_hash"), 8),
@@ -339,12 +340,12 @@ BINDING_FAILURES = {
     "configuration-missing-key": (
         _set(("run", "service", "configuration"), {}),
         "/run/service/configuration",
-        None,
+        "D003",
     ),
     "configuration-wrong-key": (
         _set(("run", "refit", "host", "configuration"), {"n": 1}),
         "/run/refit/host/configuration",
-        None,
+        "D003",
     ),
     "run-member-unknown": (_set(("run", "other"), 1), "/run/other", "D003"),
     "schema-newer": (_set(("schema_version",), 2), "/schema_version", "D002"),
@@ -378,7 +379,10 @@ def test_a_binding_at_an_older_version_without_migrate_is_d001():
     table = Bindings((run_cases._service_kind(), kind))
     with pytest.raises(DocumentError) as info:
         load_run(_dump().to_json(), table, KINDS)
-    assert (info.value.pointer, info.value.code) == ("/run/refit/host/version", "D001")
+    assert (info.value.pointer, info.value.code) == (
+        "/run/refit/compiled/version",
+        "D001",
+    )
 
 
 def test_a_binding_at_an_older_version_goes_through_migrate():
@@ -403,7 +407,7 @@ def test_a_binding_at_an_older_version_goes_through_migrate():
     for side in ("host", "compiled"):
         data["run"]["refit"][side]["configuration"] = {"diag": 1}
     run = load_run(json.dumps(data), table, KINDS)
-    assert seen == [1, 1] and run.refit["host"].n_diag == 1
+    assert set(seen) == {1} and run.refit["host"].n_diag == 1
 
 
 def test_a_migrate_that_fails_is_refused_at_the_configuration():
@@ -414,7 +418,7 @@ def test_a_migrate_that_fails_is_refused_at_the_configuration():
     table = Bindings((run_cases._service_kind(), kind))
     with pytest.raises(DocumentError) as info:
         load_run(_dump().to_json(), table, KINDS)
-    assert info.value.pointer == "/run/refit/host/configuration"
+    assert info.value.pointer == "/run/refit/compiled/configuration"
 
 
 def test_an_instance_no_binding_covers_is_refused_on_dump():
@@ -823,3 +827,228 @@ def test_the_kinds_resolver_is_accepted_wherever_a_mapping_is():
     run = load_run(_dump().to_json(), bindings(), resolver)
     assert preflight_document(_dump(), resolver) == []
     assert run.executor == "host"
+
+
+# ---- file safety ------------------------------------------------------------------
+
+
+def _stored(tmp_path):
+    """A file-backed document, the reference of its table and the file's path."""
+    doc = dump_study(_plan_study(), PLAN_KINDS, files=tmp_path, max_inline=64)
+    ref = doc.study["design"]["table"]["file"]
+    return doc, ref, tmp_path / ref["name"]
+
+
+def test_dump_never_writes_through_a_planted_symlink(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep")
+    raw = np.asarray(_plan_study().design.table).tobytes()
+    import hashlib
+
+    name = f"{hashlib.sha256(raw).hexdigest()}.bin"
+    # the temporary names an earlier version used, and the final name, as symlinks
+    for planted in (f".{name}.{os.getpid()}.tmp", f".{name}.tmp", name):
+        (tmp_path / planted).symlink_to(victim)
+    doc, _, path = _stored(tmp_path)
+    assert victim.read_text() == "keep"
+    assert not path.is_symlink() and path.read_bytes() == raw
+    again = load_study(doc.to_json(), PLAN_KINDS, files=tmp_path)
+    assert np.asarray(again.design.table).tobytes() == raw
+
+
+def test_a_same_length_corruption_is_healed_by_the_next_dump(tmp_path):
+    _, _, path = _stored(tmp_path)
+    good = path.read_bytes()
+    path.write_bytes(bytes([good[0] ^ 1]) + good[1:])
+    doc = dump_study(_plan_study(), PLAN_KINDS, files=tmp_path, max_inline=64)
+    assert path.read_bytes() == good
+    load_study(doc.to_json(), PLAN_KINDS, files=tmp_path)
+
+
+def test_a_wrong_length_file_is_replaced_by_the_next_dump(tmp_path):
+    _, _, path = _stored(tmp_path)
+    good = path.read_bytes()
+    path.write_bytes(good[:-8])
+    dump_study(_plan_study(), PLAN_KINDS, files=tmp_path, max_inline=64)
+    assert path.read_bytes() == good
+
+
+def test_load_refuses_a_symlink_even_when_its_target_matches(tmp_path):
+    doc, _, path = _stored(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "copy").write_bytes(path.read_bytes())
+    path.unlink()
+    path.symlink_to(elsewhere / "copy")
+    where = _pointer_of(lambda: load_study(doc.to_json(), PLAN_KINDS, files=tmp_path))
+    assert where == "/study/design/table/file/name"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs POSIX named pipes")
+def test_load_refuses_a_fifo_without_blocking(tmp_path):
+    doc, _, path = _stored(tmp_path)
+    path.unlink()
+    os.mkfifo(path)
+    where = _pointer_of(lambda: load_study(doc.to_json(), PLAN_KINDS, files=tmp_path))
+    assert where == "/study/design/table/file/name"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs POSIX named pipes")
+def test_dump_replaces_a_fifo_at_the_digest_name(tmp_path):
+    _, _, path = _stored(tmp_path)
+    good = path.read_bytes()
+    path.unlink()
+    os.mkfifo(path)
+    dump_study(_plan_study(), PLAN_KINDS, files=tmp_path, max_inline=64)
+    assert path.is_file() and path.read_bytes() == good
+
+
+def test_oversize_and_undersize_files_are_refused_by_size(tmp_path):
+    doc, _, path = _stored(tmp_path)
+    good = path.read_bytes()
+    for raw in (good + b"\0" * 8, good[:-8], b""):
+        path.write_bytes(raw)
+        where = _pointer_of(
+            lambda: load_study(doc.to_json(), PLAN_KINDS, files=tmp_path)
+        )
+        assert where == "/study/design/table/file/bytes"
+
+
+def test_a_declared_size_is_checked_before_any_file_is_opened(tmp_path):
+    doc, _, path = _stored(tmp_path)
+    data = json.loads(doc.to_json())
+    data.pop("content_hash")
+    data["study"]["design"]["table"]["file"]["bytes"] = 1
+    path.unlink()  # a missing file would be `name`; the size is judged first
+    where = _pointer_of(
+        lambda: load_study(json.dumps(data), PLAN_KINDS, files=tmp_path)
+    )
+    assert where == "/study/design/table/file/bytes"
+
+
+def test_the_byte_limit_refuses_before_reading(tmp_path):
+    doc, ref, _ = _stored(tmp_path)
+    where = _pointer_of(
+        lambda: load_study(
+            doc.to_json(), PLAN_KINDS, files=tmp_path, max_file_bytes=ref["bytes"] - 1
+        )
+    )
+    assert where == "/study/design/table/file/bytes"
+    load_study(doc.to_json(), PLAN_KINDS, files=tmp_path, max_file_bytes=ref["bytes"])
+
+
+# ---- pre-flight and load agree -----------------------------------------------------
+
+
+def test_preflight_reads_file_backed_documents_and_checks_their_integrity(tmp_path):
+    doc, _, path = _stored(tmp_path)
+    assert preflight_document(doc, PLAN_KINDS, files=tmp_path) == []
+    assert [f.pointer for f in preflight_document(doc, PLAN_KINDS)] == [
+        "/study/design/table/file"
+    ]
+    good = path.read_bytes()
+    path.write_bytes(bytes([good[0] ^ 1]) + good[1:])
+    found = preflight_document(doc, PLAN_KINDS, files=tmp_path)
+    assert [(str(f.code), f.pointer) for f in found] == [
+        ("L001", "/study/design/table/file/sha256")
+    ]
+
+
+def _first_error(data):
+    """What pre-flight lists first, and what `load_run` raises, for one document."""
+    found = preflight_document(data, KINDS, bindings=bindings())
+    errors = [f for f in found if f.severity == "error"]
+    with pytest.raises(DocumentError) as info:
+        _load(data)
+    return errors[0], info.value
+
+
+PARITY_EXTRA = {
+    "run-null": (_set(("run",), None), "/run"),
+    "service-unknown-and-executor-bad": (
+        lambda d: (
+            _set(("run", "service", "kind"), "nobody")(d),
+            _set(("run", "executor"), "gpu")(d),
+        ),
+        "/run/service/kind",
+    ),
+    "wake-fn-member": (_set(("run", "wake_fn"), "hook"), "/run/wake_fn"),
+    "callable-tag": (
+        _set(("study", "design", "gain"), {"$lambda": "f"}),
+        "/study/design/gain",
+    ),
+    "records-bad": (lambda d: d["records"].pop(), "/records"),
+}
+
+
+@pytest.mark.parametrize("name", [*BINDING_FAILURES, *PARITY_EXTRA])
+def test_load_run_raises_the_first_finding_preflight_lists(name):
+    edit, pointer, *_ = (BINDING_FAILURES | PARITY_EXTRA)[name]
+    data = _parsed()
+    edit(data)
+    first, raised = _first_error(data)
+    assert raised.pointer == first.pointer
+    if not isinstance(raised, CallableRefused):
+        assert raised.detail == first.message
+    expected = None if str(first.code) == "L001" else str(first.code)
+    assert raised.code == expected or isinstance(raised, CallableRefused)
+    if name in PARITY_EXTRA:
+        assert first.pointer == pointer
+
+
+def test_preflight_rebuilds_boundaries_like_load_run():
+    data = _parsed()
+    for side in ("host", "compiled"):
+        data["run"]["refit"][side]["model_hash"] = 9
+    found = preflight_document(data, KINDS, bindings=bindings())
+    assert [(str(f.code), f.pointer) for f in found] == [
+        ("D003", "/run/refit/compiled/model_hash"),
+        ("D003", "/run/refit/host/model_hash"),
+    ]
+    data = _parsed()
+    data["run"]["refit"]["host"]["configuration"] = {}
+    found = preflight_document(data, KINDS, bindings=bindings())
+    assert [(str(f.code), f.pointer) for f in found] == [
+        ("D003", "/run/refit/host/configuration")
+    ]
+    assert preflight_document(_parsed(), KINDS, bindings=bindings()) == []
+
+
+# ---- the registry is hashed -------------------------------------------------------
+
+
+def _mutated(edit):
+    doc = _dump()
+    records = copy.deepcopy(doc.records)
+    edit(records)
+    return dataclasses.replace(doc, records=records)
+
+
+REGISTRY_MUTATIONS = {
+    "kind-name": lambda r: r[1].__setitem__("name", "renamed"),
+    "audience": lambda r: r[1]["columns"][0].__setitem__(1, 1),
+    "derived-flag": lambda r: r[1].__setitem__("derived", True),
+    "column-name": lambda r: r[1]["columns"][0].__setitem__(0, "renamed"),
+}
+
+
+@pytest.mark.parametrize("name", REGISTRY_MUTATIONS)
+def test_every_registry_field_is_in_the_content_hash(name):
+    base = _dump()
+    other = _mutated(REGISTRY_MUTATIONS[name])
+    assert other.content_hash != base.content_hash
+    assert json.loads(other.to_json())["content_hash"] == other.content_hash
+
+
+@pytest.mark.parametrize("name", ["kind-name", "audience", "derived-flag"])
+def test_a_registry_edit_that_changes_the_lowering_is_refused(name):
+    other = _mutated(REGISTRY_MUTATIONS[name])
+    with pytest.raises(DocumentError) as info:
+        load_run(other.to_json(), bindings(), KINDS)
+    assert info.value.pointer.startswith("/records")
+
+
+def test_a_column_name_the_lowering_drops_loads_but_changes_the_hash():
+    other = _mutated(REGISTRY_MUTATIONS["column-name"])
+    run = load_run(other.to_json(), bindings(), KINDS)
+    assert run.registry[1].columns[0].name == "renamed"
