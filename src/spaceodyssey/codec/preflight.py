@@ -52,7 +52,10 @@ from enum import StrEnum
 from spaceodyssey.codec.document import (
     DOCUMENT_KEYS,
     FORMAT,
+    RUN_FORMAT,
+    RUN_KEYS,
     DocumentError,
+    RunDocument,
     StudyDocument,
     check_schema_version,
     parse_text,
@@ -60,6 +63,7 @@ from spaceodyssey.codec.document import (
 )
 from spaceodyssey.codec.kinds import RegistrationError, as_resolver
 from spaceodyssey.codec.load import load_study, tolerating_null_arrays
+from spaceodyssey.codec.records import check_lowering, decode_records
 from spaceodyssey.core.declarations import EXECUTORS, declaration_of
 from spaceodyssey.core.enums import EffectKind
 from spaceodyssey.core.ledger import ChannelTable
@@ -68,6 +72,8 @@ from spaceodyssey.core.preflight import preflight as preflight_study
 from spaceodyssey.core.preflight.checks import _components
 
 RUN_KEY = "run"
+_RUN_MEMBERS = frozenset({"executor", "service", "refit"})
+CALLABLE_MEMBERS = frozenset({"wake_fn", "decide_py", "activation", "kernel", "fit"})
 
 
 def _text(value):
@@ -142,7 +148,7 @@ def resolve_pointer(root, ptr):
     return node
 
 
-def preflight_document(document, kinds=None, *, run=None, executor=None):
+def preflight_document(document, kinds=None, *, run=None, executor=None, bindings=None):
     """Every pre-flight finding of a study document, errors first.
 
     `document` is JSON text, a parsed object or a `StudyDocument`. `kinds` is a
@@ -153,17 +159,30 @@ def preflight_document(document, kinds=None, *, run=None, executor=None):
     capability check uses and defaults to the record's. A broken registration is a
     `RegistrationError` when the resolver is built, never a finding; document content
     never raises.
+
+    A `RunDocument` (or its text, or a parsed object whose `format` is
+    `spaceodyssey.run_document`) carries the run record as `run` and the record-kind
+    registry as `records`, both hashed with the study: the record is checked as
+    above, unknown members of it are `D003`, and the registry must decode and lower
+    to the study's capacities (`L001` at `/records` otherwise). `bindings` is the
+    `Bindings` table of service and refit kinds; with it, a binding that names an
+    unknown kind or a newer version is `D001`.
     """
     resolver = _resolver(kinds)
     try:
         data = _parsed(document)
     except DocumentError as err:
         return [_from_error(err)]
-    if RUN_KEY in data:
+    is_run = data.get("format") == RUN_FORMAT
+    if is_run:
+        if run is not None:
+            raise ValueError("pass the run record once: as `run` or in the document")
+        run = data.get(RUN_KEY)
+    elif RUN_KEY in data:
         if run is not None:
             raise ValueError("pass the run record once: as `run` or in the document")
         run = data.pop(RUN_KEY)
-    found, decodable = _envelope(data)
+    found, decodable = _envelope(data, is_run)
     version = data.get("schema_version")
     if version is not None:
         try:
@@ -176,7 +195,9 @@ def preflight_document(document, kinds=None, *, run=None, executor=None):
         found += refs
         decodable = decodable and not refs
     if run is not None:
-        found += _record(run)
+        found += record_findings(run, strict=is_run)
+        if bindings is not None:
+            found += _unknown_bindings(run, bindings)
         if executor is None and isinstance(run, dict):
             chosen = run.get("executor")
             executor = chosen if _executor(chosen) else None
@@ -188,7 +209,9 @@ def preflight_document(document, kinds=None, *, run=None, executor=None):
     if study is not None:
         found += _in_memory(study, data["study"], executor)
         if run is not None:
-            found += _service(study, run)
+            found += service_findings(study, run)
+        if is_run and "records" in data:
+            found += _records(data["records"], study)
     return _ordered(found)
 
 
@@ -218,6 +241,14 @@ def _parsed(document):
     value JSON cannot hold (a set, a non-string key, a non-finite number) is refused
     with a pointer.
     """
+    if isinstance(document, RunDocument):
+        return {
+            "format": RUN_FORMAT,
+            "schema_version": document.schema_version,
+            "study": document.study,
+            "run": document.run,
+            "records": document.records,
+        }
     if isinstance(document, StudyDocument):
         return {
             "format": FORMAT,
@@ -252,18 +283,22 @@ def _from_error(err, fix=None):
     return DocumentFinding(code, Severity.ERROR, err.pointer or "", str(err), fix)
 
 
-def _envelope(data):
+def _envelope(data, is_run=False):
     """`L001` for a wrong envelope, and whether the study can be decoded."""
     out = []
-    extra = sorted(set(data) - DOCUMENT_KEYS)
+    extra = sorted(set(data) - (RUN_KEYS if is_run else DOCUMENT_KEYS))
     if extra:
         err = DocumentError(f"unknown document key {extra[0]!r}", pointer(extra[:1]))
         out.append(_from_error(err))
-    for key in ("format", "schema_version", "study"):
+    needed = ("format", "schema_version", "study") + (
+        ("run", "records") if is_run else ()
+    )
+    for key in needed:
         if key not in data:
             out.append(_from_error(DocumentError(f"the document has no {key!r}", "")))
-    if "format" in data and data["format"] != FORMAT:
-        out.append(_from_error(DocumentError(f"format is not {FORMAT!r}", "/format")))
+    want = RUN_FORMAT if is_run else FORMAT
+    if "format" in data and data["format"] != want:
+        out.append(_from_error(DocumentError(f"format is not {want!r}", "/format")))
     return out, not out
 
 
@@ -273,7 +308,15 @@ def _check_hash(data):
     version = data["schema_version"]
     if stored is None or type(version) is not int:
         return []
-    doc = StudyDocument(study=data["study"], schema_version=version)
+    if data.get("format") == RUN_FORMAT and "run" in data and "records" in data:
+        doc = RunDocument(
+            study=data["study"],
+            schema_version=version,
+            run=data["run"],
+            records=data["records"],
+        )
+    else:
+        doc = StudyDocument(study=data["study"], schema_version=version)
     if stored == doc.content_hash:
         return []
     err = DocumentError(
@@ -404,11 +447,49 @@ def _follow(node, tokens, path):
     return path
 
 
-# ---- the run record -------------------------------------------------------------
+# ---- the run record ----------------------------
 
 
-def _record(run):
-    """`D003` for a run record whose members are missing, ill-typed or inconsistent."""
+def _records(node, study):
+    """`L001` when the registry does not decode or does not lower to the study."""
+    try:
+        check_lowering(decode_records(node), study)
+    except DocumentError as err:
+        return [
+            _from_error(err, "write the registry the study's capacities lower from")
+        ]
+    return []
+
+
+def _unknown_bindings(run, bindings):
+    """`D001` for a service or refit binding that names a kind the table lacks."""
+    found = []
+    if not isinstance(run, dict):
+        return found
+    refit = run.get("refit")
+    items = [(("service",), run.get("service"))]
+    if isinstance(refit, dict):
+        items += [(("refit", side), refit.get(side)) for side in ("host", "compiled")]
+    for where, binding in items:
+        if not (isinstance(binding, dict) and _text(binding.get("kind"))):
+            continue
+        if not _version(binding.get("version")):
+            continue
+        try:
+            bindings.resolve(binding["kind"], binding["version"], (RUN_KEY, *where))
+        except DocumentError as err:
+            found.append(
+                _from_error(err, "bind a kind the installed bindings register")
+            )
+    return found
+
+
+def record_findings(run, strict=False):
+    """`D003` for a run record whose members are missing, ill-typed or inconsistent.
+
+    With `strict` (a run document), a member other than `executor`, `service` and
+    `refit` is `D003` too; a callable such as `wake_fn` is named as one.
+    """
     out = []
 
     def flag(ptr, message, fix):
@@ -419,6 +500,20 @@ def _record(run):
     if not isinstance(run, dict):
         flag(pointer((RUN_KEY,)), "the run record is not an object", "write an object")
         return out
+    if strict:
+        for key in sorted(set(run) - _RUN_MEMBERS):
+            what = (
+                "a callable, which a document cannot hold"
+                if key in CALLABLE_MEMBERS
+                else "unknown"
+            )
+            flag(
+                pointer((RUN_KEY, key)),
+                f"run member {key!r} is {what}",
+                "remove it; bind code by kind in service or refit",
+            )
+        if "executor" not in run:
+            flag(pointer((RUN_KEY,)), "the run record has no 'executor'", "add it")
     if "executor" in run and not _executor(run["executor"]):
         flag(
             pointer((RUN_KEY, "executor")),
@@ -480,7 +575,7 @@ def _binding(binding, where, schema, flag):
     return valid
 
 
-def _service(study, run):
+def service_findings(study, run):
     """`D003` when a component asks a `Query` and the record binds no service."""
     asking = [
         name

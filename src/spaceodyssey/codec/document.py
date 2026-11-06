@@ -39,15 +39,19 @@ any process. Dict entries are a list, not an object, so their insertion order is
 part of the content and of the hash.
 """
 
+import contextlib
+import contextvars
 import dataclasses
 import hashlib
 import json
 import math
 
 FORMAT = "spaceodyssey.study"
+RUN_FORMAT = "spaceodyssey.run_document"
 SCHEMA_VERSION = 1
 
 DOCUMENT_KEYS = frozenset({"format", "schema_version", "study", "content_hash"})
+RUN_KEYS = DOCUMENT_KEYS | {"run", "records"}
 
 
 class DocumentError(ValueError):
@@ -66,6 +70,43 @@ class DocumentError(ValueError):
         where = "" if pointer is None else f" at {pointer or '/'}"
         prefix = "" if code is None else f"{code}: "
         super().__init__(f"{prefix}{message}{where}")
+
+
+# The tick `{"no_switch": true}` stands for, while a study is dumped or loaded.
+_MAX_TICK = contextvars.ContextVar("max_tick", default=None)
+
+
+@contextlib.contextmanager
+def with_max_tick(max_tick):
+    """Set the capacity tick `no_switch` lowers to, and is written back from."""
+    token = _MAX_TICK.set(max_tick)
+    try:
+        yield
+    finally:
+        _MAX_TICK.reset(token)
+
+
+def current_max_tick():
+    """`caps.max_tick` of the study being dumped or loaded, or `None`."""
+    return _MAX_TICK.get()
+
+
+class CallableRefused(DocumentError):
+    """A callable that a document cannot hold: code is bound by kind, never stored.
+
+    A document is data. A function, a lambda, an activation function or a wake or
+    decide hook has no document form, so the codec refuses it by name, at the
+    pointer of the value, and says to register a kind or binding instead.
+    """
+
+    def __init__(self, name, pointer=None):
+        """Name the refused callable in the message."""
+        self.name = name
+        super().__init__(
+            f"callable refused: {name} is code, not data; register it as a kind "
+            "or a binding and name that in the document",
+            pointer,
+        )
 
 
 def pointer(path):
@@ -142,6 +183,63 @@ class StudyDocument:
         version = data["schema_version"]
         check_schema_version(version)
         doc = cls(study=data["study"], schema_version=version)
+        stored = data.get("content_hash")
+        if stored is not None and stored != doc.content_hash:
+            raise DocumentError(
+                "content_hash does not match the document's canonical bytes",
+                "/content_hash",
+            )
+        return doc
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class RunDocument(StudyDocument):
+    """A study document plus what a run binds: executor, service, refit boundary.
+
+    `run` is the run record, the same object the JSON pre-flight reads: `executor`,
+    `service` (`kind`, `version`, `configuration`) and `refit` (a `host` and a
+    `compiled` binding, each with `kind`, `version`, `configuration` and
+    `model_hash`). `records` is the record-kind registry the study's capacities were
+    lowered from. The refresh schedule is a field of the study. All of it is hashed.
+    """
+
+    run: dict = dataclasses.field(default_factory=dict)
+    records: list = dataclasses.field(default_factory=list)
+
+    def body(self):
+        """The document without its hash."""
+        return {
+            "format": RUN_FORMAT,
+            "schema_version": self.schema_version,
+            "study": self.study,
+            "run": self.run,
+            "records": self.records,
+        }
+
+    @classmethod
+    def from_json(cls, text):
+        """Parse run document text, checking its format, schema version and hash."""
+        data = parse_text(text)
+        if not isinstance(data, dict):
+            raise DocumentError("a document is a JSON object", "")
+        extra = sorted(set(data) - RUN_KEYS)
+        if extra:
+            raise DocumentError(
+                f"unknown document key {extra[0]!r}", pointer(extra[:1])
+            )
+        for key in ("format", "schema_version", "study", "run", "records"):
+            if key not in data:
+                raise DocumentError(f"the document has no {key!r}", "")
+        if data["format"] != RUN_FORMAT:
+            raise DocumentError(f"format is not {RUN_FORMAT!r}", "/format")
+        version = data["schema_version"]
+        check_schema_version(version)
+        doc = cls(
+            study=data["study"],
+            schema_version=version,
+            run=data["run"],
+            records=data["records"],
+        )
         stored = data.get("content_hash")
         if stored is not None and stored != doc.content_hash:
             raise DocumentError(

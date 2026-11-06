@@ -28,18 +28,23 @@ import jax.numpy as jnp
 import numpy as np
 
 from spaceodyssey.codec.document import (
+    CallableRefused,
     DocumentError,
     StudyDocument,
     check_schema_version,
+    current_max_tick,
     pointer,
+    with_max_tick,
 )
 from spaceodyssey.codec.dump import ARRAY_DTYPES
+from spaceodyssey.codec.files import current_store, make_store, using_store
 from spaceodyssey.codec.kinds import as_resolver, is_kind_class, is_version_field
-from spaceodyssey.core.capacities import require_x64
-from spaceodyssey.core.study import Study
+from spaceodyssey.core.capacities import Capacities, require_x64
+from spaceodyssey.core.study import Agenda, Study
 
+_CALLABLE_TAGS = frozenset({"$callable", "$function", "$lambda", "$fn"})
 _FLOAT_TAGS = {"nan": math.nan, "inf": math.inf, "-inf": -math.inf}
-_ARRAY_KEYS = frozenset({"$array", "shape", "data", "weak", "type"})
+_ARRAY_KEYS = frozenset({"$array", "shape", "data", "file", "weak", "type"})
 _WEAK_ZEROS = {"int64": 0, "float64": 0.0}
 
 
@@ -61,7 +66,7 @@ def tolerating_null_arrays(fields):
         _NULL_OK.reset(token)
 
 
-def load_study(document, kinds=None):
+def load_study(document, kinds=None, *, files=None):
     """Rebuild the `Study` a `StudyDocument` (or its JSON text) describes.
 
     `kinds` is a `KindResolver` or the mapping `dump_study` took. A module stored
@@ -70,12 +75,20 @@ def load_study(document, kinds=None):
     an array whose data does not match its declared shape or dtype, and a module
     whose validation fails each raise `DocumentError` carrying the JSON pointer of
     the offending value.
+
+    `files` is the directory of array files a dump with large arrays wrote; a
+    reference to a file that is missing, or whose bytes do not match the stored
+    sha256, is refused at its pointer, and a document with references and no `files`
+    directory is refused. A `{"no_switch": true}` phase boundary becomes
+    `caps.max_tick`, and a study whose `horizon_tick` reaches `caps.max_tick` is
+    refused.
     """
     require_x64()
     if isinstance(document, str):
         document = StudyDocument.from_json(document)
     check_schema_version(document.schema_version)
-    study = decode(document.study, ("study",), as_resolver(kinds))
+    with using_store(make_store(files, 0)):
+        study = decode(document.study, ("study",), as_resolver(kinds))
     if not isinstance(study, Study):
         raise DocumentError("the document's study is not a Study", "/study")
     return study
@@ -93,6 +106,8 @@ def decode(node, path, table):
     if len(tags) != 1:
         raise DocumentError("an object needs exactly one $ tag", pointer(path))
     tag = tags[0]
+    if tag in _CALLABLE_TAGS:
+        raise CallableRefused(tag, pointer(path))
     if tag == "$kind":
         return _decode_kind(node, path, table)
     if tag == "$array":
@@ -196,6 +211,17 @@ def _decode_kind(node, path, table):
             raise DocumentError(f"field {missing[0]!r} is missing", pointer(path))
     else:
         migrated = _migrated(node, ref, stored, path, table)
+    if cls is Study and migrated is None:
+        caps = decode(node["caps"], (*path, "caps"), table)
+        if not isinstance(caps, Capacities):
+            raise DocumentError("caps is not a Capacities", pointer((*path, "caps")))
+        with with_max_tick(caps.max_tick):
+            return _build(cls, node, path, table, version, migrated, fields)
+    return _build(cls, node, path, table, version, migrated, fields)
+
+
+def _build(cls, node, path, table, version, migrated, fields):
+    """Decode each field of `node`, build the object and validate it."""
     obj = object.__new__(cls)
     values = {}
     for field in fields:
@@ -203,13 +229,18 @@ def _decode_kind(node, path, table):
         if is_version_field(cls, field.name):
             value = version
         elif migrated is None:
-            value = decode(node[field.name], where, table)
+            item = node[field.name]
+            if cls is Agenda and field.name == "phase_until":
+                item = _lowered_no_switch(item, where)
+            value = decode(item, where, table)
             _check_field(cls, field, value, where)
         else:
             value = migrated[field.name]
             _check_field(cls, field, value, where if field.name in node else path)
         values[field.name] = value
         object.__setattr__(obj, field.name, value)
+    if cls is Study:
+        _check_horizon(values, path)
     try:
         _validate(obj, cls, values, path)
     except DocumentError:
@@ -217,6 +248,36 @@ def _decode_kind(node, path, table):
     except _CHECK_ERRORS as err:
         raise DocumentError(f"{cls.__qualname__}: {err}", pointer(path)) from err
     return obj
+
+
+def _lowered_no_switch(node, path):
+    """The `phase_until` node with each `{"no_switch": true}` as `caps.max_tick`."""
+    top = current_max_tick()
+    if top is None or type(node) is not dict or type(node.get("data")) is not list:
+        return node
+    data = []
+    for i, item in enumerate(node["data"]):
+        if type(item) is dict:
+            if set(item) != {"no_switch"} or item["no_switch"] is not True:
+                raise DocumentError(
+                    'a phase boundary tag is {"no_switch": true}',
+                    pointer((*path, "data", i)),
+                )
+            item = top
+        data.append(item)
+    return {**node, "data": data}
+
+
+def _check_horizon(values, path):
+    """Refuse a horizon at or beyond the tick a no-switch boundary lowers to."""
+    horizon = values["horizon_tick"]
+    top = current_max_tick()
+    if top is not None and int(horizon) >= top:
+        raise DocumentError(
+            f"horizon_tick {int(horizon)} reaches caps.max_tick {top}, the tick a "
+            "no-switch phase boundary stands for",
+            pointer((*path, "horizon_tick")),
+        )
 
 
 def _migrated(node, ref, stored, path, table):
@@ -318,13 +379,20 @@ def _decode_array(node, path):
     shape = node.get("shape")
     if type(shape) is not list or not all(type(n) is int and n >= 0 for n in shape):
         raise DocumentError("shape is a list of sizes", pointer((*path, "shape")))
-    if "data" not in node:
-        raise DocumentError("the array has no data", pointer(path))
-    data = _elements(node["data"], dtype, (*path, "data"))
-    try:
-        arr = np.array(data, dtype=dtype)
-    except (ValueError, OverflowError) as err:
-        raise DocumentError(f"bad array data: {err}", pointer((*path, "data"))) from err
+    if ("data" in node) == ("file" in node):
+        raise DocumentError(
+            "an array has either data or a file reference", pointer(path)
+        )
+    if "file" in node:
+        arr = _read_file(node["file"], dtype, shape, (*path, "file"))
+    else:
+        data = _elements(node["data"], dtype, (*path, "data"))
+        try:
+            arr = np.array(data, dtype=dtype)
+        except (ValueError, OverflowError) as err:
+            raise DocumentError(
+                f"bad array data: {err}", pointer((*path, "data"))
+            ) from err
     if (
         arr.size == 0
         and math.prod(shape) == 0
@@ -358,6 +426,25 @@ def _decode_array(node, path):
         zero = jnp.asarray(_WEAK_ZEROS[name])
         return jax.lax.full_like(zero, 0, shape=arr.shape).at[...].set(arr)
     return jnp.asarray(arr)
+
+
+def _read_file(ref, dtype, shape, path):
+    """The array a file reference holds, checked against its dtype and shape."""
+    store = current_store()
+    if store is None:
+        raise DocumentError(
+            "the document holds an array file reference; pass the files directory",
+            pointer(path),
+        )
+    raw = store.get(ref, path)
+    expected = math.prod(shape) * dtype.itemsize
+    if len(raw) != expected:
+        raise DocumentError(
+            f"the file holds {len(raw)} bytes, shape {shape} of {dtype.name} needs "
+            f"{expected}",
+            pointer((*path, "bytes")),
+        )
+    return np.frombuffer(raw, dtype=dtype).reshape(shape).copy()
 
 
 def _elements(data, dtype, path):

@@ -7,10 +7,23 @@ import math
 import jax
 import numpy as np
 
-from spaceodyssey.codec.document import DocumentError, StudyDocument, pointer
+from spaceodyssey.codec.document import (
+    CallableRefused,
+    DocumentError,
+    StudyDocument,
+    current_max_tick,
+    pointer,
+    with_max_tick,
+)
+from spaceodyssey.codec.files import (
+    DEFAULT_MAX_INLINE,
+    current_store,
+    make_store,
+    using_store,
+)
 from spaceodyssey.codec.kinds import as_resolver, is_version_field
 from spaceodyssey.core.capacities import require_x64
-from spaceodyssey.core.study import Study
+from spaceodyssey.core.study import Agenda, Study
 
 # Element types the document stores; complex and object arrays are refused.
 ARRAY_DTYPES = frozenset(
@@ -32,7 +45,7 @@ ARRAY_DTYPES = frozenset(
 )
 
 
-def dump_study(study, kinds=None):
+def dump_study(study, kinds=None, *, files=None, max_inline=DEFAULT_MAX_INLINE):
     """Encode `study` as a `StudyDocument`.
 
     `kinds` is a `KindResolver`, or a mapping of `(group, id, version)` to each
@@ -40,12 +53,28 @@ def dump_study(study, kinds=None):
     of every module is written, static and dynamic alike, with exact Python types
     and array dtypes, so `load_study` rebuilds an equal pytree. A value of a type
     the document has no form for (a function, a set, a complex array) raises
-    `DocumentError` naming its pointer.
+    `DocumentError` naming its pointer, and a callable (an activation function, a
+    hook) raises `CallableRefused`.
+
+    An array of more than `max_inline` elements is written to a file in the directory
+    `files`, when one is given, and the document keeps a reference with its sha256
+    (see `spaceodyssey.codec.files`). A `phase_until` entry equal to `caps.max_tick`
+    is written as `{"no_switch": true}`; a study whose `horizon_tick` reaches
+    `caps.max_tick` is refused, as the loader would refuse it.
     """
     require_x64()
     if not isinstance(study, Study):
         raise TypeError(f"dump_study needs a Study, not {type(study).__name__}")
-    return StudyDocument(study=encode(study, ("study",), as_resolver(kinds)))
+    store = make_store(files, max_inline)
+    table = as_resolver(kinds)
+    with using_store(store), with_max_tick(study.caps.max_tick):
+        if int(study.horizon_tick) >= study.caps.max_tick:
+            raise DocumentError(
+                f"horizon_tick {int(study.horizon_tick)} reaches caps.max_tick "
+                f"{study.caps.max_tick}, the tick a no-switch boundary stands for",
+                "/study/horizon_tick",
+            )
+        return StudyDocument(study=encode(study, ("study",), table))
 
 
 def encode(value, path, table):
@@ -80,6 +109,11 @@ def encode(value, path, table):
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return _encode_kind(value, path, table)
     name = f"{type(value).__module__}.{type(value).__qualname__}"
+    if callable(value):
+        label = getattr(value, "__qualname__", None) or type(value).__qualname__
+        raise CallableRefused(
+            f"{getattr(value, '__module__', None) or ''}.{label}", pointer(path)
+        )
     raise DocumentError(f"no document form for a {name}", pointer(path))
 
 
@@ -108,7 +142,18 @@ def _encode_kind(value, path, table):
                 pointer((*path, field.name)),
             )
         out[field.name] = encode(item, (*path, field.name), table)
+        if cls is Agenda and field.name == "phase_until":
+            out[field.name] = _tag_no_switch(out[field.name])
     return out
+
+
+def _tag_no_switch(node):
+    """Write each boundary equal to `caps.max_tick` as the no-switch tag."""
+    top = current_max_tick()
+    if "data" not in node:
+        return node
+    node["data"] = [{"no_switch": True} if t == top else t for t in node["data"]]
+    return node
 
 
 def _encode_array(arr, path, *, weak=False, container=None):
@@ -121,11 +166,14 @@ def _encode_array(arr, path, *, weak=False, container=None):
             f"dtype {arr.dtype.str} is not in native byte order; convert it first",
             pointer(path),
         )
-    if np.issubdtype(arr.dtype, np.floating) or name == "bfloat16":
-        data = _tag_floats(arr.astype(np.float64).tolist())
+    out = {"$array": name, "shape": list(arr.shape)}
+    store = current_store()
+    if store is not None and store.wants(arr.size):
+        out["file"] = store.put(np.ascontiguousarray(arr).tobytes())
+    elif np.issubdtype(arr.dtype, np.floating) or name == "bfloat16":
+        out["data"] = _tag_floats(arr.astype(np.float64).tolist())
     else:
-        data = arr.tolist()
-    out = {"$array": name, "shape": list(arr.shape), "data": data}
+        out["data"] = arr.tolist()
     if weak:
         out["weak"] = True
     if container is not None:
