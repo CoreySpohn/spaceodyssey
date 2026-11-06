@@ -147,6 +147,8 @@ SLOW_FILES = frozenset(
         "test_slice1_gate.py",
         # observer kit on runs: one executor compile alone exceeds the unit budget
         "test_observer_kit_runs.py",
+        # refresh runs compile the chunked driver and the masked kernel per executor
+        "test_refresh_runs.py",
         "test_observer_kit_statistics.py",
         "test_corpus_invariants.py",
         "test_parity_corpus.py",
