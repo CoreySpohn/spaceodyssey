@@ -52,15 +52,3 @@ html_theme_options = {
     "use_repository_button": True,
     "show_toc_level": 2,
 }
-
-
-def _skip_observe_alias(app, what, name, obj, skip, options):
-    """Keep the observe module and loop.observe function at distinct API targets."""
-    if name == "spaceodyssey.observe" and what == "data":
-        return True
-    return None
-
-
-def setup(app):
-    """Avoid indexing the package alias over the same-named submodule."""
-    app.connect("autoapi-skip-member", _skip_observe_alias)

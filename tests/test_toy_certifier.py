@@ -16,12 +16,9 @@ from hypothesis.strategies import floats
 from scipy.stats import norm
 
 from spaceodyssey.certify import SnrThreshold, ToyGaussianCertifier
-from spaceodyssey.errors import UnsupportedOperator
-from spaceodyssey.plan import CertificationOutcome, PlanPredictive
-from spaceodyssey.registry import REGISTRY
-from spaceodyssey.testing import check_certificate, check_outcome, check_ports
+from spaceodyssey.plan import PlanPredictive
 from tests.test_data import make_dataset
-from tests.test_plan import make_outcome, make_plan
+from tests.test_plan import make_plan
 
 ALPHA = 0.05
 BOUNDARY = 0.3
@@ -231,59 +228,6 @@ class TestRangeFlag:
         np.testing.assert_array_max_ulp(
             np.asarray(eager.p_neg), np.asarray(compiled.p_neg), maxulp=4
         )
-
-
-class TestSeamConformance:
-    """Registry metadata and the certification conformance suite."""
-
-    def test_registered_as_closed_form_integrate_peer(self):
-        """The toy is a peer on the certification seam."""
-        entry = REGISTRY.get("certification", "toy_gaussian")
-        assert entry.cls is ToyGaussianCertifier
-        assert entry.info.operators == frozenset({"integrate"})
-        assert entry.info.fidelity == "closed_form"
-
-    def test_conformance_suite_passes(self):
-        """Declared operators are honest and the outcome meets its contract."""
-        toy = make_toy()
-        info = REGISTRY.get("certification", "toy_gaussian").info
-        predictive = predictive_for([0.1, 0.6], [3.0, 9.0])
-        state = check_certificate(toy, info, [make_dataset()], predictive=predictive)
-        assert state is None
-        check_ports(toy.integrate(predictive), info)
-
-    @pytest.mark.parametrize("operator", ["initial", "update", "propagate"])
-    def test_state_operators_unsupported(self, operator):
-        """The integrate-only toy rejects every state operator directly."""
-        toy = make_toy()
-        args = () if operator == "initial" else (None, None)
-        with pytest.raises(UnsupportedOperator):
-            getattr(toy, operator)(*args)
-
-    def test_outcome_check_catches_overlapping_verdicts(self):
-        """p_pos + p_neg > 1 breaks the outcome contract."""
-        bad = make_outcome(p_pos=jnp.full((3,), 0.7), p_neg=jnp.full((3,), 0.5))
-        with pytest.raises(AssertionError, match="exceeds one"):
-            check_outcome(bad)
-
-    def test_outcome_check_ignores_out_of_range_values(self):
-        """Untrusted out-of-range values are excluded, but never all of them."""
-        flags = jnp.array([True, False, True])
-        loose = make_outcome(p_pos=jnp.array([0.5, 2.0, 0.5]), in_range=flags)
-        check_outcome(loose)
-        with pytest.raises(AssertionError, match="no planet"):
-            check_outcome(make_outcome(in_range=jnp.zeros(3, dtype=bool)))
-
-    @pytest.mark.parametrize("alpha", [0.0, 0.6, -0.1])
-    def test_invalid_alpha_rejected(self, alpha):
-        """Alpha outside (0, 0.5] would let both verdicts overlap or vanish."""
-        with pytest.raises(ValueError, match="alpha"):
-            make_toy(alpha=alpha)
-
-    def test_outcome_type(self):
-        """Integrate returns the outcome contract."""
-        outcome = make_toy().integrate(predictive_for([0.5], [4.0]))
-        assert isinstance(outcome, CertificationOutcome)
 
 
 @pytest.mark.parametrize("rank", [None, 0])

@@ -18,7 +18,6 @@ from spaceodyssey.errors import UnsupportedProfile
 from spaceodyssey.gaussian import normal_rectangle_probability
 from spaceodyssey.plan import CertificationOutcome
 from spaceodyssey.profile import Profile
-from spaceodyssey.registry import SeamInfo, register
 from spaceodyssey.truth import AbstractTruthModel, _plan_masks
 
 _INTERVAL_BISECTIONS = 80
@@ -161,18 +160,6 @@ def _posterior_moments(precision, prior_precision, rows, rhs):
     return mean, covariance, posterior_covariance
 
 
-@register(
-    "certification",
-    "gaussian_profile",
-    SeamInfo(
-        operators={"integrate"},
-        consumes=("spaceodyssey.PlanPredictive",),
-        produces=("spaceodyssey.CertificationOutcome",),
-        version="1",
-        fidelity="",  # Fidelity is recorded per outcome.
-        cost_hint="low",
-    ),
-)
 class GaussianProfileCertifier(AbstractProfileCertificate):
     """A Gaussian toy for testing the profile integration interface.
 

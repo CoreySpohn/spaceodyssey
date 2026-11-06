@@ -10,8 +10,9 @@ ensemble repeats a campaign over many simulated worlds and aggregates the
 outcomes. The simulated world and the model used to reason about it are
 separate by construction.
 
-Pre-alpha. The campaign core provides a declarative vocabulary, registries,
-and execution engines; physics and inference enter through adapters.
+Pre-alpha. The campaign core provides a declarative vocabulary, a document form
+for studies, and host and compiled executors; physics and inference enter
+through adapters.
 
 ## Getting Started
 

@@ -8,17 +8,11 @@ import pytest
 
 import spaceodyssey
 from spaceodyssey import AbstractProfileCertificate, Claim, Edge
-from spaceodyssey.build import build
-from spaceodyssey.engines.analytic import run_integrate
-from spaceodyssey.errors import UnsupportedOperator, UnsupportedProfile, WiringError
-from spaceodyssey.plan import PlanPredictive
+from spaceodyssey.errors import UnsupportedOperator, UnsupportedProfile
 from spaceodyssey.profile import Profile
-from spaceodyssey.registry import SeamInfo
-from spaceodyssey.testing import LinearGaussianTruthModel, check_certificate
-from tests.doubles import make_spec
-from tests.test_analytic import TestIntegrateEngine as _TestIntegrateEngine
+from tests.doubles import LinearGaussianTruthModel
 from tests.test_claim_outcome import claim_fields
-from tests.test_plan import make_outcome, make_plan
+from tests.test_plan import make_outcome
 from tests.test_truth import make_profile, make_truth
 
 
@@ -81,18 +75,6 @@ def test_default_state_operators_raise(operator):
         getattr(certificate, operator)(*args)
 
 
-def test_integrate_only_certificate_passes_conformance():
-    """Conformance checks an integrate-only certificate without a state."""
-    certificate = ProfileCertificateDouble(make_profile(), LinearGaussianTruthModel())
-    state = check_certificate(
-        certificate,
-        SeamInfo(operators={"integrate"}),
-        [None],
-        predictive=PlanPredictive(make_plan(), make_truth()),
-    )
-    assert state is None
-
-
 def test_unrestricted_quantities_and_public_export():
     class UnrestrictedCertificate(ProfileCertificateDouble):
         SUPPORTED_QUANTITIES: ClassVar[frozenset[str] | None] = None
@@ -103,66 +85,6 @@ def test_unrestricted_quantities_and_public_export():
     assert spaceodyssey.AbstractProfileCertificate is AbstractProfileCertificate
     with pytest.raises(TypeError):
         AbstractProfileCertificate()
-
-
-@pytest.mark.parametrize("wrong_hash", [False, True])
-def test_run_integrate_checks_profile_identity(wrong_hash):
-    class IdentityCertificate(ProfileCertificateDouble):
-        def integrate(self, predictive):
-            fields = claim_fields(self.profile)
-            if wrong_hash:
-                fields["profile_hash"] = "0" * 64
-            return make_outcome(**fields)
-
-    profile = make_profile()
-    certificate = IdentityCertificate(profile, LinearGaussianTruthModel())
-    mission = build(make_spec(), _TestIntegrateEngine.config())
-    mission = eqx.tree_at(lambda m: m.model.certification, mission, certificate)
-    if wrong_hash:
-        with pytest.raises(WiringError, match="profile_hash"):
-            run_integrate(
-                mission,
-                predictive=PlanPredictive(make_plan(), make_truth()),
-                weights=[1, 1, 1],
-            )
-    else:
-        report = run_integrate(
-            mission,
-            predictive=PlanPredictive(make_plan(), make_truth()),
-            weights=[1, 1, 1],
-        )
-        assert report.profile_hash == profile.content_hash()
-
-
-@pytest.mark.parametrize(
-    "cause", ["flux", "model", "dimension", "context", "plan_axis"]
-)
-def test_engine_validates_predictive_before_integrating(cause):
-    class ComputingCertificate(ProfileCertificateDouble):
-        def integrate(self, predictive):
-            pytest.fail("integration must not run for invalid predictive inputs")
-
-    plan, truth = make_plan(), make_truth()
-    if cause == "flux":
-        plan = make_plan(flux_reference="different")
-        error, message = UnsupportedProfile, "flux reference"
-    else:
-        error = ValueError
-        changes, message = {
-            "model": ({"model_id": "other"}, "model_id"),
-            "dimension": ({"theta": [[1, 2, 3]] * 3}, "wrong D"),
-            "context": ({"context": {}}, "missing context"),
-            "plan_axis": ({"n": 2}, "planet axis P"),
-        }[cause]
-        truth = make_truth(**changes)
-    certificate = ComputingCertificate(make_profile(), LinearGaussianTruthModel())
-    mission = build(make_spec(), _TestIntegrateEngine.config())
-    mission = eqx.tree_at(lambda m: m.model.certification, mission, certificate)
-    # Bypass constructor validation to exercise the engine's validation layer.
-    predictive = PlanPredictive(plan, make_truth())
-    predictive = eqx.tree_at(lambda p: p.truth, predictive, truth)
-    with pytest.raises(error, match=message):
-        run_integrate(mission, predictive=predictive, weights=[1, 1, 1])
 
 
 def test_constructor_cannot_hide_profile_inputs():
@@ -188,49 +110,6 @@ def test_profile_specific_restriction_runs_before_constructor():
         RestrictedCertificate(
             replace(make_profile(), support_rule="joint"), LinearGaussianTruthModel()
         )
-
-
-def test_unrelated_profile_attribute_is_not_a_profile_certificate():
-    class UnrelatedCertificate(spaceodyssey.ToyGaussianCertifier):
-        profile: str = eqx.field(static=True, default="display label")
-
-    certificate = UnrelatedCertificate(0.0, 0.05, 1.0)
-    mission = build(make_spec(), _TestIntegrateEngine.config())
-    mission = eqx.tree_at(lambda m: m.model.certification, mission, certificate)
-    report = run_integrate(
-        mission,
-        predictive=PlanPredictive(make_plan(), make_truth().theta[:, 0]),
-        weights=[1, 1, 1],
-    )
-    assert report.profile_hash is None
-
-
-def test_signed_zero_profiles_share_jit_cache_and_engine_identity():
-    traces = []
-
-    class JittedCertificate(ProfileCertificateDouble):
-        @eqx.filter_jit
-        def integrate(self, predictive):
-            traces.append(True)
-            return make_outcome(**claim_fields(self.profile))
-
-    mission = build(make_spec(), _TestIntegrateEngine.config())
-    model = LinearGaussianTruthModel()
-    hashes = []
-    for zero in (0.0, -0.0):
-        profile = make_profile(
-            claims=(Claim("x", (Edge("x", zero, "above"),), "positive"),)
-        )
-        certificate = JittedCertificate(profile=profile, truth_model=model)
-        configured = eqx.tree_at(lambda m: m.model.certification, mission, certificate)
-        report = run_integrate(
-            configured,
-            predictive=PlanPredictive(make_plan(), make_truth()),
-            weights=[1, 1, 1],
-        )
-        hashes.append(report.profile_hash)
-    assert hashes[0] == hashes[1]
-    assert len(traces) == 1
 
 
 @pytest.mark.parametrize("supported", [False, True])
