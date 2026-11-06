@@ -58,6 +58,9 @@ class Carry(eqx.Module):
     next_sid: jax.Array
     release_version: jax.Array  # I64[2]: releases received by (observer, policy)
     request: EventTable  # the host request being awaited; `valid` while unanswered
+    refresh: EventTable  # the checkpoint held for the host; `valid` until installed
+    refresh_dirty: jax.Array  # B[2, n_subjects]: (observer, policy) subjects to refit
+    refresh_status: jax.Array  # I64[2, n_subjects]: `RefitStatus` of the last refit
 
 
 def _zero_belief(caps):
@@ -77,6 +80,8 @@ def empty_carry(caps, balance=None):
     z = jnp.asarray(0, I64)
     f = jnp.asarray(False)
     br, nr = caps.n_balance_rows, caps.n_resources
+    # the refresh leaves are zero-size unless the capacities carry the protocol
+    n_refresh = caps.n_subjects if caps.rows_per_subject > 0 else 0
     return Carry(
         tick=z,
         stage=z,
@@ -119,6 +124,9 @@ def empty_carry(caps, balance=None):
         next_sid=z,
         release_version=jnp.zeros(2, I64),
         request=empty_event_row(),
+        refresh=empty_event_row(),
+        refresh_dirty=jnp.zeros((2, n_refresh), B),
+        refresh_status=jnp.full((2, n_refresh), -1, I64),
     )
 
 

@@ -21,6 +21,7 @@ from spaceodyssey.core.enums import (
     EffectKind,
     EventKind,
     RecordStatus,
+    RefitStatus,
     Scope,
     Stage,
 )
@@ -33,6 +34,7 @@ from spaceodyssey.core.kinds import (
     AbstractPolicy,
     AbstractProcess,
     AbstractWorldSource,
+    ObserverCapabilities,
 )
 from spaceodyssey.core.ledger import AssetTable, ChannelTable
 from spaceodyssey.core.records import (
@@ -40,6 +42,12 @@ from spaceodyssey.core.records import (
     PayloadColumn,
     RecordKind,
     record_none,
+)
+from spaceodyssey.core.refresh import (
+    REFRESH_PRODUCT_KIND,
+    HostLoopRefit,
+    MaskedBatchRefit,
+    RefreshSchedule,
 )
 from spaceodyssey.core.snapshot import (
     BeliefLayout,
@@ -157,6 +165,19 @@ class ToyRunningMean(AbstractObserver):
             mean=belief.mean.at[subject].set(fitted.mean[subject]),
             n=belief.n.at[subject].set(fitted.n[subject]),
             aux=belief.aux,
+        )
+
+
+class ToyRefitMean(ToyRunningMean):
+    """The running mean that changes only by refresh: refit-capable, never folded.
+
+    Its belief, and its policy summary, hold what the last checkpoint installed.
+    """
+
+    def capabilities(self):
+        """Refit-capable on measurement rows, not incremental."""
+        return ObserverCapabilities(
+            incremental=False, refit=True, refit_kinds=("measurement",)
         )
 
 
@@ -777,6 +798,88 @@ def survey_1(caps=None, **overrides):
     base["world_source"] = ToyWorldSource()
     base["objective"] = ToyObjective(threshold=base.pop("detect_thr", 3.0))
     return Study(**base)
+
+
+PRODUCT_CHANNELS = (
+    90,
+    91,
+)  # observer and policy product channels of the refresh studies
+PRODUCT_KIND = 3  # index of `REFRESH_PRODUCT_KIND` in `refresh_registry`
+
+
+def refresh_registry():
+    """The toy kinds and the derived refresh product kind, at indices 0 to 3."""
+    return KindRegistry(
+        (
+            RecordKind("none", ()),
+            MEASUREMENT_KIND,
+            AUXILIARY_KIND,
+            REFRESH_PRODUCT_KIND,
+        )
+    )
+
+
+def survey_refresh(every_ticks=100, offset_ticks=0, *, observer=None, **overrides):
+    """The five-acquisition toy study with a refresh schedule (a checkpoint grid).
+
+    The observer defaults to `ToyRefitMean`, which changes only by refresh. The
+    capacities carry the protocol (`rows_per_subject=8`, `refit_lanes=2`) and the
+    registry lowered with the observer's refit kinds.
+    """
+    observer = ToyRefitMean() if observer is None else observer
+    caps = overrides.pop("caps", None) or Capacities(rows_per_subject=8, refit_lanes=2)
+    caps = refresh_registry().lower(caps, observer)
+    schedule = RefreshSchedule(
+        every_ticks, offset_ticks, *PRODUCT_CHANNELS, PRODUCT_KIND
+    )
+    return survey_1(caps, observer=observer, refresh=schedule, **overrides)
+
+
+def toy_mean_kernel(study, entry):
+    """The toy posterior mean in closed form: a masked kernel for `MaskedBatchRefit`.
+
+    A flat-prior Gaussian posterior with known noise has the sample mean of the
+    counting measurements as its mean, whatever the order they are summed in. Returns
+    the subject slice `(mean, n)`, status `OK` and the row count as diagnostic.
+    """
+    observer, rows = study.observer, entry.rows
+    take = (
+        rows.valid
+        & (rows.kind == observer.measurement_kind)
+        & (rows.status == RecordStatus.COMPLETED)
+    )
+    n = jnp.sum(take).astype(I64)
+    total = jnp.sum(jnp.where(take, rows.payload[:, 0], 0.0))
+    mean = total / jnp.maximum(n, 1).astype(F64)
+    diag = jnp.zeros(1, F64).at[0].set(n.astype(F64))
+    return (mean, n), jnp.asarray(RefitStatus.OK, I64), diag
+
+
+def toy_refit_fit(study, entry):
+    """The same posterior as `toy_mean_kernel`, summed in a Python loop on the host."""
+    observer, rows = study.observer, entry.rows
+    total, n = 0.0, 0
+    for i in range(rows.valid.shape[0]):
+        counts = (
+            rows.valid[i]
+            and rows.kind[i] == observer.measurement_kind
+            and rows.status[i] == RecordStatus.COMPLETED
+        )
+        if counts:
+            total += float(rows.payload[i, 0])
+            n += 1
+    mean = total / n if n else 0.0
+    return (np.float64(mean), np.int64(n)), RefitStatus.OK, [float(n)]
+
+
+def toy_masked_refit():
+    """The toy refit as an array kernel: a `MaskedBatchRefit` of `toy_mean_kernel`."""
+    return MaskedBatchRefit(toy_mean_kernel)
+
+
+def toy_refit_service():
+    """The toy refit as a host loop: a `HostLoopRefit` of `toy_refit_fit`."""
+    return HostLoopRefit(toy_refit_fit)
 
 
 def d2_study(theta=0.3, **overrides):

@@ -18,10 +18,11 @@ from spaceodyssey.core.enums import (
     Scope,
     Stage,
 )
-from spaceodyssey.core.events import enqueue, where_tree
+from spaceodyssey.core.events import enqueue, requeue, where_tree
 from spaceodyssey.core.keys import draw_key, fold_key
 from spaceodyssey.core.ledger import _resource_rows
 from spaceodyssey.core.records import Record, masked_record, record_none, write_log
+from spaceodyssey.core.refresh import refresh_enabled, schedule_refresh
 
 
 def _emit(n, slot):
@@ -158,8 +159,14 @@ def h_release(c, ev, study, truth, root):
     obs = masked_record(rec, caps, Audience.OBSERVER)
     # one key per record identity serves both audiences' folds
     key = fold_key(root, rec, study)
-    folded = study.observer.analyze(study.observer.fold(c.belief, obs, caps, key=key))
-    belief = where_tree(to_observer & ~already & ~accepted.any(), folded, c.belief)
+    # An observer that is not incremental changes only by refresh: nothing folds.
+    incremental = study.observer.capabilities().incremental
+    belief = c.belief
+    if incremental:
+        folded = study.observer.analyze(
+            study.observer.fold(c.belief, obs, caps, key=key)
+        )
+        belief = where_tree(to_observer & ~already & ~accepted.any(), folded, belief)
     # the policy summary folds only records released to the policy audience, once
     seen = log.released_tick[slot] >= 0
     released = others & (log.released_tick >= 0)
@@ -172,8 +179,10 @@ def h_release(c, ev, study, truth, root):
         ),
     )
     pol = masked_record(pol_rec, caps, Audience.POLICY)
-    pfolded = study.observer.fold_summary(c.pbelief, pol, caps, key=key)
-    pbelief = where_tree(public & ~seen & ~released.any(), pfolded, c.pbelief)
+    pbelief = c.pbelief
+    if incremental:
+        pfolded = study.observer.fold_summary(c.pbelief, pol, caps, key=key)
+        pbelief = where_tree(public & ~seen & ~released.any(), pfolded, pbelief)
     older = jnp.where(accepted & (log.revision < rec.revision), rec.revision, -1)
     newer = jnp.max(jnp.where(accepted, log.revision, -1))
     newer = jnp.where(newer > rec.revision, newer, -1)
@@ -209,7 +218,27 @@ def h_release(c, ev, study, truth, root):
         woke=public & ~seen,
         dup_fold=c.dup_fold | (to_observer & already) | (public & seen),
     )
+    if refresh_enabled(caps):
+        c1 = _mark_refresh(c1, rec, to_observer & ~already, public & ~seen, study)
     return c1, _emit(0, slot), record_none(caps)
+
+
+def _mark_refresh(c, rec, accepted, released, study):
+    """Mark the subject dirty for each audience that took an eligible row, and queue.
+
+    A row is eligible when its kind is one the observer refits; its status is not
+    consulted, so a correction that retracts a value also marks the subject. Later
+    marks coalesce into the checkpoint already queued.
+    """
+    eligible = jnp.isin(rec.kind, jnp.asarray(study.caps.refit_kinds, I64))
+    mark_obs, mark_pol = accepted & eligible, released & eligible
+    subject = rec.subject
+    dirty = c.refresh_dirty
+    dirty = dirty.at[0, subject].set(dirty[0, subject] | mark_obs)
+    dirty = dirty.at[1, subject].set(dirty[1, subject] | mark_pol)
+    return schedule_refresh(
+        _tree_set(c, refresh_dirty=dirty), mark_obs | mark_pol, study
+    )
 
 
 def h_result(c, ev, study, truth, root):
@@ -226,6 +255,26 @@ def h_request(c, ev, study, truth, root):
     """Hold the run for the host: the row moves into the carry until it is answered."""
     held = dataclasses.replace(ev, valid=jnp.asarray(True))
     return _tree_set(c, request=held), _emit(0, 0), record_none(study.caps)
+
+
+def h_refresh(c, ev, study, truth, root):
+    """Hold the world at a checkpoint, then consume the row once it is installed.
+
+    The first handling copies the row into `Carry.refresh` and puts it back in the queue
+    unchanged, so a decision pending at this tick stays pending behind it and the world
+    takes no step until the host installs (`refresh.commit_refresh`). That install marks
+    the queued row (`disposition`) and its second handling is the completion: a no-op
+    that reports the product rows written, after which the owed decision runs.
+    """
+    installed = ev.disposition == 1
+    held = dataclasses.replace(ev, valid=jnp.asarray(True))
+    c1 = requeue(_tree_set(c, refresh=held), ev, True)
+    c2 = where_tree(installed, c, c1)
+    return (
+        c2,
+        _emit(jnp.where(installed, ev.group, 0), jnp.where(installed, ev.slot, 0)),
+        record_none(study.caps),
+    )
 
 
 def h_wait(c, ev, study, truth, root):
@@ -410,5 +459,6 @@ HANDLERS = (
     h_result,
     h_fault,
     h_request,
+    h_refresh,
 )
 PUBLIC = Audience.OBSERVER | Audience.POLICY

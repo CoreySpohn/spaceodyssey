@@ -31,6 +31,10 @@ class Capacities:
     derived_kinds: tuple[int, ...] = ()
     refit_kinds: tuple[int, ...] = ()
     refit_statuses: tuple[int, ...] = ()
+    # The refresh protocol: counting rows a refit reads per subject (0 disables the
+    # protocol structurally) and the world lanes of one masked refit call.
+    rows_per_subject: int = 0
+    refit_lanes: int = 0
     n_effects: int = 2
     n_pstate: int = 4
     n_an: int = 4
@@ -57,6 +61,8 @@ class Capacities:
             raise ValueError("max_tick must be positive")
         if any(len(row) != self.payload_width for row in self.payload_audience):
             raise ValueError("every payload_audience row needs payload_width entries")
+        if self.rows_per_subject < 0 or self.refit_lanes < 0:
+            raise ValueError("rows_per_subject and refit_lanes must not be negative")
         if not self.n_an <= self.n_subjects:
             raise ValueError("n_an must not exceed n_subjects")
         largest = _order_key_py(

@@ -11,6 +11,7 @@ B = jnp.bool_
 N_STAGES = 5
 N_TIES = 3
 TIE_NEUTRAL = 1
+REFRESH_TIE = 0  # a checkpoint row sorts ahead of neutral rows sharing its position
 BIG = int(np.iinfo(np.int64).max // 4)
 
 
@@ -37,6 +38,7 @@ class EventKind(IntEnum):
     RESULT = 7
     FAULT = 8
     REQUEST = 9
+    REFRESH = 10
 
 
 class EffectKind(IntEnum):
@@ -147,6 +149,8 @@ class Capacity(IntFlag):
     QUEUE_SLOTS = 1
     STABLE_IDS = 2
     LOG_ROWS = 4
+    REFIT_ROWS = 8  # a subject had more counting rows than `rows_per_subject`
+    GRID_TICK = 16  # the next checkpoint tick is beyond `Capacities.max_tick`
 
 
 class RunStatus(IntEnum):
@@ -155,7 +159,8 @@ class RunStatus(IntEnum):
     `STALLED` is the microstep guard: a row reached the guard position, so the run
     stopped instead of looping within one tick. `OVERFLOW` names no capacity by
     itself; `Carry.overflow_mask` holds the `Capacity` bits. `AWAITING` means a
-    request to the host is still unanswered, so nothing after it ran.
+    request or a refresh checkpoint is still unanswered by the host, so nothing
+    after it ran.
     """
 
     COMPLETE = 0
@@ -164,6 +169,24 @@ class RunStatus(IntEnum):
     STALLED = 3
     OVERFLOW = 4
     AWAITING = 5
+
+
+class RefitStatus(IntEnum):
+    """How a boundary answered one audience and subject of a refresh request.
+
+    `OK` and `DEGRADED` install the slice the boundary returned (`DEGRADED` is a
+    labelled, usable belief, such as a truncated one); `NO_SUPPORT` and `FAILED`
+    leave the belief as it was. Either way the status is recorded on the product
+    row and in `Carry.refresh_status`.
+    """
+
+    OK = 0
+    NO_SUPPORT = 1
+    DEGRADED = 2
+    FAILED = 3
+
+
+INSTALLING_STATUSES = (RefitStatus.OK, RefitStatus.DEGRADED)
 
 
 def version_slot(audience):

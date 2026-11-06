@@ -40,6 +40,8 @@ CANONICAL_FIELDS = {
         "dec_ordinal",
         "next_sid",
         "release_version",
+        "refresh_dirty",
+        "refresh_status",
     ),
     "carry.ev": (
         "kind",
@@ -129,6 +131,30 @@ CANONICAL_FIELDS = {
         "decision",
         "valid",
     ),
+    "carry.refresh": (
+        "kind",
+        "tick",
+        "stage",
+        "micro",
+        "tie",
+        "sid",
+        "lane",
+        "channel_index",
+        "channel",
+        "subject",
+        "acquisition_index",
+        "gen",
+        "group",
+        "audience",
+        "slot",
+        "scope",
+        "disposition",
+        "acquisition_id",
+        "snapshot_fp",
+        "version",
+        "decision",
+        "valid",
+    ),
     "trace": (
         "handled",
         "kind",
@@ -165,6 +191,12 @@ CANONICAL_FIELDS = {
 # comparator leaf of the full belief and of the policy summary (see `belief_leaves`).
 LAYOUT_FIELDS = ("carry.belief", "carry.pbelief")
 
+# Fields that exist only where the refresh protocol does: they leave a canonical history
+# when the capacities do not carry it (their leaf has zero size), so no history of a
+# study without refresh moves.
+REFRESH_GROUPS = ("carry.refresh",)
+REFRESH_FIELDS = ("carry.refresh_dirty", "carry.refresh_status")
+
 # Whole-field exclusions: dotted output path -> reason. Empty on purpose; invalid
 # queue/log rows and unhandled trace rows are masked in `canonical_history`, not
 # excluded by field. See docs/executors.md.
@@ -180,7 +212,7 @@ def run_status(carry):
     """
     s = jnp.where(carry.done, RunStatus.COMPLETE, RunStatus.TRUNCATED)
     s = jnp.where(carry.idle, RunStatus.IDLE, s)
-    s = jnp.where(carry.request.valid, RunStatus.AWAITING, s)
+    s = jnp.where(carry.request.valid | carry.refresh.valid, RunStatus.AWAITING, s)
     s = jnp.where(carry.stalled, RunStatus.STALLED, s)
     s = jnp.where(carry.overflow, RunStatus.OVERFLOW, s)
     return s.astype(I64)
@@ -263,7 +295,10 @@ def _canonical_leaves(carry, trace, handled, layout):
     The retained request and the scalar carry fields compare in full.
     """
     out = {}
+    refreshing = np.asarray(carry.refresh_status).size > 0
     for group, names in CANONICAL_FIELDS.items():
+        if group in REFRESH_GROUPS and not refreshing:
+            continue
         obj = carry if group == "carry" else trace if group == "trace" else None
         if obj is None:
             obj = carry
@@ -275,6 +310,8 @@ def _canonical_leaves(carry, trace, handled, layout):
         elif group in ("carry.ev", "carry.log"):
             mask = np.asarray(obj.valid)
         for name in names:
+            if f"{group}.{name}" in REFRESH_FIELDS and not refreshing:
+                continue
             leaf = np.asarray(getattr(obj, name))
             if mask is not None and name != "valid":
                 leaf = leaf[mask]
