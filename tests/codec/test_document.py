@@ -19,7 +19,7 @@ from spaceodyssey.core.executors.base import histories_equal
 from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.core.keys import Coupling
 from spaceodyssey.studies import toy
-from tests.core.helpers import baseline_host_run, one_world
+from tests.core.helpers import one_world
 
 # T5a resolves kinds through an explicit mapping; entry points replace it later.
 TOY_KINDS = {
@@ -102,9 +102,12 @@ def test_reloaded_study_runs_and_reuses_the_compiled_program():
     """Fails if a reloaded study misses the host executor's jit cache (a new trace
     or compile) or runs to a different canonical history than the original.
     """
-    study, run, _ = baseline_host_run()
-    loaded = load_study(dump_study(study, TOY_KINDS).to_json(), TOY_KINDS)
+    study = toy.survey_1()
     truth, root = one_world()
+    # Run the original here: the suite may have cleared the jit cache since any
+    # earlier run of the same study.
+    run = HostExecutor().run(study, truth, root, 40)
+    loaded = load_study(dump_study(study, TOY_KINDS).to_json(), TOY_KINDS)
     before = _compiles["n"]
     again = HostExecutor().run(loaded, truth, root, 40)
     assert _compiles["n"] == before
