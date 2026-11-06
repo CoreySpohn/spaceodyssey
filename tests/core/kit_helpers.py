@@ -35,7 +35,11 @@ from spaceodyssey.core import (
 )
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.conformance import make_worlds, replay_beliefs
+from spaceodyssey.core.enums import Audience
+from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
+from spaceodyssey.core.refresh import MaskedBatchRefit, RefreshSchedule
 from spaceodyssey.studies import toy
+from spaceodyssey.studies.scripted import ScriptedRecords
 
 NOISE = 0.5
 N_WORLDS = 2000
@@ -369,3 +373,132 @@ def pit_of_sample(noise):
 def first_worlds(tree, n):
     """The first `n` worlds of a batched run, or of any tree with a world axis."""
     return jax.tree_util.tree_map(lambda x: x[:n], tree)
+
+
+class KeepsSuperseded(RefitMean):
+    """The running mean whose `install` can merge into what the subject holds.
+
+    With `merge` on, an install blends the refit into the subject's current belief,
+    so a row a correction superseded stays in the belief (the fault of the delayed
+    correction check). The fault is an array leaf, so both settings share a program.
+    """
+
+    merge: jax.Array = _flag()
+
+    def install(self, belief, fitted, subject):
+        put = super().install(belief, fitted, subject)
+        n = belief.n[subject] + fitted.n[subject]
+        blend = (
+            belief.mean[subject] * belief.n[subject]
+            + fitted.mean[subject] * fitted.n[subject]
+        ) / jnp.maximum(n, 1)
+        return MeanBelief(
+            mean=jnp.where(self.merge, belief.mean.at[subject].set(blend), put.mean),
+            n=jnp.where(self.merge, belief.n.at[subject].set(n), put.n),
+            aux=put.aux,
+        )
+
+
+SUMMARY_KIND = 4  # index of the summary kind in `summary_registry`
+PUBLIC = Audience.OBSERVER | Audience.POLICY
+EVERY = 100
+
+
+def _scripted(observer, caps, ticks, values, ids, revisions=None, kinds=None):
+    process = ScriptedRecords(
+        ticks=tuple(ticks),
+        values=tuple(values),
+        ids=tuple(ids),
+        revisions=tuple(revisions or (0,) * len(ticks)),
+        statuses=(0,) * len(ticks),
+        kinds=tuple(kinds or ()),
+    )
+    schedule = RefreshSchedule(EVERY, 0, *toy.PRODUCT_CHANNELS, toy.PRODUCT_KIND)
+    return toy.survey_1(
+        caps,
+        observer=observer,
+        refresh=schedule,
+        policies=(toy.NullPolicy(),),
+        process=process,
+    )
+
+
+def correction_study(observer):
+    """Subject 0 measured as 2 and 4, then acquisition 4 corrected to 9 at tick 150.
+
+    The first checkpoint (tick 100) installs {2, 4}, the second (tick 200) the
+    corrected set {9, 4}: mean 6.5 over two rows.
+    """
+    caps = toy.refresh_registry().lower(
+        Capacities(rows_per_subject=8, refit_lanes=2), observer
+    )
+    return _scripted(observer, caps, (1, 2, 150), (2.0, 4.0, 9.0), (4, 5, 4), (0, 0, 1))
+
+
+class SummaryMean(RefitMean):
+    """The running mean of measurements, that counts a summary row like one if given.
+
+    With `count_summary` the observer lists the summary kind for refit, which a
+    registry that marks the kind derived refuses. A derived summary never reaches a
+    fold or a refit, so the same fold is correct there.
+    """
+
+    count_summary: bool = eqx.field(default=False, static=True)
+
+    def capabilities(self):
+        kinds = ("measurement", "summary") if self.count_summary else ("measurement",)
+        return ObserverCapabilities(refit=True, refit_kinds=kinds)
+
+    def fold(self, belief, rec, caps, key=None):
+        kind = jnp.where(rec.kind == SUMMARY_KIND, self.measurement_kind, rec.kind)
+        return super().fold(belief, dataclasses.replace(rec, kind=kind), caps, key=key)
+
+
+def summary_registry(derived):
+    """The refresh kinds with a `summary` kind at index 4, derived or not."""
+    summary = RecordKind("summary", (PayloadColumn("value", PUBLIC),), derived=derived)
+    base = toy.refresh_registry()
+    return KindRegistry((*(base[i] for i in range(len(base))), summary))
+
+
+def summary_study(observer, *, derived, ids=(6,), revisions=None):
+    """Measurements 2 and 4 of subject 0, then a summary of them (their maximum, 4).
+
+    The summary is computed from the rows the observer folds, so its pedigree
+    overlaps its revision set. Counted as a datum it would make three rows and a
+    mean of 10/3 where the data are two rows and a mean of 3.
+    """
+    caps = summary_registry(derived).lower(
+        Capacities(rows_per_subject=8, refit_lanes=2), observer
+    )
+    n = 2 + len(ids)
+    return _scripted(
+        observer,
+        caps,
+        range(1, n + 1),
+        (2.0, 4.0) + (4.0,) * len(ids),
+        (4, 5, *ids),
+        (0, 0, *(revisions or (0,) * len(ids))),
+        (1, 1) + (SUMMARY_KIND,) * len(ids),
+    )
+
+
+@functools.cache
+def refresh_run(name):
+    """`(study, run, roots)` of two worlds of a named scripted refresh study."""
+    studies = {
+        "correction": lambda: correction_study(KeepsSuperseded()),
+        "keeps_superseded": lambda: correction_study(KeepsSuperseded(merge=True)),
+        "summary": lambda: summary_study(SummaryMean(), derived=True),
+        "summary_twice": lambda: summary_study(SummaryMean(), derived=True, ids=(6, 7)),
+        "summary_not_derived": lambda: summary_study(
+            SummaryMean(count_summary=True), derived=False
+        ),
+        "summary_reissued": lambda: summary_study(
+            SummaryMean(), derived=True, ids=(6, 6), revisions=(0, 1)
+        ),
+    }
+    study = studies[name]()
+    truths, roots = make_worlds(study, 2)
+    run = HostExecutor().run_worlds(study, truths, roots, 60, refit=MaskedBatchRefit())
+    return study, run, roots

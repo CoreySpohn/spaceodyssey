@@ -150,6 +150,8 @@ SLOW_FILES = frozenset(
         # refresh runs compile the chunked driver and the masked kernel per executor
         "test_refresh_runs.py",
         "test_observer_kit_statistics.py",
+        # correction checks on scripted refresh runs: one executor compile per study
+        "test_observer_kit_corrections.py",
         # a reloaded run executes on both executors: compiles the chunked driver and
         # the masked kernel, like the refresh runs
         "test_run_document_runs.py",
