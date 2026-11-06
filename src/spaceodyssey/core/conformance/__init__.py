@@ -33,3 +33,7 @@ from spaceodyssey.core.conformance.observer_kit import (
     declared_margin as declared_margin,
 )
 from spaceodyssey.core.conformance.observer_kit import release_order as release_order
+from spaceodyssey.core.conformance.observer_kit import (
+    replay_beliefs as replay_beliefs,
+)
+from spaceodyssey.core.conformance.observer_kit import t_quantile as t_quantile

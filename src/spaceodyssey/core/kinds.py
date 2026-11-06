@@ -75,13 +75,16 @@ class AbstractObserver(eqx.Module):
     Promotion parity (`conformance.observer_kit`) holds an observer's refit to its
     incremental belief. An exact observer, the default, matches within the parity
     tolerances. A statistical observer, whose refit draws a different sample of the
-    same posterior, sets the class attribute `statistical` and declares, also as
-    class attributes, the equivalence `margin` of its trace projection, the `seeds`
-    of its refit keys and the Monte Carlo `standard_error` the margin was sized
-    against; the kit refuses a statistical observer without them.
+    same posterior, sets the class attribute `statistical`; an order-sensitive one,
+    whose refit of the same rows in canonical order is another sample of the same
+    posterior, sets `order_sensitive`. Either declares, also as class attributes,
+    the equivalence `margin` of its trace projection, the `seeds` of its refit keys
+    and the Monte Carlo `standard_error` the margin was sized against; the kit
+    refuses such an observer without them, and an exact one that declares them.
     """
 
     statistical: ClassVar[bool] = False
+    order_sensitive: ClassVar[bool] = False
     margin: ClassVar[float | None] = None
     seeds: ClassVar[tuple[int, ...]] = ()
     standard_error: ClassVar[float | None] = None
