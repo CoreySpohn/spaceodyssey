@@ -33,15 +33,17 @@ caller passes (`kinds`); `CORE_KINDS` holds the core's own types and is always
 included. A class field named `version` is the kind version: it is not written
 among the fields, and loading sets it from the reference.
 
-Canonical JSON sorts keys, uses no whitespace, escapes non-ASCII characters and
-refuses bare NaN or Infinity literals, so equal documents give equal bytes in any
-process.
+Canonical JSON sorts the keys of every JSON object, uses no whitespace, escapes
+non-ASCII characters and refuses non-finite numbers (bare NaN or Infinity, or a
+number such as `1e999` that overflows), so equal documents give equal bytes in
+any process.
 """
 
 import dataclasses
 import enum
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 
 from spaceodyssey.core import enums
@@ -215,7 +217,9 @@ class StudyDocument:
 
     def canonical_bytes(self):
         """The canonical JSON bytes the content hash is taken over."""
-        return canonical_json(self.body()).encode("ascii")
+        body = self.body()
+        check_parsed(body)
+        return canonical_json(body).encode("ascii")
 
     @property
     def content_hash(self):
@@ -233,9 +237,12 @@ class StudyDocument:
         The text need not be canonical: the hash is checked against the canonical
         bytes of what it parses to. A document without `content_hash` is accepted.
         """
-        data = json.loads(
-            text, object_pairs_hook=_unique_keys, parse_constant=_refuse_constant
-        )
+        try:
+            data = json.loads(text, object_pairs_hook=_Pairs, parse_constant=float)
+        except json.JSONDecodeError as err:
+            raise DocumentError(f"malformed JSON: {err}", "") from err
+        check_parsed(data)
+        data = _plain(data)
         if not isinstance(data, dict):
             raise DocumentError("a document is a JSON object", "")
         extra = sorted(set(data) - _DOCUMENT_KEYS)
@@ -272,16 +279,45 @@ def check_schema_version(version):
         )
 
 
-def _unique_keys(pairs):
-    """Build a JSON object, refusing a key given twice."""
-    out = {}
-    for key, value in pairs:
-        if key in out:
-            raise DocumentError(f"key {key!r} appears twice in one object")
-        out[key] = value
-    return out
+class _Pairs(dict):
+    """A parsed JSON object that remembers the first key it was given twice."""
+
+    def __init__(self, pairs):
+        """Keep the last value of each key, as `json` does, and note repeats."""
+        super().__init__()
+        self.repeated = None
+        for key, value in pairs:
+            if key in self and self.repeated is None:
+                self.repeated = key
+            self[key] = value
 
 
-def _refuse_constant(name):
-    """Refuse the non-standard NaN and Infinity literals."""
-    raise DocumentError(f"bare {name} is not JSON; write a $float tag")
+def check_parsed(value, path=()):
+    """Refuse a repeated key or a non-finite number anywhere in parsed JSON.
+
+    Bare NaN and Infinity parse to floats, and so does a number such as `1e999`
+    that overflows, so all three are caught here, at their pointer, before any
+    hash is taken.
+    """
+    if isinstance(value, dict):
+        repeated = getattr(value, "repeated", None)
+        if repeated is not None:
+            raise DocumentError(
+                f"key {repeated!r} appears twice", pointer((*path, repeated))
+            )
+        for key, item in value.items():
+            check_parsed(item, (*path, key))
+    elif isinstance(value, list):
+        for i, item in enumerate(value):
+            check_parsed(item, (*path, i))
+    elif type(value) is float and not math.isfinite(value):
+        raise DocumentError("a number is not finite; write a $float tag", pointer(path))
+
+
+def _plain(value):
+    """Parsed JSON with every object as a plain dict."""
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    return value

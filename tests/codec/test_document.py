@@ -201,3 +201,36 @@ def test_bad_document_fails_with_a_pointer(edit, where, code):
         load_study(json.dumps(doc), TOY_KINDS)
     assert (err.value.pointer, err.value.code) == (where, code)
     assert where in str(err.value)
+
+
+def _token_in_budget(token):
+    """Document text with one budget element replaced by a raw JSON token."""
+    doc = json.loads(dump_study(toy.survey_1(), TOY_KINDS).to_json())
+    doc["study"]["budget"]["data"][0][0] = "@token@"
+    return json.dumps(doc).replace('"@token@"', token)
+
+
+def _repeat_a_nested_key():
+    text = dump_study(toy.survey_1(), TOY_KINDS).to_json()
+    return text.replace('"budget":{', '"budget":{"shape":[1],', 1)
+
+
+@pytest.mark.parametrize(
+    ("make_text", "where"),
+    [
+        (lambda: _token_in_budget("1e999"), "/study/budget/data/0/0"),
+        (lambda: _token_in_budget("NaN"), "/study/budget/data/0/0"),
+        (_repeat_a_nested_key, "/study/budget/shape"),
+        (lambda: dump_study(toy.survey_1(), TOY_KINDS).to_json()[:-1], ""),
+    ],
+    ids=["overflow", "bare-nan", "nested-duplicate-key", "truncated"],
+)
+def test_malformed_text_fails_with_a_pointer(make_text, where):
+    """Fails if a number that overflows to infinity (or a bare NaN) loads, reaches
+    the hash check, or fails without its pointer; if a key repeated inside a
+    nested object is resolved silently or reported without its path; or if
+    malformed JSON escapes as a raw decoder error.
+    """
+    with pytest.raises(DocumentError) as err:
+        load_study(make_text(), TOY_KINDS)
+    assert err.value.pointer == where
