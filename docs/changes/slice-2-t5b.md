@@ -170,7 +170,7 @@ Local runs on the four-thread compute launcher.
 |---|---|
 | `test_run_document.py` | 82 passed, 1.8 s wall; no case near 5 s |
 | `test_run_document_runs.py` | 5 passed, 24.2 s wall; compiled case 13.9 s, host case 7.7 s (cold compile) |
-| `tests/codec` and the gates | see the full-suite note below |
+| Full suite (entry-point install test deselected in the worktree), `-n 2 --dist loadfile` | 2,915 passed, 1,329 s wall, peak footprint 10.5 GiB; the two unit-budget reports are the two known tests outside the codec |
 
 ## Remaining
 
