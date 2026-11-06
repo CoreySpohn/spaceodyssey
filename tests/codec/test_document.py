@@ -18,8 +18,21 @@ from spaceodyssey.core.enums import Audience, Purpose
 from spaceodyssey.core.executors.base import histories_equal
 from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.core.keys import Coupling
+from spaceodyssey.core.kinds import AbstractDesign
 from spaceodyssey.studies import toy
 from tests.core.helpers import one_world
+
+
+class LabelledDesign(AbstractDesign):
+    """A design holding a dict, and a count its `__post_init__` derives from it."""
+
+    labels: dict
+    n_labels: int = 0
+
+    def __post_init__(self):
+        """Derive the count."""
+        object.__setattr__(self, "n_labels", len(self.labels))
+
 
 # T5a resolves kinds through an explicit mapping; entry points replace it later.
 TOY_KINDS = {
@@ -32,6 +45,7 @@ TOY_KINDS = {
     ("channel_model", "toy.photometry", 1): toy.ToyPhotometry,
     ("design", "toy.gain", 1): toy.ToyDesign,
     ("objective", "toy.threshold", 1): toy.ToyObjective,
+    ("design", "test.labelled", 1): LabelledDesign,
 }
 
 # The jit trace and XLA compile events; any jit cache miss emits the first.
@@ -161,6 +175,19 @@ def test_dtypes_non_finite_floats_and_negative_zero_survive():
     first, second = loaded.agenda.policies
     assert math.copysign(1.0, first.stop_snr) == -1.0 and second.stop_snr == math.inf
     assert np.signbit(loaded.design.gain) and loaded.objective.threshold == -np.inf
+
+
+def test_dict_order_is_content():
+    """Fails if a dict's insertion order is lost on reload or left out of the hash
+    (a policy reading the first key would change behavior unseen).
+    """
+    docs = [
+        dump_study(toy.survey_1(design=LabelledDesign(labels=labels)), TOY_KINDS)
+        for labels in ({"z": 1, "a": 2}, {"a": 2, "z": 1})
+    ]
+    assert docs[0].content_hash != docs[1].content_hash
+    for doc, order in zip(docs, (["z", "a"], ["a", "z"]), strict=True):
+        assert list(load_study(doc.to_json(), TOY_KINDS).design.labels) == order
 
 
 def _set_budget_shape(doc):

@@ -76,9 +76,10 @@ def encode(value, path, table):
         if not all(type(k) is str for k in value):
             raise DocumentError("a dict needs string keys", pointer(path))
         return {
-            "$dict": {
-                k: encode(v, (*path, "$dict", k), table) for k, v in value.items()
-            }
+            "$dict": [
+                [k, encode(v, (*path, "$dict", i, 1), table)]
+                for i, (k, v) in enumerate(value.items())
+            ]
         }
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return _encode_kind(value, path, table)

@@ -17,7 +17,7 @@ Values are encoded by type:
 | NaN, +inf, -inf | `{"$float": "nan"}`, `{"$float": "inf"}`, `{"$float": "-inf"}` |
 | `tuple` | a JSON array |
 | `list` | `{"$list": [...]}` |
-| `dict` with string keys | `{"$dict": {...}}` |
+| `dict` with string keys | `{"$dict": [[key, value], ...]}`, in insertion order |
 | enum member | `{"$enum": [group, id, version], "value": ...}` |
 | JAX or NumPy array | `{"$array": dtype, "shape": [...], "data": nested lists}` |
 | `eqx.Module` or dataclass | `{"$kind": [group, id, version], <field>: <value>, ...}` |
@@ -36,7 +36,8 @@ among the fields, and loading sets it from the reference.
 Canonical JSON sorts the keys of every JSON object, uses no whitespace, escapes
 non-ASCII characters and refuses non-finite numbers (bare NaN or Infinity, or a
 number such as `1e999` that overflows), so equal documents give equal bytes in
-any process.
+any process. Dict entries are a list, not an object, so their insertion order is
+part of the content and of the hash.
 """
 
 import dataclasses

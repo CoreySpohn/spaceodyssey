@@ -75,9 +75,7 @@ def decode(node, path, table):
             raise DocumentError("$list holds an array", pointer((*path, tag)))
         return [decode(v, (*path, tag, i), table) for i, v in enumerate(body)]
     if tag == "$dict":
-        if type(body) is not dict:
-            raise DocumentError("$dict holds an object", pointer((*path, tag)))
-        return {k: decode(v, (*path, tag, k), table) for k, v in body.items()}
+        return _decode_dict(body, (*path, tag), table)
     if tag == "$enum":
         cls = table.resolve(_ref(body, (*path, tag)), (*path, tag))
         value = decode(node.get("value"), (*path, "value"), table)
@@ -86,6 +84,20 @@ def decode(node, path, table):
         except (ValueError, TypeError) as err:
             raise DocumentError(str(err), pointer((*path, "value"))) from err
     raise DocumentError(f"unknown tag {tag}", pointer(path))
+
+
+def _decode_dict(body, path, table):
+    """A dict from its `[key, value]` pairs, in their stored order."""
+    if type(body) is not list:
+        raise DocumentError("$dict holds a list of [key, value] pairs", pointer(path))
+    out = {}
+    for i, pair in enumerate(body):
+        if type(pair) is not list or len(pair) != 2 or type(pair[0]) is not str:
+            raise DocumentError("a $dict entry is [key, value]", pointer((*path, i)))
+        if pair[0] in out:
+            raise DocumentError(f"key {pair[0]!r} repeats", pointer((*path, i, 0)))
+        out[pair[0]] = decode(pair[1], (*path, i, 1), table)
+    return out
 
 
 def _only(node, allowed, path):
