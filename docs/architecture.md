@@ -129,7 +129,7 @@ planet-to-star contrast. Signal models and factors use the same normalization;
 the denominator is never a noisy measured flux. Per-planet covariance is
 `diag(noise_sigma**2) + F @ F.T`. Omitting F or using Kc = 0 gives white noise.
 `mass_measured` is a derived boolean property, `isfinite(k_precision_ms)`.
-Simulation uses `k_precision_ms`; certifiers use
+Simulation uses `k_precision_ms`; a consumer that certifies uses
 `k_precision_for_certification_ms`, which selects `k_precision_assumed_ms`
 when present and otherwise `k_precision_ms`. The assumed precision must be
 positive and infinite exactly where the true precision is infinite. There is
@@ -141,19 +141,13 @@ the producer must convert them to the sampling precision of its K estimate.
 The old name is not an alias. A consumer pinned to version 2 must refuse a
 version-3 plan (fail closed), rather than silently assume matched precision.
 
-The `snr` field has been removed. Each certifier supplies its own signal and
-noise mapping. `ToyGaussianCertifier` assumes unit signal in every bin and
-uses `S = sqrt(1.T @ inverse(covariance) @ 1)`, then a posterior standard
-deviation `sigma_unit_snr / S`. For white noise, migrate positive v1 SNRs with
-`noise_sigma = 1 / snr`; the closed-form probabilities are unchanged. There is
-no derived contract SNR because the contract supplies no signal model.
-`ToyGaussianCertifier.posterior_sd` now takes a `PlanSummary`.
+The `snr` field has been removed. A plan carries noise sigma and optional
+correlated factors, and a consumer supplies its own signal model; there is no
+derived contract SNR because the contract supplies none. For white noise, migrate
+positive v1 SNRs with `noise_sigma = 1 / snr`.
 
-Missing spectra use `spectrum_visit = -1`, not infinite noise. The toy returns
-zero positive and negative certification probabilities if no spectrum is
-available, its selected visit failed, or there are no visits. These are valid
-zero-yield plans, including in strict integration. Unknown noise is
-outside the toy's validated range and is flagged through `in_range`.
+Missing spectra use `spectrum_visit = -1`, not infinite noise. Unknown noise is
+outside the validated range of a consumer and is flagged through `in_range`.
 Shapes and spectrum index dtype are checked during tracing; value validation
 runs during concrete construction. Validate inputs before passing them to JIT.
 
@@ -177,15 +171,6 @@ edge order within a claim and the sign of zero do not change identity.
 The evidence rule is `every_claim` (prior-only risk must exceed alpha) or `none`
 (the condition is dropped).
 
-`AbstractProfileCertificate` checks compatibility before subclass construction
-runs, including custom `__init__` and `__check_init__` methods. Constructors must
-expose named `profile` and `truth_model` parameters; field converters on these
-parameters and hiding them in variadic arguments are rejected. The integration
-entry point calls `validate_predictive` to check truth identity, parameter dimensions,
-required context, the planet axis, and plan flux references before integrating.
-The base `integrate` contract assumes validated inputs; direct callers must
-validate unless their concrete integrator does so itself.
-
 `CertificationOutcome` can carry six `(P, K)` claim arrays and ordered
 `claim_names`, all present together. Each column describes that claim as a
 stand-alone one-claim profile. Profile probabilities describe the combined
@@ -193,52 +178,3 @@ certification event. The lowercase hexadecimal `profile_hash` identifies the
 configuration. `certified_yield` preserves it and reports weighted `claim_yields`;
 `paired_difference` records `profile_hash_a` and `profile_hash_b`, allowing both
 same-profile comparisons and comparisons between different profiles.
-
-`GaussianProfileCertifier` is a toy for
-interface tests. The exact tier is the reference for production comparisons.
-The toy uses a declared full-column-rank `spectral_matrix`, known spectral
-noise, and a singleton independent Normal prior. The truth model explicitly
-opts in with `LINEAR_GAUSSIAN_SPECTRUM = True`.
-Other observation channels are unused. Explicit `flat_prior=True` selects a
-support-only improper-flat-prior experiment, ignoring the nominal prior and
-bypassing prior evidence; that mode
-has no robustness interpretation. A bounded uniform posterior is not Gaussian.
-
-Certification is a condition on the posterior, and certification probability
-is over data realizations at fixed truth. The posterior mean is Gaussian over
-those realizations. For any linear quantity, a one-sided posterior risk bound
-shifts its threshold by a normal critical value times its posterior standard
-deviation. An interval claim uses a deterministic, JIT-compatible, 80-step
-scalar bisection to find the interval of certifying posterior means; intervals
-that are too narrow have no positive support region. The solver evaluates tail
-probabilities directly at small alpha. Interval radii use implicit-function
-gradients through `jax.lax.custom_root` away from the feasibility boundary.
-Infeasible radii are zero and have zero tangents.
-
-The toy accepts `separate` and `split` for up to four linearly independent claim
-scalars. Quantities may be affine combinations of parameters; two edges within
-one claim must reduce to a single scalar interval. Its host-side integration
-wrapper runs eagerly on the host, validates inputs and this geometry, and cannot
-be jitted, vmapped, or differentiated in any argument. Nonlinear quantities are
-rejected before posterior computation. Stand-alone claim columns use the profile
-alpha even when the combined event uses `split`. Prior evidence is required for each
-report in the proper Gaussian experiment unless the profile's evidence rule is `none`,
-which drops it as the flat-prior experiment does. Negative profile events are unions
-of negative reports for positive-counted claims; wrong counted events include
-wrong reports of either-counted claims.
-
-Each outcome records `fidelity`: `closed_form` for single thresholds and
-independent claim means, or `quadrature` for correlated claim means. Correlated
-probabilities use fixed-node Gaussian rectangle integration in claim space,
-including the full sampling covariance. Zero standard errors indicate the
-absence of Monte Carlo, not a bound on quadrature error.
-
-Multi-claim `joint` profiles raise `UnsupportedProfile` through the base profile
-check before any computation. More than four claims and linearly dependent
-claim scalars (singular claim covariance) also raise `UnsupportedProfile`, before
-posterior computation. These are deliberate limits of rectangle quadrature.
-Although joint support regions are convex for interval claims, counting
-certification in either direction creates a union of such regions. A library point
-estimate needs a tabulated or approximate
-tier validated against the exact tier. The reference profiles retain `joint`;
-an explicit `separate` variant can exercise this toy with a compatible model.

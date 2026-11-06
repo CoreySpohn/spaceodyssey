@@ -43,6 +43,12 @@ def test_certified_yield_is_reporting_function():
         "register_engine",
         "to_json",
         "spec_from_json",
+        "AbstractCertificate",
+        "AbstractProfileCertificate",
+        "CertificateState",
+        "GaussianProfileCertifier",
+        "SnrThreshold",
+        "ToyGaussianCertifier",
     ],
 )
 def test_legacy_names_are_gone(name):
