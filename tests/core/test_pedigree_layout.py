@@ -155,6 +155,7 @@ def _view(caps, product):
         n_dec=jnp.asarray(0, I64),
         release_version=jnp.asarray(0, I64),
         balance_q=None,
+        balance_rows=None,
     )
 
 

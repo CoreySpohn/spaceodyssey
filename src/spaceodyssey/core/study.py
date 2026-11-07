@@ -3,6 +3,7 @@
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from spaceodyssey.core.capacities import OPTIONAL, Capacities, require_x64
 from spaceodyssey.core.enums import F64, I64, LEVEL_EFFECTS
@@ -116,6 +117,33 @@ class Study(eqx.Module):
         _check_layout(self.observer, self.caps)
         _check_refit(self.observer, self.caps, self.refresh)
         _check_refresh(self.observer, self.caps, self.refresh)
+        _check_balance_range(self.budget, self.caps)
+
+
+_EXACT_QUANTA = 2.0**53
+
+
+def _check_balance_range(budget, caps):
+    """Require the snapshot's integer balance to hold the budget, when it is shown.
+
+    The view hashes the balance as a count of `balance_quantum` units. Past 2**53
+    units a float no longer separates neighbouring counts, and the int64 conversion
+    saturates at 2**63, so two different balances would share one fingerprint. The
+    budget bounds every balance (a debit lowers it and a refund restores at most what
+    was debited), so the check is made once, here. A traced budget is not judged.
+    """
+    if not caps.snapshot_balances:
+        return
+    try:
+        largest = float(np.max(np.abs(np.asarray(budget, dtype=np.float64))))
+    except jax.errors.TracerArrayConversionError:
+        return
+    if not np.isfinite(largest) or largest / caps.balance_quantum > _EXACT_QUANTA:
+        raise ValueError(
+            "snapshot_balances needs |budget| / balance_quantum to be finite and at "
+            f"most 2**53 (largest budget {largest}, balance_quantum "
+            f"{caps.balance_quantum}); raise balance_quantum"
+        )
 
 
 def _check_refit(observer, caps, refresh):

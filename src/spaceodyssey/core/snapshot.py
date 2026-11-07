@@ -145,9 +145,12 @@ class Snapshot(eqx.Module):
     # The policy's view of the ledger (rows: assets, then programs, then the shared
     # row; one column per resource), as the float balance and the integer count of
     # `balance_quantum` units the fingerprint hashes. Absent (None, no leaf) unless
-    # `snapshot_balances` is on, and always absent for the observer.
+    # `snapshot_balances` is on, and always absent for the observer. `balance_rows`
+    # names each row (columns: kind 0 asset, 1 program, 2 shared; index within the
+    # kind), so two layouts with the same row count cannot show one table.
     balance: jax.Array | None = None
     balance_q: jax.Array | None = None
+    balance_rows: jax.Array | None = None
 
 
 class EffectTable(eqx.Module):
@@ -251,7 +254,7 @@ def snapshot_view(carry, audience, caps):
         else:
             mask = vis if col.ndim == 1 else vis[:, None]
             cols[name] = jnp.where(mask, col, jnp.zeros_like(col))[order]
-    balance, balance_q = balance_view(carry, audience, caps)
+    balance, balance_q, balance_rows = balance_view(carry, audience, caps)
     return Snapshot(
         log=RecordLog(**cols),
         n_rows=vis.sum().astype(I64),
@@ -261,20 +264,28 @@ def snapshot_view(carry, audience, caps):
         release_version=carry.release_version[version_slot(audience)],
         balance=balance,
         balance_q=balance_q,
+        balance_rows=balance_rows,
     )
 
 
 def balance_view(carry, audience, caps):
-    """The balance and its integer count of quanta, or `(None, None)` when not shown.
+    """The balance, its integer count of quanta and its row names, or all `None`.
 
     Only the policy is shown balances, and only while `caps.snapshot_balances` is on,
     so every other view keeps its pytree and its fingerprint. The integer is the
-    balance over `caps.balance_quantum`, rounded to the nearest unit.
+    balance over `caps.balance_quantum`, rounded to the nearest unit; a study that
+    shows balances refuses a budget the integer could not hold (`Study`). The row
+    names are the ledger's layout: assets, then programs, then the shared row.
     """
     if not caps.snapshot_balances or audience != Audience.POLICY:
-        return None, None
+        return None, None, None
     balance = carry.ledger.balance
-    return balance, jnp.round(balance / caps.balance_quantum).astype(I64)
+    kind = np.repeat([0, 1, 2], [caps.n_assets, caps.n_programs, 1])
+    index = np.concatenate(
+        [np.arange(caps.n_assets), np.arange(caps.n_programs), np.zeros(1, int)]
+    )
+    rows = jnp.asarray(np.stack([kind, index], axis=1), I64)
+    return balance, jnp.round(balance / caps.balance_quantum).astype(I64), rows
 
 
 _GOLDEN = np.uint64(0x9E3779B97F4A7C15)
@@ -314,15 +325,16 @@ def conditional_view_leaves(view):
 
     The pedigree the view shows (a width-0 column when the refresh protocol is off) and
     the program column (absent with one program), the refund index and award generation
-    (absent without refunds), then the integer balance (absent unless balances are on;
-    the float is not hashed). A feature that adds a leaf to the view lists it here.
+    (absent without refunds), then the balance row names and the integer balance (absent
+    unless balances are on; the float is not hashed). A feature that adds a leaf to the
+    view lists it here.
     """
     program = () if view.log.program is None else (view.log.program,)
     # the refund columns that are integers; the amount is a float and is not hashed
     refunds = tuple(
         x for x in (view.log.refund_index, view.log.award_gen) if x is not None
     )
-    balance = () if view.balance_q is None else (view.balance_q,)
+    balance = () if view.balance_q is None else (view.balance_rows, view.balance_q)
     return (view.log.product, *program, *refunds, *balance)
 
 

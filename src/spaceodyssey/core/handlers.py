@@ -31,6 +31,7 @@ from spaceodyssey.core.records import (
     write_log,
 )
 from spaceodyssey.core.refresh import refresh_enabled, schedule_refresh
+from spaceodyssey.core.snapshot import snapshot_fingerprint, snapshot_view
 
 
 def _emit(n, slot):
@@ -361,8 +362,20 @@ def h_result(c, ev, study, truth, root):
 
 
 def h_request(c, ev, study, truth, root):
-    """Hold the run for the host: the row moves into the carry until it is answered."""
+    """Hold the run for the host: the row moves into the carry until it is answered.
+
+    While `caps.snapshot_balances` is on, the request is stamped again with the
+    fingerprint of the policy snapshot as it stands now, at the decision that asked.
+    Ledger events queued ahead of the request at its tick (a refund, a settlement)
+    move the balance after the decision read it, and the host answers on the state the
+    run is held at. The decision's own fingerprint stays in the trace.
+    """
     held = dataclasses.replace(ev, valid=jnp.asarray(True))
+    if study.caps.snapshot_balances:
+        view = snapshot_view(c, Audience.POLICY, study.caps)
+        view = dataclasses.replace(view, n_dec=ev.decision)
+        layout = study.observer.layout(study.caps)
+        held = dataclasses.replace(held, snapshot_fp=snapshot_fingerprint(view, layout))
     return _tree_set(c, request=held), _emit(0, 0), record_none(study.caps)
 
 
