@@ -107,7 +107,7 @@ def _non_release(trace):
     return {
         n: np.asarray(getattr(trace, n))[keep]
         for n in type(trace).__dataclass_fields__
-        if n not in LATENCY_FREE_SKIP
+        if n not in LATENCY_FREE_SKIP and (n != "program" or trace.program is not None)
     }
 
 

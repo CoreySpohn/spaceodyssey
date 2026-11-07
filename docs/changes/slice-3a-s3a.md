@@ -111,6 +111,9 @@ None. `tests/core/golden_histories.json` and every pin file are unchanged.
   is a conditional leaf (present only with more than one program, registered in
   `CONDITIONAL_FIELDS` as `trace.program` under `programs_on`), so no one-program history or
   pin moves. A debit moved to the wrong program after an overflow now fails conservation.
+- The battery walks that visit every trace field (truth swap, fork, latency shift, metamorphic
+  epoch, replay columns, canonical-field padding) skip the absent `program` leaf of a
+  one-program trace. The refresh mutation pair enables refunds so its refund leaves are held.
 - The observer-release mutant matches the handler's multiline source and is asserted before use.
 - Default lowered scan hash unchanged (2a0a4ec280c8e0bbeaea...).
 

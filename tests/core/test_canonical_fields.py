@@ -157,6 +157,7 @@ def test_inactive_storage_and_trace_padding_are_ignored(executor_pair):
                 ]
             )
             for field in dataclasses.fields(compiled.trace)
+            if getattr(compiled.trace, field.name) is not None
         },
     )
     padded = RunResult(carry, trace, compiled.layout)

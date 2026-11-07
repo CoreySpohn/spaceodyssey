@@ -291,7 +291,7 @@ def replay_run(run, roots, carry, trace, *, refit=None, executor=None):
     refit_kinds = {int(k) for k in caps.refit_kinds}
     names = ("kind", "tick", "subject", "acquisition_index", "channel", "log_slot")
     handled = np.asarray(trace.handled)
-    cols = {n: np.asarray(v) for n, v in vars(trace).items()}
+    cols = {n: np.asarray(v) for n, v in vars(trace).items() if v is not None}
     belief = observer.init(caps)
     pbelief = observer.init_summary(caps)
     dirty = np.zeros(np.shape(carry.refresh_dirty), dtype=bool)
