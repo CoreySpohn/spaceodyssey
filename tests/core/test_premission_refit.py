@@ -40,7 +40,7 @@ from spaceodyssey.core.refresh import (
     _gather,
 )
 from spaceodyssey.studies import toy
-from spaceodyssey.studies.premission import authored_table
+from spaceodyssey.studies.premission import authored_table, resolve_overlap
 from spaceodyssey.studies.prior_observer import (
     PRIOR_INDEX,
     PRODUCT_INDEX,
@@ -49,7 +49,12 @@ from spaceodyssey.studies.prior_observer import (
     PriorRefitObserver,
 )
 from tests.core.helpers import worlds
-from tests.core.prior_helpers import IgnoresWeights, alike_table, refit_study
+from tests.core.prior_helpers import (
+    IgnoresWeights,
+    alike_table,
+    refit_study,
+    refit_table,
+)
 from tests.core.test_premission import _imported
 
 OBS, POL = int(Audience.OBSERVER), int(Audience.POLICY)
@@ -305,8 +310,12 @@ def _replay_failures(study, run, roots):
     return failures
 
 
-def _expected_beliefs(carry, priors):
-    """Each audience's subject 0 and 1 means from the run's log, independently."""
+def _expected_beliefs(carry, priors, dropped_index=1):
+    """Each audience's subject 0 and 1 means from the run's log, independently.
+
+    The imported raw row of subject 1 (channel 60, local index `dropped_index`) is
+    dropped by its prior.
+    """
     log = jax.tree_util.tree_map(np.asarray, carry.log)
     out = {}
     for audience, tick in ((OBS, log.accepted_tick), (POL, log.released_tick)):
@@ -318,18 +327,21 @@ def _expected_beliefs(carry, priors):
                 & (log.status == RecordStatus.COMPLETED)
                 & (log.subject == s)
             )
-            # the imported raw row of subject 1 is dropped by its prior
-            keep &= ~((log.channel == 60) & (log.acquisition_index == 1))
+            keep &= ~(
+                (log.channel == 60)
+                & (log.acquisition_index == dropped_index)
+                & (log.subject == 1)
+            )
             values = list(log.payload[keep, 0])
             out[audience, s] = _posterior(audience, s, values, priors)
     return out
 
 
-def _belief_failures(result, priors=PRIORS):
+def _belief_failures(result, priors=PRIORS, dropped_index=1):
     failures = []
     for w in range(2):
         carry = index_world(result.carry, w)
-        want = _expected_beliefs(carry, priors)
+        want = _expected_beliefs(carry, priors, dropped_index)
         for (audience, s), value in want.items():
             belief = carry.belief if audience == OBS else carry.pbelief
             if abs(float(belief.mean[s]) - value) > 1e-12:
@@ -405,3 +417,25 @@ def test_equal_resolutions_refit_alike_on_both_boundaries():
             assert np.allclose(got, want, rtol=0, atol=1e-12), (name, leaf)
     _, differ, _, _ = _run("host", MaskedBatchRefit)
     assert any("audience 2" in f for f in _belief_failures(differ))
+
+
+@pytest.mark.medium  # the refresh study on the host executor, replayed
+def test_two_subjects_sharing_a_local_index_fold_refit_and_replay_apart():
+    """D006 per channel and subject. Fails if pre-flight refuses two subjects whose
+    raw rows share local index 0 on channel 60, if the prior that drops subject 1's
+    row also drops subject 0's (a lookup by channel and index alone), in a fold or a
+    refit of either audience, or if keyed replay does not reproduce the run.
+    """
+    t = refit_table(shared_index=True)
+    study = refit_study(t)
+    weights = resolve_overlap(t, 1, OBS, derived_kinds=study.caps.derived_kinds)
+    assert np.asarray(weights)[:2].tolist() == [1, 0]
+    context = PreflightContext(boundary=AudiencePriorRefit())
+    assert preflight(study, context=context) == []
+    truths, roots = worlds(2, study.caps)
+    host = HostExecutor().run_worlds(
+        study, truths, roots, 120, refit=AudiencePriorRefit()
+    )
+    assert np.asarray(host.complete).all()
+    assert _belief_failures(host, dropped_index=0) == []
+    assert _replay_failures(study, host, roots) == []

@@ -187,14 +187,15 @@ def import_study(mistake=None):
 
     `mistake` is `None` (a correct table), `"upstream"` (a declared upstream hash,
     unverified without a document), `"pedigree"` (an in-table pedigree entry naming
-    an absent source), `"index"` (a local index repeated on one channel) or
+    an absent source), `"index"` (a local index repeated for one subject on one
+    channel) or
     `"offset"` (a row that ends after its release).
     """
     pedigree = [(), ()]
     if mistake == "pedigree":
         pedigree = [(), ((0, 60, 0, 7, False),)]
     table = authored_table(
-        subject=[0, 1],
+        subject=[0, 0 if mistake == "index" else 1],
         local_index=[0, 0 if mistake == "index" else 1],
         channel=[60, 60],
         kind=[toy.RECORD_MEASUREMENT] * 2,

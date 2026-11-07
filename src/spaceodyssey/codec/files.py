@@ -6,6 +6,13 @@ directory the caller names. The document keeps the dtype and shape and a referen
 `{"name": "<sha256>.bin", "sha256": "<hex>", "bytes": n}`, and the reference is part
 of the document hash, so the content of every file is covered by it. A reference
 names a file in the directory, never a path: a name with a separator is refused.
+
+The trusted directory is the files directory's parent. Its real path is resolved
+once, when the store is made (so an alias such as macOS's `/tmp` or `/var` is
+accepted), and every read and write walks that real path from the root, then the
+files directory, then the file, opening each component without following a symbolic
+link. A link anywhere below the trusted directory, or one that appears in its real
+path later, is refused, not read or written through.
 """
 
 import contextlib
@@ -14,8 +21,8 @@ import dataclasses
 import hashlib
 import os
 import re
+import secrets
 import stat
-import tempfile
 from pathlib import Path
 
 from spaceodyssey.codec.document import DocumentError, pointer
@@ -24,6 +31,56 @@ DEFAULT_MAX_INLINE = 1024
 DEFAULT_MAX_BYTES = 1 << 30
 _NAME = re.compile(r"[0-9a-f]{64}\.bin")
 _REF_KEYS = frozenset({"name", "sha256", "bytes"})
+_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY
+
+
+class UnsafeDirectory(OSError):
+    """A directory on the way to an array file is a symbolic link."""
+
+
+def _is_link(name, dir_fd):
+    """Whether `name` below `dir_fd` is a symbolic link (not followed)."""
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISLNK(info.st_mode)
+
+
+def _walk(fd, parts, create=False):
+    """The descriptor of `parts` opened one by one below `fd`, never through a link.
+
+    Takes ownership of `fd` (closed on return or failure). With `create`, a missing
+    component is made relative to its parent's descriptor, then opened like any
+    other, so nothing is made through a link. A link, an empty, `.` or `..` component
+    is `UnsafeDirectory`.
+    """
+    flags = _DIRECTORY | os.O_NOFOLLOW
+    try:
+        for part in parts:
+            if part in ("", ".", ".."):
+                raise UnsafeDirectory(f"path component {part!r} is refused")
+            try:
+                try:
+                    nxt = os.open(part, flags, dir_fd=fd)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(part, dir_fd=fd)
+                    nxt = os.open(part, flags, dir_fd=fd)
+            except OSError:
+                if _is_link(part, fd):
+                    raise UnsafeDirectory(
+                        f"{part!r} is a symbolic link; a link is refused"
+                    ) from None
+                raise
+            os.close(fd)
+            fd = nxt
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 @dataclasses.dataclass(frozen=True)
@@ -39,6 +96,25 @@ class FileStore:
     directory: Path
     max_inline: int = DEFAULT_MAX_INLINE
     max_bytes: int = DEFAULT_MAX_BYTES
+    # the trusted directory's real path, resolved once, and the path below it
+    trusted: str = dataclasses.field(init=False, repr=False, compare=False)
+    below: tuple = dataclasses.field(init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        """Resolve the trusted directory (the files directory's parent) once."""
+        parent, name = os.path.split(os.path.abspath(self.directory))
+        object.__setattr__(self, "trusted", os.path.realpath(parent))
+        object.__setattr__(self, "below", (name,) if name else ())
+
+    def _open(self, create=False):
+        """A descriptor of the files directory, walked from the trusted real path.
+
+        With `create`, the trusted directory and the files directory are made when
+        missing. A link on the way is `UnsafeDirectory`.
+        """
+        root = [p for p in self.trusted.split(os.sep) if p]
+        fd = _walk(os.open(os.sep, _DIRECTORY), root, create=create)
+        return _walk(fd, self.below, create=create)
 
     def wants(self, size):
         """Whether an array of `size` elements is written to a file."""
@@ -57,16 +133,22 @@ class FileStore:
         ref = {"name": name, "sha256": digest, "bytes": len(raw)}
         if self._intact(name, digest, len(raw)):
             return ref
-        self.directory.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.directory, prefix=".", suffix=".tmp")
+        _require_safe_open(writes=True)
+        dir_fd = self._open(create=True)
         try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(raw)
-            os.replace(tmp, self.directory / name)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+            tmp = f".{secrets.token_hex(16)}.tmp"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            fd = os.open(tmp, flags, 0o600, dir_fd=dir_fd)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(raw)
+                os.rename(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp, dir_fd=dir_fd)
+                raise
+        finally:
+            os.close(dir_fd)
         return ref
 
     def _intact(self, name, digest, size):
@@ -82,7 +164,7 @@ class FileStore:
         if size > limit:
             raise ValueError("file is larger than the limit")
         _require_safe_open()
-        dir_fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+        dir_fd = self._open()
         try:
             flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
             fd = os.open(name, flags, dir_fd=dir_fd)
@@ -142,6 +224,12 @@ class FileStore:
         _require_safe_open(pointer((*path, "name")))
         try:
             raw = self._read(name, size, self.max_bytes)
+        except UnsafeDirectory as err:
+            raise DocumentError(
+                f"array file {name} is not read: the files directory is reached "
+                f"through a symbolic link ({err}); a link is refused",
+                pointer((*path, "name")),
+            ) from err
         except FileNotFoundError as err:
             raise DocumentError(
                 f"array file {name} is missing from {self.directory}",
@@ -167,8 +255,8 @@ class FileStore:
         return raw
 
 
-def _require_safe_open(where=None):
-    """Refuse to read where a symlink or a special file cannot be ruled out."""
+def _require_safe_open(where=None, writes=False):
+    """Refuse to read, or write, where a link or a special file cannot be ruled out."""
     for flag in ("O_NOFOLLOW", "O_NONBLOCK", "O_DIRECTORY"):
         if not hasattr(os, flag):
             raise DocumentError(
@@ -176,11 +264,14 @@ def _require_safe_open(where=None):
                 "a symlink or special file could not be refused",
                 where,
             )
-    if os.open not in os.supports_dir_fd:
-        raise DocumentError(
-            "array files need dir_fd support in os.open, which this platform lacks",
-            where,
-        )
+    calls = (os.open, os.stat) + ((os.mkdir, os.rename, os.unlink) if writes else ())
+    for call in calls:
+        if call not in os.supports_dir_fd:
+            raise DocumentError(
+                f"array files need dir_fd support in os.{call.__name__}, which this "
+                "platform lacks",
+                where,
+            )
 
 
 _STORE = contextvars.ContextVar("file_store", default=None)

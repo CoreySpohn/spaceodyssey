@@ -83,16 +83,19 @@ def summaries(second):
     )
 
 
-def refit_table(policy_value=-4.0):
+def refit_table(policy_value=-4.0, shared_index=False):
     """Two public raw rows, then an observer, a policy and a public prior.
 
     Subject 0 has an observer-only prior (10, precision 2) and a policy-only prior
     (`policy_value`, precision 1). Subject 1 has a public prior (3, precision 1) whose
-    pedigree names raw row 1, the raw row of subject 1.
+    pedigree names raw row 1, the raw row of subject 1. With `shared_index` the two
+    raw rows share local index 0 on channel 60 (the core counts acquisition indices
+    per subject), so only the subject tells them apart.
     """
+    raw = 0 if shared_index else 1
     return authored_table(
         subject=[0, 1, 0, 0, 1],
-        local_index=[0, 1, 0, 1, 2],
+        local_index=[0, raw, 0, 1, 2],
         channel=[60, 60, 61, 61, 61],
         kind=[MEAS, MEAS] + [PRIOR_INDEX] * 3,
         audience=[3, 3, OBS, POL, 3],
@@ -104,7 +107,7 @@ def refit_table(policy_value=-4.0):
             (),
             ((7, 90, 0, 0, True),),
             ((7, 90, 0, 1, True),),
-            ((0, 60, 1, 1, False), (7, 90, 1, 2, True)),
+            ((0, 60, 1, raw, False), (7, 90, 1, 2, True)),
         ],
         width=2,
     )

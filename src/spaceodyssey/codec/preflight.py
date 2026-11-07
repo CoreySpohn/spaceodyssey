@@ -58,7 +58,10 @@ from spaceodyssey.codec.document import (
     DocumentError,
     RunDocument,
     StudyDocument,
+    canonical_json,
+    check_integers,
     check_schema_version,
+    int_too_long,
     parse_text,
     pointer,
 )
@@ -164,6 +167,7 @@ def preflight_document(
     files=None,
     max_file_bytes=DEFAULT_MAX_BYTES,
     n_steps=None,
+    upstream=None,
 ):
     """Every pre-flight finding of a study document, errors first.
 
@@ -201,6 +205,13 @@ def preflight_document(
     study document with a separate run record has no registry to rebuild with: a
     `D003` warning says the boundary was not rebuilt. Without a boundary, a component
     that needs one reports its check as unverified.
+
+    `upstream` is the document an imported table names by its declared upstream
+    hash (JSON text, a parsed object, a `StudyDocument` or a `RunDocument`). It is
+    read with `read_upstream` and passed in the context, so the table's lineage check
+    (`D004`) compares the declaration with its content hash, at the pointer of the
+    declared hash. An upstream document that does not read fails that check; without
+    one, a declared hash is reported as declared, unverified.
     """
     resolver = _resolver(kinds)
     try:
@@ -247,6 +258,11 @@ def preflight_document(
             context = PreflightContext(
                 budget=RunBudget(caps.n_events, caps.n_log, n_steps)
             )
+        if upstream is not None:
+            context = dataclasses.replace(
+                context or PreflightContext(),
+                upstream_document=read_upstream(upstream),
+            )
         records = data.get("records") if is_run else None
         boundaries, unbuilt = _boundaries(run, records, bindings, executor)
         found += unbuilt
@@ -290,26 +306,20 @@ def _parsed(document):
     """The document as a JSON object, validated as the loader validates it.
 
     Text goes through the loader's parser: malformed JSON, a repeated key and a
-    non-finite number are refused with a pointer. A `StudyDocument` is read as it is,
-    as `load_study` reads it, with no stored hash. A parsed object is copied, and a
+    non-finite number are refused with a pointer. A `StudyDocument` (or `RunDocument`)
+    is read as it is, with no stored hash; only an integer too long to write is
+    refused there (`check_integers`). A parsed object is copied, and a
     value JSON cannot hold (a set, a non-string key, a non-finite number) is refused
     with a pointer.
     """
-    if isinstance(document, RunDocument):
-        return {
-            "format": RUN_FORMAT,
-            "schema_version": document.schema_version,
-            "study": document.study,
-            "run": document.run,
-            "records": document.records,
-        }
-    if isinstance(document, StudyDocument):
-        return {
-            "format": FORMAT,
-            "schema_version": document.schema_version,
-            "study": document.study,
-        }
-    data = parse_text(document) if isinstance(document, str) else _json(document)
+    try:
+        if isinstance(document, StudyDocument):  # a RunDocument too
+            data = document.body()
+            check_integers(data)
+            return data
+        data = parse_text(document) if isinstance(document, str) else _json(document)
+    except RecursionError:
+        raise DocumentError("the document nests too deeply to read", "") from None
     if not isinstance(data, dict):
         raise DocumentError("a document is a JSON object", "")
     return data
@@ -325,6 +335,8 @@ def _json(value, path=()):
         return [_json(v, (*path, i)) for i, v in enumerate(value)]
     if type(value) is float and not math.isfinite(value):
         raise DocumentError("a number is not finite; write a $float tag", pointer(path))
+    if type(value) is int and int_too_long(value):
+        raise DocumentError("an integer is too long to write", pointer(path))
     if value is None or type(value) in (bool, int, float, str):
         return value
     raise DocumentError(f"{type(value).__name__} is not a JSON value", pointer(path))
@@ -764,3 +776,70 @@ def service_findings(study, run):
             DocumentCode.D003, Severity.ERROR, pointer((RUN_KEY,)), message, fix
         )
     ]
+
+
+# ---- upstream documents, for the lineage check --------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class UpstreamDocument:
+    """The content hash of a supplied upstream document, or why it has none.
+
+    `content_hash` is the sha256 of the document's canonical bytes, `None` when the
+    document could not be read; `problem` then says why, with the pointer of the
+    failure in the upstream document.
+    """
+
+    content_hash: str | None
+    problem: str | None = None
+
+
+def read_upstream(upstream):
+    """The `UpstreamDocument` of a study or run document; never raises on content.
+
+    `upstream` is JSON text, a parsed object, a `StudyDocument` or a `RunDocument`
+    (an `UpstreamDocument` is returned as it is). The hash is taken over the
+    canonical bytes, so whitespace and the order of JSON object keys do not change
+    it, while any changed value, a reordered array and reordered `$dict` entries do.
+    Text or an object that carries a stored `content_hash` must match it: a document
+    edited after its hash was written is refused.
+    """
+    if isinstance(upstream, UpstreamDocument):
+        return upstream
+    try:
+        data = _parsed(upstream)
+        cls = RunDocument if data.get("format") == RUN_FORMAT else StudyDocument
+        return UpstreamDocument(cls.from_json(canonical_json(data)).content_hash)
+    except (ValueError, TypeError) as err:  # a DocumentError is a ValueError
+        return UpstreamDocument(None, f"does not read as a document ({err})")
+    except RecursionError:
+        return UpstreamDocument(None, "does not read as a document (nested too deeply)")
+
+
+def read_document(document):
+    """`(data, findings)`: a document as its parsed object, and why it may not be.
+
+    `data` is `None` when the document cannot be interpreted: it does not parse as a
+    JSON object, its envelope is wrong (a missing or unknown key, another format) or
+    its schema version is not one this loader reads; `findings` then holds why, as
+    `L001` or `D002`. A stored `content_hash` that differs from the canonical bytes is
+    an `L001` finding at `/content_hash`, and `data` is returned.
+    """
+    try:
+        data = _parsed(document)
+    except DocumentError as err:
+        return None, [_from_error(err)]
+    found, readable = _envelope(data, data.get("format") == RUN_FORMAT)
+    if "schema_version" in data:
+        try:
+            check_schema_version(data["schema_version"])
+        except DocumentError as err:
+            found.append(_from_error(err))
+            readable = False
+    if not readable:
+        return None, found
+    try:
+        return data, found + _check_hash(data)
+    except RecursionError:
+        err = DocumentError("the document nests too deeply to read", "")
+        return None, [*found, _from_error(err)]

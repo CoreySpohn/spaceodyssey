@@ -31,6 +31,7 @@ from spaceodyssey.codec.document import (
     CallableRefused,
     DocumentError,
     StudyDocument,
+    check_integers,
     check_schema_version,
     current_max_tick,
     pointer,
@@ -100,6 +101,7 @@ def load_study(document, kinds=None, *, files=None, max_file_bytes=DEFAULT_MAX_B
     if isinstance(document, str):
         document = StudyDocument.from_json(document)
     check_schema_version(document.schema_version)
+    check_integers(document.study, ("study",))
     with using_store(make_store(files, 0, max_file_bytes)):
         study = decode(document.study, ("study",), as_resolver(kinds))
     if not isinstance(study, Study):
@@ -400,6 +402,11 @@ def _decode_array(node, path):
     shape = node.get("shape")
     if type(shape) is not list or not all(type(n) is int and n >= 0 for n in shape):
         raise DocumentError("shape is a list of sizes", pointer((*path, "shape")))
+    largest = np.iinfo(np.intp).max
+    if any(n > largest for n in shape) or math.prod(shape) > largest // dtype.itemsize:
+        raise DocumentError(
+            "the shape holds more elements than an array can", pointer((*path, "shape"))
+        )
     if ("data" in node) == ("file" in node):
         raise DocumentError(
             "an array has either data or a file reference", pointer(path)
