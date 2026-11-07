@@ -19,7 +19,9 @@ read priors (section 5), and the replay check `test_replay_reproduces_prior_run`
 5. `feat(codec): rebuild the run record's refit boundary for the JSON pre-flight` (`914c589`)
 6. review round 1 fixes (`bb3fcb4`, `2799006`, `943ca19`; see the section of that name)
 7. `chore(pre-commit): the prior test helpers are a support module` (`8ebbae9`)
-8. this record
+8. this record (`716c7fa`)
+9. review round 2 (independent tier-2 review) fixes: `38ac5bb`, `22e0b01`,
+   `aab7092`, and this record's update (see "Review round 2")
 
 Commit 2 is about 900 lines (the new module, the finding codes and the seeded
 pre-flight cases that keep `test_every_code_has_a_seeded_mistake` green land
@@ -43,9 +45,11 @@ together), above the 600-line guide.
 - `core/conformance/observer_kit.py` and its `__init__`: `check_overlap_declared`
   (check 7) and `check_zero_weight_rows`; `check_folded_once` also runs the
   zero-weight check for an observer that declares `reads_priors`.
-- `codec/preflight.py`: with a run record and `bindings`, the refit boundary is
-  rebuilt (the selected executor's side, or both sides merged) and passed in the
-  `PreflightContext`, so `D009` and `D010` are reachable through JSON. The docstring
+- `codec/preflight.py`: for a run document checked with `bindings`, the refit
+  boundary is rebuilt with the document's record registry (the selected executor's
+  side, or both sides merged) and passed in the `PreflightContext`, so `D009` and
+  `D010` are reachable through JSON. A study document with a separate run record
+  has no registry: nothing is rebuilt and a `D003` warning says so. The docstring
   counts twenty codes (three document codes, seventeen in-memory).
 - No core runtime file changed. The core edits are `core/preflight/findings.py` and
   `core/conformance/`, both allowed by K2. `core/battery/` is untouched.
@@ -89,8 +93,8 @@ It is hashable by class and declaration, so instances share one compiled program
 | Code | Raised when | Locator |
 |---|---|---|
 | D008 | two priors retained for one audience have pedigrees that share a source (external entries count); once per pair | `observer`, `table.pedigree.source_index`, `(later row, entry)` |
-| D009 | the boundary is `MaskedBatchRefit` with the observer's own kernel (it starts both refits from `observer.init` and shares them) and the audiences resolve differently for some subject | `observer`, `table` |
-| D010 | a table prior retained for some audience, with any other boundary that does not declare audience priors (`OftiRefit`, a host fit or kernel that never reads the installed prior, the updater boundary when it lands); with no boundary supplied and a refresh grid on, a warning that D009 and D010 are unverified | `observer`, `table` |
+| D009 | a retained table prior with `MaskedBatchRefit` of the observer's own kernel (it starts both refits from `observer.init` and shares them) while the audiences resolve differently for some subject | `observer`, `table` |
+| D010 | a retained table prior with any boundary other than `AudiencePriorRefit` (A10): `OftiRefit`, a host fit or kernel that never reads the installed prior, the updater boundary when it lands, and the observer-init boundary when the audiences resolve alike; with no boundary supplied and a refresh grid on, a warning that D009 and D010 are unverified | `observer`, `table` |
 | D006 | (also) the observer's table differs from the table the process imports | `observer`, `table` |
 
 ## Tests
@@ -179,6 +183,68 @@ boundary lane, D006 for the table mismatch.
 
 The scoped second round confirmed the fixes and found no new problem.
 
+## Review round 2
+
+An independent tier-2 review returned "fix first" with five P2s. Each fix has a test
+that failed before it.
+
+1. **The D009/D010 split did not follow the adopted A10.** The observer-init
+   boundary with equal resolutions was accepted. Now only `AudiencePriorRefit`
+   takes a retained table prior; that case is `D010` (silence 1 records it as a
+   candidate spec change). Tests: `test_d009_refuses_different_priors_on_the_observer_init_boundary`
+   and `test_a_policy_only_row_is_judged_by_the_policy_rule` now require `D010` for
+   equal resolutions.
+2. **The zero-weight probe row had audience 0** (from `record_none`), so an observer
+   that ignores the weights but folds only rows addressed to the audience passed
+   both kit checks, while with the real public audience the excluded row moved the
+   posterior from -5 to -0.5. The probe now carries the import's and release's
+   metadata. Test: `test_the_zero_weight_probe_carries_the_rows_real_audience`
+   (control `GuardsByAudience`).
+3. **Non-binary weights passed.** NaN for dropped rows passed both checks (`> 0` in
+   one, `== 0` in the other) while the observer double counted (means 1/3 and -0.5
+   against -5). Both checks now first require a finite {0, 1} vector of one entry
+   per row. Test: `test_the_prior_checks_refuse_weights_outside_zero_and_one`
+   (control `NanWeights`, both rules).
+4. **Vacuous passes.** An all-padding table passed both checks. Check 7 refuses a
+   table with no prior, and the zero-weight check a table with no row of weight
+   zero. Test: `test_the_prior_checks_refuse_a_table_with_nothing_to_judge`.
+5. **The JSON boundary rebuild called builders with `registry=None`** on the study
+   document plus `run=` path, so a builder that reads the registry raised
+   `AttributeError`. Boundaries are now rebuilt only with a run document's
+   registry; the other path reports a `D003` warning at `/run/refit` and the
+   observer's unverified warning. Test:
+   `test_a_study_document_with_a_run_record_does_not_rebuild_without_a_registry`
+   (the same registry-reading binding rebuilds inside a run document and reaches
+   `D010`). The D009 and D010 JSON tests now use run documents
+   (`dump_run`), and the executor-side test selects host or compiled on one.
+
+Tests added in this round: 4 functions (5 nodes); 3 existing tests changed to the
+adopted contract or to run documents. Cold times, each alone (caches off, four
+threads, wall time with imports):
+
+| Test | Tier | Cold s |
+|---|---|---|
+| `test_observer_kit.py::test_the_zero_weight_probe_carries_the_rows_real_audience` | unit | 4.4 |
+| `::test_the_prior_checks_refuse_weights_outside_zero_and_one` (2) | unit | 2.9 per node |
+| `::test_the_prior_checks_refuse_a_table_with_nothing_to_judge` | unit | 3.6 |
+| `test_preflight_json.py::test_a_study_document_with_a_run_record_does_not_rebuild_without_a_registry` | unit | 3.9 |
+| `::test_the_run_record_boundary_reaches_the_prior_checks` (3) with `::test_the_selected_executor_side_is_checked` (2) | unit | 3.4 for all five |
+| `test_premission_refit.py::test_d009_refuses_different_priors_on_the_observer_init_boundary` | unit | 3.5 |
+| `::test_a_policy_only_row_is_judged_by_the_policy_rule` | unit | 3.6 |
+| `::test_a_refit_observer_keeps_its_prior_across_a_refresh` (rerun, uses the changed kit) | medium | 17.9 |
+
+Checks rerun at `aab7092`:
+
+- `test_golden_histories.py` with `test_run_document_runs.py`: 189 passed in
+  182.6 s; `git diff 7fe3e24 -- tests/core/golden_pin.json tests/codec/hash_pin.json`
+  is empty.
+- Quick tier (`-m "not slow" -n 2 --dist loadfile`, entry-point test deselected):
+  2,059 passed in 207.5 s. The budget plugin reported one unit over 5 s, the
+  existing `test_snapshot_fingerprint.py::test_snapshot_fingerprint_recorded`
+  (5.48 s under the parallel load), not touched here.
+- ruff, the internal-reference, domain-word and core-import checks, and
+  `pre-commit run` over the branch: clean.
+
 ## Mutants and controls
 
 Each mutant was applied to a copy of `src/` and the new and touched tests run against
@@ -235,14 +301,14 @@ trusts the installed prior; the independent prior-plus-rows comparison in
 
 ## Spec silences decided here
 
-1. **D009 and D010 split by boundary.** `AudiencePriorRefit` declares
-   `audience_priors` and is always accepted. `MaskedBatchRefit` with the observer's
-   own kernel starts both refits from `observer.init`, which holds the observer's
-   prior, so it is correct exactly when both audiences resolve alike: it is accepted
-   then and is `D009` otherwise. Every other boundary with a retained table prior is
-   `D010`. This accepts one boundary beyond the toy one, which D2 and Q10 do not; the
-   alternative (D010 for everything but the toy boundary) makes D009 unreachable.
-   Flagged for Corey with Q10.
+1. **Only `AudiencePriorRefit` takes a retained table prior (adopted A10).** Every
+   other boundary is refused: `D009` when it is the observer-init boundary and the
+   audiences resolve differently, `D010` otherwise. Round 1 had accepted the
+   observer-init boundary when the audiences resolve alike; round 2 reverted that to
+   the adopted contract (see "Review round 2"). That case looks safe for the current
+   Gaussian observer (it starts both refits from `observer.init`, which then holds
+   the one common prior, and no wrong-posterior counterexample was found) and is a
+   candidate for a later, explicit spec change, not a silence here.
 2. **`resolve_overlap` takes `derived_kinds` (keyword).** The frozen signature cannot
    tell a prior from a raw row without the registry; a prior is a row of a derived
    kind (R1 silence 4). `overlap_roles` is added beside it for the pre-flight check.
@@ -271,12 +337,19 @@ trusts the installed prior; the independent prior-plus-rows comparison in
     with the installed beliefs.
 11. **The JSON path checks the selected executor's boundary**, or both sides merged
     when none is selected; a side whose binding does not rebuild is skipped (its
-    own `D001` or `D003` reports why).
+    own `D001` or `D003` reports why). Boundaries are rebuilt only with the run
+    document's record registry, as `load_run` rebuilds them; a study document with
+    a separate run record gets a `D003` warning instead.
 12. **The kit's prior checks use a duck protocol** (`reads_priors`, `table`,
     `weights(caps, audience)`, `init`, `init_summary`), documented in
     `_prior_reader` and refused when incomplete; core imports nothing from
     `studies/`. The kit computes each audience's priors and evidence from the table's
-    columns itself, never from the observer's resolution.
+    columns itself, never from the observer's resolution. Weights that are not a
+    finite {0, 1} vector fail both checks; check 7 refuses a table with no prior and
+    the zero-weight check a table with no row of weight zero (inside
+    `check_folded_once` such a table adds no failure). The zero-weight probe row
+    carries the import's metadata: the row's audience, its span, availability at
+    tick 0 and the release stamps of the audiences it is addressed to.
 
 ## Spec points not satisfied
 
