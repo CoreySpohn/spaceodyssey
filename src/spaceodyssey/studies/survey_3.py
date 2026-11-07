@@ -20,13 +20,17 @@ tick, so shifting the epoch origin changes nothing.
 The survey's table (`survey_3_table`) has two public raw rows, an optional raw row of
 subject 0, and two public priors:
 
-| Row | Kind | Subject | Audience | Pedigree |
-|---|---|---|---|---|
-| 0 | measurement | 0 | public | |
-| 1 | measurement | 1 | public | |
-| 2 | measurement | 0 | observer only, public or not imported | |
-| 3 | prior with a window | 0 | public | an external source and row 2 |
-| 4 | prior | 1 | public | row 1 |
+=== =========== ======= ============================ ===========================
+Row Kind        Subject Audience                     Pedigree
+=== =========== ======= ============================ ===========================
+0   measurement 0       public
+1   measurement 1       public
+2   measurement 0       observer only, public or not
+                        imported
+3   prior with  0       public                       an external source, row 2
+    a window
+4   prior       1       public                       row 1
+=== =========== ======= ============================ ===========================
 
 Row 3's pedigree entry for row 2 is external when row 2 is not imported, so prior 3 is
 then entirely external.
