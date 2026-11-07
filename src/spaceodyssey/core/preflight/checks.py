@@ -5,6 +5,8 @@ study. A passing pre-flight says the declarations are consistent, never that the
 science is right.
 """
 
+import dataclasses
+
 import numpy as np
 
 from spaceodyssey.core.declarations import (
@@ -25,6 +27,35 @@ from spaceodyssey.core.preflight.graph import NodeKind, Side, StudyGraph
 from spaceodyssey.core.study import Study
 
 ERROR, WARNING = Severity.ERROR, Severity.WARNING
+
+
+@dataclasses.dataclass(frozen=True)
+class RunBudget:
+    """What a run may use: event slots, log rows and executor steps."""
+
+    n_events: int
+    n_log: int
+    n_steps: int
+
+    @classmethod
+    def of(cls, study, n_steps):
+        """The budget of `study` run for `n_steps` steps, from its capacities."""
+        return cls(study.caps.n_events, study.caps.n_log, int(n_steps))
+
+
+@dataclasses.dataclass(frozen=True)
+class PreflightContext:
+    """What a run supplies beside the study, for checks the study alone cannot make.
+
+    `boundary` is the refit boundary the executor is given, `budget` the run's
+    `RunBudget`, and `upstream_document` the document a declared upstream hash names.
+    Each is optional; a check that needs a missing one does not run, or reports that
+    it could not verify.
+    """
+
+    boundary: object = None
+    budget: RunBudget | None = None
+    upstream_document: object = None
 
 
 def _components(study):
@@ -412,8 +443,35 @@ def channels(study: Study):
     return out
 
 
-def preflight(study: Study, executor: str | None = None) -> list[Finding]:
-    """Structural findings for `study`, errors first. Nothing runs."""
+def components(study: Study, context: PreflightContext | None = None):
+    """Findings the process and the observer report on themselves.
+
+    A component that defines `validate(study, context)` returns its own findings; the
+    slot is filled in where a finding leaves it empty. `context` is passed as given,
+    `None` included.
+    """
+    out = []
+    for slot, component in (("process", study.process), ("observer", study.observer)):
+        validate = getattr(component, "validate", None)
+        if not callable(validate):
+            continue
+        for item in validate(study, context):
+            out.append(
+                item if item.subject else dataclasses.replace(item, subject=slot)
+            )
+    return out
+
+
+def preflight(
+    study: Study,
+    executor: str | None = None,
+    context: PreflightContext | None = None,
+) -> list[Finding]:
+    """Structural findings for `study`, errors first. Nothing runs.
+
+    `context` carries what a run supplies beside the study (`PreflightContext`); the
+    process's and observer's own checks receive it.
+    """
     graph = StudyGraph.from_study(study)
     found = [
         *firewall(graph),
@@ -424,5 +482,6 @@ def preflight(study: Study, executor: str | None = None) -> list[Finding]:
         *reserved(study),
         *stops(study),
         *channels(study),
+        *components(study, context),
     ]
     return sorted(found, key=lambda f: (f.severity != ERROR, f.code))

@@ -1,7 +1,7 @@
 """Pre-flight of a study document: every finding, each with a pointer.
 
 `preflight_document` runs the structural checks on a JSON document without running
-the study. It reports all thirteen finding codes:
+the study. It reports all seventeen finding codes:
 
 - `D001`, `D002`: a kind id or version the resolver does not know, and a schema
   version newer than the loader. Every `$kind` and `$enum` reference is checked, so
@@ -9,7 +9,7 @@ the study. It reports all thirteen finding codes:
 - `D003`: a run record that binds no service where a component asks a `Query`, a
   binding with a missing or ill-typed member, or host and compiled refit bindings
   that carry different inference-model hashes.
-- the ten in-memory codes (`FindingCode`): the document is loaded and
+- the fourteen in-memory codes (`FindingCode`): the document is loaded and
   `spaceodyssey.core.preflight.preflight` runs on the study; each finding keeps its
   code and gains the JSON pointer of the offending value in the document.
 
@@ -28,7 +28,7 @@ when the document has no `D001` or `D002` and decodes. A document that does not 
 for another reason (malformed JSON, a repeated key, a non-finite number, a wrong
 shape, a module whose validation fails, a wrong envelope or hash) is reported as `L001`
 at the pointer of the failure, alongside the independent findings; `L001` is not one of
-the thirteen finding codes but the in-band form of a `DocumentError`. One field-level
+the seventeen finding codes but the in-band form of a `DocumentError`. One field-level
 failure is reported with its own code instead: a `null` coincident order loads, so
 `T002` is reported with the other in-memory findings.
 
@@ -112,7 +112,7 @@ class DocumentCode(StrEnum):
     D001 = "D001"  # an unknown kind id or version
     D002 = "D002"  # a schema version newer than the loader
     D003 = "D003"  # a binding missing, ill-typed, or refit model hashes that differ
-    L001 = "L001"  # the document does not decode as a study (not one of the thirteen)
+    L001 = "L001"  # the document does not decode as a study (not one of the seventeen)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -120,7 +120,7 @@ class DocumentFinding:
     """One finding on a document: a code, the pointer of the offending value, a hint.
 
     `in_memory` is the finding the core pre-flight made on the loaded study, for the
-    ten in-memory codes, and `None` for the document codes.
+    fourteen in-memory codes, and `None` for the document codes.
     """
 
     code: FindingCode | DocumentCode
@@ -413,7 +413,8 @@ def _tokens(item, study):
     The slot is a field of the study (the policy slot is `agenda.policies`). The member
     and entry are followed only when the slot has a field of that name, which is how a
     component that stores what it declares is located; a component that computes its
-    declaration is located at the slot.
+    declaration is located at the slot. A dotted member (`table.local_index`) names a
+    field of a module the slot holds, followed field by field.
     """
     if not item.subject:
         return ()
@@ -428,8 +429,9 @@ def _tokens(item, study):
         if dataclasses.is_dataclass(slot)
         else ()
     )
-    if item.member in names:
-        tokens += (item.member, *item.entry)
+    head, *rest = item.member.split(".")
+    if head in names:
+        tokens += (head, *rest, *item.entry)
     return tokens
 
 
