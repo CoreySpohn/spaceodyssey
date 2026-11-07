@@ -8,10 +8,12 @@ document hash and no schema version moves.
 """
 
 import dataclasses
+import hashlib
 import json
 import os
 from types import SimpleNamespace
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -36,7 +38,7 @@ from spaceodyssey.core.preflight.checks import PreflightContext
 from spaceodyssey.core.records import empty_log
 from spaceodyssey.studies import toy
 from spaceodyssey.studies.conformance import CORPUS
-from spaceodyssey.studies.precursor import export_records
+from spaceodyssey.studies.precursor import export_records, table_digest, verify_lineage
 from spaceodyssey.studies.premission import (
     PREMISSION_KINDS,
     PreMissionImporter,
@@ -227,7 +229,7 @@ def test_an_unsafe_or_damaged_file_reference_is_refused_at_its_pointer(tmp_path,
     """Fails if a reference whose name holds a relative or absolute path, a symlink
     out of the directory, a missing file, or bytes that do not match the sha256 (also
     the same rows reordered) is read, or is reported anywhere but at its pointer, or
-    raises from the pre-flight instead of an `L001` finding.
+    raises from the pre-flight or the lineage check instead of an `L001` finding.
     """
     files = tmp_path / "files"
     data = json.loads(_stored(files))
@@ -236,6 +238,9 @@ def test_an_unsafe_or_damaged_file_reference_is_refused_at_its_pointer(tmp_path,
     text = json.dumps(data)
     found = preflight_document(text, RESOLVER, files=files, upstream=UPSTREAM)
     assert _codes(found) == [("L001", "error", where)]
+    report = verify_lineage(text, UPSTREAM, files=files)
+    assert report.status == "failed"
+    assert _codes(report.findings) == [("L001", "error", where)]
     with pytest.raises(DocumentError) as info:
         load_study(text, RESOLVER, files=files)
     assert info.value.pointer == where
@@ -416,3 +421,108 @@ def test_export_refuses_what_it_cannot_write():
 
 def _batched(log):
     return dataclasses.replace(log, kind=jnp.stack([log.kind, log.kind]))
+
+
+# ---- lineage ------------------------------------------------------------------------
+
+
+def _exported(tmp_path, table=None):
+    """The exported policy table imported by survey 1, as file-backed document text."""
+    return _stored(tmp_path, _export(2).table if table is None else table)
+
+
+def test_an_exported_table_imports_and_verifies_its_lineage(tmp_path):
+    """Fails if the exported table does not pass pre-flight with its upstream
+    document, if the lineage report does not name the declared hash and each file's
+    sha256 (as the file's bytes hash), or if `verify_lineage` does not pass with the
+    upstream document, fail with `D004` at the declared hash (as the JSON pre-flight
+    does) with another one, and report declared, unverified with none.
+    """
+    table = _export(2).table
+    context = PreflightContext(upstream_document=UPSTREAM)
+    assert preflight(_study(table), context=context) == []
+    text = _exported(tmp_path, table)
+    report = verify_lineage(text, UPSTREAM.to_json(), files=tmp_path)
+    assert report.status == "verified" and report.findings == ()
+    (lineage,) = report.tables
+    assert lineage.pointer == "/study/process/table"
+    assert lineage.upstream_hash == UPSTREAM.content_hash
+    assert lineage.digest == table_digest(table)
+    named = {ref.pointer: ref for ref in lineage.files}
+    assert f"{PAYLOAD}" in named
+    for ref in named.values():
+        raw = (tmp_path / ref.name).read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == ref.sha256 and len(raw) == ref.bytes
+    wrong = verify_lineage(text, OTHER, files=tmp_path)
+    assert wrong.status == "failed"
+    assert _codes(wrong.findings) == [("D004", "error", DECLARED)]
+    json_found = preflight_document(text, RESOLVER, files=tmp_path, upstream=OTHER)
+    assert wrong.findings[0].message == json_found[0].message
+    unverified = verify_lineage(text, files=tmp_path)
+    assert unverified.status == "declared, unverified"
+    assert _codes(unverified.findings) == [("D004", "warning", DECLARED)]
+
+
+def test_lineage_fails_on_a_reordered_or_changed_table(tmp_path):
+    """Fails if a table whose rows were reordered, or one value changed, after export
+    passes the lineage check against the expected export, or if the table as exported
+    does not.
+    """
+    table = _export(2).table
+    reordered = _take(table, [2, 0, 1])
+    changed = dataclasses.replace(table, payload=table.payload.at[0, 0].add(1.0))
+    assert table_digest(reordered) != table_digest(table)
+    right = verify_lineage(
+        _exported(tmp_path, table), UPSTREAM, expected=table, files=tmp_path
+    )
+    assert right.status == "verified"
+    for other in (reordered, changed):
+        text = _exported(tmp_path, other)
+        report = verify_lineage(text, UPSTREAM, expected=table, files=tmp_path)
+        assert _codes(report.findings) == [("D004", "error", "/study/process/table")]
+        by_digest = verify_lineage(
+            text, UPSTREAM, expected=table_digest(table), files=tmp_path
+        )
+        assert by_digest.findings == report.findings
+
+
+def _take(table, order):
+    """The table with its rows in `order` (columns of `[N]` and `[N, ...]` alike)."""
+    order = jnp.asarray(order)
+    return jax.tree_util.tree_map(lambda x: x[order], table)
+
+
+@pytest.mark.parametrize(
+    "how", ["malformed", "array", "missing_field", "version", "stale"]
+)
+def test_the_lineage_check_never_raises_on_a_broken_document(tmp_path, how):
+    """Fails if a document that does not parse, a table missing a field or at an
+    unknown kind version, or a stored hash that no longer matches raises instead of
+    failing the report with a finding at its pointer.
+    """
+    data = json.loads(_exported(tmp_path))
+    if how != "stale":
+        data.pop("content_hash")
+    node = data["study"]["process"]["table"]
+    expected = {
+        "malformed": ("L001", ""),
+        "array": ("L001", ""),
+        "missing_field": ("L001", "/study/process/table"),
+        "version": ("D001", "/study/process/table/$kind"),
+        "stale": ("L001", "/content_hash"),
+    }[how]
+    text = None
+    if how == "malformed":
+        text = "{not json"
+    elif how == "array":
+        text = "[]"
+    elif how == "missing_field":
+        node.pop("local_index")
+    elif how == "version":
+        node["$kind"][2] = 9
+    else:
+        node["upstream_hash"] = OTHER.content_hash
+    text = json.dumps(data) if text is None else text
+    report = verify_lineage(text, UPSTREAM, files=tmp_path)
+    assert report.status == "failed"
+    assert expected in {(str(f.code), f.pointer) for f in report.findings}

@@ -12,22 +12,45 @@ downstream's tick 0: a row's offsets are its ticks minus the upstream horizon.
 The table travels as a field of the downstream study. Large columns are written to
 sha256-named files by the codec's generic walk (`dump_study(..., files=...)`), and the
 document's hash covers their references. The table declares the content hash of the
-upstream document (`upstream_hash`).
+upstream document (`upstream_hash`). `verify_lineage` reads a downstream document,
+decodes each table in it (so every file reference is checked: a path in a name, a
+missing file, a symlink or a wrong digest is refused at its pointer) and compares the
+declared hash with the supplied upstream document's content hash. A mismatch is `D004`
+at the pointer of the declared hash; with no upstream document the lineage is
+"declared, unverified".
 """
 
 import dataclasses
+import hashlib
 
 import numpy as np
 
+from spaceodyssey.codec.document import DocumentError, pointer
+from spaceodyssey.codec.files import DEFAULT_MAX_BYTES, make_store, using_store
+from spaceodyssey.codec.kinds import KindResolver
+from spaceodyssey.codec.load import decode
+from spaceodyssey.codec.preflight import (
+    DocumentCode,
+    DocumentFinding,
+    read_document,
+    read_upstream,
+)
 from spaceodyssey.core.enums import PUBLIC, Audience, RecordStatus
+from spaceodyssey.core.preflight import FindingCode, Severity
+from spaceodyssey.core.preflight.checks import PreflightContext
 from spaceodyssey.core.records import payload_columns
 from spaceodyssey.studies.premission import (
     PAD,
+    PREMISSION_KINDS,
     PreMissionTable,
     SourceId,
+    lineage_findings,
 )
 
 EPOCHS = ("end_at_zero",)
+_TABLE_KINDS = {ref: cls for ref, cls in PREMISSION_KINDS.items() if ref[0] == "table"}
+_TABLE_REF = next(ref for ref, cls in _TABLE_KINDS.items() if cls is PreMissionTable)
+_RESOLVER = KindResolver(_TABLE_KINDS)
 
 
 # ---- export -------------------------------------------------------------------------
@@ -265,9 +288,206 @@ def _mapped(table, log, rows, subject_map, producer_map):
     )
 
 
+def table_digest(table):
+    """The sha256 of a table's columns in row order, and its declared upstream hash.
+
+    It names one table whatever its encoding (inline or file-backed): reordering
+    rows, or changing any value, gives another digest.
+    """
+    h = hashlib.sha256()
+    for name, leaf in _columns(table, ""):
+        arr = np.ascontiguousarray(np.asarray(leaf))
+        h.update(f"{name}:{arr.dtype.name}:{list(arr.shape)};".encode("ascii"))
+        h.update(arr.tobytes())
+    h.update(f"upstream_hash:{table.upstream_hash}".encode())
+    return h.hexdigest()
+
+
+def _columns(module, prefix):
+    """`(name, array)` for every array field of a table, sources included."""
+    for field in dataclasses.fields(module):
+        value = getattr(module, field.name)
+        if isinstance(value, SourceId):
+            yield from _columns(value, f"{prefix}{field.name}.")
+        elif field.name != "upstream_hash":
+            yield f"{prefix}{field.name}", value
+
+
+# ---- lineage ------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class FileReference:
+    """An array file a table names: its pointer, file name, sha256 and size."""
+
+    pointer: str
+    name: str
+    sha256: str
+    bytes: int
+
+
+@dataclasses.dataclass(frozen=True)
+class TableLineage:
+    """One table of a document: where it is, what it declares and what it holds."""
+
+    pointer: str
+    upstream_hash: str
+    digest: str
+    files: tuple[FileReference, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class LineageReport:
+    """What `verify_lineage` found: the upstream hash, each table and the findings.
+
+    `upstream` is the supplied upstream document as read (`None` when none was
+    supplied). `status` is `"failed"` when any finding is an error, `"no lineage"`
+    when no table declares an upstream hash, `"declared, unverified"` when no upstream
+    document was supplied, and `"verified"` otherwise.
+    """
+
+    upstream: object
+    tables: tuple[TableLineage, ...]
+    findings: tuple[DocumentFinding, ...]
+
+    @property
+    def status(self):
+        """The verdict, as described in the class docstring."""
+        if any(f.severity == Severity.ERROR for f in self.findings):
+            return "failed"
+        if not any(t.upstream_hash for t in self.tables):
+            return "no lineage"
+        if self.upstream is None:
+            return "declared, unverified"
+        return "verified"
+
+    @property
+    def verified(self):
+        """Whether every declared upstream hash was checked and matched."""
+        return self.status == "verified"
+
+
+def _table_nodes(node, path):
+    """`(path, node)` of every encoded `PreMissionTable` under a document node."""
+    if isinstance(node, list):
+        for i, item in enumerate(node):
+            yield from _table_nodes(item, (*path, i))
+    elif isinstance(node, dict):
+        ref = node.get("$kind")
+        if isinstance(ref, list) and ref[:2] == list(_TABLE_REF[:2]):
+            yield path, node
+        elif "$array" not in node:
+            for key, item in node.items():
+                yield from _table_nodes(item, (*path, key))
+
+
+def _file_refs(node, path):
+    """Every array file reference under an encoded node, with its pointer."""
+    if isinstance(node, list):
+        for i, item in enumerate(node):
+            yield from _file_refs(item, (*path, i))
+    elif isinstance(node, dict):
+        if "$array" in node and isinstance(node.get("file"), dict):
+            ref = node["file"]
+            where = pointer((*path, "file"))
+            yield FileReference(where, ref["name"], ref["sha256"], ref["bytes"])
+        else:
+            for key, item in node.items():
+                yield from _file_refs(item, (*path, key))
+
+
+def _refused(err):
+    """The finding of a table that does not decode: its own code, or `L001`."""
+    return DocumentFinding(
+        DocumentCode(err.code) if err.code else DocumentCode.L001,
+        Severity.ERROR,
+        err.pointer or "",
+        err.detail,
+        "restore the table and its array files as they were written",
+    )
+
+
+def verify_lineage(
+    document,
+    upstream_document=None,
+    *,
+    expected=None,
+    files=None,
+    max_file_bytes=DEFAULT_MAX_BYTES,
+):
+    """Check every table's declared upstream hash in a study or run document.
+
+    `document` is JSON text, a parsed object, a `StudyDocument` or a `RunDocument`;
+    `files` is the directory of its array files. Each `PreMissionTable` in the study
+    is decoded as the loader decodes it, so a file reference whose name holds a path,
+    or that names a missing file, a symlink or bytes that do not match its sha256, is
+    refused (`L001` at the pointer of the reference). A stored `content_hash` that
+    does not match the document is `L001` too.
+
+    `upstream_document` is the document the tables name (any form
+    `read_upstream` takes). Its content hash is compared with each declared
+    `upstream_hash`: a mismatch, or an upstream document that does not read, is
+    `D004` at the pointer of the declared hash; with no upstream document, a declared
+    hash is a `D004` warning, declared, unverified. `expected` is the table the
+    upstream run exports, or its `table_digest`: a table with a declared hash whose
+    digest differs (rows reordered or changed) is `D004` at the table's pointer.
+
+    Never raises on document content; returns a `LineageReport`.
+    """
+    data, found = read_document(document)
+    upstream = None if upstream_document is None else read_upstream(upstream_document)
+    if data is None:
+        return LineageReport(upstream, (), tuple(found))
+    want = expected
+    if expected is not None and not isinstance(expected, str):
+        want = table_digest(expected)
+    context = PreflightContext(upstream_document=upstream)
+    store = make_store(files, 0, max_file_bytes)
+    tables = []
+    for path, node in _table_nodes(data.get("study"), ("study",)):
+        try:
+            with using_store(store):
+                table = decode(node, path, _RESOLVER)
+        except DocumentError as err:
+            found.append(_refused(err))
+            continue
+        for item in lineage_findings(table, context):
+            found.append(
+                DocumentFinding(
+                    item.code,
+                    item.severity,
+                    pointer((*path, "upstream_hash")),
+                    item.message,
+                    item.fix,
+                    in_memory=item,
+                )
+            )
+        digest = table_digest(table)
+        if want is not None and table.upstream_hash and digest != want:
+            found.append(
+                DocumentFinding(
+                    FindingCode.D004,
+                    Severity.ERROR,
+                    pointer(path),
+                    f"the table's digest {digest} differs from the expected export's "
+                    f"{want}: its rows were changed or reordered",
+                    "import the table exactly as the upstream run exports it",
+                )
+            )
+        refs = tuple(_file_refs(node, path))
+        tables.append(TableLineage(pointer(path), table.upstream_hash, digest, refs))
+    found.sort(key=lambda f: (f.severity != Severity.ERROR, f.code, f.pointer))
+    return LineageReport(upstream, tuple(tables), tuple(found))
+
+
 __all__ = [
     "EPOCHS",
     "Export",
     "ExportedRevision",
+    "FileReference",
+    "LineageReport",
+    "TableLineage",
     "export_records",
+    "table_digest",
+    "verify_lineage",
 ]
