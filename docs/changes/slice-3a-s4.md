@@ -315,3 +315,57 @@ See the section below.
 - `ruff check` and `ruff format --check` clean. Default `_scan_worlds` and `_init_worlds`
   StableHLO hashes unchanged (sha256 `a67917728c...` and `09226cf964...`, byte counts 1,292,736
   and 70,941); no pin moved.
+
+## Review round 3
+
+### 1. What the host can read equals what the fingerprint hashes
+
+With a quantum of 10 a refund from a balance of 9 to 10 is one count either way, so the
+fingerprint was unchanged, but the policy and the service read the float and saw 9 and 10. The
+view's float `balance` is now `balance_q * balance_quantum` (`balance_view`), so it carries
+nothing beyond the hashed integer. Fingerprint equality then means the state a service reads is
+identical, and an unchanged request is answered on exactly what the policy read. Tests: the
+quantum-10 refund study is not refused and its request is held (slow tier, both executors); an
+eager rule that two carries a fraction of a quantum apart share a fingerprint and a float, and
+that the float is a whole number of quanta; a mutant that exposes the raw balance fails it.
+
+### 2. The policy can read the refusal
+
+`Snapshot.query_refused` (policy view only, present only with balances on, hashed with the
+other balance leaves, absent from the observer view and with the flag off) holds the decision
+index of the last request refused as stale, -1 for none. It is backed by an optional
+`Carry.query_refused` leaf, set by `h_request` and absent with the flag off (an absent leaf
+adds nothing to the default program). A policy that decided at `n_dec - 1` and now reads
+`query_refused == n_dec - 1` knows that Query was refused with `QUERY_STALE` and may ask
+again. I chose the index over a flag that resets on read because it needs no policy-side
+reset and the policy can compare it with a decision it remembers. Tests: the recovery run uses
+a policy that asks again only when it reads the refusal (one stale row, one answered request,
+both executors; medium); the balances-off control (it has no refusal to read, so it stops;
+slow); eager rules that the policy sees the leaf, the observer does not, the digest moves with
+it and an off carry has none; mutants that hide the leaf from the view or from the digest fail
+them.
+
+### 3. For integration with S3a
+
+S3a debits charge plus surcharge. The sign check added in round 2 covers channel `cost` and
+`charge` only, so `cost = charge = 0` with a surcharge of -1e20 would pass construction and
+produce a negative debit, and the budget would no longer bound the balance. When S4 is replayed
+onto S3a the check must be extended to the surcharge and to any other S3a pricing term that can
+go negative.
+
+### Review round 3 gate results
+
+See the section below.
+
+
+- Full suite including the slow tier before the last two edits (`-n 2 --dist loadfile`,
+  both entry-points files deselected as stale installed metadata): 3797 tests, 3793 passed,
+  4 failed, all from the new `Carry.query_refused` leaf having no parity disposition and two
+  test shims lacking the new view field. Fixed: the leaf is a gated canonical field
+  (`balances_on`) and both shims carry it; the refresh mutation study now shows balances so
+  that every gated leaf is held.
+- After the fixes: canonical fields, pedigree, fingerprint, slice 3 guard, balances, lints and
+  refresh runs files: 486 passed (the refresh mutation pair, whose one failure the fixes
+  addressed, re-run alone: 31 passed). `ruff check` and `ruff format --check` clean. Default
+  `_scan_worlds` and `_init_worlds` StableHLO hashes unchanged (`a67917728c...`,
+  `09226cf964...`); no pin moved.
