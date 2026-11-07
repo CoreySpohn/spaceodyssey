@@ -194,6 +194,7 @@ CANONICAL_FIELDS = {
         "belief_aux",
         "n_log",
         "pol_u",
+        "program",
     ),
 }
 
@@ -237,6 +238,7 @@ CONDITIONAL_FIELDS = {
     "carry.log.refund_index": refunds_on,
     "carry.log.award_gen": refunds_on,
     "carry.ledger.refund_ignored": refunds_on,
+    "trace.program": programs_on,
 }
 REFRESH_GROUPS = tuple(CONDITIONAL_GROUPS)
 REFRESH_FIELDS = tuple(CONDITIONAL_FIELDS)

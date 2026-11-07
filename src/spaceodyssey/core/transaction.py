@@ -128,6 +128,7 @@ def advance(carry, root, study, truth, *, wake_fn=wake_by_audience):
         belief_mean=belief_mean,
         belief_aux=belief_aux,
         n_log=c5.n_log,
+        program=None if ev.program is None else g(ev.program),
     )
     return c5, trace, wake
 
