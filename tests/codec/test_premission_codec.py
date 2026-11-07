@@ -549,7 +549,8 @@ def test_the_lineage_check_never_raises_on_a_broken_document(tmp_path, how):
     array for its declared hash, a stored hash that no longer matches, or a wrong
     format or a newer schema version (no stored hash) raises from the lineage check,
     the pre-flight or `read_upstream`, or does not fail the report with a finding at
-    its pointer before any table is interpreted.
+    its pointer before any table is interpreted; or if text that does not parse
+    raises anything but `DocumentError` from `load_study`.
     """
     data = json.loads(_exported(tmp_path))
     if how != "stale":
@@ -592,3 +593,6 @@ def test_the_lineage_check_never_raises_on_a_broken_document(tmp_path, how):
     read = read_upstream(text)
     if how in ("malformed", "array", "digits", "deep", "format", "schema"):
         assert read.content_hash is None and read.problem
+    if how in ("malformed", "digits", "deep"):
+        with pytest.raises(DocumentError):
+            load_study(text, RESOLVER, files=tmp_path)
