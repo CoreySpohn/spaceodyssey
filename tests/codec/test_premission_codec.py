@@ -534,6 +534,7 @@ BROKEN = {
     "missing_field": ("L001", "/study/process/table"),
     "version": ("D001", "/study/process/table/$kind"),
     "stale": ("L001", "/content_hash"),
+    "hash_array": ("L001", DECLARED),
     "digits": ("L001", ""),
     "deep": ("L001", ""),
     "format": ("L001", "/format"),
@@ -544,9 +545,9 @@ BROKEN = {
 @pytest.mark.parametrize("how", list(BROKEN))
 def test_the_lineage_check_never_raises_on_a_broken_document(tmp_path, how):
     """Fails if a document that does not parse (also a 4,500-digit number or 1,100
-    nested arrays), a table missing a field or at an unknown kind version, a stored
-    hash that no longer matches, or a wrong format or a newer schema version (no
-    stored hash) raises from the lineage check,
+    nested arrays), a table missing a field, at an unknown kind version or with an
+    array for its declared hash, a stored hash that no longer matches, or a wrong
+    format or a newer schema version (no stored hash) raises from the lineage check,
     the pre-flight or `read_upstream`, or does not fail the report with a finding at
     its pointer before any table is interpreted.
     """
@@ -566,6 +567,8 @@ def test_the_lineage_check_never_raises_on_a_broken_document(tmp_path, how):
         node["$kind"][2] = 9
     elif how == "stale":
         node["upstream_hash"] = OTHER.content_hash
+    elif how == "hash_array":
+        node["upstream_hash"] = {"$array": "int64", "shape": [2], "data": [1, 2]}
     elif how == "digits":
         data["schema_version"] = 7
         text = json.dumps(data).replace(

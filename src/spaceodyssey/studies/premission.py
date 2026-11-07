@@ -71,6 +71,13 @@ def _bool(x):
     return jnp.asarray(x, B)
 
 
+def _hash_text(x):
+    """A declared upstream hash: a string (a document's content hash), or empty."""
+    if type(x) is not str:
+        raise TypeError(f"upstream_hash is a string, not a {type(x).__name__}")
+    return x
+
+
 def _concrete(*arrays):
     return not any(isinstance(a, jax.core.Tracer) for a in arrays)
 
@@ -122,7 +129,7 @@ class PreMissionTable(eqx.Module):
     pedigree: SourceId
     external: jax.Array = eqx.field(converter=_bool)
     n_pedigree: jax.Array = eqx.field(converter=_i64)
-    upstream_hash: str = eqx.field(default="", static=True)
+    upstream_hash: str = eqx.field(default="", static=True, converter=_hash_text)
 
     def __check_init__(self):
         """Require consistent shapes and, on present rows, a known audience."""
