@@ -1202,10 +1202,21 @@ AUDIENCES = (int(Audience.OBSERVER), int(Audience.POLICY))
 
 
 def _prior_reader(study, observer):
-    """The observer to judge, or a refusal unless it declares `reads_priors`."""
+    """The observer to judge, or a refusal unless it follows the prior protocol.
+
+    An observer that declares `reads_priors` holds the imported table as `table`
+    (columns `source`, `pedigree`, `n_pedigree`, `kind`, `audience`, `channel`,
+    `local_index`, `payload`; a namespace of -1 pads) and reports the weight in
+    {0, 1} of each row for an audience as `weights(caps, audience)`; `init` and
+    `init_summary` are its two initial beliefs.
+    """
     observer = study.observer if observer is None else observer
     if not getattr(observer, "reads_priors", False):
         raise ValueError("the observer does not declare reads_priors")
+    if getattr(observer, "table", None) is None or not callable(
+        getattr(observer, "weights", None)
+    ):
+        raise ValueError("an observer that reads priors holds a table and weights")
     return observer
 
 

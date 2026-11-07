@@ -406,8 +406,16 @@ def test_zero_weight_rows_control_an_observer_that_ignores_weights(rule, message
 
 def test_the_prior_checks_refuse_an_observer_that_reads_no_priors():
     """Fails if check 7 or the zero-weight check judges an observer without
-    `reads_priors`.
+    `reads_priors`, or one that declares it without a table and weights.
     """
     for check in (check_overlap_declared, check_zero_weight_rows):
         with pytest.raises(ValueError, match="reads_priors"):
             check(STUDY)
+        with pytest.raises(ValueError, match="table and weights"):
+            check(STUDY, observer=Tableless())
+
+
+class Tableless(RefitMean):
+    """Declares that it reads priors but holds no table."""
+
+    reads_priors = True
