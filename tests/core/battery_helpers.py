@@ -8,15 +8,19 @@ test stays untouched.
 import dataclasses
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import jax.random as jr
 
 from spaceodyssey import core
 from spaceodyssey.core import handlers, snapshot, transaction
+from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import (
     F64,
     I64,
+    PUBLIC,
+    Audience,
     Disposition,
     EffectKind,
     RecordStatus,
@@ -24,8 +28,10 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.kinds import AbstractPolicy
+from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
 from spaceodyssey.core.snapshot import effects_none
 from spaceodyssey.studies import toy as kinds
+from spaceodyssey.studies.premission import PreMissionImporter, authored_table
 from tests.core.corpus import frozen
 from tests.core.mutants import _clone, _step_with_table
 
@@ -186,6 +192,130 @@ class PriorBiasedMean(kinds.ToyRunningMean):
         """Fold the record with its value pushed up by the bias."""
         biased = dataclasses.replace(rec, payload=rec.payload.at[0].add(self.bias))
         return super().fold(belief, biased, caps, key=key)
+
+
+# ---- a study with times before the run starts ----------------------------------
+# A synthetic study with negative observation times, for the epoch relation: the toy
+# survey 1 with a pre-mission import of three raw rows observed before the run starts
+# (one of them observer-only) and a public prior whose payload holds a window relative
+# to its release. Its policy waits for that window and observes; nothing in it reads
+# an absolute tick unless a control asks it to.
+#
+# What the table covers, for the comparators:
+#
+# - start and end ticks below zero, one end tick exactly -1 (a time, not a marker);
+# - under a shift of 5 an end tick lands on -1, and under 19 a start tick does;
+# - an observer-only row (its release stamp stays -1) and a split public prior (the
+#   policy's copy keeps its acceptance stamp at -1);
+# - the oldest time is 20 ticks before the start, so a shift of 1000 moves every time
+#   above zero.
+
+EPOCH_PRIOR = 3  # the derived kind registered after the toy kinds
+EPOCH_REGISTRY = KindRegistry(
+    (
+        RecordKind("none", ()),
+        kinds.MEASUREMENT_KIND,
+        kinds.AUXILIARY_KIND,
+        RecordKind(
+            "windowed_prior",
+            (PayloadColumn("value", PUBLIC), PayloadColumn("window_lo_rel", PUBLIC)),
+            derived=True,
+        ),
+    )
+)
+EPOCH_CAPS = EPOCH_REGISTRY.lower(Capacities())
+RAW_CHANNEL = 60  # the channel of the imported raw rows
+WINDOW = 30  # the prior's window opens this long after its release
+OBSERVATIONS = 3  # observations after the window opens, then a stop
+OLDEST = 20  # ticks before the start of the oldest imported time
+EPOCH_STEPS = 40
+# Shifts: one maps an end tick onto -1, one a start tick, one exceeds the oldest age.
+EPOCH_SHIFTS = (5, 19, 1000)
+LOW_TICK = -(2**62)  # below any tick
+
+
+def epoch_table():
+    """Raw rows at negative times (row 2 observer-only) and a windowed public prior."""
+    return authored_table(
+        subject=[0, 1, 2, 0],
+        local_index=[0, 1, 2, 0],
+        channel=[RAW_CHANNEL, RAW_CHANNEL, RAW_CHANNEL, RAW_CHANNEL + 1],
+        kind=[kinds.RECORD_MEASUREMENT] * 3 + [EPOCH_PRIOR],
+        audience=[3, 3, int(Audience.OBSERVER), 3],
+        payload=[[1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [0.5, float(WINDOW)]],
+        start_offset=[-12, -5, -8, -OLDEST],
+        end_offset=[-6, -1, -3, 0],
+        window_lo_rel=[0, 0, 0, WINDOW],
+    )
+
+
+class EpochImporter(PreMissionImporter):
+    """The pre-mission importer, or, with `absolute` set, one that writes each row's
+    start tick as if the run started at tick 0 (a control).
+
+    Only the start tick is wrong in the control, and the policy never reads it, so
+    the two runs differ in that column alone. `absolute` is an array, so the control
+    shares the fixture's compiled program.
+    """
+
+    absolute: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, bool))
+
+    def handle(self, carry, ev, study):
+        """Write the row; the control takes the event tick back off its start."""
+        carry, rec = super().handle(carry, ev, study)
+        back = jnp.where(self.absolute, ev.tick, 0)
+        return carry, dataclasses.replace(rec, start_tick=rec.start_tick - back)
+
+
+class WindowAgePolicy(AbstractPolicy):
+    """Wait for the prior's window, then observe subjects 0 and 1 in turn, then stop.
+
+    The first decision waits until the prior row's `released_tick` plus its relative
+    window, plus the age of the newest imported raw row. With `rule="relative"` the
+    age is the decision tick less that row's end tick. With `rule="absolute"` (a
+    control) it is minus the end tick, which assumes the run starts at tick 0: the
+    two agree on an unshifted run and differ on a shifted one.
+    """
+
+    rule: str = eqx.field(static=True, default="relative")
+
+    def decide(self, pstate, view, study, key):
+        """Wait for the window first, then observe, then stop."""
+        log = view.log
+        prior = log.valid & (log.kind == EPOCH_PRIOR)
+        opens = jnp.max(
+            jnp.where(
+                prior, log.released_tick + log.payload[:, 1].astype(I64), LOW_TICK
+            )
+        )
+        raw = log.valid & (log.channel == RAW_CHANNEL)
+        newest = jnp.max(jnp.where(raw, log.end_tick, LOW_TICK))
+        now = view.tick if self.rule == "relative" else jnp.asarray(0, I64)
+        age = now - newest
+        first = view.n_dec == 0
+        stop = view.n_dec > OBSERVATIONS
+        act = jnp.where(stop, EffectKind.STOP, EffectKind.OBSERVE)
+        eff = _table(
+            study.caps,
+            jnp.where(first, EffectKind.NONE, act),
+            jnp.where(first, EffectKind.WAIT, EffectKind.NONE),
+            subject=view.n_dec % 2,
+            channel_index=0,
+            scope=Scope.CAMPAIGN,
+            disposition=Disposition.DRAIN,
+            group=view.n_dec,
+        )
+        eff = dataclasses.replace(eff, tick=eff.tick.at[1].set(opens + age))
+        return eff, pstate, jnp.asarray(0.0, F64)
+
+
+def epoch_study(*, absolute=False, rule="relative"):
+    """The synthetic study: survey 1 with the import and the window policy."""
+    return kinds.survey_1(
+        EPOCH_CAPS,
+        process=EpochImporter(table=epoch_table(), absolute=absolute),
+        policies=(WindowAgePolicy(rule=rule),),
+    )
 
 
 # ---- broken executors ---------------------------------------------------------------

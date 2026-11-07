@@ -6,7 +6,6 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax import lax
 
 from spaceodyssey.core.battery.result import (
     bits_equal,
@@ -16,10 +15,9 @@ from spaceodyssey.core.battery.result import (
     worlds_of,
 )
 from spaceodyssey.core.battery.views import DecisionViews, compare_views, moved_ticks
-from spaceodyssey.core.carry import init_carry
 from spaceodyssey.core.enums import I64
 from spaceodyssey.core.executors.base import belief_leaves, canonical_history
-from spaceodyssey.core.transaction import transition
+from spaceodyssey.core.kinds import AbstractProcess
 
 # Float columns of a canonical history that no draw feeds.
 DRAW_FREE_FLOATS = ("cost", "charged", "balance")
@@ -101,66 +99,95 @@ def _move_start(carry, delta):
     return eqx.tree_at(lambda c: c.tick, carry, carry.tick + delta)
 
 
-@eqx.filter_jit
-def _scan_from(study, truths, roots, delta, n_steps):
-    def one(truth, root):
-        c0 = _move_start(init_carry(study, truth), delta)
-        return lax.scan(
-            lambda c, i: transition(c, i, root, study, truth), c0, jnp.arange(n_steps)
-        )
+class _StartedLater(AbstractProcess):
+    """The study's process, with the seeded queue and the clock moved by `delta`.
 
-    return jax.vmap(one)(truths, roots)
+    `init_carry` ends with the process's `seed`, so moving after it moves every event
+    queued at the start (the kickoff wait included) and the clock. `delta` is an
+    array, so a run and its shifted run share one compiled program per executor.
+    """
+
+    inner: AbstractProcess
+    delta: jax.Array
+
+    def seed(self, carry, caps):
+        """Seed as the inner process does, then move the start."""
+        return _move_start(self.inner.seed(carry, caps), self.delta)
+
+    def handle(self, carry, ev, study):
+        """Handle as the inner process does."""
+        return self.inner.handle(carry, ev, study)
 
 
-def shift_epoch(study, truths, roots, n_steps, delta_ticks):
+def _started_later(study, delta):
+    """`study` with its process wrapped to start `delta` ticks later."""
+    later = _StartedLater(inner=study.process, delta=jnp.asarray(delta, I64))
+    return dataclasses.replace(study, process=later)
+
+
+def shift_epoch(study, truths, roots, n_steps, delta_ticks, *, executor=None):
     """Start the whole run `delta_ticks` later and require the same run, shifted.
 
     Assumptions: no component reads an absolute tick (a channel, process, observer or
-    policy that does breaks the relation, and the check is expected to fail for it),
-    and the study carries its absolute horizon and phase boundaries, which are moved
-    by `delta_ticks`. The shifted run starts with its queue and clock moved. Every
-    tick in the trace and the records, less `delta_ticks`, must equal the original;
-    every other column, belief, ledger and payload must be bitwise equal. The policy
-    draw is keyed by its decision tick, an absolute time by design, and is not
-    compared.
+    policy that does breaks the relation, and the check is expected to fail for it);
+    the study carries its absolute horizon and phase boundaries, which are moved by
+    `delta_ticks`; nothing asks the host (no `Query` request, no refresh schedule).
+    The shifted run starts with its queue and clock moved, on the named executor (the
+    compiled one by default). Every tick in the trace and the records, less
+    `delta_ticks`, must equal the original; every other column, belief, ledger and
+    payload must be bitwise equal. Tick columns are known by name, not by sign, so an
+    observation time before the run starts (negative) moves like any other; only a
+    release or acceptance stamp still at -1 (unset) stays. The policy draw is keyed by
+    its decision tick, an absolute time by design, and is not compared.
+
+    `delta_ticks` must be positive: a zero shift checks nothing, and a negative one
+    could move a stamp onto the unset value -1.
     """
-    zero = jnp.asarray(0, I64)
+    if int(delta_ticks) <= 0:
+        raise ValueError(
+            f"the shift must be a positive number of ticks, not {delta_ticks}"
+        )
+    runner = default_executor(executor)
     layout = study.observer.layout(study.caps)
     va, vb = DecisionViews(), DecisionViews()
-    base_carry, base_trace = _scan_from(
-        va.instrument(study), truths, roots, zero, n_steps
-    )
     moved = shifted_epoch(study, delta_ticks)
-    late_carry, late_trace = _scan_from(
-        vb.instrument(moved), truths, roots, jnp.asarray(delta_ticks, I64), n_steps
+    base = runner.run_worlds(
+        _started_later(va.instrument(study), 0), truths, roots, n_steps
+    )
+    late = runner.run_worlds(
+        _started_later(vb.instrument(moved), delta_ticks), truths, roots, n_steps
     )
     failures = []
-    n_records = 0
-    for w in range(int(roots.shape[0])):
-        pick = lambda tree, w=w: jax.tree_util.tree_map(lambda x: x[w], tree)  # noqa: E731
+    n_records = n_before = n_views = 0
+    for w, ((cb, tb), (cl, tl)) in enumerate(
+        zip(worlds_of(base), worlds_of(late), strict=True)
+    ):
+        left = va.read(study, roots[w], tb)
         failures += compare_views(
-            va.read(study, roots[w], pick(base_trace)),
-            vb.read(moved, roots[w], pick(late_trace)),
-            pick(base_carry),
-            pick(late_carry),
+            left,
+            vb.read(moved, roots[w], tl),
+            cb,
+            cl,
             study.caps,
-            pick(base_trace),
+            tb,
             layout=layout,
             epoch=delta_ticks,
         )
-        failures += _epoch_world(
-            w,
-            pick(base_carry),
-            pick(base_trace),
-            pick(late_carry),
-            pick(late_trace),
-            delta_ticks,
-            layout,
-        )
-        n_records += int(np.asarray(base_carry.log.valid[w]).sum())
+        failures += _epoch_world(w, cb, tb, cl, tl, delta_ticks, layout)
+        valid = np.asarray(cb.log.valid)
+        n_records += int(valid.sum())
+        before = (np.asarray(cb.log.start_tick) < 0) | (np.asarray(cb.log.end_tick) < 0)
+        n_before += int((valid & before).sum())
+        n_views += len(left)
     if not n_records:
         failures.append("no record was logged, so the check is vacuous")
-    return make_result("shift_epoch", failures, n_records=n_records)
+    return make_result(
+        "shift_epoch",
+        failures,
+        n_records=n_records,
+        n_before_start=n_before,
+        n_views=n_views,
+    )
 
 
 def _epoch_world(w, cb, tb, cl, tl, delta, layout):

@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import pytest
 
 from spaceodyssey.core import battery, snapshot, transaction, wake_by_audience
-from spaceodyssey.core.battery import metamorphic
 from spaceodyssey.core.enums import I64
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
@@ -99,7 +98,7 @@ def changed_view_transition(content):
 
 @pytest.mark.parametrize("content", (False, True), ids=("rows", "payload"))
 @pytest.mark.parametrize("relation", ("relabel", "epoch", "latency"))
-def test_relation_rejects_changed_policy_view(relation, content, monkeypatch):
+def test_relation_rejects_changed_policy_view(relation, content):
     changed = changed_view_transition(content)
 
     class HiddenRows(CompiledExecutor):
@@ -120,8 +119,9 @@ def test_relation_rejects_changed_policy_view(relation, content, monkeypatch):
             executor=HiddenRows(),
         )
     elif relation == "epoch":
-        monkeypatch.setattr(metamorphic, "transition", changed)
-        result = battery.shift_epoch(study, truths, roots, 40, 1000)
+        result = battery.shift_epoch(
+            study, truths, roots, 40, 1000, executor=HiddenRows()
+        )
     else:
         result = battery.latency_shift(
             survey(AbsolutePlanPolicy()),
