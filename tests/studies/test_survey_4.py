@@ -355,6 +355,18 @@ def test_the_precursor_moves_only_decisions_that_saw_it():
             assert projection(with_, w) != projection(without, w)
             assert shown(hidden, w) == []
             assert projection(hidden, w) == projection(without, w)
+            # evidence: the zero-information rows were imported, public, and
+            # stamped at tick 0 for both audiences, before the projections compare
+            log = index_world(zero.carry.log, w)
+            imported = np.flatnonzero(
+                np.asarray(log.valid)
+                & (np.asarray(log.channel) == PRECURSOR_CHANNEL)
+                & (np.asarray(log.kind) == toy.RECORD_AUXILIARY)
+            )
+            assert imported.size == _precursor().n_rows == 2
+            assert np.asarray(log.audience)[imported].tolist() == [PUBLIC] * 2
+            assert np.asarray(log.released_tick)[imported].tolist() == [0, 0]
+            assert np.asarray(log.accepted_tick)[imported].tolist() == [0, 0]
             assert projection(zero, w) == projection(without, w)
             decisions, records = projection(without, w)
             assert len(decisions) == N_OBSERVATIONS + 1
