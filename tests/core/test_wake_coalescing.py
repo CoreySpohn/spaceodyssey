@@ -1,6 +1,7 @@
 """Wakes coalesce per tick: one decision sees every record released at that tick."""
 
 import numpy as np
+import pytest
 
 from spaceodyssey.core.enums import AdmissionCode, EventKind
 from spaceodyssey.core.executors.base import canonical_history
@@ -39,6 +40,7 @@ def test_two_releases_one_tick_one_decision():
     assert int(view.n_rows) == 3
 
 
+@pytest.mark.medium  # the per-wake mutant executor compiles its own run, about 7 s cold
 def test_per_wake_rule_would_decide_twice_and_the_first_misses_a_record():
     study = CORPUS_BY_NAME["bundle"].make_study()
     h, views, trace = _run(PerWakeHostExecutor(), study)

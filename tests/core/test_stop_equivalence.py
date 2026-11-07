@@ -38,6 +38,7 @@ def stopped(scope, disposition):
     )
 
 
+@pytest.mark.medium  # the first scope compiles the runs, 10 to 17 s cold
 @pytest.mark.parametrize("scope", [Scope.LANE, Scope.ASSET, Scope.PROGRAM])
 def test_stop_equivalence_below_campaign(scope):
     close, drain = stopped(scope, Disposition.CLOSE), stopped(scope, Disposition.DRAIN)

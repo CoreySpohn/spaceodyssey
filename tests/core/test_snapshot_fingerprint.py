@@ -49,6 +49,7 @@ def _fp(carry, study, audience=Audience.POLICY):
     return int(fingerprint_j(view, study.observer.layout(study.caps)))
 
 
+@pytest.mark.medium  # one compiled run, about 7 s cold
 def test_snapshot_fingerprint_recorded():
     study, baseline, views = baseline_host_run()
     carry, trace = baseline
