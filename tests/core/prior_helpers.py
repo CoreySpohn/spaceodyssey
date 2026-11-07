@@ -110,6 +110,20 @@ def refit_table(policy_value=-4.0):
     )
 
 
+def alike_table():
+    """The refit table with one public subject-0 prior (10, precision 2) in place of
+    the observer and policy priors, so both audiences resolve to the same priors.
+    """
+    t = refit_table()
+    return dataclasses.replace(
+        t,
+        audience=t.audience.at[2].set(3),
+        source=dataclasses.replace(
+            t.source, namespace=t.source.namespace.at[3].set(PAD)
+        ),
+    )
+
+
 def refit_study(t=None, every=100, rule=PedigreeRule.EXCLUDE_ROWS):
     """The refresh study importing `t` (the refit table) with `PriorRefitObserver`."""
     return prior_study(refit_table() if t is None else t, rule, refit_every=every)

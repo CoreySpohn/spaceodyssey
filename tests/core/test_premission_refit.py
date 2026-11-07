@@ -49,12 +49,13 @@ from spaceodyssey.studies.prior_observer import (
     PriorRefitObserver,
 )
 from tests.core.helpers import worlds
-from tests.core.prior_helpers import IgnoresWeights, refit_study, refit_table
+from tests.core.prior_helpers import IgnoresWeights, alike_table, refit_study
 from tests.core.test_premission import _imported
 
 OBS, POL = int(Audience.OBSERVER), int(Audience.POLICY)
 MEAS = toy.RECORD_MEASUREMENT
 PRIORS = {OBS: {0: (10.0, 2.0), 1: (3.0, 1.0)}, POL: {0: (-4.0, 1.0), 1: (3.0, 1.0)}}
+ALIKE = {OBS: PRIORS[OBS], POL: PRIORS[OBS]}  # the priors of `alike_table`
 
 
 def _request(study):
@@ -64,9 +65,9 @@ def _request(study):
     return _gather(c, jax.random.PRNGKey(0), study)
 
 
-def _posterior(audience, subject, values):
+def _posterior(audience, subject, values, priors=PRIORS):
     """The independent answer: the audience's prior plus each value at weight one."""
-    mean, weight = PRIORS[audience][subject]
+    mean, weight = priors[audience][subject]
     return (mean * weight + sum(values)) / (weight + len(values))
 
 
@@ -161,40 +162,19 @@ def _codes(study, boundary):
 
 
 def test_d009_refuses_different_priors_on_the_observer_init_boundary():
-    """A10: only the audience-prior boundary supports a retained table prior. Fails
-    if the boundary that starts both refits from `observer.init` is accepted with a
-    table prior, if it is not D009 while the audiences resolve to different priors
-    and D010 when they resolve alike, or if the audience-prior boundary is refused.
+    """D010 as amended: the boundary that starts both refits from `observer.init` is
+    accepted with a retained table prior when both audiences resolve to the same
+    prior. Fails if it is not D009 while the audiences resolve to different priors, if
+    it is refused when they resolve alike, or if the audience-prior boundary is
+    refused in either case.
     """
     differ = refit_study()
     assert _codes(differ, MaskedBatchRefit()) == [("D009", "error")]
     assert _codes(differ, AudiencePriorRefit()) == []
-    alike = refit_study(refit_table(policy_value=10.0))
-    alike = dataclasses.replace(
-        alike,
-        observer=dataclasses.replace(
-            alike.observer,
-            table=_equal_priors(alike.observer.table),
-        ),
-    )
-    alike = dataclasses.replace(
-        alike,
-        process=dataclasses.replace(alike.process, table=alike.observer.table),
-    )
+    alike = refit_study(alike_table())
     assert bool(np.asarray(alike.observer.same_resolution(alike.caps)).all())
-    assert _codes(alike, MaskedBatchRefit()) == [("D010", "error")]
+    assert _codes(alike, MaskedBatchRefit()) == []
     assert _codes(alike, AudiencePriorRefit()) == []
-
-
-def _equal_priors(t):
-    """The refit table with both subject-0 priors public and equal (one is padded)."""
-    return dataclasses.replace(
-        t,
-        audience=t.audience.at[2].set(3),
-        source=dataclasses.replace(
-            t.source, namespace=t.source.namespace.at[3].set(-1)
-        ),
-    )
 
 
 def _ofti():
@@ -257,13 +237,13 @@ def _policy_row_table(named):
 def test_a_policy_only_row_is_judged_by_the_policy_rule():
     """Fails if the observer's own refit (which the observer-init boundary also runs
     for the policy) drops a raw row only the policy receives, if the audiences do not
-    resolve alike then (the boundary is still refused, D010), or if a policy-only row
-    that the policy's rule drops is not D009 on that boundary.
+    resolve alike then and the boundary is accepted, or if a policy-only row that the
+    policy's rule drops is not D009 on that boundary.
     """
     alike = refit_study(_policy_row_table(named=False))
     caps, observer = alike.caps, alike.observer
     assert bool(np.asarray(observer.same_resolution(caps)).all())
-    assert _codes(alike, MaskedBatchRefit()) == [("D010", "error")]
+    assert _codes(alike, MaskedBatchRefit()) == []
     row = _imported_row(observer.table, 0, caps, POL)
     rows = jax.tree_util.tree_map(lambda x: x[None], row)
     fitted = observer.refit(observer.init(caps), rows, caps, None, None)
@@ -285,9 +265,9 @@ def test_without_a_boundary_d009_and_d010_are_reported_unverified():
 # ---- runs: the prior across a refresh, replay ---------------------------------------
 
 
-def _run(executor, boundary_cls=AudiencePriorRefit, n_steps=120):
-    """Two worlds of the refit study on `executor` ("host" or "compiled")."""
-    study = refit_study()
+def _run(executor, boundary_cls=AudiencePriorRefit, n_steps=120, study=None):
+    """Two worlds of `study` (the refit study) on `executor` ("host" or "compiled")."""
+    study = refit_study() if study is None else study
     truths, roots = worlds(2, study.caps)
     if executor == "host":
         run = HostExecutor().run_worlds(
@@ -325,7 +305,7 @@ def _replay_failures(study, run, roots):
     return failures
 
 
-def _expected_beliefs(carry):
+def _expected_beliefs(carry, priors):
     """Each audience's subject 0 and 1 means from the run's log, independently."""
     log = jax.tree_util.tree_map(np.asarray, carry.log)
     out = {}
@@ -340,15 +320,16 @@ def _expected_beliefs(carry):
             )
             # the imported raw row of subject 1 is dropped by its prior
             keep &= ~((log.channel == 60) & (log.acquisition_index == 1))
-            out[audience, s] = _posterior(audience, s, list(log.payload[keep, 0]))
+            values = list(log.payload[keep, 0])
+            out[audience, s] = _posterior(audience, s, values, priors)
     return out
 
 
-def _belief_failures(result):
+def _belief_failures(result, priors=PRIORS):
     failures = []
     for w in range(2):
         carry = index_world(result.carry, w)
-        want = _expected_beliefs(carry)
+        want = _expected_beliefs(carry, priors)
         for (audience, s), value in want.items():
             belief = carry.belief if audience == OBS else carry.pbelief
             if abs(float(belief.mean[s]) - value) > 1e-12:
@@ -395,3 +376,32 @@ def test_replay_reproduces_prior_run():
     assert np.asarray(compiled.complete).all()
     assert _belief_failures(compiled) == []
     assert _replay_failures(study, compiled, roots) == []
+
+
+def _products(result):
+    """The refresh products in each world's log: how many refits were installed."""
+    log = result.carry.log
+    return np.sum(np.asarray(log.valid & (log.kind == PRODUCT_INDEX)), axis=-1)
+
+
+@pytest.mark.medium  # the alike study on the host executor with both boundaries
+def test_equal_resolutions_refit_alike_on_both_boundaries():
+    """D010 as amended 2026-11-07. Fails if, with both audiences resolving to the same
+    priors, the observer-init boundary's run does not hold each audience's prior plus
+    its rows (computed from the log), differs from the audience-prior boundary's run,
+    or installs no refit. Control: with different resolutions (D009) the observer-init
+    boundary gives the policy the observer's prior, and the check fails.
+    """
+    alike = refit_study(alike_table())
+    _, init, _, _ = _run("host", MaskedBatchRefit, study=alike)
+    _, own, _, _ = _run("host", AudiencePriorRefit, study=alike)
+    assert (_products(init) > 0).all()
+    assert _belief_failures(init, ALIKE) == []
+    assert _belief_failures(own, ALIKE) == []
+    for name in ("belief", "pbelief"):
+        a, b = getattr(init.carry, name), getattr(own.carry, name)
+        for leaf in ("mean", "n", "weight"):
+            got, want = np.asarray(getattr(a, leaf)), np.asarray(getattr(b, leaf))
+            assert np.allclose(got, want, rtol=0, atol=1e-12), (name, leaf)
+    _, differ, _, _ = _run("host", MaskedBatchRefit)
+    assert any("audience 2" in f for f in _belief_failures(differ))

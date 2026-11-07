@@ -51,7 +51,7 @@ from tests.core.preflight_cases import (
     DocPolicy,
     import_study,
 )
-from tests.core.prior_helpers import EXTERNAL, refit_study, summaries
+from tests.core.prior_helpers import EXTERNAL, alike_table, refit_study, summaries
 
 RESOLVER = KindResolver(
     {**TOY_KINDS, **DOC_KINDS, **PREMISSION_KINDS, **PRIOR_OBSERVER_KINDS}
@@ -1157,9 +1157,9 @@ def _prior_bindings(*extra):
     return Bindings((*kinds, *extra))
 
 
-def _run_document(host, compiled=None, bindings=None):
-    """The refit study as a run document bound to `host` and `compiled` boundaries."""
-    study = refit_study()
+def _run_document(host, compiled=None, bindings=None, study=None):
+    """`study` (the refit study) as a run document bound to `host` and `compiled`."""
+    study = refit_study() if study is None else study
     refit = {"host": _BOUNDARIES[host](), "compiled": _BOUNDARIES[compiled or host]()}
     return dump_run(
         study,
@@ -1194,6 +1194,20 @@ def test_the_run_record_boundary_reaches_the_prior_checks(kind, found):
     unbound = preflight_document(text, RESOLVER)
     assert [(str(f.code), str(f.severity)) for f in unbound] == [("D010", "warning")]
     assert "unverified" in unbound[0].message
+
+
+def test_equal_resolutions_pass_on_the_observer_init_boundary():
+    """D010 as amended 2026-11-07. Fails if a run document binding the observer's own
+    masked kernel is refused while both audiences resolve to the same priors, or if a
+    host fit is then accepted (still D010).
+    """
+    alike = refit_study(alike_table())
+    text = _run_document("observer_init", study=alike)
+    got = preflight_document(text, RESOLVER, bindings=_prior_bindings())
+    assert [(str(f.code), str(f.severity)) for f in got] == []
+    fit = _run_document("host_fit", study=alike)
+    got = preflight_document(fit, RESOLVER, bindings=_prior_bindings())
+    assert [(str(f.code), str(f.severity)) for f in got] == [("D010", "error")]
 
 
 @pytest.mark.parametrize(

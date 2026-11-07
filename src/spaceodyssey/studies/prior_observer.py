@@ -22,11 +22,11 @@ core's sharing unless the two audiences resolve to the same prior. Pre-flight
 - `D008`: two priors retained for one audience whose pedigrees intersect.
 - `D009`: a retained table prior with the boundary that starts both refits from
   `observer.init` (`MaskedBatchRefit` with the observer's own kernel) while the
-  audiences resolve to different priors.
-- `D010`: a retained table prior with any other boundary than `AudiencePriorRefit`
-  (`OftiRefit`, the updater boundary, a custom kernel or fit, and the observer-init
-  boundary when the audiences resolve alike); with no boundary supplied, a warning
-  that `D009` and `D010` are unverified.
+  audiences resolve to different priors. When they resolve to the same prior, that
+  boundary is accepted: both refits start from the one prior both audiences hold.
+- `D010`: a retained table prior with any boundary other than `AudiencePriorRefit` and
+  that observer-init boundary (`OftiRefit`, the updater boundary, a custom kernel or
+  fit); with no boundary supplied, a warning that `D009` and `D010` are unverified.
 """
 
 import dataclasses
@@ -421,13 +421,15 @@ def boundary_findings(observer, study, context):
                     "(AudiencePriorRefit)",
                 )
             ]
+        return []  # both audiences start from the one prior they resolve to
     return [
         _finding(
             FindingCode.D010,
             "table",
             (),
-            f"a table prior with refit boundary {name!r}; only AudiencePriorRefit "
-            "supports a table prior with refits",
+            f"a table prior with refit boundary {name!r}; only AudiencePriorRefit, "
+            "and the observer's own masked kernel when both audiences resolve to the "
+            "same prior, support a table prior with refits",
             "bind AudiencePriorRefit, or drop the table prior",
         )
     ]
