@@ -95,6 +95,21 @@ None. `tests/core/golden_histories.json` and every pin file are unchanged.
 5. STATISTICAL prices like OCCUPANCY; the fraction is expressed in `charge`.
 6. `_balance_rows` became program-aware here because a refund to a program row exposed the S2
    gap in the invariant.
+7. A receipt is any record of a declared failure kind written on a channel other than the one
+   it names (`channel != source`); an acquisition of the failure kind is not a receipt, and the
+   origin may share the receipt's kind. No receipt names its own row (`n != slot`).
+
+## Round 1 review fixes
+
+- Conservation no longer trusts a receipt row's negative `charged`: the allowed credit is
+  recomputed from the origin record (`charged` less `nonrefundable`, first receipt only), the
+  ledger counters are held to it, and a receipt row that does not carry that credit fails.
+  Mutants: whole-charge credit and a missing once-only test, each on program 0 and program 1.
+- `Record.nonrefundable`, `refund_index` and `award_gen` are optional document fields (omitted
+  at default, old documents load, a null is refused, populated columns round-trip).
+- Log overflow: a refused completion is charged to the program whose balance row its debit
+  fits (the trace names the lane, not the program), searched over at most 16 refusals.
+- Default lowered scan hash unchanged (2a0a4ec280c8e0bbeaea...).
 
 ## K3 and K4 attribution
 

@@ -6,7 +6,12 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from spaceodyssey.core.capacities import PEDIGREE_HEAD, PEDIGREE_TRIPLE, Capacities
+from spaceodyssey.core.capacities import (
+    OPTIONAL,
+    PEDIGREE_HEAD,
+    PEDIGREE_TRIPLE,
+    Capacities,
+)
 from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience, B, Capacity
 
 
@@ -226,9 +231,11 @@ class Record(eqx.Module):
     # fixed part of the charge, the semantic acquisition index a failure receipt names
     # (visible; `refund_of` holds the internal id the handler resolves it to), and the
     # window generation of the payer row at debit.
-    nonrefundable: jax.Array | None = None  # F64[R]
-    refund_index: jax.Array | None = None
-    award_gen: jax.Array | None = None
+    nonrefundable: jax.Array | None = dataclasses.field(
+        default=None, metadata=OPTIONAL
+    )  # F64[R]
+    refund_index: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    award_gen: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
 
 
 def record_none(caps):
