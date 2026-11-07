@@ -154,11 +154,9 @@ Migration, for release notes:
 
 ```python
 class MyObserver(AbstractObserver):
-    def fold(self, belief, rec, caps, key=None):
-        ...
+    def fold(self, belief, rec, caps, key=None): ...
 
-    def fold_summary(self, summary, rec, caps, key=None):
-        ...
+    def fold_summary(self, summary, rec, caps, key=None): ...
 ```
 
 An observer that draws nothing ignores `key`; one that calls `super().fold` passes
