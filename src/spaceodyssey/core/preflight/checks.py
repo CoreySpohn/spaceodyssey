@@ -496,6 +496,7 @@ STUDY_SLOTS = frozenset(
         "coupling",
         "fork",
         "refresh",
+        "key_version",
     }
 )
 
