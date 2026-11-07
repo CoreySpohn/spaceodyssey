@@ -71,7 +71,11 @@ from spaceodyssey.core.enums import EffectKind
 from spaceodyssey.core.ledger import ChannelTable
 from spaceodyssey.core.preflight import Finding, FindingCode, Severity
 from spaceodyssey.core.preflight import preflight as preflight_study
-from spaceodyssey.core.preflight.checks import _components
+from spaceodyssey.core.preflight.checks import (
+    PreflightContext,
+    RunBudget,
+    _components,
+)
 
 RUN_KEY = "run"
 _RUN_MEMBERS = frozenset({"executor", "service", "refit"})
@@ -159,6 +163,7 @@ def preflight_document(
     bindings=None,
     files=None,
     max_file_bytes=DEFAULT_MAX_BYTES,
+    n_steps=None,
 ):
     """Every pre-flight finding of a study document, errors first.
 
@@ -183,6 +188,11 @@ def preflight_document(
     directory of array files a dump wrote, forwarded to the loader with
     `max_file_bytes`, so a file-backed document is checked, integrity included.
     `load_run` raises the first error this returns.
+
+    With a run record (or `n_steps`, the executor step budget), the in-memory checks
+    receive the run's budget: the study's `n_events` and `n_log`, and `n_steps` when
+    given, so a component's capacity check runs as it does for the in-memory call
+    with a `RunBudget`. A bare study document has no budget.
     """
     resolver = _resolver(kinds)
     try:
@@ -223,7 +233,13 @@ def preflight_document(
         study, failure = _decoded(data, resolver, files, max_file_bytes)
         found += failure
     if study is not None:
-        found += _in_memory(study, data["study"], executor)
+        context = None
+        if run is not None or is_run or n_steps is not None:
+            caps = study.caps
+            context = PreflightContext(
+                budget=RunBudget(caps.n_events, caps.n_log, n_steps)
+            )
+        found += _in_memory(study, data["study"], executor, context)
         if run is not None:
             found += service_findings(study, run)
         if is_run and "records" in data:
@@ -392,7 +408,7 @@ def _is_ref(ref):
 # ---- in-memory findings, located in the document --------------------------------
 
 
-def _in_memory(study, doc_study, executor):
+def _in_memory(study, doc_study, executor, context=None):
     """The core findings on `study`, each at the pointer of its offending value."""
     return [
         DocumentFinding(
@@ -403,7 +419,7 @@ def _in_memory(study, doc_study, executor):
             item.fix,
             in_memory=item,
         )
-        for item in preflight_study(study, executor)
+        for item in preflight_study(study, executor, context)
     ]
 
 
@@ -414,14 +430,21 @@ def _tokens(item, study):
     and entry are followed only when the slot has a field of that name, which is how a
     component that stores what it declares is located; a component that computes its
     declaration is located at the slot. A dotted member (`table.local_index`) names a
-    field of a module the slot holds, followed field by field.
+    field of a module the slot holds, followed field by field. A locator that names no
+    slot of the study, or a policy that is missing or out of range, is located at the
+    study, or at the policy list.
     """
     if not item.subject:
         return ()
     if item.subject == "policy":
-        tokens = ("agenda", "policies", item.index)
-        slot = study.agenda.policies[item.index]
+        index, policies = item.index, study.agenda.policies
+        if not (type(index) is int and 0 <= index < len(policies)):
+            return ("agenda", "policies")
+        tokens = ("agenda", "policies", index)
+        slot = policies[index]
     else:
+        if item.subject not in {f.name for f in dataclasses.fields(study)}:
+            return ()
         tokens = (item.subject,)
         slot = getattr(study, item.subject)
     names = (

@@ -263,6 +263,9 @@ class PreMissionImporter(AbstractProcess):
                 f"the table's payload has {width} columns; the capacities hold "
                 f"{caps.payload_width}"
             )
+        if table.n_rows == 0:
+            # nothing is queued for an empty table; the handler is still traced
+            return carry, record_none(caps)
         g = ev.group
         room = carry.next_sid < caps.max_sid
         internal = carry.next_sid
@@ -543,7 +546,7 @@ def capacity_findings(table, caps, budget):
         ("executor steps", need.steps, budget.n_steps, "run for more steps"),
     )
     for what, wanted, held, fix in checks:
-        if wanted > held:
+        if held is not None and wanted > held:
             out.append(
                 _finding(
                     FindingCode.D006,
@@ -564,6 +567,22 @@ PREMISSION_KINDS = {
 }
 """The kind references of the importer and its table, for `dump_study` and
 `load_study` (merge them into the mapping or resolver a document is read with)."""
+
+
+def _payload_rows(payload, n):
+    """The payload as `[n, P]`, refusing any other rank or row count.
+
+    An empty table may give an empty payload; it is one column wide.
+    """
+    values = np.asarray(payload, np.float64)
+    if n == 0 and values.size == 0:
+        return values.reshape(0, values.shape[1] if values.ndim == 2 else 1)
+    if values.ndim != 2 or values.shape[0] != n:
+        raise ValueError(
+            f"payload has shape {values.shape}; it needs one row of values per "
+            f"table row, [{n}, P]"
+        )
+    return values
 
 
 def authored_table(
@@ -628,7 +647,7 @@ def authored_table(
         end_offset=col(end_offset, zeros),
         window_lo_rel=col(window_lo_rel, zeros),
         window_hi_rel=col(window_hi_rel, zeros),
-        payload=np.asarray(payload, np.float64).reshape(n, -1),
+        payload=_payload_rows(payload, n),
         pedigree=SourceId(
             namespace=grid[..., 0],
             producer=grid[..., 1],

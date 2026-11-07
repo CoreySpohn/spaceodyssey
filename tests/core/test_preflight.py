@@ -283,3 +283,28 @@ def test_an_import_one_row_too_large_fails_only_with_the_real_budget(field, held
     assert [str(f.code) for f in found] == ["D006"]
     assert held in found[0].message and found[0].member == "table"
     assert preflight(over) == []
+
+
+def test_a_hook_finding_outside_the_study_falls_back_to_its_component():
+    """Fails if a validator's finding that names no slot of the study, or a policy
+    that is missing or out of range, keeps that locator instead of falling back to
+    the validating component's own slot.
+    """
+    from tests.codec.test_preflight_json import LocatorProcess
+
+    for subject, index in (("missing", None), ("policy", None), ("policy", 3)):
+        study = toy.survey_1(process=LocatorProcess(subject=subject, index=index))
+        found = preflight(study)
+        assert [locator(f) for f in found] == [("process", None, "", ())]
+    kept = preflight(toy.survey_1(process=LocatorProcess(subject="policy", index=0)))
+    assert [locator(f) for f in kept] == [("policy", 0, "", ())]
+
+
+def test_the_locatable_slots_are_the_fields_of_the_study():
+    """Fails if a field is added to or removed from `Study` without the pre-flight's
+    list of slots a finding may name following it.
+    """
+    from spaceodyssey.core.preflight.checks import STUDY_SLOTS
+    from spaceodyssey.core.study import Study
+
+    assert {f.name for f in dataclasses.fields(Study)} == STUDY_SLOTS

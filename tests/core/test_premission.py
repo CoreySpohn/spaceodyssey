@@ -441,3 +441,105 @@ def test_only_in_table_pedigree_entries_must_name_a_row_of_the_table():
     assert [(str(f.code), f.entry) for f in found] == [("D005", (1, 0))]
     padded = preflight(study_of(with_pedigree((0, 60, 0, 0, False), (PAD, 0))))
     assert [str(f.code) for f in padded] == ["D005"]
+
+
+# ---- review round 1 ----------------------------------------------------------------
+
+
+def test_the_authored_helper_refuses_a_payload_of_another_row_count_or_rank():
+    """Fails if payload rows are silently reassigned by a reshape: three rows of two
+    values for a two-row table must be refused, not read as two rows of three.
+    """
+    rows = dict(
+        subject=[0, 1],
+        local_index=[0, 1],
+        channel=[60, 60],
+        kind=[MEAS, MEAS],
+        audience=[3, 3],
+    )
+    with pytest.raises(ValueError, match="payload"):
+        authored_table(**rows, payload=[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    with pytest.raises(ValueError, match="payload"):
+        authored_table(**rows, payload=[1.0, 2.0])
+    with pytest.raises(ValueError, match="payload"):
+        authored_table(**rows, payload=[[[1.0]], [[2.0]]])
+    good = authored_table(**rows, payload=[[1.0, 2.0], [3.0, 4.0]])
+    assert np.asarray(good.payload).tolist() == [[1.0, 2.0], [3.0, 4.0]]
+
+
+def _imported(study):
+    """The carry after every tick-0 import event, handled one by one, eagerly."""
+    from spaceodyssey.core.events import select_next
+    from spaceodyssey.core.handlers import h_process, h_release, h_wait
+
+    handlers = {
+        int(EventKind.WAIT): h_wait,
+        int(EventKind.PROCESS): h_process,
+        int(EventKind.RELEASE): h_release,
+    }
+    truth, root = one()
+    c = core.init_carry(study, truth)
+    while True:
+        nxt, ev, has = select_next(c, study.caps)
+        if not bool(has) or int(ev.tick) > 0:
+            return c
+        c = handlers[int(ev.kind)](nxt, ev, study, truth, root)[0]
+
+
+def test_the_battery_matches_split_rows_by_audience_and_refuses_collisions():
+    """Fails if the battery's record index drops one copy of a split prior (both
+    share subject, index, channel, revision and status), if a policy view is not
+    matched to its own log rows, or if two rows that collide in every coordinate,
+    audience included, are indexed silently.
+    """
+    from spaceodyssey.core.battery.result import log_index
+    from spaceodyssey.core.battery.views import _payload_matches_log
+
+    study = study_of(table())
+    c = _imported(study)
+    assert int(c.n_log) == 5
+    assert len(log_index(c)) == 5
+    view = snapshot_view(c, Audience.POLICY, CAPS)
+    assert int(view.n_rows) == 3
+    assert _payload_matches_log(view, c, CAPS)
+    # an accidental collision: row 1 copied into slot 5, audience and all
+    log = c.log
+    dup = jax_tree_copy_row(log, 1, 5)
+    clash = eqx.tree_at(lambda x: (x.log, x.n_log), c, (dup, jnp.asarray(6)))
+    with pytest.raises(ValueError, match="share"):
+        log_index(clash)
+    with pytest.raises(ValueError, match="share"):
+        _payload_matches_log(snapshot_view(clash, Audience.POLICY, CAPS), clash, CAPS)
+
+
+def jax_tree_copy_row(log, src, dst):
+    import jax
+
+    return jax.tree_util.tree_map(lambda col: col.at[dst].set(col[src]), log)
+
+
+def test_an_empty_table_is_a_no_op_import_also_under_tracing():
+    """Fails if a zero-row table cannot be authored, if its importer queues anything
+    but the retargeted kickoff, or if its handler fails to trace (JAX indexes the
+    empty columns), eagerly or under jit.
+    """
+    empty = authored_table(
+        subject=[], local_index=[], channel=[], kind=[], audience=[], payload=[]
+    )
+    assert np.shape(empty.payload) == (0, 1) and ImportDemand.of(empty, CAPS).rows == 0
+    study = study_of(empty)
+    truth, _ = one()
+    c = core.init_carry(study, truth)
+    assert int(np.asarray(c.ev.valid).sum()) == 1 and int(c.next_sid) == 1
+    row = dataclasses.replace(
+        core.empty_event_row(),
+        kind=jnp.asarray(EventKind.PROCESS),
+        stage=jnp.asarray(Stage.RELEASE),
+        valid=jnp.asarray(True),
+    )
+    for handle in (study.process.handle, eqx.filter_jit(study.process.handle)):
+        out, rec = handle(c, row, study)
+        assert not bool(rec.valid) and int(out.next_sid) == int(c.next_sid)
+    from spaceodyssey.core.preflight import preflight
+
+    assert preflight(study) == []

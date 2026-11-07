@@ -967,3 +967,116 @@ def test_binding_edge_cases_the_first_tests_missed():
     assert nested != text
     found = preflight_document(nested, RESOLVER)
     assert [(f.code, f.pointer) for f in found] == [("L001", "/study/clock/$kind")]
+
+
+# ---- review round 1: budget through JSON, payload rows, malformed locators ----------
+
+
+def _rows_study(n_rows, n_events):
+    from spaceodyssey.core.capacities import Capacities
+    from spaceodyssey.studies.premission import PreMissionImporter, authored_table
+
+    t = authored_table(
+        subject=[0] * n_rows,
+        local_index=list(range(n_rows)),
+        channel=[60] * n_rows,
+        kind=[toy.RECORD_MEASUREMENT] * n_rows,
+        audience=[3] * n_rows,
+        payload=[[1.0]] * n_rows,
+    )
+    caps = toy.toy_registry().lower(Capacities(n_events=n_events))
+    return toy.survey_1(caps, process=PreMissionImporter(table=t))
+
+
+def test_a_run_reaches_the_import_capacity_check_through_the_json_path():
+    """Fails if a run whose import needs six queue slots with five held passes the
+    JSON pre-flight while the in-memory call with the run's budget reports D006, if
+    the finding is not at the table, or if a bare study document is checked.
+    """
+    from spaceodyssey.core.preflight.checks import PreflightContext, RunBudget
+
+    study = _rows_study(5, 5)
+    budget = RunBudget(5, study.caps.n_log, None)
+    in_memory = preflight(study, context=PreflightContext(budget=budget))
+    assert [str(f.code) for f in in_memory] == ["D006"]
+    doc = _doc(study)
+    found = _find(doc, {"executor": "host"})
+    assert [(str(f.code), f.pointer) for f in found] == [
+        ("D006", "/study/process/table")
+    ]
+    assert found[0].in_memory == in_memory[0]
+    assert _find(doc, None) == []
+    assert _find(_doc(_rows_study(4, 5)), {"executor": "host"}) == []
+    # a step budget, when the caller names one, is checked too
+    steps = _find(_doc(_rows_study(4, 5)), {"executor": "host"}, n_steps=8)
+    assert [str(f.code) for f in steps] == ["D006"] and "steps" in steps[0].message
+
+
+def test_a_payload_of_another_row_count_is_a_load_finding_at_the_table():
+    """Fails if a document whose payload rows do not match the table's rows loads
+    (its rows would be reassigned) instead of being reported at the table.
+    """
+    doc = _doc(_rows_study(2, 48))
+    doc["study"]["process"]["table"]["payload"] = {
+        "$array": "float64",
+        "shape": [3, 2],
+        "data": [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+    }
+    found = _find(doc, None)
+    assert [(str(f.code), f.pointer) for f in found] == [
+        ("L001", "/study/process/table")
+    ]
+    assert "payload" in found[0].message
+
+
+class LocatorProcess(toy.NullProcess):
+    """A process whose validator returns one finding at a stated locator."""
+
+    subject: str = eqx.field(static=True, default="")
+    index: int | None = eqx.field(static=True, default=None)
+    member: str = eqx.field(static=True, default="")
+
+    def validate(self, study, context):
+        from spaceodyssey.core.preflight import Finding, Severity
+
+        return [
+            Finding(
+                FindingCode.D006,
+                Severity.ERROR,
+                "p",
+                "m",
+                "f",
+                subject=self.subject,
+                index=self.index,
+                member=self.member,
+            )
+        ]
+
+
+@pytest.mark.parametrize(
+    ("subject", "index", "member", "where"),
+    [
+        ("missing", None, "", "/study/process"),
+        ("policy", None, "", "/study/process"),
+        ("policy", 7, "", "/study/process"),
+        ("policy", -1, "", "/study/process"),
+        ("process", None, "no.such.field", "/study/process"),
+        ("channels", None, "id.data.9", "/study/channels/id"),
+        ("policy", 0, "", "/study/agenda/policies/0"),
+    ],
+)
+def test_a_malformed_hook_locator_is_reported_at_a_resolvable_pointer(
+    subject, index, member, where
+):
+    """Fails if a validator's locator naming no slot, a missing or out-of-range
+    policy, or a field the slot lacks makes the JSON pre-flight raise, or if its
+    finding does not point at a value that resolves in the document.
+    """
+    kinds = KindResolver(
+        {**TOY_KINDS, **DOC_KINDS, ("process", "test.locator", 1): LocatorProcess}
+    )
+    process = LocatorProcess(subject=subject, index=index, member=member)
+    doc = json.loads(dump_study(toy.survey_1(process=process), kinds).to_json())
+    found = preflight_document(json.dumps(doc), kinds)
+    assert [(str(f.code), f.pointer) for f in found] == [("D006", where)]
+    resolve_pointer(doc, where)

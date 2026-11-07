@@ -64,14 +64,30 @@ def worlds_of(run):
 def log_index(carry):
     """Map each valid log row's identity to its slot.
 
-    The identity is (subject, acquisition index, channel, revision, status).
+    The identity is (subject, acquisition index, channel, revision, status, audience):
+    one datum written once per audience (a split pre-run prior) is two rows. Two
+    valid rows with one identity are refused with `ValueError`, never indexed as one.
     """
     log = carry.log
     out = {}
     for i in np.flatnonzero(np.asarray(log.valid)):
-        key = tuple(
-            int(getattr(log, n)[i])
-            for n in ("subject", "acquisition_index", "channel", "revision", "status")
+        key = (
+            *(
+                int(getattr(log, n)[i])
+                for n in (
+                    "subject",
+                    "acquisition_index",
+                    "channel",
+                    "revision",
+                    "status",
+                )
+            ),
+            int(log.audience[i]),
         )
+        if key in out:
+            raise ValueError(
+                f"log rows {out[key]} and {int(i)} share the identity {key}; a "
+                "comparison cannot tell them apart"
+            )
         out[key] = int(i)
     return out

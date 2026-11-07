@@ -31,16 +31,21 @@ ERROR, WARNING = Severity.ERROR, Severity.WARNING
 
 @dataclasses.dataclass(frozen=True)
 class RunBudget:
-    """What a run may use: event slots, log rows and executor steps."""
+    """What a run may use: event slots, log rows and executor steps.
+
+    `n_steps` is `None` when the step budget is not known (a document records none);
+    a check of it then does not run.
+    """
 
     n_events: int
     n_log: int
-    n_steps: int
+    n_steps: int | None = None
 
     @classmethod
-    def of(cls, study, n_steps):
+    def of(cls, study, n_steps=None):
         """The budget of `study` run for `n_steps` steps, from its capacities."""
-        return cls(study.caps.n_events, study.caps.n_log, int(n_steps))
+        steps = None if n_steps is None else int(n_steps)
+        return cls(study.caps.n_events, study.caps.n_log, steps)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -446,9 +451,11 @@ def channels(study: Study):
 def components(study: Study, context: PreflightContext | None = None):
     """Findings the process and the observer report on themselves.
 
-    A component that defines `validate(study, context)` returns its own findings; the
-    slot is filled in where a finding leaves it empty. `context` is passed as given,
-    `None` included.
+    A component that defines `validate(study, context)` returns its own findings.
+    A finding is located at the validating component's slot when it leaves the slot
+    empty, names no slot of the study, or names a policy that is missing or out of
+    range; its path and message are kept. `context` is passed as given, `None`
+    included.
     """
     out = []
     for slot, component in (("process", study.process), ("observer", study.observer)):
@@ -456,10 +463,44 @@ def components(study: Study, context: PreflightContext | None = None):
         if not callable(validate):
             continue
         for item in validate(study, context):
-            out.append(
-                item if item.subject else dataclasses.replace(item, subject=slot)
-            )
+            if not _locates(item, study):
+                item = dataclasses.replace(
+                    item, subject=slot, index=None, member="", entry=()
+                )
+            out.append(item)
     return out
+
+
+# The fields of `Study`, which a finding's `subject` may name (the policy slot names
+# `agenda.policies` by index); a test keeps the list equal to the dataclass's fields.
+STUDY_SLOTS = frozenset(
+    {
+        "caps",
+        "clock",
+        "channels",
+        "channel_model",
+        "assets",
+        "budget",
+        "horizon_tick",
+        "agenda",
+        "process",
+        "observer",
+        "design",
+        "world_source",
+        "objective",
+        "coupling",
+        "fork",
+        "refresh",
+    }
+)
+
+
+def _locates(item, study):
+    """Whether a finding's slot exists: a field of the study, or a policy by index."""
+    if item.subject == "policy":
+        index = item.index
+        return isinstance(index, int) and 0 <= index < len(study.agenda.policies)
+    return item.subject in STUDY_SLOTS
 
 
 def preflight(

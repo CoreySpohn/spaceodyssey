@@ -14,7 +14,7 @@ from spaceodyssey.core.enums import Audience, EventKind
 from spaceodyssey.core.keys import policy_key
 from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.records import payload_columns
-from spaceodyssey.core.snapshot import snapshot_fingerprint
+from spaceodyssey.core.snapshot import snapshot_fingerprint, visible_rows
 
 TICKS = {"start_tick", "end_tick", "available_tick", "released_tick", "accepted_tick"}
 RELEASE_TICKS = {"available_tick", "released_tick", "accepted_tick"}
@@ -129,14 +129,25 @@ class DecisionViews:
 
 
 def _payload_matches_log(view, carry, caps):
-    """Draws may change under id relabeling; each view must still show its own draw."""
+    """Draws may change under id relabeling; each view must still show its own draw.
+
+    A view row is matched among the log rows the policy can see, by identity and
+    audience, so the observer's copy of a datum written once per audience is never a
+    candidate. Two visible rows that match one view row are refused (`ValueError`).
+    """
     log = carry.log
     names = ("subject", "acquisition_index", "channel", "revision", "status")
+    names += ("audience",)
+    seen = np.asarray(visible_rows(log, Audience.POLICY))
     for i in range(int(view.n_rows)):
-        hit = np.asarray(log.valid).copy()
+        hit = seen.copy()
         for name in names:
             hit &= np.asarray(getattr(log, name)) == getattr(view.log, name)[i]
         rows = np.flatnonzero(hit)
+        if len(rows) > 1:
+            raise ValueError(
+                f"log rows {rows.tolist()} share the identity of policy view row {i}"
+            )
         if len(rows) != 1:
             return False
         j = rows[0]
