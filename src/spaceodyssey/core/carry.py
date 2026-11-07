@@ -106,6 +106,11 @@ def empty_carry(caps, balance=None):
             if caps.n_programs > 1
             else None,
             refund_ignored=z if caps.refunds else None,
+            win_state=jnp.zeros(br, I64) if caps.awards else None,
+            win_gen=jnp.zeros(br, I64) if caps.awards else None,
+            realloc_row=jnp.zeros(br, I64) if caps.awards else None,
+            granted=jnp.zeros((br, nr), F64) if caps.awards else None,
+            lapsed=jnp.zeros((br, nr), F64) if caps.awards else None,
         ),
         belief=_zero_belief(caps),
         pbelief=_zero_belief(caps),
@@ -175,6 +180,28 @@ class Trace(eqx.Module):
     # The program an event's debit or settlement is charged under; absent (None, no
     # leaf) unless the capacities hold more than one program.
     program: jax.Array | None = None
+    # What each Allocate row of the decision asked: the amount per resource, the window
+    # and the recipient row. Absent (None, no leaf) unless awards are on, so no other
+    # trace, history or fingerprint changes.
+    alloc_amount: jax.Array | None = None  # F64[E, R]
+    alloc_from: jax.Array | None = None  # I64[E]
+    alloc_until: jax.Array | None = None  # I64[E]
+    alloc_recipient: jax.Array | None = None  # I64[E]
+
+
+def absent(trace, name):
+    """Whether `trace` holds no leaf `name`: a conditional leaf whose feature is off.
+
+    Walks over every trace field skip these; the names are spelled out so no field is
+    reached by a dynamic lookup.
+    """
+    return (
+        (name == "program" and trace.program is None)
+        or (name == "alloc_amount" and trace.alloc_amount is None)
+        or (name == "alloc_from" and trace.alloc_from is None)
+        or (name == "alloc_until" and trace.alloc_until is None)
+        or (name == "alloc_recipient" and trace.alloc_recipient is None)
+    )
 
 
 # Trace fields filled by the observer layout's projection of the full belief.
@@ -215,6 +242,12 @@ def empty_trace(caps):
         n_log=z,
         pol_u=jnp.asarray(0.0, F64),
         program=z if caps.n_programs > 1 else None,
+        alloc_amount=jnp.zeros((caps.n_effects, caps.n_resources), F64)
+        if caps.awards
+        else None,
+        alloc_from=jnp.zeros(caps.n_effects, I64) if caps.awards else None,
+        alloc_until=jnp.zeros(caps.n_effects, I64) if caps.awards else None,
+        alloc_recipient=jnp.zeros(caps.n_effects, I64) if caps.awards else None,
     )
 
 

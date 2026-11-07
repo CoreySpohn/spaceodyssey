@@ -114,6 +114,11 @@ CANONICAL_FIELDS = {
         "refunded",
         "program_closed",
         "refund_ignored",
+        "win_state",
+        "win_gen",
+        "realloc_row",
+        "granted",
+        "lapsed",
     ),
     "carry.request": (
         "kind",
@@ -195,6 +200,10 @@ CANONICAL_FIELDS = {
         "n_log",
         "pol_u",
         "program",
+        "alloc_amount",
+        "alloc_from",
+        "alloc_until",
+        "alloc_recipient",
     ),
 }
 
@@ -218,6 +227,11 @@ def refunds_on(carry):
     return carry.log.refund_index is not None
 
 
+def awards_on(carry):
+    """Whether the carry holds the award state (the window generations exist)."""
+    return carry.ledger.win_gen is not None
+
+
 # Fields that exist only where a feature does, by dotted path, each with the predicate
 # that says whether the carry holds the feature. A field of a feature that is off has
 # zero size and leaves the canonical history, so no history of a study without the
@@ -239,6 +253,15 @@ CONDITIONAL_FIELDS = {
     "carry.log.award_gen": refunds_on,
     "carry.ledger.refund_ignored": refunds_on,
     "trace.program": programs_on,
+    "carry.ledger.win_state": awards_on,
+    "carry.ledger.win_gen": awards_on,
+    "carry.ledger.realloc_row": awards_on,
+    "carry.ledger.granted": awards_on,
+    "carry.ledger.lapsed": awards_on,
+    "trace.alloc_amount": awards_on,
+    "trace.alloc_from": awards_on,
+    "trace.alloc_until": awards_on,
+    "trace.alloc_recipient": awards_on,
 }
 REFRESH_GROUPS = tuple(CONDITIONAL_GROUPS)
 REFRESH_FIELDS = tuple(CONDITIONAL_FIELDS)

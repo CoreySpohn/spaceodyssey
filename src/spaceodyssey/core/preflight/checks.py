@@ -12,6 +12,7 @@ import numpy as np
 from spaceodyssey.core.declarations import (
     EXECUTOR_CAPABILITIES,
     EXECUTORS,
+    GATED_EFFECTS,
     SUPPORTED_EFFECTS,
     declaration_of,
 )
@@ -291,7 +292,9 @@ def capability(study: Study, executor: str | None = None):
         decl = declaration_of(component)
         slot, index = _slot(path)
         for kind in sorted(decl.effects, key=int):
-            if EffectKind(kind) not in SUPPORTED_EFFECTS:
+            if EffectKind(kind) not in SUPPORTED_EFFECTS or (
+                EffectKind(kind) in GATED_EFFECTS and not study.caps.awards
+            ):
                 out.append(
                     Finding(
                         FindingCode.X001,
@@ -484,6 +487,49 @@ def programs(study: Study):
     return out
 
 
+def awards(study: Study):
+    """W001: an award window a policy declares that cannot be admitted.
+
+    A window is `(recipient, start, until)`: the recipient must be a balance row, the
+    window nonempty (`0 <= start < until`) and inside the run's last tick, and no two
+    windows on one row may overlap (a row holds one window at a time).
+    """
+    out = []
+    caps = study.caps
+
+    def flag(i, j, why):
+        out.append(
+            Finding(
+                FindingCode.W001,
+                ERROR,
+                f"policy[{i}]",
+                f"award {j} {why}",
+                "give the award a balance row, a nonempty window inside the run and "
+                "no overlap with another award on that row",
+                subject="policy",
+                index=i,
+                member="awards",
+                entry=(j,),
+            )
+        )
+
+    for i, policy in enumerate(study.agenda.policies):
+        taken = {}
+        for j, (row, start, until) in enumerate(declaration_of(policy).awards):
+            if not 0 <= row < caps.n_balance_rows:
+                last = caps.n_balance_rows - 1
+                flag(i, j, f"names balance row {row}, outside 0 to {last}")
+            elif not 0 <= start < until <= caps.max_tick:
+                flag(
+                    i, j, f"has the window [{start}, {until}), empty or outside the run"
+                )
+            elif any(start < u and s < until for s, u in taken.get(row, ())):
+                flag(i, j, f"overlaps an earlier award on balance row {row}")
+            else:
+                taken.setdefault(row, []).append((start, until))
+    return out
+
+
 def channels(study: Study):
     """T002 and R001: coincident order and record kinds of the channel table."""
     out = []
@@ -611,6 +657,7 @@ def preflight(
         *failure_kinds(study),
         *stops(study),
         *programs(study),
+        *awards(study),
         *channels(study),
         *components(study, context),
     ]

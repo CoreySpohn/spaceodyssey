@@ -626,6 +626,17 @@ def _variant_w002(seed):
     return _doc(_with(study, caps=caps, channels=channels)), None
 
 
+def _variant_w001(seed):
+    return _policy_doc(awards=((2, 50, 50 if seed else 80),)), None
+
+
+def _variant_x001_awards(seed):
+    """An Allocate effect: flagged while awards are off, clean once they are on."""
+    study = toy.survey_1(policies=(DocPolicy(effects=(int(EffectKind.ALLOCATE),)),))
+    caps = dataclasses.replace(study.caps, awards=not seed)
+    return _doc(_with(study, caps=caps)), None
+
+
 def _variant_x002_resource(seed):
     study = toy.survey_1()
     rows = jnp.asarray([-1, 0 if seed else -1], I64)
@@ -688,6 +699,18 @@ VARIANTS = {
         _variant_w002,
         "/study/channels/failure_kind/data/2",
         _is(0),
+    ),
+    "W001": (
+        FindingCode.W001,
+        _variant_w001,
+        "/study/agenda/policies/0/awards/0",
+        _is([2, 50, 50]),
+    ),
+    "X001-awards": (
+        FindingCode.X001,
+        _variant_x001_awards,
+        "/study/agenda/policies/0/effects",
+        _is([int(EffectKind.ALLOCATE)]),
     ),
     "X002-resource": (
         FindingCode.X002,

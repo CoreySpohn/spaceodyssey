@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from spaceodyssey.core.capacities import OPTIONAL
-from spaceodyssey.core.enums import I64, Audience, B, RecordStatus, version_slot
+from spaceodyssey.core.enums import F64, I64, Audience, B, RecordStatus, version_slot
 from spaceodyssey.core.records import (
     LOG_INT_FIELDS,
     REFUND_COLUMNS,
@@ -164,6 +164,15 @@ class EffectTable(eqx.Module):
     # The program a row charges (and, for a Stop, closes); absent (None, no leaf) unless
     # the capacities hold more than one program, so a study with one is unchanged.
     program: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    # An Allocate row's award, present only while awards are on: the amount per
+    # resource, the window [window_from, window_until), the recipient balance row, the
+    # `RemainderRule` at the window's end and the row a REALLOCATE moves it to.
+    amount: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    window_from: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    window_until: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    recipient: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    remainder: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    realloc_to: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
 
 
 def effects_none(caps):
@@ -173,7 +182,23 @@ def effects_none(caps):
         **{n: z for n in EFFECT_FIELDS if n != "disruptive"},
         disruptive=jnp.zeros(caps.n_effects, B),
         program=z if caps.n_programs > 1 else None,
+        **award_columns(caps),
     )
+
+
+def award_columns(caps):
+    """The Allocate columns of an empty effect table: none unless awards are on."""
+    if not caps.awards:
+        return {}
+    z = jnp.zeros(caps.n_effects, I64)
+    return {
+        "amount": jnp.zeros((caps.n_effects, caps.n_resources), F64),
+        "window_from": z,
+        "window_until": z,
+        "recipient": z,
+        "remainder": z,
+        "realloc_to": z,
+    }
 
 
 def visible_rows(log, audience):
@@ -330,7 +355,18 @@ def snapshot_fingerprint(view, layout):
     return jax.lax.bitcast_convert_type(h, I64)
 
 
-# the columns every effect table has; `program` is present only with several programs
+# the columns every effect table has; the others are present only where a feature is on
+OPTIONAL_EFFECT_FIELDS = (
+    "program",
+    "amount",
+    "window_from",
+    "window_until",
+    "recipient",
+    "remainder",
+    "realloc_to",
+)
 EFFECT_FIELDS = tuple(
-    f.name for f in dataclasses.fields(EffectTable) if f.name != "program"
+    f.name
+    for f in dataclasses.fields(EffectTable)
+    if f.name not in OPTIONAL_EFFECT_FIELDS
 )

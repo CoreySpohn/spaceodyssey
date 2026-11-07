@@ -32,8 +32,11 @@ SUPPORTED_EFFECTS = frozenset(
         EffectKind.STOP,
         EffectKind.CANCEL,
         EffectKind.QUERY,
+        EffectKind.ALLOCATE,
     }
 )
+# effects an executor runs only while `caps.awards` is on
+GATED_EFFECTS = frozenset({EffectKind.ALLOCATE})
 
 DRAW_COORDS = tuple(c for c in COORDS if c not in OPTIONAL_COORDS)
 
@@ -67,6 +70,8 @@ class Declaration:
     # records on, or the service channel a policy asks a `Query` on
     channels: tuple[int, ...] = ()
     programs: tuple[int, ...] = ()  # program ids a policy names (a plan or a Stop)
+    # award windows a policy asks for, as (recipient balance row, start, until) triples
+    awards: tuple[tuple[int, int, int], ...] = ()
 
     def __post_init__(self):
         """Reject unknown names so a typo cannot read as a clean declaration."""
