@@ -92,15 +92,16 @@ Documentation = "https://spaceodyssey.readthedocs.io"
 # through photomancy's NumPyro model, and summary radiometry through jaxedith on a
 # yippy response.
 physical = [
+    # jaxedith's fixed-frame variance and QE handling, optixstuff's dQE default and
+    # skyscapes' FlatStar diameter are on main but unreleased; .github/sibling-pins.txt
+    # pins those commits. Each floor moves to the first release that carries them.
     "skyscapes>=2.1",
     "orbix>=3.0",
     "numpyro>=0.21.0",
     "jaxedith>=2.0",
     "optixstuff>=4.0",
-    # The summary adapter reads EqxCoronagraph.stellar_frame and stellar_pixel_scale_lod,
-    # which no release carries yet; .github/sibling-pins.txt pins the yippy commit that
-    # adds them. The floor moves to the first release that carries them.
-    "yippy>=2.11",
+    # EqxCoronagraph.stellar_frame and stellar_pixel_scale_lod arrived in 2.12.0.
+    "yippy>=2.12.0",
     "interpax>=0.3",
 ]
 retrieval = ["exojax>=2.5"]
@@ -118,7 +119,7 @@ test = [
     "ineedvalidation>=1.1",
     "hwoutils>=1.10.0",
     "spaceodyssey[physical,viz]>=0.0.1",
-    "yippy>=2.11",
+    "yippy>=2.12.0",
     "astropy>=6.0",
     "mpmath>=1.3",
     "coronalyze>=1.2",

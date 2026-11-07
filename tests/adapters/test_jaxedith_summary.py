@@ -1,17 +1,17 @@
 """Summary radiometry through jaxedith: hand budgets, parity, refinement, anchors.
 
 Unit tests run on an analytic toy coronagraph, so every expected value is written by
-hand. Medium and slow tests use the pinned public response package. Anchors that
-need an unmerged library change are strict expected failures that name the change;
-they never count as acceptance.
+hand. Medium and slow tests use the pinned public response package. The library
+anchors (QE and dQE applied once, the fixed-frame detector variance and SNR, the
+primary built from the package header) run against the pinned library commits.
 """
 
+import itertools
 import math
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import jaxedith
 import numpy as np
 import pytest
 from astropy.io import fits
@@ -213,15 +213,14 @@ def test_detector_spec_and_report_refuse_undeclared_choices(observatory):
         with pytest.raises(ValueError):
             DetectorSpec.fixture(**override)
     spec = DetectorSpec.fixture()
-    assert spec.cadence == "photon_counting_legacy"
-    assert spec.cadence_code == CADENCE_CODES["photon_counting_legacy"]
-    fixed = DetectorSpec.fixture(cadence="fixed_frame")
-    if hasattr(jaxedith, "count_variance_components_ayo"):
-        code = toy_report(observatory, spec=fixed).detector_spec.cadence_code
-        assert code == CADENCE_CODES["fixed_frame"]
-    else:
-        with pytest.raises(NotImplementedError, match="finite-frame"):
-            toy_report(observatory, spec=fixed)
+    assert spec.cadence == "fixed_frame"
+    assert spec.cadence_code == CADENCE_CODES["fixed_frame"] == 0
+    legacy = DetectorSpec.fixture(cadence="photon_counting_legacy")
+    assert legacy.cadence_code == CADENCE_CODES["photon_counting_legacy"] == 1
+    interval = ScienceInterval.from_start(EPOCH_JD + 10.0, 3600.0)
+    for declared in (spec, legacy):
+        budget = toy_report(observatory, spec=declared).predict(face_on(1.5), interval)
+        assert int(budget.cadence) == declared.cadence_code
     for kwargs in (
         dict(n_time_nodes=0),
         dict(bg_multiplier=0.0),
@@ -237,12 +236,15 @@ def test_hand_count_and_variance_budget(observatory):
 
     The planet is on a face-on circular orbit (constant separation, Lambert phase at
     90 degrees), the detector has QE 1 and dQE 1 so the budget does not depend on
-    where QE is applied, and the collecting area is pi (D/2)^2 (1 - OBSCURED). Also
+    where QE is applied and runs in the legacy cadence (the fixed-frame detector
+    term has its own anchor), and the collecting area is pi (D/2)^2 (1 - OBSCURED). Also
     fails if a component is dropped from the variance, if the background multiplier
     is not applied, or if the floor is not (t * leakage / ppfact)^2. A zero-length
     interval has zero counts, zero variance, SNR 0 and a finite centroid (not NaN).
     """
-    spec = DetectorSpec.fixture(quantum_efficiency=1.0, dqe=1.0)
+    spec = DetectorSpec.fixture(
+        quantum_efficiency=1.0, dqe=1.0, cadence="photon_counting_legacy"
+    )
     scene = toy_scene()
     a_au, Rp_au, Ag = 1.5, 1e-4, 0.3
     interval = ScienceInterval.from_start(EPOCH_JD + 120.0, 7200.0)
@@ -394,15 +396,10 @@ def test_moving_planet_counts_and_centroid_match_a_fine_grid(observatory):
     assert abs(midpoint * 2 * 86400.0 / float(budget.planet) - 1) > 1e-3
 
 
-# -- Blocked anchors ----------------------------------------------------------
+# -- Library anchors ----------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="blocked on jaxedith branch codex-detector-qe: QE on photon rates",
-)
-def test_blocked_quantum_efficiency_applies_exactly_once(observatory):
+def test_quantum_efficiency_applies_exactly_once(observatory):
     """Fails if the planet and photon background rates do not scale with QE once."""
     interval = ScienceInterval.from_start(EPOCH_JD + 120.0, 3600.0)
     unit = toy_report(observatory, spec=DetectorSpec.fixture(quantum_efficiency=1.0))
@@ -413,12 +410,7 @@ def test_blocked_quantum_efficiency_applies_exactly_once(observatory):
         np.testing.assert_allclose(getattr(b, key), 0.5 * getattr(a, key), rtol=1e-12)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="blocked on jaxedith branch codex-detector-qe: dQE as a survival",
-)
-def test_blocked_dqe_is_a_survival_fraction(observatory):
+def test_dqe_is_a_survival_fraction(observatory):
     """Fails if a 0.8 dQE does not scale planet and photon backgrounds by 0.8 once."""
     interval = ScienceInterval.from_start(EPOCH_JD + 120.0, 3600.0)
     neutral = toy_report(observatory, spec=DetectorSpec.fixture(dqe=1.0))
@@ -429,12 +421,7 @@ def test_blocked_dqe_is_a_survival_fraction(observatory):
         np.testing.assert_allclose(getattr(b, key), 0.8 * getattr(a, key), rtol=1e-12)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ImportError,
-    reason="blocked on jaxedith branch codex-fixed-frame: finite-frame variance",
-)
-def test_blocked_fixed_frame_detector_variance(observatory):
+def test_fixed_frame_detector_variance(observatory):
     """Fails if the detector variance is not n_pix (dark t + (RN^2 + CIC) ceil(t/T)).
 
     Sub-frame, exactly one frame, exactly n frames and n frames plus a partial last
@@ -457,12 +444,7 @@ def test_blocked_fixed_frame_detector_variance(observatory):
         np.testing.assert_allclose(budget.var_detector, hand, rtol=1e-12)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ImportError,
-    reason="blocked on jaxedith branch codex-fixed-frame: fixed-frame SNR",
-)
-def test_blocked_fixed_frame_floor_agrees_with_jaxedith(observatory):
+def test_fixed_frame_floor_agrees_with_jaxedith(observatory):
     """Fails if the fixed-frame SNR differs from jaxedith's with the floor off or on."""
     from jaxedith import count_variance_components_ayo
 
@@ -487,12 +469,7 @@ def test_blocked_fixed_frame_floor_agrees_with_jaxedith(observatory):
         np.testing.assert_allclose(budget.variance, components["total"], rtol=1e-6)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AttributeError,
-    reason="blocked on optixstuff branch codex-primary-from-yip: from_yip",
-)
-def test_blocked_primary_from_yip_matches_the_adapter_area():
+def test_primary_from_yip_matches_the_adapter_area():
     """Fails if the library's YIP primary differs from pi (D/2)^2 (1 - OBSCURED)."""
     primary = SimplePrimary.from_yip(fetch_pinned_yip())
     obscured, diameter = header_obscuration_and_diameter()
@@ -646,13 +623,15 @@ def test_variance_agrees_with_jaxedith_and_the_system_wrapper(yip_report, observ
     """Fails if the summary SNR or rates disagree with jaxedith's own entry points.
 
     With one node and a stationary planet the budget's SNR equals jaxedith's
-    `snr_ayo` to 1e-6 with the floor off (ppfact infinite) and on (ppfact 30), and
-    the SNR at jaxedith's `exptime_ayo` for SNR 10 is 10. The rates of a face-on
-    circular planet equal `count_rates_from_system_ayo` on an equivalent skyscapes
-    system, which builds the zero point, the stellar ratio, the local zodi and the
-    stellar diameter itself, to 1e-5 (the system's own Kepler solve); a 1 percent
-    zero-point or stellar-flux error fails. The collecting area is
-    pi (D/2)^2 (1 - OBSCURED) from the package header; the raw fraction as the
+    `snr_ayo` to 1e-6 with the floor off (ppfact infinite) and on (ppfact 30), in
+    the fixed-frame cadence (the default) and the legacy one; the SNR at jaxedith's
+    `exptime_ayo` for SNR 10 is 10 (fixed frames planned to the minimum duration;
+    whole-frame planning reaches at least 10, and one frame less falls short). The
+    rates of a face-on circular planet equal `count_rates_from_system_ayo` on an
+    equivalent skyscapes system, which builds the zero point, the stellar ratio, the
+    local zodi and the stellar diameter itself, to 1e-5 (the system's own Kepler
+    solve); a 1 percent zero-point or stellar-flux error fails. The collecting area
+    is pi (D/2)^2 (1 - OBSCURED) from the package header; the raw fraction as the
     obscuration overstates it by over 10 percent.
     """
     obscured, diameter = header_obscuration_and_diameter()
@@ -665,14 +644,21 @@ def test_variance_agrees_with_jaxedith_and_the_system_wrapper(yip_report, observ
     a_au, Lambda = 2.1, 0.3 * (11.2 * Rearth2AU) ** 2
     theta = face_on(a_au, Rp_au=11.2 * Rearth2AU, Ag=0.3)
     start = EPOCH_JD + 200.0
-    for ppfact in (math.inf, 30.0):
+    legacy_report = SummaryReport.from_yip(
+        DetectorSpec.fixture(cadence="photon_counting_legacy"),
+        uma_scene(),
+        orbit_epoch_jd=EPOCH_JD,
+        observatory=observatory,
+    )
+    cadences = ((yip_report, "fixed_frame"), (legacy_report, "photon_counting_ayo"))
+    for (base, cadence), ppfact in itertools.product(cadences, (math.inf, 30.0)):
         report = eqx.tree_at(
             lambda r: (r.ppfact, r.nodes, r.weights),
-            yip_report,
+            base,
             (ppfact, jnp.zeros(1), jnp.full(1, 2.0)),
         )
         rates = report.rates(report.nominal, theta, start)
-        budget = report.predict(theta, ScienceInterval(start, 36000.0))
+        budget = report.predict(theta, ScienceInterval(start, 36500.0))
         scene = etc_scene(report, rates, 0, start)
         args = (report.optical_path, scene, WAVELENGTH_NM, rates.separation_lod[0])
         options = dict(
@@ -681,12 +667,23 @@ def test_variance_agrees_with_jaxedith_and_the_system_wrapper(yip_report, observ
             ppfact=ppfact,
             bg_multiplier=1.0,
             eps_warm_T_cold=0.0,
+            cadence=cadence,
         )
-        snr = snr_ayo(*args, BAND_NM, 36000.0, **options)
+        snr = snr_ayo(*args, BAND_NM, 36500.0, **options)
         np.testing.assert_allclose(budget.snr, snr, rtol=1e-6)
+        if cadence == "fixed_frame":
+            options["planning"] = "min_duration"
         t10 = exptime_ayo(*args, BAND_NM, 10.0, **options)
         planned = report.predict(theta, ScienceInterval(start, t10))
         np.testing.assert_allclose(planned.snr, 10.0, rtol=1e-6)
+        if cadence == "fixed_frame":
+            options["planning"] = "whole_frames"
+            whole = float(exptime_ayo(*args, BAND_NM, 10.0, **options))
+            frame = report.detector_spec.frame_time_s
+            assert whole % frame == pytest.approx(0.0, abs=1e-6)
+            above = report.predict(theta, ScienceInterval(start, whole))
+            below = report.predict(theta, ScienceInterval(start, whole - frame))
+            assert float(above.snr) >= 10.0 * (1 - 1e-9) > float(below.snr)
 
     star = Star(
         Ms_kg=Msun_to_kg(1.03),
@@ -815,8 +812,9 @@ def test_survey_snr_and_exposure_time_over_one_orbit(yip_report, observatory):
     """Fails if the summary SNR at jaxedith's planned exposure strays from 10.
 
     47 UMa b on general-knowledge elements (a = 2.1 AU, P near 1078 d, i = 60 deg)
-    at twelve phases: jaxedith's `exptime_ayo` for SNR 10 at the exposure start, then
-    the integrated summary SNR over that exposure. Where the planet is in the field
+    at twelve phases: jaxedith's fixed-frame `exptime_ayo` for SNR 10 (minimum
+    duration) at the exposure start, then the integrated summary SNR over that
+    exposure. Where the planet is in the field
     and outside the inner working angle they agree to 1 percent (the planet barely
     moves during the exposure); elsewhere the exposure time is infinite or the
     phase is flagged.
@@ -863,6 +861,8 @@ def test_survey_snr_and_exposure_time_over_one_orbit(yip_report, observatory):
                 ppfact=math.inf,
                 bg_multiplier=1.0,
                 eps_warm_T_cold=0.0,
+                cadence="fixed_frame",
+                planning="min_duration",
             )
         )
         if sep < iwa or not math.isfinite(t10):

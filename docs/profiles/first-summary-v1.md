@@ -36,7 +36,7 @@ Status: draft. Every entry is a proposal until it is adopted.
 - **thermal.** Thermal emission is off (eps_warm_T_cold = 0); the telescope temperature is inert.
 - **exozodi.** Fexozodi at 1 AU = n_ez x one-zodi surface brightness x (L / Lsun), with n_ez = 3 passed explicitly.
 - **detection.** Detection is the event counts >= 5 limit_counts; a null is the complementary event at a realized science duration t > 0.
-- **cadence.** Fixed frames with integer frame counts; until the finite-duration variance API exists the legacy photon-counting cadence runs and every row says so.
+- **cadence.** Fixed frames with integer frame counts: read noise and clock-induced charge per frame (a partial last frame counts as one), dark current per second; planned exposures are whole frames. The legacy photon-counting cadence stays available when a detector declares it, and every row records its cadence.
 
 ## Time
 
@@ -154,7 +154,7 @@ before its test exists; `blocked` names the library change the anchor waits on.
 | `radiometry_zodi` | local zodi count rate | e- s^-1 | nonnegative | dependence on ecliptic latitude and solar longitude across a year | 2 percent | pinned |
 | `radiometry_exozodi` | exozodi count rate | e- s^-1 | nonnegative | separation sweep in AU; aperture sweep; two hosts of different luminosity | 2 percent | pinned |
 | `radiometry_leakage` | stellar leakage in the aperture | e- s^-1 | nonnegative | native 0.25 and rebinned 0.5 sampling; diameter 0 versus 0.03 lambda/D; annular-bin control fails | 5 percent | pinned |
-| `detector_variance` | noise variance and frame counts | e-^2 | nonnegative | zero-noise and each-source-alone cases; sub-frame, exact-frame, n frames and n frames plus a partial last frame | 2 percent on variance | blocked: jaxedith finite-duration fixed-frame variance API |
+| `detector_variance` | noise variance and frame counts | e-^2 | nonnegative | zero-noise and each-source-alone cases; sub-frame, exact-frame, n frames and n frames plus a partial last frame | 2 percent on variance | pinned |
 | `reporting_law` | detection frequency, retained counts, astrometric covariance | 1 | frequencies in [0, 1] | 20000 draws at three signal levels with s(theta) != s0; corr = 0 and corr = 0.5; wrong-threshold control fails | 3 Monte Carlo standard errors; Kolmogorov-Smirnov p above 0.01; whitened residual chi-square | pinned |
 | `inference_calibration` | posterior calibration | 1 | probabilities in [0, 1] | calibration panel of 100 worlds | probability-integral-transform CDF inside the DKW band at 100 worlds (half-width 0.136); coverage inside a Bonferroni band | pinned |
 
@@ -170,7 +170,7 @@ the LBTI HOSTS survey (Ertel et al. 2020, AJ 159, 177, abstract).
   public yield standard has not yet been checked.
 - The astrometric scale `kappa = 1` is uncalibrated for this response; the
   first campaign runs `kappa` in 1 and 2.
-- The fixed-frame cadence waits on a finite-duration variance API in jaxedith;
-  until then rows carry the legacy photon-counting cadence and say so.
-- The host star is a tabulated `Star`; a flat-spectrum star with an angular
-  diameter becomes available after a skyscapes change and may replace it.
+- The host star is a tabulated `Star`. skyscapes' `FlatStar` now carries an
+  angular diameter, but it has no coordinates or luminosity (which the local zodi
+  and exozodi read) and a flat spectrum in place of the blackbody table, so it does
+  not replace the tabulated star.

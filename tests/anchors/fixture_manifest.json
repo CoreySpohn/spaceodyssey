@@ -5,11 +5,11 @@
   "libraries": {
     "orbix": {"revision": "e0f615739c897945a3549dbf8acc7f761cb03d71", "floor": "3.0.0", "role": "Keplerian orbits, Kepler solver, L2 halo orbit, keepout"},
     "photomancy": {"revision": "dc1d0deaef830a2e2d91716f7ce29092a776bfd3", "floor": "0.4.1.dev0", "role": "orbit prior with planet-scale sites (sample_planet_scale, unreleased after 0.4.0; installed in CI from the sibling pin at this revision until a release carries it)"},
-    "skyscapes": {"revision": "28232bf44c38f93dffe27715b36599f0ce923eb6", "floor": "2.1.0", "role": "Star, BlackbodyStar, Planet, System, LambertianPhysicalModel"},
+    "skyscapes": {"revision": "bf229556edfde721a127afd335ca4277bf51a698", "floor": "2.1.1.dev0", "role": "Star, BlackbodyStar, FlatStar, Planet, System, LambertianPhysicalModel (FlatStar.diameter_arcsec unreleased after 2.1.0; installed from the sibling pin at this revision until a release carries it)"},
     "hwoutils": {"revision": "6767088c192fa1ce6bb81d596678cb3db149c005", "floor": "1.10.0", "role": "constants and conversions"},
-    "yippy": {"revision": "8e2cea989eb54c7107330a5a2cf9dc76ef80c792", "floor": "2.11.0", "role": "pinned response package loader"},
-    "jaxedith": {"revision": "031974cefe5b11b59b217132b80a6b6e15c84784", "floor": "2.0.0", "role": "count rates and noise (consumed from the summary radiometry task on)"},
-    "optixstuff": {"revision": "dd5d10b6e031df7423a15d2c5984876c46558e76", "floor": "4.0.0", "role": "response density and core area (consumed from the summary radiometry task on)"}
+    "yippy": {"revision": "ac0c24f12cfd87e7f746877c4afa29262a0fd893", "floor": "2.12.0", "role": "pinned response package loader and response metadata (stellar_frame, stellar_pixel_scale_lod)"},
+    "jaxedith": {"revision": "9f1c13b7ac3dcc7c866d4c38b102765511cf689b", "floor": "2.0.1.dev0", "role": "count rates and noise, QE applied once, fixed-frame variance and planners (unreleased after 2.0.0; installed from the sibling pin at this revision until a release carries it)"},
+    "optixstuff": {"revision": "735a651607741091a494b8a0f710821d71da0bb5", "floor": "4.0.2.dev0", "role": "response density and core area, SimplePrimary.from_yip, dQE default 1.0 (unreleased after 4.0.1; installed from the sibling pin at this revision until a release carries it)"}
   },
   "data": {
     "package": "eac1_aavc_2d",

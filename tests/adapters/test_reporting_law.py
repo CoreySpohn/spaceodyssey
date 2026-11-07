@@ -598,6 +598,7 @@ def test_every_digested_report_field_moves_the_predicted_budget(observatory):
                 for x in (
                     b.planet,
                     b.background,
+                    b.var_background,
                     b.var_detector,
                     b.var_systematic,
                     b.thermal,
@@ -647,7 +648,8 @@ def run_survey(n_worlds=N_WORLDS, kappas=(1.0, 2.0)):
     each 120-day step on which the target is outside keepout for the whole
     occupancy and the nominal planet lies between the inner working angle plus
     0.5 lambda/D and the field edge; the exposure is jaxedith's `exptime_ayo` for
-    signal-to-noise 10 at the nominal scene, after one day of settling. Worlds are
+    signal-to-noise 10 at the nominal scene in whole fixed frames, after one day of
+    settling. Worlds are
     drawn from photomancy's prior through the profile's world source; the true
     scene is the nominal one. Returns the rows and the measured statistics.
     """
@@ -749,6 +751,7 @@ def run_survey(n_worlds=N_WORLDS, kappas=(1.0, 2.0)):
                 ppfact=math.inf,
                 bg_multiplier=1.0,
                 eps_warm_T_cold=0.0,
+                cadence="fixed_frame",
             )
         )
         interval = ScienceInterval.from_start(start, t10)

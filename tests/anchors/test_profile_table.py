@@ -127,8 +127,8 @@ def test_page_has_no_dashes_or_contractions():
 def test_manifest_pins_every_consumed_library_and_the_response():
     """Fails if a consumed library is unpinned, below its floor, or the pins disagree.
 
-    Every library the physical adapters import has a 40-hex revision and a
-    version floor the installed package meets. A floor that is not yet released
+    Every library in the manifest has a 40-hex revision and a version floor the
+    installed package meets. A floor that is not yet released
     (a development version) is installed from the sibling pin at exactly the
     manifest revision. The manifest's response pin is the profile's and is
     yippy's catalog entry for its release.
@@ -136,7 +136,7 @@ def test_manifest_pins_every_consumed_library_and_the_response():
     from yippy import datasets
 
     pins = dict(re.findall(r"^(\S+) @ git\+\S+@([0-9a-f]{40})$", SIBLING_PINS, re.M))
-    for name in ("orbix", "photomancy", "skyscapes", "hwoutils", "yippy"):
+    for name in MANIFEST["libraries"]:
         entry = MANIFEST["libraries"][name]
         assert re.fullmatch("[0-9a-f]{40}", entry["revision"]), name
         installed = Version(importlib.metadata.version(name))

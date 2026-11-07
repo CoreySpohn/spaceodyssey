@@ -37,10 +37,9 @@ Declared conventions:
   value of `zodi_fn_ayo` (one zodi seen face-on at equivalent insolation).
 - Thermal emission is evaluated with the declared `eps_warm_T_cold` (0 switches it
   off whatever the temperature).
-- Detector quantum efficiency and dQE enter only where jaxedith's intermediates apply
-  them. A jaxedith whose intermediates do not multiply photon rates by the detector QE
-  gives photon counts through the optics; the adapter does not apply QE itself, so it
-  is never applied twice.
+- Detector quantum efficiency and dQE (a survival fraction) enter only where
+  jaxedith's intermediates apply them, once on photon rates; the adapter never
+  applies them itself.
 - The background variance multiplier `bg_multiplier` is declared (1 for one roll with
   a known mean subtracted). The systematic floor is `leakage / ppfact` and is off
   for an infinite `ppfact`. The exozodi floor is off.
@@ -50,8 +49,8 @@ Declared conventions:
   `fixed_frame` takes the detector variance of the whole interval from jaxedith's
   finite-frame variance (dark current per second, read noise and clock-induced charge
   per frame including a partial last frame, no background multiplier), with the
-  aperture pixel count averaged over the nodes. A jaxedith without that API refuses
-  the `fixed_frame` cadence.
+  aperture pixel count averaged over the nodes. `fixed_frame` is the default
+  (`DetectorSpec.fixture`); the legacy cadence is used only when declared.
 
 The variance of the measured counts is
 ``planet + bg_multiplier * background + detector + systematic`` with
@@ -77,7 +76,6 @@ import equinox as eqx
 import interpax
 import jax
 import jax.numpy as jnp
-import jaxedith
 import numpy as np
 from hwoutils.constants import nm2m, rad2arcsec, s2d
 from hwoutils.conversions import jy_to_photons_per_nm_per_m2, mag_to_flux_jy
@@ -85,6 +83,7 @@ from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 from jaxedith import (
     ETCScene,
+    count_variance_components_ayo,
     detector_noise,
     exozodi_background,
     planet_signal,
@@ -138,10 +137,6 @@ PLANET_KEYS = ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp", "Lambda")
 # The summary path never forms an image, so the detector array size is nominal.
 _DETECTOR_SHAPE = (64, 64)
 
-# jaxedith's finite-frame variance budget, absent from releases without the
-# fixed-frame cadence.
-_FRAME_VARIANCE = getattr(jaxedith, "count_variance_components_ayo", None)
-
 
 def fetch_pinned_yip():
     """The pinned response package's directory, fetched by yippy's hash-checked loader.
@@ -183,7 +178,7 @@ class DetectorSpec:
 
     `fixture()` is jaxedith's test detector: quantum efficiency 0.9, dark current
     3e-5 e/pix/s, no read noise, clock-induced charge 1.3e-3 e/pix/frame, 1000 s
-    frames and 0.01 arcsec pixels.
+    frames and 0.01 arcsec pixels, read in fixed frames.
     """
 
     name: str
@@ -226,7 +221,10 @@ class DetectorSpec:
 
     @classmethod
     def fixture(cls, **overrides):
-        """The jaxedith test detector, in the legacy photon-counting cadence."""
+        """The jaxedith test detector in the fixed-frame cadence (the profile's).
+
+        Pass ``cadence="photon_counting_legacy"`` for jaxedith's rate-based term.
+        """
         fields = dict(
             name="jaxedith-fixture",
             family="unspecified",
@@ -238,7 +236,7 @@ class DetectorSpec:
             clock_induced_charge_rate_e_per_frame=1.3e-3,
             frame_time_s=1000.0,
             pixel_scale_arcsec=0.01,
-            cadence="photon_counting_legacy",
+            cadence="fixed_frame",
         )
         fields.update(overrides)
         return cls(**fields)
@@ -491,12 +489,6 @@ class SummaryReport(eqx.Module):
         """Validate the declarations and cache the nominal scene."""
         if not isinstance(detector_spec, DetectorSpec):
             raise TypeError("detector_spec must be a DetectorSpec")
-        if detector_spec.cadence == "fixed_frame" and _FRAME_VARIANCE is None:
-            msg = (
-                "cadence 'fixed_frame' needs jaxedith's finite-frame variance API "
-                "(count_variance_components_ayo), which this jaxedith does not provide"
-            )
-            raise NotImplementedError(msg)
         if isinstance(n_time_nodes, bool) or not isinstance(n_time_nodes, int):
             raise ValueError("n_time_nodes must be an integer")
         if n_time_nodes < 1:
@@ -794,7 +786,7 @@ class SummaryReport(eqx.Module):
                 dist_pc=prepared.dist_pc,
                 sep_arcsec=sep * self.lod_arcsec,
             )
-            return _FRAME_VARIANCE(
+            return count_variance_components_ayo(
                 prepared.optical_path,
                 scene,
                 self.wavelength_nm,
