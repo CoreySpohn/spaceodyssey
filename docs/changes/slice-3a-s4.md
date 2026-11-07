@@ -369,3 +369,53 @@ See the section below.
   addressed, re-run alone: 31 passed). `ruff check` and `ruff format --check` clean. Default
   `_scan_worlds` and `_init_worlds` StableHLO hashes unchanged (`a67917728c...`,
   `09226cf964...`); no pin moved.
+
+## Integration with S3a
+
+The S4 commits were replayed in order onto S3a (refunds, pricing, conservation) on main.
+Conflicts were resolved by keeping both sides.
+
+- `snapshot.py`: `conditional_view_leaves` returns the program leaves, then the refund leaves
+  (`refund_index`, `award_gen`), then the balance leaves (`balance_rows`, `balance_q`,
+  `query_refused`). The balance view and the refund view are independent flags.
+- `executors/base.py`: the gated canonical fields are the union of S3a's refund fields and S4's
+  `carry.query_refused`, each under its own flag (`refunds_on`, `balances_on`).
+- `preflight/checks.py`: the failure-kind check and the balances check (X002) are both
+  registered.
+- `handlers.py`, `transaction.py`, `carry.py`, `records.py`: S4's stale-request path sits beside
+  S3a's `h_release` and `_apply_refund` without sharing a code path; a refund credited in
+  `h_release` changes the balance, and the request compares fingerprints before it is held.
+- The refresh mutation pair builds its study with refunds and balances both on, so every gated
+  leaf is held.
+
+### The sign check reads S3a's pricing
+
+With balances shown the study refuses a debit that is not negative, because a negative debit
+would push the balance above the budget and break the integer range. S3a prices a debit as
+`charge_parts(study, channel_index)`, which returns the total debit, its fixed part, and the
+pricing mode. The check now uses that function as the source of truth: every entry of
+`channels.cost`, `channels.charge`, the debit and the fixed part for each channel, and
+`channels.surcharge` must be finite and at least zero. Cost and charge of zero with a surcharge
+of -1e20 is refused. Positive surcharge and flat-fraction examples stay valid, and refund
+records, whose charge is negative by design, are not channels and are not checked. A negative
+surcharge on a channel whose pricing never reads it is also refused: the table is a study
+input, the check is cheap, and a study that carries a sign error in an unused column is more
+likely a mistake than intent. Tests cover the zero-cost case, the surcharge, a flat fraction,
+and a mutant that drops the surcharge and pricing terms from the check and must fail them.
+
+### A receipt between a decision and its request
+
+A failure receipt is processed at the admit stage and wakes the policy before its own release,
+which is queued behind it, runs. The policy decides and asks; the release credits the refund
+ahead of the request; the request finds the policy view at its decision no longer matches the
+stamp, is not held, writes `QUERY_STALE` on its trace row and wakes the policy, which asks again
+on the fresh balance and is answered. One test runs this on both executors and checks parity,
+one stale refusal, one answered request after it, and a credited refund. A receipt released to
+the observer alone credits nothing, so it cannot reach the stale path.
+
+### Integration gate results
+
+- Default `_scan_worlds` and `_init_worlds` StableHLO recomputed at 7da9d2b and on the
+  integrated tree: identical (`a67917728c...`, `09226cf964...`). No golden pin moved.
+- Balances file: 54 passed. Lints and pre-commit (`--all-files`, conventional-pre-commit
+  skipped): passed, codespell included.
