@@ -22,6 +22,8 @@ read priors (section 5), and the replay check `test_replay_reproduces_prior_run`
 8. this record (`716c7fa`)
 9. review round 2 (independent tier-2 review) fixes: `38ac5bb`, `22e0b01`,
    `aab7092`, and this record's update (see "Review round 2")
+10. review round 3 fix: the probe keeps the release stamps unset, with this
+    record's update (see "Review round 3")
 
 Commit 2 is about 900 lines (the new module, the finding codes and the seeded
 pre-flight cases that keep `test_every_code_has_a_seeded_mistake` green land
@@ -197,9 +199,10 @@ that failed before it.
 2. **The zero-weight probe row had audience 0** (from `record_none`), so an observer
    that ignores the weights but folds only rows addressed to the audience passed
    both kit checks, while with the real public audience the excluded row moved the
-   posterior from -5 to -0.5. The probe now carries the import's and release's
-   metadata. Test: `test_the_zero_weight_probe_carries_the_rows_real_audience`
-   (control `GuardsByAudience`).
+   posterior from -5 to -0.5. The probe now carries the import's audience, span
+   and availability (round 3 keeps the release stamps at -1). Test:
+   `test_the_zero_weight_probe_carries_the_rows_real_audience` (control
+   `GuardsByAudience`).
 3. **Non-binary weights passed.** NaN for dropped rows passed both checks (`> 0` in
    one, `== 0` in the other) while the observer double counted (means 1/3 and -0.5
    against -5). Both checks now first require a finite {0, 1} vector of one entry
@@ -244,6 +247,16 @@ Checks rerun at `aab7092`:
   (5.48 s under the parallel load), not touched here.
 - ruff, the internal-reference, domain-word and core-import checks, and
   `pre-commit run` over the branch: clean.
+
+## Review round 3
+
+The scoped review of round 2 confirmed the five fixes and found one new P2: the probe
+row set `accepted_tick` and `released_tick` to 0, but `h_release` calls both fold
+methods while those stamps are still -1. An observer that ignores the weights and
+folds only unstamped rows passed both prior kit checks, while the real import gives
+a policy mean of -0.5 instead of -5. The probe now keeps both stamps at -1. Test
+(failed before the fix): `test_the_zero_weight_probe_is_the_row_as_it_is_at_fold_time`
+(control `FoldsUnstamped`; unit).
 
 ## Mutants and controls
 
@@ -348,8 +361,9 @@ trusts the installed prior; the independent prior-plus-rows comparison in
     finite {0, 1} vector fail both checks; check 7 refuses a table with no prior and
     the zero-weight check a table with no row of weight zero (inside
     `check_folded_once` such a table adds no failure). The zero-weight probe row
-    carries the import's metadata: the row's audience, its span, availability at
-    tick 0 and the release stamps of the audiences it is addressed to.
+    is the row as the observer folds it: the import's audience, span and
+    availability at tick 0, with `accepted_tick` and `released_tick` still -1 (the
+    release folds a row before it stamps it).
 
 ## Spec points not satisfied
 
