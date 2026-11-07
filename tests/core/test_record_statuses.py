@@ -48,6 +48,7 @@ def scripted_run():
     return study, carry, trace, truths, roots
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_every_status_is_logged_and_only_completed_values_are_folded(scripted_run):
     _study, carry, _, _, _ = scripted_run
     log = carry.log

@@ -20,6 +20,7 @@ PLOT_NAMES = (
 )
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_base_install_without_eyepiece():
     """All plot names fail with an install hint while extraction still works."""
     code = (
@@ -44,6 +45,7 @@ def test_base_install_without_eyepiece():
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_extract_imports_no_plotting_dependencies():
     """A fresh import of the numerical module loads no plotting stack."""
     code = (

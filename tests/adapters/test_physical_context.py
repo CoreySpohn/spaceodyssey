@@ -126,6 +126,7 @@ def test_keepout_window_length_against_spherical_trigonometry(context, target):
     assert abs(blocked - expected) <= 2.0, (blocked, expected)
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_certification_outcomes_are_explicit(context, edge):
     """Fails if a straddling or invisible visit certifies, or a refusal is silent.
 
@@ -155,6 +156,7 @@ def test_certification_outcomes_are_explicit(context, edge):
     assert outcome(edge - 10 * DAY, support=support) is Certification.OUTSIDE_SUPPORT
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_certification_is_conservative_at_the_edge(context, edge):
     """Fails if the keepout margin is dropped or smaller than the sampling needs.
 

@@ -58,6 +58,7 @@ LEDGER_FIELDS = {
 
 
 @pytest.mark.parametrize("name", LEDGER_FIELDS)
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_reserved_ledger_field_roundtrips_through_both_executors(runs, name):
     key, expected = LEDGER_FIELDS[name]
     scan, host = histories(runs)

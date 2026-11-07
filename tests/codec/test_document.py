@@ -146,6 +146,7 @@ def test_reloaded_study_runs_and_reuses_the_compiled_program():
     assert histories_equal(run.history(), again.history()).ok
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_content_hash_is_stable_across_processes():
     """Fails if the hash depends on the process: dict or set order, string hash
     randomization, object ids, or a float formatted differently.

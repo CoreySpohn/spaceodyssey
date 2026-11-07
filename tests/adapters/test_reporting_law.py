@@ -335,6 +335,7 @@ def test_payload_carries_observables_only():
     assert 0 < n_detected < 64
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_null_and_no_science_rows():
     """Fails if a null or an empty interval publishes position or counts.
 

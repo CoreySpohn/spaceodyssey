@@ -29,6 +29,7 @@ def _decisions_at(trace, tick):
     )
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_two_releases_one_tick_one_decision():
     study = CORPUS_BY_NAME["bundle"].make_study()
     h, views, trace = _run(HostExecutor(), study)

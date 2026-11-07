@@ -153,6 +153,7 @@ def test_study_refuses_a_refit_declaration_it_cannot_honour(case, match):
     toy.survey_1(caps=lowered, observer=RefitMean())
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_each_fold_draws_from_its_records_inference_key(sample_run):
     """Fails if the core passes `fold` no key, another purpose's key, or a key of
     another record; or if the summary leaves the belief's path.

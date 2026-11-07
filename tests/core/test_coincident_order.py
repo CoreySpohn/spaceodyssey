@@ -105,6 +105,7 @@ def test_tie_break_comes_after_stage():
     assert pop_kinds(c, 2) == [EventKind.DONE, EventKind.FAULT]
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_fault_first_fails_the_acquisition_and_the_settlement_goes_stale():
     study, c = with_pending_settlement(CoincidentOrder.FAULT_FIRST)
     c = add_fault(c, study)

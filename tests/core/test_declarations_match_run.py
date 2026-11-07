@@ -65,6 +65,7 @@ def stated(**declared):
     return survey(policy)
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_the_plan_declares_the_stop_it_emits(inputs):
     result = run(survey(), inputs)
     assert result, result.diagnostic
@@ -76,6 +77,7 @@ def test_a_special_stop_is_declared_and_emitted(inputs):
     assert result, result.diagnostic
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_needs_that_the_run_meets_pass(inputs):
     result = run(stated(stops=(DRAIN,), needs=(Need(10, 10, 130),)), inputs)
     assert result, result.diagnostic
