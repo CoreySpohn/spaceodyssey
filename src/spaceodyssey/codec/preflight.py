@@ -1,7 +1,7 @@
 """Pre-flight of a study document: every finding, each with a pointer.
 
 `preflight_document` runs the structural checks on a JSON document without running
-the study. It reports all seventeen finding codes:
+the study. It reports all twenty finding codes:
 
 - `D001`, `D002`: a kind id or version the resolver does not know, and a schema
   version newer than the loader. Every `$kind` and `$enum` reference is checked, so
@@ -9,7 +9,7 @@ the study. It reports all seventeen finding codes:
 - `D003`: a run record that binds no service where a component asks a `Query`, a
   binding with a missing or ill-typed member, or host and compiled refit bindings
   that carry different inference-model hashes.
-- the fourteen in-memory codes (`FindingCode`): the document is loaded and
+- the seventeen in-memory codes (`FindingCode`): the document is loaded and
   `spaceodyssey.core.preflight.preflight` runs on the study; each finding keeps its
   code and gains the JSON pointer of the offending value in the document.
 
@@ -28,7 +28,7 @@ when the document has no `D001` or `D002` and decodes. A document that does not 
 for another reason (malformed JSON, a repeated key, a non-finite number, a wrong
 shape, a module whose validation fails, a wrong envelope or hash) is reported as `L001`
 at the pointer of the failure, alongside the independent findings; `L001` is not one of
-the seventeen finding codes but the in-band form of a `DocumentError`. One field-level
+the twenty finding codes but the in-band form of a `DocumentError`. One field-level
 failure is reported with its own code instead: a `null` coincident order loads, so
 `T002` is reported with the other in-memory findings.
 
@@ -116,7 +116,7 @@ class DocumentCode(StrEnum):
     D001 = "D001"  # an unknown kind id or version
     D002 = "D002"  # a schema version newer than the loader
     D003 = "D003"  # a binding missing, ill-typed, or refit model hashes that differ
-    L001 = "L001"  # the document does not decode as a study (not one of the seventeen)
+    L001 = "L001"  # the document does not decode as a study (not one of the twenty)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -124,7 +124,7 @@ class DocumentFinding:
     """One finding on a document: a code, the pointer of the offending value, a hint.
 
     `in_memory` is the finding the core pre-flight made on the loaded study, for the
-    fourteen in-memory codes, and `None` for the document codes.
+    seventeen in-memory codes, and `None` for the document codes.
     """
 
     code: FindingCode | DocumentCode
@@ -193,6 +193,12 @@ def preflight_document(
     receive the run's budget: the study's `n_events` and `n_log`, and `n_steps` when
     given, so a component's capacity check runs as it does for the in-memory call
     with a `RunBudget`. A bare study document has no budget.
+
+    With a run record and `bindings`, the refit boundary is rebuilt from the record
+    (the selected executor's side, or each side when none is selected) and passed in
+    the context, so the boundary checks of a component (`D009`, `D010`) run; findings
+    of the sides are merged. Without them no boundary is known, and a component that
+    needs one reports its check as unverified.
     """
     resolver = _resolver(kinds)
     try:
@@ -239,7 +245,16 @@ def preflight_document(
             context = PreflightContext(
                 budget=RunBudget(caps.n_events, caps.n_log, n_steps)
             )
-        found += _in_memory(study, data["study"], executor, context)
+        boundaries = _boundaries(run, data.get("records"), bindings, executor)
+        if not boundaries:
+            found += _in_memory(study, data["study"], executor, context)
+        for boundary in boundaries:
+            seen = dataclasses.replace(context, boundary=boundary)
+            found += [
+                f
+                for f in _in_memory(study, data["study"], executor, seen)
+                if f not in found
+            ]
         if run is not None:
             found += service_findings(study, run)
         if is_run and "records" in data:
@@ -505,6 +520,45 @@ def _records(node, study):
             _from_error(err, "write the registry the study's capacities lower from")
         ]
     return []
+
+
+def _boundaries(run, records, bindings, executor):
+    """The refit boundaries the record binds, rebuilt, for the in-memory checks.
+
+    With `bindings` and a record, each side's boundary (only the selected executor's
+    when one is selected) is rebuilt as `load_run` rebuilds it; a side that does not
+    rebuild is skipped (its own findings say why). Without them there is none.
+    """
+    if bindings is None or not isinstance(run, dict):
+        return []
+    refit = run.get("refit")
+    if not isinstance(refit, dict):
+        return []
+    registry = None
+    if records is not None:
+        try:
+            registry = decode_records(records)
+        except DocumentError:
+            return []
+    sides = [executor] if executor in ("host", "compiled") else ["host", "compiled"]
+    out = []
+    for side in sides:
+        record = refit.get(side)
+        ok = (
+            isinstance(record, dict)
+            and _text(record.get("kind"))
+            and _version(record.get("version"))
+            and _object(record.get("configuration"))
+        )
+        if not ok:
+            continue
+        where = (RUN_KEY, "refit", side)
+        try:
+            entry = bindings.resolve(record["kind"], record["version"], where)
+            out.append(build_binding(entry, record, registry, where))
+        except DocumentError:
+            continue
+    return out
 
 
 def _rebuilt(run, records, bindings):

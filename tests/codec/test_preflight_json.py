@@ -1,4 +1,4 @@
-"""JSON pre-flight: all seventeen finding codes, each with a pointer to its value."""
+"""JSON pre-flight: all twenty finding codes, each with a pointer to its value."""
 
 import copy
 import dataclasses
@@ -32,6 +32,12 @@ from spaceodyssey.core.preflight import FindingCode, preflight
 from spaceodyssey.plugins import RegistrationError
 from spaceodyssey.studies import toy
 from spaceodyssey.studies.premission import PREMISSION_KINDS, PreMissionImporter
+from spaceodyssey.studies.prior_observer import (
+    PRIOR_OBSERVER_KINDS,
+    AudiencePriorRefit,
+    audience_prior_binding,
+    prior_study,
+)
 from tests.codec.test_document import TOY_KINDS
 from tests.core.preflight_cases import (
     DOC_KINDS,
@@ -41,8 +47,11 @@ from tests.core.preflight_cases import (
     DocPolicy,
     import_study,
 )
+from tests.core.prior_helpers import EXTERNAL, refit_study, summaries
 
-RESOLVER = KindResolver({**TOY_KINDS, **DOC_KINDS, **PREMISSION_KINDS})
+RESOLVER = KindResolver(
+    {**TOY_KINDS, **DOC_KINDS, **PREMISSION_KINDS, **PRIOR_OBSERVER_KINDS}
+)
 QUERY = int(EffectKind.QUERY)
 
 
@@ -169,6 +178,11 @@ def d003_hash(seed):
     return _policy_doc(effects=(QUERY,)), _run(compiled_hash=8 if seed else 7)
 
 
+def d008(seed):
+    second = EXTERNAL if seed else (7, 90, 0, 1)
+    return _doc(prior_study(summaries(second))), None
+
+
 def _import(mistake):
     return lambda seed: (_doc(import_study(mistake if seed else None)), None)
 
@@ -267,6 +281,12 @@ CASES = {
         _import("offset"),
         "/study/process/table/end_offset/data/0",
         _is(3),
+    ),
+    "D008": (
+        FindingCode.D008,
+        d008,
+        "/study/observer/table/pedigree/source_index/data/1/0",
+        _is(0),
     ),
 }
 
@@ -1114,3 +1134,47 @@ def test_a_hook_finding_without_a_slot_keeps_its_member_and_entry():
     doc = json.loads(dump_study(study, kinds).to_json())
     found = preflight_document(json.dumps(doc), kinds)
     assert [f.pointer for f in found] == ["/study/process/table/local_index/data/1"]
+
+
+# ---- the refit boundary of a run record (D009, D010) ------------------------------
+
+
+def _bound_run(kind):
+    config = {"model_hash": 0} if kind == AudiencePriorRefit.kind else {"n_diag": 1}
+    binding = {"kind": kind, "version": 1, "configuration": config, "model_hash": 0}
+    return {"executor": "host", "refit": {"host": binding, "compiled": binding}}
+
+
+def _prior_bindings():
+    from spaceodyssey.codec import Bindings
+    from tests.codec.run_cases import _host_loop_kind, _observer_kernel_kind
+
+    kinds = (audience_prior_binding(), _observer_kernel_kind(), _host_loop_kind())
+    return Bindings(kinds)
+
+
+@pytest.mark.parametrize(
+    ("kind", "found"),
+    [
+        (AudiencePriorRefit.kind, []),
+        ("toy.observer_refit", [("D009", "error")]),
+        ("toy.refit_fit", [("D010", "error")]),
+    ],
+    ids=["audience_prior", "observer_init", "host_fit"],
+)
+def test_the_run_record_boundary_reaches_the_prior_checks(kind, found):
+    """B4 for D009 and D010. Fails if the boundary a run record binds is not rebuilt
+    into the pre-flight context, so the observer's boundary checks do not run; if a
+    finding is not at the observer's table; or if, without bindings, the report does
+    not say the checks are unverified.
+    """
+    doc = _doc(refit_study())
+    run = _bound_run(kind)
+    got = _find(doc, run, bindings=_prior_bindings())
+    assert [(str(f.code), str(f.severity)) for f in got] == found
+    for f in got:
+        assert f.pointer == "/study/observer/table"
+        resolve_pointer(_root(doc, run), f.pointer)
+    unbound = _find(doc, run)
+    assert [(str(f.code), str(f.severity)) for f in unbound] == [("D010", "warning")]
+    assert "unverified" in unbound[0].message
