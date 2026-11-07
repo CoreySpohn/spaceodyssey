@@ -20,11 +20,13 @@ core's sharing unless the two audiences resolve to the same prior. Pre-flight
 (through the observer's `validate`) reports:
 
 - `D008`: two priors retained for one audience whose pedigrees intersect.
-- `D009`: audiences that resolve to different priors on the boundary that starts both
-  refits from `observer.init` (`MaskedBatchRefit` with the observer's own kernel).
-- `D010`: a retained table prior with any other boundary that does not declare
-  audience priors (`OftiRefit`, the updater boundary, a custom kernel or fit); with no
-  boundary supplied, a warning that `D009` and `D010` are unverified.
+- `D009`: a retained table prior with the boundary that starts both refits from
+  `observer.init` (`MaskedBatchRefit` with the observer's own kernel) while the
+  audiences resolve to different priors.
+- `D010`: a retained table prior with any other boundary than `AudiencePriorRefit`
+  (`OftiRefit`, the updater boundary, a custom kernel or fit, and the observer-init
+  boundary when the audiences resolve alike); with no boundary supplied, a warning
+  that `D009` and `D010` are unverified.
 """
 
 import dataclasses
@@ -401,33 +403,31 @@ def boundary_findings(observer, study, context):
                 Severity.WARNING,
             )
         ]
-    if getattr(boundary, "audience_priors", False):
+    if not retained or getattr(boundary, "audience_priors", False):
         return []
     name = getattr(boundary, "kind", type(boundary).__name__)
     if starts_from_observer_init(boundary):
         differ = np.flatnonzero(~np.asarray(observer.same_resolution(caps)))
-        if differ.size == 0:
-            return []
-        return [
-            _finding(
-                FindingCode.D009,
-                "table",
-                (),
-                f"the audiences resolve to different priors for subjects "
-                f"{differ.tolist()}, but boundary {name!r} starts both refits from "
-                "observer.init and shares them",
-                "bind a boundary that declares audience priors (AudiencePriorRefit)",
-            )
-        ]
-    if not retained:
-        return []
+        if differ.size:
+            return [
+                _finding(
+                    FindingCode.D009,
+                    "table",
+                    (),
+                    f"the audiences resolve to different priors for subjects "
+                    f"{differ.tolist()}, but boundary {name!r} starts both refits "
+                    "from observer.init and shares them",
+                    "bind a boundary that declares audience priors "
+                    "(AudiencePriorRefit)",
+                )
+            ]
     return [
         _finding(
             FindingCode.D010,
             "table",
             (),
-            f"a table prior with refit boundary {name!r}, which does not consume "
-            "it; only AudiencePriorRefit supports a table prior with refits",
+            f"a table prior with refit boundary {name!r}; only AudiencePriorRefit "
+            "supports a table prior with refits",
             "bind AudiencePriorRefit, or drop the table prior",
         )
     ]

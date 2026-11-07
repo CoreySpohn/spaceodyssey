@@ -161,9 +161,10 @@ def _codes(study, boundary):
 
 
 def test_d009_refuses_different_priors_on_the_observer_init_boundary():
-    """Fails if the boundary that starts both refits from `observer.init` is accepted
-    while the audiences resolve to different priors, if it is refused when they
-    resolve alike, or if the audience-prior boundary is refused.
+    """A10: only the audience-prior boundary supports a retained table prior. Fails
+    if the boundary that starts both refits from `observer.init` is accepted with a
+    table prior, if it is not D009 while the audiences resolve to different priors
+    and D010 when they resolve alike, or if the audience-prior boundary is refused.
     """
     differ = refit_study()
     assert _codes(differ, MaskedBatchRefit()) == [("D009", "error")]
@@ -180,7 +181,9 @@ def test_d009_refuses_different_priors_on_the_observer_init_boundary():
         alike,
         process=dataclasses.replace(alike.process, table=alike.observer.table),
     )
-    assert _codes(alike, MaskedBatchRefit()) == []
+    assert bool(np.asarray(alike.observer.same_resolution(alike.caps)).all())
+    assert _codes(alike, MaskedBatchRefit()) == [("D010", "error")]
+    assert _codes(alike, AudiencePriorRefit()) == []
 
 
 def _equal_priors(t):
@@ -253,12 +256,14 @@ def _policy_row_table(named):
 
 def test_a_policy_only_row_is_judged_by_the_policy_rule():
     """Fails if the observer's own refit (which the observer-init boundary also runs
-    for the policy) drops a raw row only the policy receives, or if a policy-only row
+    for the policy) drops a raw row only the policy receives, if the audiences do not
+    resolve alike then (the boundary is still refused, D010), or if a policy-only row
     that the policy's rule drops is not D009 on that boundary.
     """
     alike = refit_study(_policy_row_table(named=False))
     caps, observer = alike.caps, alike.observer
-    assert _codes(alike, MaskedBatchRefit()) == []
+    assert bool(np.asarray(observer.same_resolution(caps)).all())
+    assert _codes(alike, MaskedBatchRefit()) == [("D010", "error")]
     row = _imported_row(observer.table, 0, caps, POL)
     rows = jax.tree_util.tree_map(lambda x: x[None], row)
     fitted = observer.refit(observer.init(caps), rows, caps, None, None)
