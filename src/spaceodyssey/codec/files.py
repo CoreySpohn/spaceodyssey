@@ -51,18 +51,24 @@ def _walk(fd, parts, create=False):
     """The descriptor of `parts` opened one by one below `fd`, never through a link.
 
     Takes ownership of `fd` (closed on return or failure). With `create`, a missing
-    component is made first. A link, an empty, `.` or `..` component is
-    `UnsafeDirectory`.
+    component is made relative to its parent's descriptor, then opened like any
+    other, so nothing is made through a link. A link, an empty, `.` or `..` component
+    is `UnsafeDirectory`.
     """
+    flags = _DIRECTORY | os.O_NOFOLLOW
     try:
         for part in parts:
             if part in ("", ".", ".."):
                 raise UnsafeDirectory(f"path component {part!r} is refused")
-            if create:
-                with contextlib.suppress(FileExistsError):
-                    os.mkdir(part, dir_fd=fd)
             try:
-                nxt = os.open(part, _DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                try:
+                    nxt = os.open(part, flags, dir_fd=fd)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(part, dir_fd=fd)
+                    nxt = os.open(part, flags, dir_fd=fd)
             except OSError:
                 if _is_link(part, fd):
                     raise UnsafeDirectory(
@@ -106,10 +112,8 @@ class FileStore:
         With `create`, the trusted directory and the files directory are made when
         missing. A link on the way is `UnsafeDirectory`.
         """
-        if create:
-            os.makedirs(self.trusted, exist_ok=True)
         root = [p for p in self.trusted.split(os.sep) if p]
-        fd = _walk(os.open(os.sep, _DIRECTORY), root)
+        fd = _walk(os.open(os.sep, _DIRECTORY), root, create=create)
         return _walk(fd, self.below, create=create)
 
     def wants(self, size):

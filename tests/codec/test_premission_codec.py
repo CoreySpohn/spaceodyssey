@@ -28,7 +28,7 @@ from spaceodyssey.codec import (
     load_study,
     preflight_document,
 )
-from spaceodyssey.codec.files import FileStore
+from spaceodyssey.codec.files import FileStore, UnsafeDirectory
 from spaceodyssey.codec.load import same_value
 from spaceodyssey.codec.preflight import (
     UpstreamDocument,
@@ -360,6 +360,28 @@ def test_a_link_below_the_trusted_directory_is_refused_whoever_owns_it(
         load_study(text, RESOLVER, files=files)
     assert info.value.pointer.endswith("/file/name")
     assert "link" in info.value.detail
+
+
+def test_the_writer_creates_nothing_outside_when_an_ancestor_becomes_a_link(tmp_path):
+    """Fails if, after a store is made for a files directory whose parent does not
+    exist yet and an existing ancestor is then replaced by a link to an outside
+    directory, `put` creates anything outside, or does not refuse the link. Control:
+    without the link, `put` makes the missing directories and the file.
+    """
+    ancestor = tmp_path / "ancestor"
+    ancestor.mkdir()
+    store = FileStore(ancestor / "newdoc" / "files", 0)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    shutil.rmtree(ancestor)
+    os.symlink(outside, ancestor)
+    with pytest.raises(UnsafeDirectory):
+        store.put(b"payload")
+    assert list(outside.iterdir()) == []
+    os.unlink(ancestor)
+    ancestor.mkdir()
+    ref = store.put(b"payload")
+    assert (ancestor / "newdoc" / "files" / ref["name"]).read_bytes() == b"payload"
 
 
 def test_the_writer_refuses_a_files_directory_reached_through_a_link(tmp_path):
