@@ -323,7 +323,10 @@ def _parsed(document):
             "schema_version": document.schema_version,
             "study": document.study,
         }
-    data = parse_text(document) if isinstance(document, str) else _json(document)
+    try:
+        data = parse_text(document) if isinstance(document, str) else _json(document)
+    except RecursionError:
+        raise DocumentError("the document nests too deeply to read", "") from None
     if not isinstance(data, dict):
         raise DocumentError("a document is a JSON object", "")
     return data
@@ -814,17 +817,34 @@ def read_upstream(upstream):
         return UpstreamDocument(cls.from_json(canonical_json(data)).content_hash)
     except (ValueError, TypeError) as err:  # a DocumentError is a ValueError
         return UpstreamDocument(None, f"does not read as a document ({err})")
+    except RecursionError:
+        return UpstreamDocument(None, "does not read as a document (nested too deeply)")
 
 
 def read_document(document):
     """`(data, findings)`: a document as its parsed object, and why it may not be.
 
-    `data` is `None` when the document does not parse as a JSON object; `findings`
-    then holds that failure as `L001`. A stored `content_hash` that differs from the
-    canonical bytes is an `L001` finding at `/content_hash`, and `data` is returned.
+    `data` is `None` when the document cannot be interpreted: it does not parse as a
+    JSON object, its envelope is wrong (a missing or unknown key, another format) or
+    its schema version is not one this loader reads; `findings` then holds why, as
+    `L001` or `D002`. A stored `content_hash` that differs from the canonical bytes is
+    an `L001` finding at `/content_hash`, and `data` is returned.
     """
     try:
         data = _parsed(document)
     except DocumentError as err:
         return None, [_from_error(err)]
-    return data, _check_hash(data)
+    found, readable = _envelope(data, data.get("format") == RUN_FORMAT)
+    if "schema_version" in data:
+        try:
+            check_schema_version(data["schema_version"])
+        except DocumentError as err:
+            found.append(_from_error(err))
+            readable = False
+    if not readable:
+        return None, found
+    try:
+        return data, found + _check_hash(data)
+    except RecursionError:
+        err = DocumentError("the document nests too deeply to read", "")
+        return None, [*found, _from_error(err)]

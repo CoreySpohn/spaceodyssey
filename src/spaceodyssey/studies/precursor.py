@@ -419,7 +419,9 @@ def verify_lineage(
     """Check every table's declared upstream hash in a study or run document.
 
     `document` is JSON text, a parsed object, a `StudyDocument` or a `RunDocument`;
-    `files` is the directory of its array files. Each `PreMissionTable` in the study
+    `files` is the directory of its array files. A document that does not parse, has
+    another envelope or format, or a schema version this loader does not read fails
+    before any table is read. Each `PreMissionTable` in the study
     is decoded as the loader decodes it, so a file reference whose name holds a path,
     or that names a missing file, a symlink or bytes that do not match its sha256, is
     refused (`L001` at the pointer of the reference). A stored `content_hash` that
@@ -445,12 +447,22 @@ def verify_lineage(
     context = PreflightContext(upstream_document=upstream)
     store = make_store(files, 0, max_file_bytes)
     tables = []
-    for path, node in _table_nodes(data.get("study"), ("study",)):
+    try:
+        nodes = list(_table_nodes(data.get("study"), ("study",)))
+    except RecursionError:
+        nodes = []
+        found.append(_refused(DocumentError("the study nests too deeply to read", "")))
+    for path, node in nodes:
         try:
             with using_store(store):
                 table = decode(node, path, _RESOLVER)
         except DocumentError as err:
             found.append(_refused(err))
+            continue
+        except RecursionError:
+            found.append(
+                _refused(DocumentError("the table nests too deeply", pointer(path)))
+            )
             continue
         for item in lineage_findings(table, context):
             found.append(

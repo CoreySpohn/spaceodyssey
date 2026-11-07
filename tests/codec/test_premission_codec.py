@@ -528,25 +528,33 @@ def _take(table, order):
     return jax.tree_util.tree_map(lambda x: x[order], table)
 
 
-@pytest.mark.parametrize(
-    "how", ["malformed", "array", "missing_field", "version", "stale"]
-)
+BROKEN = {
+    "malformed": ("L001", ""),
+    "array": ("L001", ""),
+    "missing_field": ("L001", "/study/process/table"),
+    "version": ("D001", "/study/process/table/$kind"),
+    "stale": ("L001", "/content_hash"),
+    "digits": ("L001", ""),
+    "deep": ("L001", ""),
+    "format": ("L001", "/format"),
+    "schema": ("D002", "/schema_version"),
+}
+
+
+@pytest.mark.parametrize("how", list(BROKEN))
 def test_the_lineage_check_never_raises_on_a_broken_document(tmp_path, how):
-    """Fails if a document that does not parse, a table missing a field or at an
-    unknown kind version, or a stored hash that no longer matches raises instead of
-    failing the report with a finding at its pointer.
+    """Fails if a document that does not parse (also a 4,500-digit number or 1,100
+    nested arrays), a table missing a field or at an unknown kind version, a stored
+    hash that no longer matches, or a wrong format or a newer schema version (no
+    stored hash) raises from the lineage check,
+    the pre-flight or `read_upstream`, or does not fail the report with a finding at
+    its pointer before any table is interpreted.
     """
     data = json.loads(_exported(tmp_path))
     if how != "stale":
         data.pop("content_hash")
     node = data["study"]["process"]["table"]
-    expected = {
-        "malformed": ("L001", ""),
-        "array": ("L001", ""),
-        "missing_field": ("L001", "/study/process/table"),
-        "version": ("D001", "/study/process/table/$kind"),
-        "stale": ("L001", "/content_hash"),
-    }[how]
+    expected = BROKEN[how]
     text = None
     if how == "malformed":
         text = "{not json"
@@ -556,9 +564,28 @@ def test_the_lineage_check_never_raises_on_a_broken_document(tmp_path, how):
         node.pop("local_index")
     elif how == "version":
         node["$kind"][2] = 9
-    else:
+    elif how == "stale":
         node["upstream_hash"] = OTHER.content_hash
+    elif how == "digits":
+        data["schema_version"] = 7
+        text = json.dumps(data).replace(
+            '"schema_version": 7', '"schema_version": ' + "9" * 4500
+        )
+    elif how == "deep":
+        text = json.dumps({**data, "study": None})
+        text = text.replace("null", "[" * 1100 + "]" * 1100, 1)
+    elif how == "format":
+        data["format"] = "bogus"
+    else:
+        data["schema_version"] = 999
     text = json.dumps(data) if text is None else text
     report = verify_lineage(text, UPSTREAM, files=tmp_path)
     assert report.status == "failed"
     assert expected in {(str(f.code), f.pointer) for f in report.findings}
+    if how in ("format", "schema"):
+        assert report.tables == ()
+    found = preflight_document(text, RESOLVER, files=tmp_path, upstream=UPSTREAM)
+    assert expected in {(str(f.code), f.pointer) for f in found}
+    read = read_upstream(text)
+    if how in ("malformed", "array", "digits", "deep", "format", "schema"):
+        assert read.content_hash is None and read.problem

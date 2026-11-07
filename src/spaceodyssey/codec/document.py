@@ -254,14 +254,21 @@ def parse_text(text):
     """Parsed document text as plain dicts and lists.
 
     Malformed JSON, a key written twice and a non-finite number (bare NaN or
-    Infinity, or an overflowing number) are each a `DocumentError` with a pointer.
+    Infinity, or an overflowing number) are each a `DocumentError` with a pointer, and
+    so are an integer too long to convert and nesting too deep to read.
     """
     try:
         data = json.loads(text, object_pairs_hook=_Pairs, parse_constant=float)
+        check_parsed(data)
+        return _plain(data)
     except json.JSONDecodeError as err:
         raise DocumentError(f"malformed JSON: {err}", "") from err
-    check_parsed(data)
-    return _plain(data)
+    except DocumentError:
+        raise
+    except ValueError as err:  # an integer longer than the conversion limit
+        raise DocumentError(f"unreadable JSON: {err}", "") from err
+    except RecursionError:
+        raise DocumentError("the JSON nests too deeply to read", "") from None
 
 
 def check_schema_version(version):
