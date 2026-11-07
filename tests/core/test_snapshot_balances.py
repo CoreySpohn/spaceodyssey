@@ -460,9 +460,47 @@ def test_a_study_that_shows_no_balances_judges_no_range():
 
 def test_mutant_study_without_the_range_check_fails_the_range_test(monkeypatch):
     """The range test must fail when the check is removed."""
-    monkeypatch.setattr(study_module, "_check_balance_range", lambda budget, caps: None)
+    monkeypatch.setattr(study_module, "_check_balance_range", lambda *args: None)
     with pytest.raises(pytest.fail.Exception):
         test_a_budget_the_integer_balance_cannot_hold_is_refused(1.0e7, 1.0e-12, False)
+
+
+@pytest.mark.parametrize(
+    "cost", [-1.0e20, -2.0e20, float("nan")], ids=["-1e20", "-2e20", "nan"]
+)
+def test_a_negative_channel_cost_is_refused_while_balances_are_shown(cost):
+    """Fails if a credit-like channel is accepted: with a zero budget one Observe
+    reached INT64_MAX for both -1e20 and -2e20, and the two fingerprints were equal.
+    """
+    base = _layout_study(2, 2, jnp.zeros((5, 3), jnp.float64))
+    bad = eqx.tree_at(
+        lambda s: (s.channels.cost, s.channels.charge),
+        base,
+        (jnp.full_like(base.channels.cost, cost),) * 2,
+    )
+    with pytest.raises(ValueError, match="cost and charge"):
+        study_module._check_balance_range(bad.budget, bad.channels, bad.caps)
+    with pytest.raises(ValueError, match="cost and charge"):
+        toy.survey_1(
+            caps=bad.caps,
+            lane_asset=[0, 1],
+            budget=bad.budget,
+            channels=bad.channels,
+        )
+
+
+def test_mutant_study_without_the_sign_check_fails_the_sign_test(monkeypatch):
+    """The sign test must fail when only the budget bound is checked."""
+    real = study_module._check_balance_range
+
+    def budget_only(budget, channels, caps):
+        ones = jnp.ones_like(channels.cost)
+        clean = eqx.tree_at(lambda c: (c.cost, c.charge), channels, (ones, ones))
+        return real(budget, clean, caps)
+
+    monkeypatch.setattr(study_module, "_check_balance_range", budget_only)
+    with pytest.raises(pytest.fail.Exception):
+        test_a_negative_channel_cost_is_refused_while_balances_are_shown(-1.0e20)
 
 
 class _Script(AbstractPolicy):
@@ -498,10 +536,12 @@ def _script(*decisions):
 
 
 # Observe and Wait; then Wait and Cancel, whose refund is queued ahead of the next
-# decision's request at its tick; then a lone Query; then Stop.
+# decision's request at its tick; then a lone Query (the request is stale and refused
+# while balances are shown); then the same Query again, which is answered; then Stop.
 REFUND_AHEAD = _script(
     [(K.OBSERVE, 0, 0), (K.WAIT, 10, 0)],
     [(K.WAIT, 10, 0), (K.CANCEL, 0, 0)],
+    [(K.QUERY, 0, 0)],
     [(K.QUERY, 0, 0)],
     [(K.STOP, 0, 0)],
 )
@@ -513,62 +553,88 @@ def _refund_study(on=True):
     return toy.survey_1(caps=caps, policies=(_Script(REFUND_AHEAD),)), kind
 
 
-@pytest.mark.medium  # two compiles, both executors
-def test_a_lone_query_survives_a_refund_queued_ahead_of_it_on_both_executors():
-    """Fails with 'the snapshot changed between the request and its answer' if the
-    request keeps the fingerprint of the decision while a queued Cancel returns balance
-    before the request is held.
-    """
-    study, kind = _refund_study(True)
+class _BalanceService(oracle.ToyOracleService):
+    """Answers with the balance of ledger row 0, resource 0 as the snapshot shows."""
+
+    def answer(self, request, view, layout):
+        super().answer(request, view, layout)
+        balance = 0.0 if view.balance is None else float(view.balance[0, 0])
+        return np.asarray([balance, 0.0, 0.0])
+
+
+def _refund_run(on, n_requests, n_stale):
+    study, kind = _refund_study(on)
     truths, roots = worlds(1, study.caps)
-    host_service = oracle.ToyOracleService(kind)
+    host_service = _BalanceService(kind)
     carry, trace = HostExecutor().run(
-        study, core.index_world(truths, 0), roots[0], 60, service=host_service
+        study, core.index_world(truths, 0), roots[0], 80, service=host_service
     )
-    run = CompiledExecutor().run(
-        study, truths, roots, 60, service=oracle.ToyOracleService(kind)
-    )
-    assert len(host_service.requests) == 1
+    compiled_service = _BalanceService(kind)
+    run = CompiledExecutor().run(study, truths, roots, 80, service=compiled_service)
     assert not bool(carry.request.valid)
     layout = study.observer.layout(study.caps)
-    assert core.histories_equal(
-        core.canonical_history(carry, trace, layout), run.history(0)
-    ).ok
+    host = core.canonical_history(carry, trace, layout)
+    assert core.histories_equal(host, run.history(0)).ok
+    for history, service in ((host, host_service), (run.history(0), compiled_service)):
+        stale = int((history.ints["admit_code"] == A.QUERY_STALE).sum())
+        assert (len(service.requests), stale) == (n_requests, n_stale)
+    return host_service, host
 
 
-def _held_request(study, carry, stale):
+@pytest.mark.medium  # two compiles, both executors, 10 s cold alone
+def test_a_query_made_stale_by_a_queued_refund_is_refused_and_asked_again():
+    """Fails with 'the snapshot changed between the request and its answer' if the
+    stale request is held, or if it is answered on a state the policy did not read.
+    The first Query is refused (one QUERY_STALE row, no request reaches the host), the
+    policy wakes, and its second Query is answered, on both executors.
+    """
+    service, host = _refund_run(True, n_requests=1, n_stale=1)
+    # the answer is computed on the state the asking decision read
+    asked = service.requests[0]
+    decisions = host.ints["snapshot_fp"][host.ints["snapshot_fp"] != 0]
+    assert asked.snapshot_fp == decisions[3]
+
+
+@pytest.mark.slow  # the balances-off control: two more compiles, 12 s cold alone
+def test_with_balances_off_the_same_refund_study_answers_both_queries():
+    """The control: nothing is refused when balances are not shown."""
+    _refund_run(False, n_requests=2, n_stale=0)
+
+
+def _held(study, carry, fp):
     ev = empty_event_row(study.caps)
     ev = dataclasses.replace(
-        ev, snapshot_fp=jnp.asarray(stale, I64), decision=jnp.asarray(0, I64)
+        ev, snapshot_fp=jnp.asarray(fp, I64), decision=jnp.asarray(0, I64)
     )
     truth, root = one_world(0, study.caps)
-    held, _, _ = handlers.h_request(carry, ev, study, truth, root)
-    return int(held.request.snapshot_fp)
+    after, _, _ = handlers.h_request(carry, ev, study, truth, root)
+    waits = lambda c: int((c.ev.valid & (c.ev.kind == core.EventKind.WAIT)).sum())  # noqa: E731
+    return bool(after.request.valid), waits(after) - waits(carry)
 
 
-def _request_is_stamped_where_it_is_held():
+def _stale_request_is_refused_with_a_wake():
     study, carry = _study(True), _carry(True)
     moved = _bumped(carry, 5.0)
-    assert _held_request(study, carry, 1234) == _fp(study, carry)
-    # the balance moved after the decision read it: the held stamp follows the state
-    assert _held_request(study, moved, 1234) == _fp(study, moved)
-    assert _fp(study, moved) != _fp(study, carry)
-    # with balances off the stamp is left as the decision wrote it
-    assert _held_request(_study(False), _carry(False), 1234) == 1234
+    fresh = _fp(study, carry)
+    assert _held(study, carry, fresh) == (True, 0)  # nothing moved: held, no wake
+    assert _held(study, moved, fresh) == (False, 1)  # a refund moved it: refused
+    # with balances off the request is held as before
+    assert _held(_study(False), _carry(False), 1234) == (True, 0)
 
 
-def test_a_held_request_is_stamped_with_the_snapshot_it_is_answered_on():
-    """Fails if the stamp is the decision's after the balance moved (the exception
-    above), or if an off study rewrites a stamp.
+def test_a_request_whose_snapshot_moved_is_not_held_and_wakes_the_policy():
+    """Fails if a request on a moved balance is held, a fresh one is refused, or an
+    off study refuses anything.
     """
-    _request_is_stamped_where_it_is_held()
+    _stale_request_is_refused_with_a_wake()
 
 
-def test_mutant_held_request_keeping_the_old_stamp_fails_the_stamp_check(monkeypatch):
-    """The stamp check must fail when the request keeps the decision's stamp."""
-    _request_is_stamped_where_it_is_held()
-    monkeypatch.setattr(
-        handlers, "snapshot_fingerprint", lambda view, layout: jnp.asarray(1234, I64)
-    )
+@pytest.mark.parametrize(
+    "verdict", [False, True], ids=["answers-anyway", "refuses-all"]
+)
+def test_mutant_stale_checks_fail_the_refusal_rules(monkeypatch, verdict):
+    """The refusal rules must fail when staleness is never or always found."""
+    _stale_request_is_refused_with_a_wake()
+    monkeypatch.setattr(handlers, "_stale_request", lambda c, ev, study: verdict)
     with pytest.raises(AssertionError):
-        _request_is_stamped_where_it_is_held()
+        _stale_request_is_refused_with_a_wake()

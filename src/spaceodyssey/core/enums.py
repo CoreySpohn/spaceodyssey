@@ -106,6 +106,7 @@ class AdmissionCode(IntEnum):
     FROZEN_HORIZON = 9
     FORBIDDEN = 10
     QUERY_MIXED = 11
+    QUERY_STALE = 12
 
 
 class CoincidentOrder(IntEnum):

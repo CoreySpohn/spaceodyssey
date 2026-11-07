@@ -130,6 +130,13 @@ def advance(carry, root, study, truth, *, wake_fn=wake_by_audience):
         n_log=c5.n_log,
         program=None if ev.program is None else g(ev.program),
     )
+    if caps.snapshot_balances:
+        # a request refused as stale was not held: the row records the refusal
+        stale = handled & (ev.kind == EventKind.REQUEST) & ~c5.request.valid
+        code = jnp.where(stale, AdmissionCode.QUERY_STALE, trace.admit_code[0])
+        trace = dataclasses.replace(
+            trace, admit_code=trace.admit_code.at[0].set(code.astype(I64))
+        )
     return c5, trace, wake
 
 
@@ -552,6 +559,10 @@ def finish_trace(trace, effects, codes, u, wake, carry, study, snapshot_fp=0):
     for a woken step and zero otherwise.
     """
     belief_mean, belief_aux = study.observer.layout(study.caps).project(carry.belief)
+    if study.caps.snapshot_balances:
+        # a step that decided carries its decision's codes; any other step keeps the
+        # refusal `advance` wrote for a stale request
+        codes = jnp.where(wake, codes, trace.admit_code)
     return dataclasses.replace(
         trace,
         n_dec=carry.n_dec,

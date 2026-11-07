@@ -19,7 +19,7 @@ from spaceodyssey.core.enums import (
     Scope,
     Stage,
 )
-from spaceodyssey.core.events import enqueue, requeue, where_tree
+from spaceodyssey.core.events import empty_event_row, enqueue, requeue, where_tree
 from spaceodyssey.core.keys import asset_coordinate, draw_key, fold_key
 from spaceodyssey.core.ledger import _resource_rows, charge_parts
 from spaceodyssey.core.records import (
@@ -361,22 +361,42 @@ def h_result(c, ev, study, truth, root):
     return h_release(c, ev, study, truth, root)
 
 
+def _stale_request(c, ev, study):
+    """Whether the policy snapshot differs from the one the request names.
+
+    Rebuilt at the decision that asked, as `answer_pending` rebuilds it.
+    """
+    view = snapshot_view(c, Audience.POLICY, study.caps)
+    view = dataclasses.replace(view, n_dec=ev.decision)
+    layout = study.observer.layout(study.caps)
+    return snapshot_fingerprint(view, layout) != ev.snapshot_fp
+
+
 def h_request(c, ev, study, truth, root):
     """Hold the run for the host: the row moves into the carry until it is answered.
 
-    While `caps.snapshot_balances` is on, the request is stamped again with the
-    fingerprint of the policy snapshot as it stands now, at the decision that asked.
-    Ledger events queued ahead of the request at its tick (a refund, a settlement)
-    move the balance after the decision read it, and the host answers on the state the
-    run is held at. The decision's own fingerprint stays in the trace.
+    While `caps.snapshot_balances` is on, a request whose snapshot is no longer the one
+    the decision read (a refund or settlement queued ahead of it moved the balance) is
+    refused: it is not held, nothing is computed, the trace row records
+    `AdmissionCode.QUERY_STALE`, and a same-tick wait wakes the policy, which may ask
+    again against the state it then reads.
     """
     held = dataclasses.replace(ev, valid=jnp.asarray(True))
-    if study.caps.snapshot_balances:
-        view = snapshot_view(c, Audience.POLICY, study.caps)
-        view = dataclasses.replace(view, n_dec=ev.decision)
-        layout = study.observer.layout(study.caps)
-        held = dataclasses.replace(held, snapshot_fp=snapshot_fingerprint(view, layout))
-    return _tree_set(c, request=held), _emit(0, 0), record_none(study.caps)
+    if not study.caps.snapshot_balances:
+        return _tree_set(c, request=held), _emit(0, 0), record_none(study.caps)
+    stale = _stale_request(c, ev, study)
+    c = _tree_set(c, request=where_tree(stale, empty_event_row(study.caps), held))
+    c = enqueue(
+        c,
+        stale,
+        kind=EventKind.WAIT,
+        tick=c.tick,
+        stage=Stage.ADMIT,
+        group=ev.group,
+        audience=PUBLIC,
+        caps=study.caps,
+    )
+    return c, _emit(0, 0), record_none(study.caps)
 
 
 def h_refresh(c, ev, study, truth, root):
