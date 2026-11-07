@@ -9,6 +9,8 @@ name: Pilot
 # commit, branch or tag) and prints its summary as JSON in the baseline format of
 # .github/budget/. Dispatch it once at the reference commit and once at the commit
 # to judge: the difference of the two wall times is the cold cost the change added.
+# The summary also compares the cold wall time with the pinned baseline (the previous
+# slice's close-out, cold), the like-for-like check of the K6 relative limit.
 
 on:
   workflow_dispatch:
@@ -135,4 +137,6 @@ jobs:
         run: |
           python budget-tools/.github/scripts/ci_summary.py junit-quick-cold.xml \
             --title "Quick tier, cold, at $REF" --allow-skips \
-            --write-summary quick-cold-summary.json --commit "$(git rev-parse HEAD)"
+            --write-summary quick-cold-summary.json --commit "$(git rev-parse HEAD)" \
+            --baseline budget-tools/.github/budget/quick_baseline.json \
+            --max-increase-seconds 60
