@@ -158,9 +158,9 @@ def export_records(
     the upstream row did not reach. Payload columns that some exported audience could
     not read upstream are written as zero.
 
-    `producer_map` maps each exported upstream channel to its downstream channel
-    (rows on other channels are not exported); `subject_map` maps every upstream
-    subject of an exported row to a downstream subject. `namespace` is the import's
+    `producer_map` maps each exported upstream channel to its downstream channel and
+    `subject_map` each exported upstream subject to a downstream subject; rows on
+    other channels or of other subjects are not exported. `namespace` is the import's
     namespace (at least 1; 0 is a table written by hand). `upstream_document_hash`
     is the upstream document's content hash, declared as the table's
     `upstream_hash`. `epoch="end_at_zero"` (the only epoch) places the upstream
@@ -185,6 +185,7 @@ def export_records(
     horizon = int(study.horizon_tick)
     log = _log_of(run_result)
     mapped = np.isin(log["channel"], np.asarray(sorted(producer_map), np.int64))
+    mapped &= np.isin(log["subject"], np.asarray(sorted(subject_map), np.int64))
     chosen = log["valid"] & (log["kind"] == kind) & mapped
     released = chosen.copy()
     for single in singles:
@@ -263,12 +264,10 @@ def _table(log, rows, kind, audience, singles, horizon, caps, namespace):
 
 
 def _mapped(table, log, rows, subject_map, producer_map):
-    """The table with downstream subjects and channels, refusing a gap or a clash."""
+    """The table with downstream subjects and channels, refusing an index clash."""
     subjects, channels = [], []
     for i in rows:
         s, c = int(log["subject"][i]), int(log["channel"][i])
-        if s not in subject_map:
-            raise ValueError(f"upstream subject {s} has no downstream subject")
         subjects.append(int(subject_map[s]))
         channels.append(int(producer_map[c]))
     seen = {}
@@ -277,7 +276,9 @@ def _mapped(table, log, rows, subject_map, producer_map):
         if pair in seen:
             raise ValueError(
                 f"rows {seen[pair]} and {j} share local index {pair[1]} on downstream "
-                f"channel {pair[0]}; map their producers to different channels"
+                f"channel {pair[0]}: a local index is the upstream acquisition index, "
+                "which is counted per subject, and it must be unique per channel; "
+                "select one subject per downstream channel with subject_map"
             )
         seen[pair] = j
     source = dataclasses.replace(

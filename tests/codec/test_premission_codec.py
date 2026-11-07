@@ -325,7 +325,8 @@ def test_export_keeps_the_latest_revision_released_to_the_audience():
     """Fails if a datum is exported at another revision than the latest released to
     the policy by the end of the run (a correction twice, a revision released after
     the end, an observer-only revision), if a withdrawn, unreleased, other-kind or
-    unmapped row is exported, or if the dropped revisions are not listed with why.
+    unmapped row (channel or subject) is exported, or if the dropped revisions are
+    not listed with why.
     """
     export = _export(2)
     table = export.table
@@ -356,6 +357,10 @@ def test_export_keeps_the_latest_revision_released_to_the_audience():
     }
     rows = {r.source_index: r.row for r in export.revisions if r.reason == "exported"}
     assert rows == {0: 0, 1: 1, 3: 2}
+    # the maps select: a subject outside the subject map is not exported
+    fewer = _export(2, subject_map={0: 1, 2: 3})
+    assert _ints(fewer.table.source.source_index) == [0, 3]
+    assert {r.subject for r in fewer.revisions} == {0, 2}
 
 
 def test_export_never_widens_an_audience_or_a_payload_column():
@@ -391,8 +396,8 @@ def test_export_places_the_upstream_end_at_tick_zero():
 
 def test_export_refuses_what_it_cannot_write():
     """Fails if an export that would misstate its rows goes through: a derived kind,
-    an unknown epoch or audience, no upstream hash, namespace 0, an unmapped subject,
-    two rows on one downstream channel with one local index, or a batched log.
+    an unknown epoch or audience, no upstream hash, namespace 0, two rows on one
+    downstream channel with one local index, or a batched log.
     """
     derived = dataclasses.replace(
         SOURCE, caps=dataclasses.replace(SOURCE.caps, derived_kinds=(MEASUREMENT,))
@@ -402,7 +407,6 @@ def test_export_refuses_what_it_cannot_write():
         lambda: _export(2, study=derived),
         lambda: _export(4),
         lambda: _export(2, namespace=0),
-        lambda: _export(2, subject_map={0: 1, 1: 2}),
         lambda: _export(2, log=_log(_row(0, 0, 0), _row(1, 0, 0))),
         lambda: export_records(
             run, MEASUREMENT, 2, "", SUBJECTS, PRODUCERS, study=SOURCE
