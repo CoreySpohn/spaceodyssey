@@ -218,7 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # hatch-vcs generated version file
-*_version.py
+/src/spaceodyssey/_version.py
 
 # uv lockfile (not committed for this library; see comment above)
 uv.lock

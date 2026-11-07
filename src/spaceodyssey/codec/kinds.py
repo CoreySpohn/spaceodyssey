@@ -104,14 +104,20 @@ def _plain(value):
     return type(value) in (bool, int, float, str)
 
 
-def at_default(field, value, cls=None):
-    """Whether `value` is the default of an optional field, in type and content."""
-    default = optional_default(field, cls)
+def _same(value, default):
+    """Equal in type and content, element by element for a tuple."""
     if type(value) is not type(default):
         return False
+    if type(value) is tuple:
+        return len(value) == len(default) and all(map(_same, value, default))
     if type(value) is float:
         return repr(value) == repr(default)
     return value == default
+
+
+def at_default(field, value, cls=None):
+    """Whether `value` is the default of an optional field, in type and content."""
+    return _same(value, optional_default(field, cls))
 
 
 def declared_version(cls):

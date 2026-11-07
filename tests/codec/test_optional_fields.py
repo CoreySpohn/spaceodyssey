@@ -198,3 +198,28 @@ def test_at_default_compares_type_and_content():
     assert at_default(field(float("nan")), float("nan"))
     assert at_default(field((1, "a")), (1, "a"))
     assert not at_default(field((1, "a")), [1, "a"])
+
+
+def test_at_default_compares_tuple_elements_by_type_and_content():
+    """Fails if a tuple differing only in an element's type or sign counts as default.
+
+    Such a value would be omitted by the encoder and reload as the default, so data
+    would change silently.
+    """
+
+    def field(default):
+        return dataclasses.fields(
+            dataclasses.make_dataclass(
+                "D", [("x", tuple, dataclasses.field(default=default))]
+            )
+        )[0]
+
+    assert at_default(field((1, "a")), (1, "a"))
+    assert not at_default(field((1,)), (True,))
+    assert not at_default(field((True,)), (1,))
+    assert not at_default(field((1,)), (1.0,))
+    assert not at_default(field((0.0,)), (-0.0,))
+    assert at_default(field((float("nan"),)), (float("nan"),))
+    assert at_default(field(((1, 0.0), "b")), ((1, 0.0), "b"))
+    assert not at_default(field(((1, 0.0), "b")), ((1, -0.0), "b"))
+    assert not at_default(field((1, 2)), (1,))
