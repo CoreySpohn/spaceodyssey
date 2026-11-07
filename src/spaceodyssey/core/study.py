@@ -17,7 +17,7 @@ from spaceodyssey.core.kinds import (
     AbstractProcess,
     AbstractWorldSource,
 )
-from spaceodyssey.core.ledger import AssetTable, ChannelTable
+from spaceodyssey.core.ledger import AssetTable, ChannelTable, charge_parts
 from spaceodyssey.core.records import lower_refit
 from spaceodyssey.core.refresh import RefreshSchedule, refresh_enabled
 from spaceodyssey.core.snapshot import named_leaves
@@ -117,41 +117,57 @@ class Study(eqx.Module):
         _check_layout(self.observer, self.caps)
         _check_refit(self.observer, self.caps, self.refresh)
         _check_refresh(self.observer, self.caps, self.refresh)
-        _check_balance_range(self.budget, self.channels, self.caps)
+        _check_balance_range(self)
 
 
 _EXACT_QUANTA = 2.0**53
 
 
-def _check_balance_range(budget, channels, caps):
+def _check_balance_range(study):
     """Require the snapshot's integer balance to hold every reachable balance.
 
     The view hashes the balance as a count of `balance_quantum` units. Past 2**53
     units a float no longer separates neighbouring counts, and the int64 conversion
     saturates at 2**63, so two different balances would share one fingerprint. A
     balance only falls from the budget by a debit and a refund restores at most what
-    was debited, so the budget bounds every balance, provided no channel cost or charge
-    is negative (a negative entry acts as a credit and the bound fails). Both
+    was debited, so the budget bounds every balance, provided no debit is negative
+    (a negative one credits the ledger and the bound fails). The debit and its fixed
+    part come from `charge_parts`, the pricing the ledger itself uses, so a surcharge
+    or a charge that makes a negative debit, or a negative fixed part that a refund
+    could return, is refused along with a negative `cost`, `charge` or `surcharge`
+    entry (an unused negative surcharge is refused too: it is a typo, not a price). Both
     conditions are checked once, here, while balances are shown. A traced table is not
     judged.
     """
+    caps, channels = study.caps, study.channels
     if not caps.snapshot_balances:
         return
     try:
-        largest = float(np.max(np.abs(np.asarray(budget, dtype=np.float64))))
+        largest = float(np.max(np.abs(np.asarray(study.budget, dtype=np.float64))))
+        parts = [charge_parts(study, i) for i in range(caps.n_channels)]
         entries = np.concatenate(
             [
                 np.ravel(np.asarray(channels.cost, dtype=np.float64)),
                 np.ravel(np.asarray(channels.charge, dtype=np.float64)),
+                *(
+                    np.ravel(np.asarray(x, dtype=np.float64))
+                    for p in parts
+                    for x in p[:2]
+                ),
+                *(
+                    []
+                    if channels.surcharge is None
+                    else [np.ravel(np.asarray(channels.surcharge, dtype=np.float64))]
+                ),
             ]
         )
     except jax.errors.TracerArrayConversionError:
         return
     if not np.all(np.isfinite(entries) & (entries >= 0)):
         raise ValueError(
-            "snapshot_balances needs every channel cost and charge to be finite and "
-            "not negative: a negative entry credits the ledger and the budget no "
-            "longer bounds the balance"
+            "snapshot_balances needs every channel cost, charge and surcharge to be "
+            "finite and to make a debit that is not negative: a negative entry credits "
+            "the ledger and the budget no longer bounds the balance"
         )
     if not np.isfinite(largest) or largest / caps.balance_quantum > _EXACT_QUANTA:
         raise ValueError(

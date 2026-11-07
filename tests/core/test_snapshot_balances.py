@@ -30,6 +30,7 @@ from spaceodyssey.core.enums import (
     I64,
     AdmissionCode,
     Audience,
+    ChargePricing,
     Disposition,
     EffectKind,
     Scope,
@@ -42,6 +43,14 @@ from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.studies import oracle, toy
 from tests.core.helpers import one_world, worlds
 from tests.core.mutants import _clone
+from tests.core.refund_helpers import (
+    BALANCE,
+    N_RECEIPTS,
+    OFF,
+    ScriptedReceipts,
+    receipt,
+    refund_study,
+)
 
 K, A = EffectKind, AdmissionCode
 MIXED = [
@@ -478,9 +487,9 @@ def test_a_negative_channel_cost_is_refused_while_balances_are_shown(cost):
         base,
         (jnp.full_like(base.channels.cost, cost),) * 2,
     )
-    with pytest.raises(ValueError, match="cost and charge"):
-        study_module._check_balance_range(bad.budget, bad.channels, bad.caps)
-    with pytest.raises(ValueError, match="cost and charge"):
+    with pytest.raises(ValueError, match="debit that is not negative"):
+        study_module._check_balance_range(bad)
+    with pytest.raises(ValueError, match="debit that is not negative"):
         toy.survey_1(
             caps=bad.caps,
             lane_asset=[0, 1],
@@ -493,14 +502,71 @@ def test_mutant_study_without_the_sign_check_fails_the_sign_test(monkeypatch):
     """The sign test must fail when only the budget bound is checked."""
     real = study_module._check_balance_range
 
-    def budget_only(budget, channels, caps):
-        ones = jnp.ones_like(channels.cost)
-        clean = eqx.tree_at(lambda c: (c.cost, c.charge), channels, (ones, ones))
-        return real(budget, clean, caps)
+    def budget_only(study):
+        ones = jnp.ones_like(study.channels.cost)
+        clean = eqx.tree_at(
+            lambda s: (s.channels.cost, s.channels.charge), study, (ones, ones)
+        )
+        return real(clean)
 
     monkeypatch.setattr(study_module, "_check_balance_range", budget_only)
     with pytest.raises(pytest.fail.Exception):
         test_a_negative_channel_cost_is_refused_while_balances_are_shown(-1.0e20)
+
+
+def _priced(**kw):
+    return refund_study(cap_kw={"snapshot_balances": True}, **kw)
+
+
+NEGATIVE_PRICES = [
+    dict(charge=0.0, pricing=ChargePricing.SURCHARGE, surcharge=-1.0e20),
+    dict(charge=0.0, pricing=ChargePricing.SURCHARGE, surcharge=-2.0e20),
+    dict(charge=0.0, pricing=ChargePricing.SURCHARGE, surcharge=-3.0),
+    dict(charge=10.0, pricing=ChargePricing.SURCHARGE, surcharge=-11.0),
+    dict(charge=10.0, pricing=ChargePricing.OCCUPANCY, surcharge=-1.0),
+    dict(charge=-1.0, pricing=ChargePricing.FLAT_FRACTION),
+]
+VALID_PRICES = [
+    dict(charge=10.0, pricing=ChargePricing.SURCHARGE, surcharge=2.0),
+    dict(charge=0.0, pricing=ChargePricing.SURCHARGE, surcharge=2.0),
+    dict(charge=4.0, pricing=ChargePricing.FLAT_FRACTION),
+    dict(charge=4.0, pricing=ChargePricing.STATISTICAL),
+    dict(charge=10.0),
+]
+
+
+def _negative_prices_are_refused():
+    for kw in NEGATIVE_PRICES:
+        with pytest.raises(ValueError, match="debit that is not negative"):
+            _priced(**kw)
+    for kw in VALID_PRICES:
+        _priced(**kw)
+
+
+def test_a_price_that_debits_a_negative_amount_is_refused_while_balances_are_shown():
+    """Fails if a surcharge (or a charge) that makes the ledger a credit passes with
+    cost = charge = 0 and a surcharge of -1e20, which `charge_parts` would debit as
+    a credit; positive surcharge, flat and statistical prices stay valid.
+    """
+    _negative_prices_are_refused()
+
+
+def test_a_negative_surcharge_is_valid_while_balances_are_off():
+    """The rule belongs to the flag: refund prices are not judged otherwise."""
+    refund_study(charge=0.0, pricing=ChargePricing.SURCHARGE, surcharge=-3.0)
+
+
+def test_mutant_study_that_ignores_surcharge_prices_fails_the_price_test(monkeypatch):
+    """The price test must fail when the surcharge and the priced debit go unchecked."""
+    real = study_module._check_balance_range
+
+    def no_prices(study):
+        plain = dataclasses.replace(study.channels, surcharge=None, pricing=None)
+        return real(eqx.tree_at(lambda s: s.channels, study, plain))
+
+    monkeypatch.setattr(study_module, "_check_balance_range", no_prices)
+    with pytest.raises(pytest.fail.Exception):
+        _negative_prices_are_refused()
 
 
 class _Script(AbstractPolicy):
@@ -531,20 +597,24 @@ class _Script(AbstractPolicy):
 
 
 class _Learner(_Script):
-    """Follows the script to decision 2 (a Query), then asks again at decision 3 only if
-    the snapshot says its previous Query was refused, and otherwise stops.
+    """Follows the script to its Query at decision `ask_at`, then asks again at the next
+    decision only if the snapshot says its previous Query was refused, and otherwise
+    stops. Rows after the Query: the second Query, then Stop.
     """
+
+    ask_at: int = eqx.field(default=2, static=True)
 
     def _index(self, view):
         n = view.n_dec
         refused = False if view.query_refused is None else view.query_refused == n - 1
-        return jnp.where(n < 3, n, jnp.where(refused, 3, 4))
+        again = self.ask_at + 1
+        return jnp.where(n <= self.ask_at, n, jnp.where(refused, again, again + 1))
 
 
-def _script(*decisions):
+def _script(*decisions, width=2):
     pad = (int(K.NONE), 0, 0)
     return tuple(
-        tuple((int(k), t, c) for k, t, c in d) + (pad,) * (2 - len(d))
+        tuple((int(k), t, c) for k, t, c in d) + (pad,) * (width - len(d))
         for d in decisions
     )
 
@@ -742,3 +812,79 @@ def test_mutant_stale_checks_fail_the_refusal_rules(monkeypatch, verdict):
     monkeypatch.setattr(handlers, "_stale_request", lambda c, ev, study: verdict)
     with pytest.raises(AssertionError):
         _stale_request_is_refused_with_a_wake()
+
+
+# ---- a receipt released between a decision and its request ------------------------
+
+
+class _AdmitStageReceipts(ScriptedReceipts):
+    """Receipts fired at the admit stage, after the decide stage of their tick."""
+
+    def seed(self, carry, caps):
+        for i in range(self.rows.shape[0]):
+            row = self.rows[i]
+            carry = core.enqueue(
+                carry,
+                row[7] == 1,
+                kind=core.EventKind.PROCESS,
+                tick=row[0],
+                stage=core.Stage.ADMIT,
+                group=i,
+                audience=row[6],
+                caps=caps,
+            )
+        return carry
+
+
+# Observe on channel 10; a receipt naming it is processed at tick 125, which wakes the
+# policy before the receipt's release (queued behind it) runs. The policy asks, the
+# release credits the refund ahead of the request, and the request is refused as stale.
+RECEIPT_AHEAD = _script(
+    [(K.OBSERVE, 0, 0), (K.WAIT, 200, 0)],
+    [(K.QUERY, 0, 0)],
+    [(K.WAIT, 10, 0)],
+    [(K.QUERY, 0, 0)],
+    [(K.STOP, 0, 0)],
+    width=3,
+)
+
+
+class _ReceiptLearner(_Script):
+    """Asks at decision 1; the receipt's own release wakes it once more, and it waits;
+    the refusal wakes it again, and it asks a second time; then it stops.
+    """
+
+    def _index(self, view):
+        return jnp.minimum(view.n_dec, 4)
+
+
+@pytest.mark.medium  # two compiles, both executors
+def test_a_receipt_released_between_a_decision_and_its_request_refuses_the_query():
+    """Fails if a refund credited by a receipt released ahead of the request is
+    answered on a state the policy did not read: the request is stale, refused once, and
+    the policy, which reads the refusal, asks again and is answered.
+    """
+    registry, kind = oracle.oracle_registry()
+    caps = registry.lower(Capacities(n_effects=3, refunds=True, snapshot_balances=True))
+    ch = refund_study().channels
+    study = toy.survey_1(
+        caps=caps,
+        channels=ch,
+        budget=jnp.full((caps.n_balance_rows, caps.n_resources), BALANCE),
+        policies=(_ReceiptLearner(RECEIPT_AHEAD),),
+        process=_AdmitStageReceipts(rows=(receipt(125), *[OFF] * (N_RECEIPTS - 1))),
+    )
+    truths, roots = worlds(1, study.caps)
+    host_service = _BalanceService(kind)
+    carry, trace = HostExecutor().run(
+        study, core.index_world(truths, 0), roots[0], 80, service=host_service
+    )
+    compiled_service = _BalanceService(kind)
+    run = CompiledExecutor().run(study, truths, roots, 80, service=compiled_service)
+    layout = study.observer.layout(study.caps)
+    host = core.canonical_history(carry, trace, layout)
+    assert core.histories_equal(host, run.history(0)).ok
+    for history, service in ((host, host_service), (run.history(0), compiled_service)):
+        stale = int((history.ints["admit_code"] == A.QUERY_STALE).sum())
+        assert (len(service.requests), stale) == (1, 1)
+    assert int(carry.ledger.refunded.sum()) > 0  # the receipt did credit a refund

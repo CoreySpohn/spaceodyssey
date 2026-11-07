@@ -337,8 +337,8 @@ def conditional_view_leaves(view):
     the program column (absent with one program), the refund index and award generation
     (absent without refunds), then the balance row names, the integer balance and the
     last refused request (absent unless balances are on; the float is a multiple of the
-    integer's quantum and is not hashed). A feature that adds a leaf to the view lists it
-    here.
+    integer's quantum and is not hashed). A feature that adds a leaf to the view lists
+    it here.
     """
     program = () if view.log.program is None else (view.log.program,)
     # the refund columns that are integers; the amount is a float and is not hashed
