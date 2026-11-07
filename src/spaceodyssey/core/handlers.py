@@ -35,9 +35,14 @@ def _emit(n, slot):
     return StepEmit(n_written=jnp.asarray(n, I64), last_slot=jnp.asarray(slot, I64))
 
 
+# the columns a log row always has; `program` is present only with several programs
+_ROW_FIELDS = tuple(f for f in dataclasses.fields(Record) if f.name != "program")
+
+
 def _log_rec(log, slot):
+    program = None if log.program is None else log.program[slot]
     return Record(
-        **{f.name: getattr(log, f.name)[slot] for f in dataclasses.fields(Record)}
+        **{f.name: getattr(log, f.name)[slot] for f in _ROW_FIELDS}, program=program
     )
 
 
@@ -93,6 +98,11 @@ def _realize_rec(c, study, truth, root, base, fraction):
     return dataclasses.replace(base, payload=payload.at[2].set(fraction))
 
 
+def _program_field(ev):
+    """The record's program column, copied from a row that holds one (else nothing)."""
+    return {} if ev.program is None else {"program": ev.program}
+
+
 def h_done(c, ev, study, truth, root):
     """Settle one completed occupancy exactly once: realize, log, queue its Release."""
     caps, channels = study.caps, study.channels
@@ -118,6 +128,7 @@ def h_done(c, ev, study, truth, root):
         phase=ev.scope,
         acquisition_id=ev.acquisition_id,
         revision=jnp.asarray(0, I64),
+        **_program_field(ev),
         released_tick=jnp.asarray(-1, I64),
         accepted_tick=jnp.asarray(-1, I64),
         superseded_by=jnp.asarray(-1, I64),
@@ -312,16 +323,29 @@ def h_process(c, ev, study, truth, root):
 
 
 def _cancel_lane(
-    c, study, truth, root, lane, enable, status=RecordStatus.PARTIAL, refund=True
+    c,
+    study,
+    truth,
+    root,
+    lane,
+    enable,
+    status=RecordStatus.PARTIAL,
+    refund=True,
+    program=None,
+    by_program=False,
 ):
     """Cancel a live occupancy and refund its unused cost.
 
     Live-cancel path: invalidate the lane's pending Done row, write the partial record
     at the elapsed fraction, refund the unused cost, free the lane. With `refund` false
-    the record is charged in full and nothing comes back (a fault).
+    the record is charged in full and nothing comes back (a fault). With programs
+    the credit goes to the row of the program that admitted the occupancy, and where
+    `by_program` is set only an occupancy of `program` is cancelled.
     """
     caps, channels = study.caps, study.channels
     pend = c.ev.valid & (c.ev.kind == EventKind.DONE) & (c.ev.lane == lane)
+    if c.ev.program is not None and program is not None:
+        pend = pend & (~by_program | (c.ev.program == program))
     has = enable & pend.any()
     i = jnp.argmax(pend)
     channel_index = c.ev.channel_index[i]
@@ -358,9 +382,11 @@ def _cancel_lane(
         cost=channels.cost[channel_index] * spent,
         charged=channels.cost[channel_index] * spent,
         valid=has,
+        **({} if c.ev.program is None else {"program": c.ev.program[i]}),
     )
     rec = eqx.filter_jit(_realize_rec)(c, study, truth, root, base, frac)
-    rows = _resource_rows(study, lane)
+    owner = 0 if c.ev.program is None else c.ev.program[i]
+    rows = _resource_rows(study, lane, owner)
     credit = jnp.where(has, channels.cost[channel_index] * (1.0 - spent), 0.0)
     c1 = _tree_set(
         c,
@@ -429,18 +455,37 @@ def h_stop(c, ev, study, truth, root):
     campaign = ev.scope == Scope.CAMPAIGN
     drain = ev.disposition == Disposition.DRAIN
     abort = ev.disposition == Disposition.ABORT
-    c1 = _tree_set(
-        c,
-        **{
-            "ledger.lane_closed": c.ledger.lane_closed | in_scope,
-            "draining": c.draining | (campaign & drain),
-        },
-    )
+    reach = in_scope  # the lanes an abort looks at
+    only = {}  # the program filter of the cancel, passed only where programs exist
+    by_program = None
+    if caps.n_programs > 1:
+        # a program Stop closes the program, not its lanes, and acts only on that
+        # program's occupancies; any lane may hold one
+        by_program = ev.scope == Scope.PROGRAM
+        reach = jnp.where(by_program, True, in_scope)
+        in_scope = jnp.where(by_program, False, in_scope)
+        only = {"program": ev.program, "by_program": by_program}
+    updates = {
+        "ledger.lane_closed": c.ledger.lane_closed | in_scope,
+        "draining": c.draining | (campaign & drain),
+    }
+    if by_program is not None:
+        closed = c.ledger.program_closed
+        updates["ledger.program_closed"] = closed.at[ev.program].set(
+            closed[ev.program] | by_program
+        )
+    c1 = _tree_set(c, **updates)
 
     def cancel(lane, state):
         carry, n_total, slot, rec = state
         carry, n, s, r = eqx.filter_jit(_cancel_lane)(
-            carry, study, truth, root, jnp.asarray(lane, I64), in_scope[lane] & abort
+            carry,
+            study,
+            truth,
+            root,
+            jnp.asarray(lane, I64),
+            reach[lane] & abort,
+            **only,
         )
         return carry, n_total + n, jnp.where(n > 0, s, slot), where_tree(n > 0, r, rec)
 

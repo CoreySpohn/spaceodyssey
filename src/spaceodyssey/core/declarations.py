@@ -66,6 +66,7 @@ class Declaration:
     # record channel ids it writes outside admission: the channel a process writes its
     # records on, or the service channel a policy asks a `Query` on
     channels: tuple[int, ...] = ()
+    programs: tuple[int, ...] = ()  # program ids a policy names (a plan or a Stop)
 
     def __post_init__(self):
         """Reject unknown names so a typo cannot read as a clean declaration."""

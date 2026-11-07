@@ -1,4 +1,4 @@
-"""JSON pre-flight: all twenty finding codes, each with a pointer to its value."""
+"""JSON pre-flight: all twenty-one finding codes, each with a pointer to its value."""
 
 import copy
 import dataclasses
@@ -151,6 +151,10 @@ def t001(seed):
     return _policy_doc(stops=((int(scope), int(Disposition.DRAIN)),)), None
 
 
+def p001(seed):
+    return _policy_doc(programs=(1 if seed else 0,)), None
+
+
 def t002(seed):
     order = jnp.asarray([0, 1, 7 if seed else 1], I64)
     return _doc(_with(toy.survey_1(), channels=_channels(coincident_order=order))), None
@@ -235,6 +239,12 @@ CASES = {
         t001,
         "/study/agenda/policies/0/stops/0",
         _is([int(Scope.LANE), int(Disposition.DRAIN)]),
+    ),
+    "P001": (
+        FindingCode.P001,
+        p001,
+        "/study/agenda/policies/0/programs/0",
+        _is(1),
     ),
     "T002": (
         FindingCode.T002,

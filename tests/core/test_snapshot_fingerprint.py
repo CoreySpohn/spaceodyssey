@@ -151,7 +151,9 @@ def test_an_empty_leaf_moves_the_fingerprint(monkeypatch):
     view = snapshot_view(carry, Audience.POLICY, study.caps)
     layout = study.observer.layout(study.caps)
     names = (*snapshot.LOG_INT_FIELDS, "valid", "product")
-    log = types.SimpleNamespace(**{n: getattr(view.log, n) for n in names})
+    log = types.SimpleNamespace(
+        program=view.log.program, **{n: getattr(view.log, n) for n in names}
+    )
     shim = types.SimpleNamespace(
         log=log,
         **{n: getattr(view, n) for n in ("belief", "n_rows", "tick", "n_dec")},

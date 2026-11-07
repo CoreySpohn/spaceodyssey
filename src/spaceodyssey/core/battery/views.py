@@ -13,7 +13,7 @@ from spaceodyssey.core.battery.result import bits_equal, tree_bits_equal
 from spaceodyssey.core.enums import Audience, EventKind
 from spaceodyssey.core.keys import policy_key
 from spaceodyssey.core.kinds import AbstractPolicy
-from spaceodyssey.core.records import payload_columns
+from spaceodyssey.core.records import log_columns, payload_columns
 from spaceodyssey.core.snapshot import snapshot_fingerprint, visible_rows
 
 # Log columns that hold a time, named rather than recognized by sign: a datum observed
@@ -214,8 +214,8 @@ def compare_views(
                 )
             if not bits_equal(x, getattr(vb, name)):
                 failures.append(f"{prefix} {name} changed")
-        for name in type(va.log).__dataclass_fields__:
-            x = np.asarray(getattr(va.log, name))
+        for name, col in log_columns(va.log).items():
+            x = np.asarray(col)
             valid = np.asarray(va.log.valid)
             if channel_map and name in ("channel", "source"):
                 mapped = np.vectorize(

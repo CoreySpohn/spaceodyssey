@@ -158,6 +158,9 @@ class EffectTable(eqx.Module):
     scope: jax.Array
     disposition: jax.Array
     disruptive: jax.Array  # reserved: asks to break a frozen horizon
+    # The program a row charges (and, for a Stop, closes); absent (None, no leaf) unless
+    # the capacities hold more than one program, so a study with one is unchanged.
+    program: jax.Array | None = None
 
 
 def effects_none(caps):
@@ -166,6 +169,7 @@ def effects_none(caps):
     return EffectTable(
         **{n: z for n in EFFECT_FIELDS if n != "disruptive"},
         disruptive=jnp.zeros(caps.n_effects, B),
+        program=z if caps.n_programs > 1 else None,
     )
 
 
@@ -223,6 +227,12 @@ def snapshot_view(carry, audience, caps):
     cols["product"] = jnp.where(vis[:, None], log.product, 0)[order]
     # Settlement ids shift when private events are queued; hide them from policies.
     cols["acquisition_id"] = jnp.zeros_like(cols["acquisition_id"])
+    if log.program is not None:
+        # only the policy is shown a program id; the observer's column is all zeros
+        shown = vis if audience == Audience.POLICY else jnp.zeros_like(vis)
+        cols["program"] = jnp.where(shown, log.program, 0)[order]
+    else:
+        cols["program"] = None
     return Snapshot(
         log=RecordLog(**cols),
         n_rows=vis.sum().astype(I64),
@@ -268,10 +278,12 @@ def digest_ints(words, salt=0):
 def conditional_view_leaves(view):
     """The leaves of a view that exist only where a feature does, in digest order.
 
-    Today the pedigree the view shows (a width-0 column when the refresh protocol is
-    off). A feature that adds a leaf to the view lists it here.
+    The pedigree the view shows (a width-0 column when the refresh protocol is off) and
+    the program column (absent with one program). A feature that adds a leaf to the
+    view lists it here.
     """
-    return (view.log.product,)
+    program = () if view.log.program is None else (view.log.program,)
+    return (view.log.product, *program)
 
 
 def snapshot_fingerprint(view, layout):
@@ -301,4 +313,7 @@ def snapshot_fingerprint(view, layout):
     return jax.lax.bitcast_convert_type(h, I64)
 
 
-EFFECT_FIELDS = tuple(f.name for f in dataclasses.fields(EffectTable))
+# the columns every effect table has; `program` is present only with several programs
+EFFECT_FIELDS = tuple(
+    f.name for f in dataclasses.fields(EffectTable) if f.name != "program"
+)

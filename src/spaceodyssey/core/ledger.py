@@ -38,17 +38,26 @@ class Ledger(eqx.Module):
     # what admissions have debited and cancellations have credited back, by row
     debited: jax.Array  # F64[BR, R]
     refunded: jax.Array  # F64[BR, R]
+    # Programs a PROGRAM Stop has closed, B[P]; present only with more than one program
+    program_closed: jax.Array | None = None
 
 
-def _resource_rows(study, lane):
-    """Balance row charged by each resource: r0 asset, r1 program, r2 shared."""
+def _resource_rows(study, lane, program=0):
+    """Balance row charged by each resource: r0 asset, r1 program, r2 shared.
+
+    The program row is `n_assets + program`; with one program it is the one row.
+    """
     caps = study.caps
     if caps.n_resources != 3:
         raise ValueError("the ledger charges exactly three resources")
+    if caps.n_programs == 1:
+        program_row = jnp.asarray(caps.n_assets, I64)
+    else:
+        program_row = jnp.asarray(caps.n_assets, I64) + jnp.asarray(program, I64)
     return jnp.stack(
         [
             study.assets.lane_asset[lane].astype(I64),
-            jnp.asarray(caps.n_assets, I64),
+            program_row,
             jnp.asarray(caps.n_balance_rows - 1, I64),
         ]
     )

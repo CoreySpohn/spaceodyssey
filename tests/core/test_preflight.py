@@ -170,6 +170,7 @@ LOCATORS = {
     "disruptive_resource": ("assets", None, "disruptive_resource", (0,)),
     "disruptive_effect": ("policy", 0, "disruptive", ()),
     "drain_below_campaign": ("policy", 0, "stops", (1,)),
+    "program_out_of_range": ("policy", 0, "programs", (0,)),
     "channel_without_order": ("channels", None, "coincident_order", ()),
     "channel_order_out_of_range": ("channels", None, "coincident_order", (2,)),
     "channel_kind_unregistered": ("channels", None, "kind", (2,)),

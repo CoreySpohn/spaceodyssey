@@ -403,6 +403,29 @@ def stops(study: Study):
     return out
 
 
+def programs(study: Study):
+    """P001: a program id a policy names outside `0 <= program < n_programs`."""
+    out = []
+    n = study.caps.n_programs
+    for i, policy in enumerate(study.agenda.policies):
+        for j, program in enumerate(declaration_of(policy).programs):
+            if not 0 <= program < n:
+                out.append(
+                    Finding(
+                        FindingCode.P001,
+                        ERROR,
+                        f"policy[{i}]",
+                        f"program {program} is outside the {n} the capacities hold",
+                        f"name a program from 0 to {n - 1}, or raise n_programs",
+                        subject="policy",
+                        index=i,
+                        member="programs",
+                        entry=(j,),
+                    )
+                )
+    return out
+
+
 def channels(study: Study):
     """T002 and R001: coincident order and record kinds of the channel table."""
     out = []
@@ -528,6 +551,7 @@ def preflight(
         *capability(study, executor),
         *reserved(study),
         *stops(study),
+        *programs(study),
         *channels(study),
         *components(study, context),
     ]

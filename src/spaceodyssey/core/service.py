@@ -132,7 +132,7 @@ def commit_result(carry, payload, kind, study):
         decision=req.decision,
         caps=caps,
     )
-    return _tree_set(c2, request=empty_event_row())
+    return _tree_set(c2, request=empty_event_row(caps))
 
 
 @eqx.filter_jit

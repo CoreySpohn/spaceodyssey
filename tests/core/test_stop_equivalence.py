@@ -16,7 +16,9 @@ def live_state(c):
     """Every leaf of the carry, with the dead rows of the event queue zeroed."""
     live = c.ev.valid
     ev = tuple(
-        jnp.where(live, getattr(c.ev, f.name), 0) for f in dataclasses.fields(c.ev)
+        jnp.where(live, getattr(c.ev, f.name), 0)
+        for f in dataclasses.fields(c.ev)
+        if getattr(c.ev, f.name) is not None
     )
     rest = tuple(getattr(c, f.name) for f in dataclasses.fields(c) if f.name != "ev")
     return ev, rest

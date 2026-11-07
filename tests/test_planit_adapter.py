@@ -238,6 +238,8 @@ def test_host_and_compiled_agree_record_for_record(replays):
         comparison = core.histories_equal(compiled.history(0), host.history())
         assert comparison.ok, comparison
         for field in dataclasses.fields(host.carry.log):
+            if getattr(host.carry.log, field.name) is None:
+                continue
             np.testing.assert_array_equal(
                 getattr(compiled.carry.log, field.name)[0],
                 getattr(host.carry.log, field.name),
