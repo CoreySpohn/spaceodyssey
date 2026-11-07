@@ -28,7 +28,7 @@ N_DECISIONS = 4  # the wait, two observations and the drain
 AGES = tuple(AGE * 2**k for k in range(4))  # each one twice the one before
 
 
-@pytest.mark.medium  # the merge-time guard: one program per executor
+@pytest.mark.slow  # one cold program per executor
 def test_the_epoch_relation_holds_for_three_shifts_on_both_executors():
     """B7 row 6 (a), and B6 on survey 6. Fails if a shift of the epoch origin, one of
     them larger than the oldest prior age, moves any decision, record, belief or

@@ -66,7 +66,7 @@ def adaptive_on(batch):
     )
 
 
-@pytest.mark.medium
+@pytest.mark.slow  # survey 2 runs cold on the host executor
 def test_a_belief_ignoring_revisit_policy_with_no_refresh_is_survey_1(
     batch, survey_1_run
 ):
@@ -80,7 +80,7 @@ def test_a_belief_ignoring_revisit_policy_with_no_refresh_is_survey_1(
         assert same_histories(run, survey_1_run.result, N_WORLDS)
 
 
-@pytest.mark.medium
+@pytest.mark.slow  # one cold run per executor
 @pytest.mark.parametrize("executor", ["host", "compiled"])
 def test_with_refresh_the_actions_are_survey_1s_though_the_history_is_not(
     executor, batch, survey_1_run
@@ -102,7 +102,7 @@ def test_with_refresh_the_actions_are_survey_1s_though_the_history_is_not(
     assert not same_histories(run.result, survey_1_run.result, N_WORLDS)
 
 
-@pytest.mark.medium
+@pytest.mark.slow  # a cold adaptive host run
 def test_the_adaptive_policy_acts_on_its_belief(batch, survey_1_run, adaptive_off):
     """Fails if the adaptive policy takes survey 1's plan, which would make the two
     reductions above vacuous: some world must choose a different subject sequence.

@@ -34,7 +34,7 @@ KINDS = {
     ("policy", "survey5.follow_up", 1): FollowUpPolicy,
     ("policy", "survey5.absolute_plan", 1): AbsolutePlanPolicy,
 }
-pytestmark = pytest.mark.medium
+pytestmark = pytest.mark.slow  # every test runs a cold study
 
 N_STEPS = 60
 LATER = 100

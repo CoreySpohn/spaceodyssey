@@ -45,7 +45,7 @@ def runs(request):
     return request.param, with_ofti, without
 
 
-@pytest.mark.medium
+@pytest.mark.slow  # cold host runs of two policies, shared by both tests
 def test_an_ofti_refit_installs_particles_but_does_not_change_the_actions(runs):
     """Fails if adaptive search cannot read detections alongside an orbit fit,
     or a refresh changes its complete effects or acquisition payloads. The ignoring
@@ -83,7 +83,7 @@ def test_an_ofti_refit_installs_particles_but_does_not_change_the_actions(runs):
         assert 1 in observed
 
 
-@pytest.mark.medium
+@pytest.mark.slow  # cold host runs of two policies, shared by both tests
 def test_the_action_projection_sees_a_different_plan(runs):
     """Fails if an ignoring plan matches the adaptive path or another ignoring plan."""
     _, _, without = runs

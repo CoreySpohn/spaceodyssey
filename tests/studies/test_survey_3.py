@@ -318,7 +318,7 @@ def replay_failures(store, roots, names):
     return failures
 
 
-@pytest.mark.medium  # the merge-time guard: two variants, one program per executor
+@pytest.mark.slow  # two variants, one cold program per executor
 def test_an_observer_only_source_moves_no_policy_view_or_decision():
     """B7 row 3 (d), the hidden-row check of D5 and K3 over a whole run, with replay
     (D2). Fails if a public prior whose pedigree names an observer-only raw row

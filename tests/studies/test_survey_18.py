@@ -268,7 +268,7 @@ def _precursor(world):
     return int(log.released_tick[rows[0]]), int(log.accepted_tick[rows[0]])
 
 
-@pytest.mark.medium  # the merge-time guard: one program per executor
+@pytest.mark.slow  # one cold program per executor
 def test_the_precursor_changes_the_plan_only_when_released_to_the_policy():
     """B7 row 18 (a), (c) and (e) on both executors. Fails if a withheld precursor's
     payload, or an observer-only precursor, moves any decision or acquisition in any

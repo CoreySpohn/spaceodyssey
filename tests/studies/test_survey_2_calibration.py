@@ -16,7 +16,7 @@ from spaceodyssey.studies.survey_2 import (
     survey_2,
 )
 
-pytestmark = pytest.mark.medium
+pytestmark = pytest.mark.slow  # 2000 worlds on one adaptive run, shared by every test
 
 N_WORLDS = 2000
 N_STEPS = 40
