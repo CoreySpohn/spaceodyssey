@@ -67,7 +67,7 @@ branch.
   both.
 - Fingerprint consumers: `snapshot_fingerprint` is the only hasher; `decision_fingerprint`,
   `_snapshot_for` and the `answer_pending` rebuild all call it on a `snapshot_view`.
-- Observer audience: `balance_view` returns `(None, None)` for any audience but the policy;
+- Observer audience: `balance_view` returns all `None` for any audience but the policy;
   the observer fingerprint test covers on, bumped and off carries.
 - Codec: `Capacities` is the only declaration that gained fields; `dump` and `load` use the
   S1 optional rule unchanged.
@@ -110,9 +110,10 @@ Controls and mutants (A7):
    Rejected: a field on `Study` (it would need `STUDY_SLOTS` and a key version) and a ledger
    array (the value is static and sets a shape-free rounding only).
 2. **The flag.** `Capacities.snapshot_balances` as S1 declared it. No new study field.
-3. **Balance rows and ids.** The view carries the whole ledger with no extra id column: program
-   `p` is row `n_assets + p`. Rejected: a separate id column (one more leaf and a second
-   fingerprint question for no information the row order does not hold).
+3. **Balance rows and ids.** The view carries the whole ledger plus a `balance_rows` column
+   naming each row (kind 0 asset, 1 program, 2 shared; index within the kind), hashed with the
+   integer balance. Review round 1 replaced the first choice, which relied on row order alone and
+   let a (1 asset, 3 programs) and a (2 assets, 2 programs) layout share one digest.
 4. **What counts as another effect.** Any permitted, non-empty row (Observe, Wait, Stop, Cancel,
    Allocate or a second Query row alongside a Query that is not alone). A row the phase mask
    forbids keeps `FORBIDDEN`. Two Queries and nothing else are not a mix; the second gets
@@ -123,8 +124,8 @@ Controls and mutants (A7):
    admitting the Query and refusing the siblings (the spec says whole).
 6. **Observer view.** No balance at all, not a masked zero. The observer fingerprint never
    changes.
-7. **Rounding.** `jnp.round` (half to even) over the quantum, int64. Values past int64 are not
-   guarded; a balance that large is outside the ledger's float range of use.
+7. **Rounding.** `jnp.round` (half to even) over the quantum, int64. A study whose
+   budget over the quantum exceeds 2**53 is refused at construction (review round 1).
 8. **Pre-flight.** One finding: X002 for a quantum with the flag off. No new code, since the
    spec names only `QUERY_MIXED` (runtime) for S4. A mixed decision is a runtime property of a
    policy and cannot be found from its declaration.
@@ -159,3 +160,89 @@ S3a (pricing and refunds) edits `handlers.py`, `transaction.py` (`_commit_observ
 `conditional_view_leaves` tuple. Balance timing: the balance is the carry's ledger at the
 decision, so a refund S3a credits at settlement is visible at the next decision after it is
 credited, not at its release; S3a's private-event invariance (K6) needs its own check.
+
+## Review round 1
+
+Three findings, all accepted. The default scan and init StableHLO are unchanged
+(`_scan_worlds` sha256 `a67917728c4878feaa35f3bccc622be9ff6850ec65b5adf22867e668c9d1d791`,
+1,292,736 bytes; `_init_worlds` `09226cf96404994bdcd4034eb93ca3487b9bd792d502d5dd55d31251afb99f71`),
+and no pin moved.
+
+### 1. A refund queued ahead of a lone Query
+
+A Cancel queued by an earlier decision returns balance when it runs at its tick, which can be
+ahead of the request a later decision queues at the same tick. The request carried the
+fingerprint of the decision's snapshot, so `answer_pending` rebuilt a view with the refunded
+balance and raised "the snapshot changed between the request and its answer" on both executors.
+The repro is the script Observe and Wait, Wait and Cancel, Query, Stop on the toy study.
+
+Choice: `h_request`, the handler that holds the run for the host, now stamps the request again
+with the fingerprint of the policy snapshot as it stands when the run is held, at the
+decision that asked. It does so only while `caps.snapshot_balances` is on (a static branch), so
+the default program is untouched. Why this one:
+
+- The host answers on the state the run is held at, and `answer_pending` rebuilds exactly that,
+  so the stamp and the rebuild agree for any ledger event ordered ahead of the request, whatever
+  produced it (a refund, a settlement, a completion), not only the one in the repro. Nothing
+  runs between holding the run and answering it.
+- Reordering the request ahead of same-tick ledger events would move ties and `N_TIES`, and
+  would change every history that holds a Query.
+- Answering from a snapshot kept on the request needs a second copy of the view in the carry.
+- Turning the mismatch into an admission outcome cannot work: the mismatch arises after
+  admission, at a later event.
+
+What it costs: with balances on, the request stamp is no longer the decision's fingerprint, so
+the stamp stops checking that nothing visible moved between the decision and the hold. The
+mixed-decision refusal and the event order already keep every source of that move out except
+ledger events ahead of the request, which are exactly the case the stamp now follows. The trace
+still records the decision's own fingerprint. The change is in `handlers.py` (one branch in
+`h_request` and one import), which S3a also edits.
+
+Tests: `test_a_lone_query_survives_a_refund_queued_ahead_of_it_on_both_executors` runs the repro
+on both executors with balances on (it failed before the change; the same script with balances off passes on
+`main`, run once by hand and not kept in the suite); `test_a_held_request_is_stamped_with_the_snapshot_it_is_answered_on` checks the stamp
+directly, including that an off study leaves it alone; the mutant that keeps the decision's
+stamp fails it.
+
+### 2. Row identity
+
+The policy view now carries `balance_rows` (`(rows, 2)` int64: kind and index within the kind),
+and the digest hashes it before the integer balance. `conditional_view_leaves` lists it with
+`balance_q`, so it exists only with balances on. Test: the (1, 3) and (2, 2) layouts on one
+`arange(15).reshape(5, 3)` budget now give different fingerprints, and the row names are
+asserted; a mutant that drops the names from the leaf list fails it.
+
+### 3. The integer range
+
+Choice: validate at construction, in `Study.__check_init__`, not at view time. With the flag on,
+`max |budget| / balance_quantum` must be finite and at most 2**53. A debit lowers a balance and
+a refund restores at most what was debited, so the budget bounds every balance and one check
+covers the run. Past 2**53 a float no longer separates neighbouring counts, and the int64
+conversion saturates at 2**63 (the review's quantum of 1e-12 on a budget of 10,000,000 gave
+INT64_MAX for 10,000,000 and 9,999,999). A view-time check would need `checkify` inside every
+compiled scan and would still fail late. A traced budget is not judged, and a study with the
+flag off keeps any budget. Test: six budget and quantum pairs (the saturating pair, 2**53
+accepted, 2**54, infinity and NaN refused, a pair that fits), the off study, and a mutant that
+removes the check.
+
+### Review round 1 tests and gates
+
+Added 13 tests to `tests/core/test_snapshot_balances.py` (38 in the file): 1 refund repro run
+(medium), 1 stamp check, 1 stamp mutant, 2 layout (check and mutant), 6 range cases, 1 off
+study, 1 range mutant. The `Snapshot` shims in `test_snapshot_fingerprint.py` and
+`test_pedigree_layout.py` carry the new field. Gate results are in the section below.
+
+### Review round 1 gate results
+
+- Full quick tier (`-m "not slow"`, `-n 2 --dist loadfile`, entry-points file deselected) on the
+  fixed tree before the last two edits: 2232 passed, 6 failed in 350 s, peak 7.7 GB under queue
+  load. Five of the six were not caused by S4: the entry-points test (stale installed metadata,
+  as on `main`) and four unit or medium budget overruns under load in files S4 does not touch or
+  in the balances-off control run, which was then dropped from the suite (cold alone 12 s, 39 s
+  under load). The sixth, `test_allowance_is_scoped_to_rule_function_and_count`, was this
+  change: the range check tested the argument with `isinstance`, which the study-dispatch lint
+  forbids; it now catches the tracer conversion error instead.
+- After those two edits, re-run of the lint, balances, fingerprint, pedigree, guard and codec
+  files including the slow mutants (entry-points file deselected): 678 passed in 121 s.
+- `ruff check` and `ruff format --check` clean. Default `_scan_worlds` and `_init_worlds`
+  StableHLO hashes unchanged (above); no pin moved.
