@@ -17,21 +17,22 @@ The suite is dominated by XLA compilation. Two settings keep it fast and small:
 
 import ctypes
 import gc
-import importlib.util
 import os
 import sys
 from pathlib import Path
 
 import jax
 import pytest
+from hwoutils.testbudget.config import load_config
 from hypothesis import settings
 
 jax.config.update("jax_enable_x64", True)
 
-# Released hwoutils versions may not include the optional budget plugin yet.
-pytest_plugins = []
-if importlib.util.find_spec("hwoutils.testbudget") is not None:
-    pytest_plugins.append("hwoutils.testbudget.plugin")
+# The budget plugin is mandatory and enforces the tiers set in [tool.testbudget]
+# (unit 5 s, medium 30 s, slow 300 s per test, measured on a laptop). A slower machine
+# scales every tier budget by SPACEODYSSEY_BUDGET_SCALE (CI sets the runner's factor).
+pytest_plugins = ["hwoutils.testbudget.plugin"]
+BUDGET_SCALE = float(os.environ.get("SPACEODYSSEY_BUDGET_SCALE", "1"))
 
 settings.register_profile("quick", max_examples=25, deadline=None)
 settings.register_profile("nightly", max_examples=200, deadline=None)
@@ -148,6 +149,8 @@ def save_viz_png():
 SLOW_FILES = frozenset(
     {
         "test_slice1_gate.py",
+        # the Slice 2b gate reruns the golden histories and reads the commit history
+        "test_slice2b_gate.py",
         # observer kit on runs: one executor compile alone exceeds the unit budget
         "test_observer_kit_runs.py",
         # refresh runs compile the chunked driver and the masked kernel per executor
@@ -198,10 +201,24 @@ SLOW_FILES = frozenset(
 )
 
 
-def pytest_collection_modifyitems(items):
+def _tier(item):
+    """The budget tier of a test, by the rule the budget plugin applies."""
+    if item.get_closest_marker("slow"):
+        return "slow"
+    return "medium" if item.get_closest_marker("medium") else "unit"
+
+
+def pytest_collection_modifyitems(config, items):
+    budget = load_config(config.rootpath)
     for item in items:
         if item.path.name in SLOW_FILES:
             item.add_marker(pytest.mark.slow)
+        tier = _tier(item)
+        # the junit file carries the tier, so the CI summary counts medium tests
+        item.user_properties.append(("tier", tier))
+        if BUDGET_SCALE != 1 and not item.get_closest_marker("time_budget"):
+            seconds = BUDGET_SCALE * budget.tier_budget_s(tier)
+            item.add_marker(pytest.mark.time_budget(seconds))
         if item.path.name == "test_slice1_gate.py":
             # with `-n 2 --dist loadgroup` each worker compiles one executor family
             family = "compiled" if "compiled" in item.name else "host"
