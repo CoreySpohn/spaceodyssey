@@ -211,7 +211,7 @@ def test_the_policy_view_lists_every_balance_row_in_quanta():
     view = snapshot.snapshot_view(carry, POLICY, study.caps)
     n_rows = study.caps.n_assets + 2 + 1
     assert view.balance.shape == (n_rows, study.caps.n_resources)
-    np.testing.assert_array_equal(view.balance, carry.ledger.balance)
+    np.testing.assert_array_equal(view.balance, np.asarray(view.balance_q) * 0.5)
     expected = np.round(np.asarray(carry.ledger.balance) / 0.5).astype(np.int64)
     np.testing.assert_array_equal(view.balance_q, expected)
     program_1 = study.caps.n_assets + 1
@@ -511,8 +511,11 @@ class _Script(AbstractPolicy):
     def declare(self):
         return Declaration(stops=((Scope.CAMPAIGN, Disposition.DRAIN),))
 
+    def _index(self, view):
+        return jnp.minimum(view.n_dec, len(self.rows) - 1)
+
     def decide(self, pstate, view, study, key):
-        table = jnp.asarray(self.rows, I64)[jnp.minimum(view.n_dec, len(self.rows) - 1)]
+        table = jnp.asarray(self.rows, I64)[self._index(view)]
         kind = table[:, 0]
         stop = kind == K.STOP
         eff = toy._effects(
@@ -527,6 +530,17 @@ class _Script(AbstractPolicy):
         return eff, pstate, jnp.asarray(0.0)
 
 
+class _Learner(_Script):
+    """Follows the script to decision 2 (a Query), then asks again at decision 3 only if
+    the snapshot says its previous Query was refused, and otherwise stops.
+    """
+
+    def _index(self, view):
+        n = view.n_dec
+        refused = False if view.query_refused is None else view.query_refused == n - 1
+        return jnp.where(n < 3, n, jnp.where(refused, 3, 4))
+
+
 def _script(*decisions):
     pad = (int(K.NONE), 0, 0)
     return tuple(
@@ -536,8 +550,9 @@ def _script(*decisions):
 
 
 # Observe and Wait; then Wait and Cancel, whose refund is queued ahead of the next
-# decision's request at its tick; then a lone Query (the request is stale and refused
-# while balances are shown); then the same Query again, which is answered; then Stop.
+# decision's request at its tick; then a lone Query (stale and refused while balances
+# are shown); then the same Query again, which `_Learner` sends only if it saw the
+# refusal; then Stop.
 REFUND_AHEAD = _script(
     [(K.OBSERVE, 0, 0), (K.WAIT, 10, 0)],
     [(K.WAIT, 10, 0), (K.CANCEL, 0, 0)],
@@ -547,10 +562,10 @@ REFUND_AHEAD = _script(
 )
 
 
-def _refund_study(on=True):
+def _refund_study(on=True, quantum=1.0):
     registry, kind = oracle.oracle_registry()
-    caps = registry.lower(Capacities(snapshot_balances=on))
-    return toy.survey_1(caps=caps, policies=(_Script(REFUND_AHEAD),)), kind
+    caps = registry.lower(Capacities(snapshot_balances=on, balance_quantum=quantum))
+    return toy.survey_1(caps=caps, policies=(_Learner(REFUND_AHEAD),)), kind
 
 
 class _BalanceService(oracle.ToyOracleService):
@@ -562,8 +577,8 @@ class _BalanceService(oracle.ToyOracleService):
         return np.asarray([balance, 0.0, 0.0])
 
 
-def _refund_run(on, n_requests, n_stale):
-    study, kind = _refund_study(on)
+def _refund_run(on, n_requests, n_stale, quantum=1.0):
+    study, kind = _refund_study(on, quantum)
     truths, roots = worlds(1, study.caps)
     host_service = _BalanceService(kind)
     carry, trace = HostExecutor().run(
@@ -586,7 +601,8 @@ def test_a_query_made_stale_by_a_queued_refund_is_refused_and_asked_again():
     """Fails with 'the snapshot changed between the request and its answer' if the
     stale request is held, or if it is answered on a state the policy did not read.
     The first Query is refused (one QUERY_STALE row, no request reaches the host), the
-    policy wakes, and its second Query is answered, on both executors.
+    policy reads the refusal in its next snapshot and asks again, and that Query is
+    answered, on both executors.
     """
     service, host = _refund_run(True, n_requests=1, n_stale=1)
     # the answer is computed on the state the asking decision read
@@ -596,9 +612,97 @@ def test_a_query_made_stale_by_a_queued_refund_is_refused_and_asked_again():
 
 
 @pytest.mark.slow  # the balances-off control: two more compiles, 12 s cold alone
-def test_with_balances_off_the_same_refund_study_answers_both_queries():
-    """The control: nothing is refused when balances are not shown."""
-    _refund_run(False, n_requests=2, n_stale=0)
+def test_with_balances_off_the_same_refund_study_refuses_nothing():
+    """The control: nothing is refused, the first Query is answered and the policy,
+    which has no refusal to read, stops.
+    """
+    _refund_run(False, n_requests=1, n_stale=0)
+
+
+@pytest.mark.slow  # two more compiles, 10 s cold alone
+def test_a_refund_inside_one_quantum_is_not_stale_because_the_view_cannot_show_it():
+    """Fails if the host could read a balance the fingerprint does not hash: with a
+    quantum of 10 the refund takes the balance from 9 to 10, one count either way, so
+    the request is held and answered on exactly what the policy read.
+    """
+    _refund_run(True, n_requests=1, n_stale=0, quantum=10.0)
+
+
+def _the_float_shows_only_the_hashed_integer():
+    """Two carries that differ by less than a quantum read the same float, and the
+    float is a whole number of quanta.
+    """
+    study = _study(True, 10.0)
+    base = _carry(True, 10.0)
+    near = _bumped(base, 3.0)
+    one = snapshot.snapshot_view(base, POLICY, study.caps)
+    two = snapshot.snapshot_view(near, POLICY, study.caps)
+    assert _fp(study, base) == _fp(study, near)
+    np.testing.assert_array_equal(one.balance, two.balance)
+    np.testing.assert_array_equal(one.balance, np.asarray(one.balance_q) * 10.0)
+
+
+def test_the_policy_reads_no_balance_the_fingerprint_does_not_hash():
+    """Fails if the float view carries the raw ledger balance."""
+    _the_float_shows_only_the_hashed_integer()
+
+
+def test_mutant_view_with_the_raw_float_fails_the_float_rule(monkeypatch):
+    """The float rule must fail when the view exposes the raw balance."""
+    _the_float_shows_only_the_hashed_integer()
+    real = snapshot.balance_view
+
+    def raw(carry, audience, caps):
+        _, quanta, rows = real(carry, audience, caps)
+        return carry.ledger.balance, quanta, rows
+
+    monkeypatch.setattr(snapshot, "balance_view", raw)
+    with pytest.raises(AssertionError):
+        _the_float_shows_only_the_hashed_integer()
+
+
+def _refusal_is_readable_by_the_policy_only():
+    study, carry = _study(True), _carry(True)
+    refused = eqx.tree_at(lambda c: c.query_refused, carry, jnp.asarray(2, I64))
+    for audience, shown in ((POLICY, True), (OBSERVER, False)):
+        view = snapshot.snapshot_view(refused, audience, study.caps)
+        assert (view.query_refused is not None) is shown
+    assert int(snapshot.snapshot_view(refused, POLICY, study.caps).query_refused) == 2
+    assert _fp(study, refused) != _fp(study, carry)
+    assert _fp(study, refused, OBSERVER) == _fp(study, carry, OBSERVER)
+    off = _carry(False)
+    assert off.query_refused is None
+    assert snapshot.snapshot_view(off, POLICY, _study(False).caps).query_refused is None
+
+
+def test_the_policy_snapshot_carries_the_refusal_and_it_moves_its_fingerprint():
+    """Fails if the refusal is absent from the policy view or digest, is shown to the
+    observer, or exists with balances off.
+    """
+    _refusal_is_readable_by_the_policy_only()
+
+
+@pytest.mark.parametrize("hide", ["view", "digest"])
+def test_mutant_hidden_refusal_fails_the_visibility_rules(monkeypatch, hide):
+    """The refusal rules must fail when the leaf is hidden from the view or digest."""
+    _refusal_is_readable_by_the_policy_only()
+    if hide == "view":
+        real = snapshot.snapshot_view
+
+        def hidden(carry, audience, caps):
+            return dataclasses.replace(real(carry, audience, caps), query_refused=None)
+
+        monkeypatch.setattr(snapshot, "snapshot_view", hidden)
+    else:
+        real = snapshot.conditional_view_leaves
+
+        def undigested(view):
+            leaves = real(view)
+            return leaves[:-1] if view.query_refused is not None else leaves
+
+        monkeypatch.setattr(snapshot, "conditional_view_leaves", undigested)
+    with pytest.raises(AssertionError):
+        _refusal_is_readable_by_the_policy_only()
 
 
 def _held(study, carry, fp):

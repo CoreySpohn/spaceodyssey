@@ -156,6 +156,7 @@ def _view(caps, product):
         release_version=jnp.asarray(0, I64),
         balance_q=None,
         balance_rows=None,
+        query_refused=None,
     )
 
 

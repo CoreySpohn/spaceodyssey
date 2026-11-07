@@ -42,6 +42,7 @@ CANONICAL_FIELDS = {
         "release_version",
         "refresh_dirty",
         "refresh_status",
+        "query_refused",
     ),
     "carry.ev": (
         "kind",
@@ -218,6 +219,11 @@ def refunds_on(carry):
     return carry.log.refund_index is not None
 
 
+def balances_on(carry):
+    """Whether the carry holds the balance snapshot (its refused-request leaf)."""
+    return carry.query_refused is not None
+
+
 # Fields that exist only where a feature does, by dotted path, each with the predicate
 # that says whether the carry holds the feature. A field of a feature that is off has
 # zero size and leaves the canonical history, so no history of a study without the
@@ -239,6 +245,7 @@ CONDITIONAL_FIELDS = {
     "carry.log.award_gen": refunds_on,
     "carry.ledger.refund_ignored": refunds_on,
     "trace.program": programs_on,
+    "carry.query_refused": balances_on,
 }
 REFRESH_GROUPS = tuple(CONDITIONAL_GROUPS)
 REFRESH_FIELDS = tuple(CONDITIONAL_FIELDS)

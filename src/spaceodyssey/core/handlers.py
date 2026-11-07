@@ -378,14 +378,19 @@ def h_request(c, ev, study, truth, root):
     While `caps.snapshot_balances` is on, a request whose snapshot is no longer the one
     the decision read (a refund or settlement queued ahead of it moved the balance) is
     refused: it is not held, nothing is computed, the trace row records
-    `AdmissionCode.QUERY_STALE`, and a same-tick wait wakes the policy, which may ask
-    again against the state it then reads.
+    `AdmissionCode.QUERY_STALE`, the policy view shows the asking decision's index
+    (`query_refused`), and a same-tick wait wakes the policy, which may ask again
+    against the state it then reads.
     """
     held = dataclasses.replace(ev, valid=jnp.asarray(True))
     if not study.caps.snapshot_balances:
         return _tree_set(c, request=held), _emit(0, 0), record_none(study.caps)
     stale = _stale_request(c, ev, study)
-    c = _tree_set(c, request=where_tree(stale, empty_event_row(study.caps), held))
+    c = _tree_set(
+        c,
+        request=where_tree(stale, empty_event_row(study.caps), held),
+        query_refused=jnp.where(stale, ev.decision, c.query_refused),
+    )
     c = enqueue(
         c,
         stale,

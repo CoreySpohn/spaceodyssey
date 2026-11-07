@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from spaceodyssey.core.capacities import OPTIONAL
-from spaceodyssey.core.enums import I64, Audience, B, RecordStatus, version_slot
+from spaceodyssey.core.enums import F64, I64, Audience, B, RecordStatus, version_slot
 from spaceodyssey.core.records import (
     LOG_INT_FIELDS,
     REFUND_COLUMNS,
@@ -151,6 +151,9 @@ class Snapshot(eqx.Module):
     balance: jax.Array | None = None
     balance_q: jax.Array | None = None
     balance_rows: jax.Array | None = None
+    # Decision index of the last request refused as stale (`AdmissionCode.QUERY_STALE`),
+    # -1 for none: how a policy learns its Query was refused. Same presence rule.
+    query_refused: jax.Array | None = None
 
 
 class EffectTable(eqx.Module):
@@ -255,6 +258,7 @@ def snapshot_view(carry, audience, caps):
             mask = vis if col.ndim == 1 else vis[:, None]
             cols[name] = jnp.where(mask, col, jnp.zeros_like(col))[order]
     balance, balance_q, balance_rows = balance_view(carry, audience, caps)
+    shows = caps.snapshot_balances and audience == Audience.POLICY
     return Snapshot(
         log=RecordLog(**cols),
         n_rows=vis.sum().astype(I64),
@@ -265,6 +269,7 @@ def snapshot_view(carry, audience, caps):
         balance=balance,
         balance_q=balance_q,
         balance_rows=balance_rows,
+        query_refused=carry.query_refused if shows else None,
     )
 
 
@@ -273,19 +278,24 @@ def balance_view(carry, audience, caps):
 
     Only the policy is shown balances, and only while `caps.snapshot_balances` is on,
     so every other view keeps its pytree and its fingerprint. The integer is the
-    balance over `caps.balance_quantum`, rounded to the nearest unit; a study that
-    shows balances refuses a budget the integer could not hold (`Study`). The row
-    names are the ledger's layout: assets, then programs, then the shared row.
+    balance over `caps.balance_quantum`, rounded to the nearest unit, and the float is
+    that count times the quantum, so what a policy or a host service reads equals what
+    the fingerprint hashes. A study that shows balances refuses a budget the integer
+    could not hold (`Study`). The row names are the ledger's layout: assets, then
+    programs, then the shared row.
     """
     if not caps.snapshot_balances or audience != Audience.POLICY:
         return None, None, None
-    balance = carry.ledger.balance
+    quanta = jnp.round(carry.ledger.balance / caps.balance_quantum).astype(I64)
+    # the float is the integer count in quantum units, so it shows nothing the digest
+    # does not hash
+    balance = quanta.astype(F64) * caps.balance_quantum
     kind = np.repeat([0, 1, 2], [caps.n_assets, caps.n_programs, 1])
     index = np.concatenate(
         [np.arange(caps.n_assets), np.arange(caps.n_programs), np.zeros(1, int)]
     )
     rows = jnp.asarray(np.stack([kind, index], axis=1), I64)
-    return balance, jnp.round(balance / caps.balance_quantum).astype(I64), rows
+    return balance, quanta, rows
 
 
 _GOLDEN = np.uint64(0x9E3779B97F4A7C15)
@@ -325,16 +335,19 @@ def conditional_view_leaves(view):
 
     The pedigree the view shows (a width-0 column when the refresh protocol is off) and
     the program column (absent with one program), the refund index and award generation
-    (absent without refunds), then the balance row names and the integer balance (absent
-    unless balances are on; the float is not hashed). A feature that adds a leaf to the
-    view lists it here.
+    (absent without refunds), then the balance row names, the integer balance and the
+    last refused request (absent unless balances are on; the float is a multiple of the
+    integer's quantum and is not hashed). A feature that adds a leaf to the view lists it
+    here.
     """
     program = () if view.log.program is None else (view.log.program,)
     # the refund columns that are integers; the amount is a float and is not hashed
     refunds = tuple(
         x for x in (view.log.refund_index, view.log.award_gen) if x is not None
     )
-    balance = () if view.balance_q is None else (view.balance_rows, view.balance_q)
+    balance = (
+        () if view.balance_q is None else (view.balance_rows, view.balance_q)
+    ) + (() if view.query_refused is None else (view.query_refused,))
     return (view.log.product, *program, *refunds, *balance)
 
 

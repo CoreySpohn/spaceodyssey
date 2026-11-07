@@ -61,6 +61,9 @@ class Carry(eqx.Module):
     refresh: EventTable  # the checkpoint held for the host; `valid` until installed
     refresh_dirty: jax.Array  # B[2, n_subjects]: (observer, policy) subjects to refit
     refresh_status: jax.Array  # I64[2, n_subjects]: `RefitStatus` of the last refit
+    # decision index of the last request refused as stale, -1 for none; present only
+    # while `caps.snapshot_balances` is on (the policy view shows it)
+    query_refused: jax.Array | None = None
 
 
 def _zero_belief(caps):
@@ -131,6 +134,7 @@ def empty_carry(caps, balance=None):
         refresh=empty_event_row(caps),
         refresh_dirty=jnp.zeros((2, n_refresh), B),
         refresh_status=jnp.full((2, n_refresh), -1, I64),
+        query_refused=jnp.asarray(-1, I64) if caps.snapshot_balances else None,
     )
 
 
