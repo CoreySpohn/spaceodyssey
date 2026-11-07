@@ -305,6 +305,11 @@ SEEDED = {
         None,
     ),
     "disruptive_effect": (C.X002, lambda: _policy(disruptive=True), None),
+    "balance_quantum_unread": (
+        C.X002,
+        lambda: toy.survey_1(caps=Capacities(balance_quantum=0.5)),
+        None,
+    ),
     "drain_below_campaign": (
         C.T001,
         lambda: _with_policy(
@@ -368,6 +373,12 @@ CLEAN = {
         lambda: _with_policy(
             toy.survey_1(caps=Capacities(n_programs=2)),
             StatedPolicy(stated=Declaration(programs=(0, 1))),
+        ),
+        (),
+    ),
+    "balances_with_a_quantum": (
+        lambda: toy.survey_1(
+            caps=Capacities(snapshot_balances=True, balance_quantum=0.5)
         ),
         (),
     ),

@@ -9,6 +9,7 @@ import dataclasses
 
 import numpy as np
 
+from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import (
     EXECUTOR_CAPABILITIES,
     EXECUTORS,
@@ -439,6 +440,25 @@ def failure_kinds(study: Study):
     return out
 
 
+def balances(study: Study):
+    """X002: a balance quantum set while the snapshot shows no balances."""
+    caps = study.caps
+    if caps.snapshot_balances or caps.balance_quantum == Capacities().balance_quantum:
+        return []
+    return [
+        Finding(
+            FindingCode.X002,
+            ERROR,
+            "caps.balance_quantum",
+            f"balance_quantum is {caps.balance_quantum} but snapshot_balances is off; "
+            "no rule reads it",
+            "restore the default, or turn snapshot_balances on",
+            subject="caps",
+            member="balance_quantum",
+        )
+    ]
+
+
 def stops(study: Study):
     """T001: a drain below campaign scope behaves as a close."""
     out = []
@@ -609,6 +629,7 @@ def preflight(
         *capability(study, executor),
         *reserved(study),
         *failure_kinds(study),
+        *balances(study),
         *stops(study),
         *programs(study),
         *channels(study),

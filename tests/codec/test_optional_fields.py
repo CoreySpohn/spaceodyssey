@@ -33,7 +33,13 @@ from spaceodyssey.studies import toy
 from spaceodyssey.studies.conformance import CORPUS
 from tests.codec.test_document import TOY_KINDS, assert_same_pytree
 
-CAP_FIELDS = ("awards", "refunds", "n_commitments", "snapshot_balances")
+CAP_FIELDS = (
+    "awards",
+    "refunds",
+    "n_commitments",
+    "snapshot_balances",
+    "balance_quantum",
+)
 STUDY_FIELDS = ("key_version",)
 CHANNEL_FIELDS = ("pricing", "surcharge", "failure_kind", "refund_deadline_ticks")
 RECORD_FIELDS = ("nonrefundable", "refund_index", "award_gen")
@@ -87,12 +93,23 @@ def test_no_corpus_document_holds_an_optional_field():
 def test_a_nondefault_optional_field_is_written_and_round_trips():
     """Fails if a value off its default is dropped, changed or not rebuilt exactly."""
     caps = dataclasses.replace(
-        Capacities(), awards=True, refunds=True, n_commitments=3, snapshot_balances=True
+        Capacities(),
+        awards=True,
+        refunds=True,
+        n_commitments=3,
+        snapshot_balances=True,
+        balance_quantum=0.5,
     )
     study = toy.survey_1(caps=caps, key_version=2)
     doc = _doc(study)
     assert doc["study"]["key_version"] == 2
-    assert [doc["study"]["caps"][n] for n in CAP_FIELDS] == [True, True, 3, True]
+    assert [doc["study"]["caps"][n] for n in CAP_FIELDS] == [
+        True,
+        True,
+        3,
+        True,
+        0.5,
+    ]
     text = _text(study)
     loaded = load_study(text, TOY_KINDS)
     assert_same_pytree(study, loaded)
@@ -106,7 +123,13 @@ def test_a_missing_optional_field_loads_at_its_default():
     study = toy.survey_1()
     loaded = load_study(json.dumps(_doc(study)), TOY_KINDS)
     assert loaded.key_version == 1
-    assert [getattr(loaded.caps, n) for n in CAP_FIELDS] == [False, False, 0, False]
+    assert [getattr(loaded.caps, n) for n in CAP_FIELDS] == [
+        False,
+        False,
+        0,
+        False,
+        1.0,
+    ]
     assert_same_pytree(study, loaded)
 
 
@@ -116,8 +139,10 @@ def test_a_missing_optional_field_loads_at_its_default():
         (("key_version",), 1),
         (("caps", "awards"), False),
         (("caps", "n_commitments"), 0),
+        (("caps", "snapshot_balances"), False),
+        (("caps", "balance_quantum"), 1.0),
     ],
-    ids=["study", "caps-bool", "caps-int"],
+    ids=["study", "caps-bool", "caps-int", "caps-balances", "caps-quantum"],
 )
 def test_a_field_written_at_its_default_is_refused(path, value):
     """Fails if a second document for the same study loads: it would hash apart."""
@@ -141,6 +166,17 @@ def test_a_wrong_typed_optional_value_is_refused_not_taken_for_the_default():
     doc["study"]["caps"]["awards"] = 0
     with pytest.raises(DocumentError):
         load_study(json.dumps(doc), TOY_KINDS)
+
+
+@pytest.mark.parametrize("name", ["snapshot_balances", "balance_quantum"])
+def test_an_explicit_null_balance_field_is_refused(name):
+    """Fails if `null` loads as the default of a balance field."""
+    caps = Capacities(snapshot_balances=True, balance_quantum=0.5)
+    doc = _doc(toy.survey_1(caps=caps))
+    doc["study"]["caps"][name] = None
+    with pytest.raises(DocumentError) as err:
+        load_study(json.dumps(doc), TOY_KINDS)
+    assert err.value.pointer.startswith("/study/caps")
 
 
 def test_a_required_field_still_cannot_be_missing():

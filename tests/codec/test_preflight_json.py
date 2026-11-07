@@ -20,6 +20,7 @@ from spaceodyssey.codec import (
     preflight_document,
 )
 from spaceodyssey.codec.preflight import DocumentCode, _follow, resolve_pointer
+from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import DRAW_COORDS
 from spaceodyssey.core.enums import (
     I64,
@@ -633,6 +634,11 @@ def _variant_x002_resource(seed):
     return _doc(_with(study, assets=assets)), None
 
 
+def _variant_x002_quantum(seed):
+    caps = Capacities(balance_quantum=0.5 if seed else 1.0)
+    return _doc(toy.survey_1(caps=caps)), None
+
+
 def _variant_x002_policy(seed):
     return _policy_doc(disruptive=seed), None
 
@@ -694,6 +700,12 @@ VARIANTS = {
         _variant_x002_resource,
         "/study/assets/disruptive_resource/data/1",
         _is(0),
+    ),
+    "X002-quantum": (
+        FindingCode.X002,
+        _variant_x002_quantum,
+        "/study/caps/balance_quantum",
+        _is(0.5),
     ),
     "X002-policy": (
         FindingCode.X002,

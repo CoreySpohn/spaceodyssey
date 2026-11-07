@@ -172,6 +172,7 @@ LOCATORS = {
     "frozen_horizon": ("assets", None, "freeze_ticks", (0,)),
     "disruptive_resource": ("assets", None, "disruptive_resource", (0,)),
     "disruptive_effect": ("policy", 0, "disruptive", ()),
+    "balance_quantum_unread": ("caps", None, "balance_quantum", ()),
     "drain_below_campaign": ("policy", 0, "stops", (1,)),
     "program_out_of_range": ("policy", 0, "programs", (0,)),
     "channel_without_order": ("channels", None, "coincident_order", ()),
