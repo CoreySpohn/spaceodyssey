@@ -506,7 +506,7 @@ def check_executor_parity(context, rows, refit, n_steps, observer=None):
     return host, compiled
 
 
-@pytest.mark.medium
+@pytest.mark.slow  # both executors compile the study around one real fit
 def test_executor_parity_on_one_certified_visit():
     """One certified visit, four particles: both executors install the same fit.
 

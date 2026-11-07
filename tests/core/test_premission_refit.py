@@ -340,7 +340,7 @@ def _belief_failures(result, priors=PRIORS, dropped_index=1):
     return failures
 
 
-@pytest.mark.medium  # the refresh study on the host executor, and two controls
+@pytest.mark.slow  # the refresh study on the host executor, and two controls
 def test_a_refit_observer_keeps_its_prior_across_a_refresh():
     """B3. Fails if, after several checkpoints, either audience's belief is not its
     own prior plus the rows it received (computed from the log), if the run does not
@@ -411,7 +411,7 @@ def test_equal_resolutions_refit_alike_on_both_boundaries():
     assert any("audience 2" in f for f in _belief_failures(differ))
 
 
-@pytest.mark.medium  # the refresh study on the host executor, replayed
+@pytest.mark.slow  # the refresh study on the host executor, replayed
 def test_two_subjects_sharing_a_local_index_fold_refit_and_replay_apart():
     """D006 per channel and subject. Fails if pre-flight refuses two subjects whose
     raw rows share local index 0 on channel 60, if the prior that drops subject 1's

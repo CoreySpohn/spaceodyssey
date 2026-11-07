@@ -188,6 +188,7 @@ def hand_rates(report, scene, a_au, Lambda, times_jd, *, ppfact=math.inf):
     )
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_detector_spec_and_report_refuse_undeclared_choices(observatory):
     """Fails if a detector without a name, family, dQE meaning or cadence is accepted.
 
@@ -231,6 +232,7 @@ def test_detector_spec_and_report_refuse_undeclared_choices(observatory):
             toy_report(observatory, **kwargs)
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_hand_count_and_variance_budget(observatory):
     """Fails if any count or variance component departs from its hand formula.
 
@@ -444,6 +446,7 @@ def test_fixed_frame_detector_variance(observatory):
         np.testing.assert_allclose(budget.var_detector, hand, rtol=1e-12)
 
 
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
 def test_fixed_frame_floor_agrees_with_jaxedith(observatory):
     """Fails if the fixed-frame SNR differs from jaxedith's with the floor off or on."""
     from jaxedith import count_variance_components_ayo
@@ -576,7 +579,7 @@ def relative_error(candidate, reference):
     return np.abs(ratio - 1.0).reshape(ratio.shape[0], -1).max(axis=1)
 
 
-@pytest.mark.medium  # The response package loads in about 4 s cold.
+@pytest.mark.slow  # The response package loads in 4 s cold, then jaxedith compiles.
 def test_cached_rates_match_the_full_jaxedith_call_near_the_inner_working_angle(
     yip_report,
 ):
@@ -618,7 +621,7 @@ def test_cached_rates_match_the_full_jaxedith_call_near_the_inner_working_angle(
     assert np.min(mutant_error[near[1:]]) > 1e-2
 
 
-@pytest.mark.medium  # Shares the response package fixture; one cold program each.
+@pytest.mark.slow  # Shares the response package fixture; cold jaxedith programs.
 def test_variance_agrees_with_jaxedith_and_the_system_wrapper(yip_report, observatory):
     """Fails if the summary SNR or rates disagree with jaxedith's own entry points.
 
