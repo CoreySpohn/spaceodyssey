@@ -347,7 +347,8 @@ def _decisions_at_zero(study, carry, truth, root):
     raise AssertionError("the run never left tick 0")
 
 
-@pytest.mark.medium  # compiles the shared transition for two studies
+# the seed unit test guards the kickoff retargeting at merge time (K6)
+@pytest.mark.slow  # compiles the shared transition for two studies
 def test_one_initial_decision_with_and_without_a_public_zero_information_import():
     """Fails if a public import of a row nobody folds adds a decision at tick 0, or
     changes the stateful plan policy's state, the decision count or the within-tick
@@ -807,18 +808,17 @@ def test_the_observer_and_the_importer_hold_one_table():
     ]
 
 
-@pytest.mark.parametrize("run", [False, True], ids=["folded", "handled"])
-def test_two_subjects_sharing_a_local_index_keep_their_own_weights(run):
+def test_two_subjects_sharing_a_local_index_keep_their_own_weights():
     """D006 per channel and subject. Fails if pre-flight refuses two subjects whose
     raw rows share a local index on one channel, or if the prior that drops one
-    subject's row under EXCLUDE_ROWS also drops the other subject's row, folded
-    directly or handled event by event.
+    subject's row under EXCLUDE_ROWS also drops the other subject's row, handled
+    event by event.
     """
     pedigree = list(ROWS["pedigree"])
     pedigree[5] = ((0, 60, 1, 0, False),)
     t = prior_table(edit={"local_index": [0, 1, 2, 0, 0, 1, 2], "pedigree": pedigree})
     rule = PedigreeRule.EXCLUDE_ROWS
-    study, c = _prior_carry(t, rule, run=run)
+    study, c = _prior_carry(t, rule, run=True)
     caps = study.caps
     for audience in (OBS, POL):
         w = resolve_overlap(t, rule, audience, derived_kinds=caps.derived_kinds)

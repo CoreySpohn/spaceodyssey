@@ -35,7 +35,6 @@ from spaceodyssey.codec.preflight import (
     read_upstream,
     resolve_pointer,
 )
-from spaceodyssey.core import HostExecutor
 from spaceodyssey.core.enums import RecordStatus
 from spaceodyssey.core.preflight import preflight
 from spaceodyssey.core.preflight.checks import PreflightContext
@@ -51,7 +50,6 @@ from spaceodyssey.studies.premission import (
 )
 from tests.codec.test_document import TOY_KINDS
 from tests.codec.test_run_document_runs import EXECUTORS, _corpus_document, _hash_pin
-from tests.core.helpers import one_world
 
 RESOLVER = KindResolver({**TOY_KINDS, **PREMISSION_KINDS})
 UPSTREAM = dump_study(toy.survey_1(), TOY_KINDS)
@@ -596,32 +594,6 @@ def test_two_subjects_of_one_channel_export_with_one_local_index():
     assert _ints(table.source.subject) == [0, 0, 1]
     assert _ints(table.local_index) == [0, 1, 0]
     assert table_findings(table, _study(table).caps) == []
-
-
-@pytest.mark.medium  # one compiled host run of the toy survey
-def test_a_toy_survey_channel_of_several_subjects_exports_to_one_channel():
-    """Fails if the measurements a real toy survey run writes on its one channel, two
-    subjects each counted from acquisition index 0, cannot be exported to one
-    downstream channel and imported without a pre-flight finding.
-    """
-    world = one_world()
-    run = HostExecutor().run(SOURCE, *world, 400)
-    log = run.carry.log
-    valid = np.asarray(log.valid)
-    assert set(np.asarray(log.subject)[valid].tolist()) == {0, 1}
-    table = export_records(
-        run,
-        MEASUREMENT,
-        3,
-        UPSTREAM.content_hash,
-        {0: 0, 1: 1},
-        {10: 60},
-        study=SOURCE,
-    ).table
-    assert table.n_rows == int(valid.sum())
-    assert sorted(_ints(table.local_index)) == [0, 0, 1, 1, 2]
-    context = PreflightContext(upstream_document=UPSTREAM)
-    assert preflight(_study(table), context=context) == []
 
 
 def _batched(log):

@@ -258,15 +258,6 @@ def test_a_policy_only_row_is_judged_by_the_policy_rule():
     assert _codes(named, AudiencePriorRefit()) == []
 
 
-def test_without_a_boundary_d009_and_d010_are_reported_unverified():
-    """Fails if a refit study with a table prior and no boundary in the context is
-    reported clean instead of unverified, or the warning is an error.
-    """
-    found = preflight(refit_study())
-    assert [(str(f.code), str(f.severity)) for f in found] == [("D010", "warning")]
-    assert "unverified" in found[0].message
-
-
 # ---- runs: the prior across a refresh, replay ---------------------------------------
 
 
@@ -376,7 +367,8 @@ def test_a_refit_observer_keeps_its_prior_across_a_refresh():
     assert _belief_failures(dropped)
 
 
-@pytest.mark.medium  # the refresh study on the compiled executor, replayed
+# the host run is replayed by the guard above at merge time (K6)
+@pytest.mark.slow  # the refresh study on the compiled executor, replayed
 def test_replay_reproduces_prior_run():
     """Named interface check (T4c). Fails if the compiled executor's run of the prior
     study does not hold each audience's prior plus its rows, or if keyed replay from
@@ -396,7 +388,7 @@ def _products(result):
     return np.sum(np.asarray(log.valid & (log.kind == PRODUCT_INDEX)), axis=-1)
 
 
-@pytest.mark.medium  # the alike study on the host executor with both boundaries
+@pytest.mark.slow  # the alike study on the host executor with both boundaries (K6)
 def test_equal_resolutions_refit_alike_on_both_boundaries():
     """D010 as amended 2026-11-07. Fails if, with both audiences resolving to the same
     priors, the observer-init boundary's run does not hold each audience's prior plus

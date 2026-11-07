@@ -1,7 +1,9 @@
 """The epoch relation with observation times before the run starts (negative ticks).
 
-The run-based checks use the synthetic study of `tests/core/battery_helpers.py`; the
-control that needs a second compiled policy is in `test_metamorphic.py` (slow tier).
+The run-based checks use the synthetic study of `tests/core/battery_helpers.py` and
+are in the slow tier, where the control that needs a second compiled policy also is
+(`test_metamorphic.py`). In the quick tier the comparators are checked here, and the
+relation runs with negative times in the survey 6 guard.
 """
 
 import numpy as np
@@ -64,7 +66,8 @@ def test_the_fixture_covers_negative_times_minus_one_and_a_shift_past_the_oldest
     assert max(EPOCH_SHIFTS) > OLDEST
 
 
-@pytest.mark.medium  # one compiled program per executor, shared by the three shifts
+# the survey 6 guard runs the relation with negative times at merge time (K6)
+@pytest.mark.slow  # one compiled program per executor, shared by the three shifts
 def test_the_epoch_relation_holds_with_negative_times_on_both_executors():
     """B6 on the synthetic study. Fails if either comparator (the log comparator or
     the decision-view comparator) ignores the shift, compares absolute ticks, takes
@@ -87,7 +90,7 @@ def test_the_epoch_relation_holds_with_negative_times_on_both_executors():
             assert result.detail["n_views"] == 2 * 5, where
 
 
-@pytest.mark.medium  # the same compiled program as the relation test, one executor
+@pytest.mark.slow  # a control; the same program as the relation test (K6)
 def test_the_epoch_relation_catches_rows_written_at_absolute_ticks():
     """Control: an importer that writes start ticks as if the run started at tick 0.
     Fails if either comparator lets the unshifted start ticks through (a comparator
