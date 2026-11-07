@@ -6,8 +6,8 @@ orphan: true
 
 R5 builds the two remaining Slice 2b surveys: survey 18 (exozodi-first, prescribed:
 a star-level precursor chooses between two plans, after R1) and survey 4 (a precursor
-exported from an upstream run, after R3). Survey 18 is recorded here; survey 4 follows
-once R3 is on `main`.
+exported from an upstream run, after R3, merged into this branch from `main` at
+`751f658`).
 
 ## Commits
 
@@ -15,7 +15,15 @@ once R3 is on `main`.
    (`a90a85d`)
 2. `test(studies): survey 18 assertions, one medium guard and the rest slow (K6)`
    (`55c459d`)
-3. this record (`6a1c2bc`, with its commit list)
+3. this record (`6a1c2bc`, with its commit list in `65ef971`)
+4. `Merge branch 'main' into s2b-r5` (`536803f`), bringing R3 (`751f658`)
+5. `test(studies): survey 18 evidence counts, the control on both executors, a host
+   parity mutant` (`8966b0b`; review round 1)
+6. `feat(studies): survey 4, a precursor exported from an upstream run and imported
+   with its lineage` (`de6f07d`)
+7. `test(studies): survey 4 assertions, a unit guard and the full runs slow (K6)`
+   (`bc03094`)
+8. this record's survey 4, review and checks sections
 
 ## What changed
 
@@ -24,6 +32,7 @@ once R3 is on `main`.
   `Survey18Photometry`, `Survey18Belief`, `Survey18Observer`, `Survey18Policy`,
   `Survey18Importer`, `survey_18_table` and `survey_18`.
 - `tests/studies/test_survey_18.py` (new).
+- Survey 4's files are listed in its own section below.
 - No shared file changed: `studies/premission.py`, `studies/prior_observer.py`,
   `studies/toy.py`, `core/`, `codec/` and `tests/conftest.py` are untouched, and so
   are the golden and document hash pins.
@@ -100,8 +109,9 @@ time including the about 1.5 s import), on a machine shared with other jobs:
 | `test_every_variant_passes_preflight_and_agrees_between_executors` | B7 executors | slow | 15.7 |
 
 Quick-tier cold time survey 18 adds: 16.0 s of wall time (about 14.5 s without the
-process import). With R4b's 42.6 s, Slice 2b has added 58.6 s; survey 4's guard
-would take it past the 60 s allowance.
+process import); 18.0 s when re-timed after review round 1, on the loaded machine,
+with `--threads 4`. The medium tests of R1, R2, R4a and R3 also count toward the
+Slice 2b allowance, which the slice already exceeds; R6 reconciles the total.
 
 ## Mutants and controls
 
@@ -178,13 +188,167 @@ the B7 test is a parity check with no seeded mutant.
 
 ## Spec points not satisfied
 
-- Survey 4 waits for R3 on `main`.
 - B7 at merge time covers survey 18 (a), (c) and (e); (b), (d), (f), B6 and the
   executor agreement pass in the slow tier only.
-- The quick-tier allowance: survey 18's guard brings Slice 2b to 58.6 s of the about
-  60 s, so survey 4's guard will exceed it unless the allowance moves or a guard
-  shrinks.
+- The quick-tier allowance: Slice 2b already exceeds its about 60 s with the medium
+  tests of R1 to R4b; survey 18's guard adds 16 to 18 s and survey 4 adds a unit
+  test only. R6 reconciles the total.
 - Survey 18 is not round-tripped through the codec (the importer subclass has no
   registered kind); B7 does not require it.
 - A negative release delay is refused at construction (`ValueError`), not by a
   pre-flight finding.
+
+## Review round 1 (survey 18)
+
+The tier-1 review returned "fix first" on two P2s and asked for a parity mutant. Each
+fix has a test that failed on a seeded mutant before it.
+
+1. **Vacuous relations.** At coupling 0 `swap_check` accepted empty decision and
+   acquisition projections, and B6 asserted only the count of rows before the
+   start. `swap_check` now requires of every run its five decisions, four
+   acquisitions and four folded measurements (`_missing_evidence`), and at least one
+   decision before the first differing release; B6 requires the unshifted run's
+   evidence, as many compared decision views as the run's decisions, and the five
+   records of each world. Mutant r11 (the policy drains at its first decision) is
+   killed by the guard, (b), (d), B6 and the control.
+2. **The control on one executor.** `TruthReadingRunner` ran the compiled executor
+   only; (f) now runs on both, still slow.
+3. **Parity mutant.** r12 shifts, on the host executor only, the `available_tick` of
+   a delayed precursor by one tick (`HostExecutor.advance` in a copy of `src/`); the
+   executor-agreement test rejects it (also B6).
+
+| Test | Tier | Cold s (after the fixes) |
+|---|---|---|
+| `test_the_precursor_changes_the_plan_only_when_released_to_the_policy` | medium (guard) | 18.0 |
+| `test_a_swapped_group_latent_moves_the_plan_only_after_a_differing_release` | slow | 16.1 |
+| `test_the_epoch_relation_holds_with_released_and_delayed_precursors` | slow | 41.2 |
+| `test_a_policy_reading_the_truth_latent_fails_rows_a_to_e` | slow | 17.0 |
+
+Timed alone, serially, caches off, `compute-run --threads 4`, on a machine shared with
+other jobs (load average about 8). B6 grew because its evidence reads the unshifted
+run, one more program per executor. The reviewer's one-thread cold run of the guard
+took 42.75 s; at four threads, as CI's two workers see it, it is 18.0 s, well under
+the 30 s medium budget, so it is unchanged.
+
+## Survey 4
+
+### What changed
+
+- `studies/survey_4.py` (new): `survey_4_upstream`, `export_precursor`,
+  `without_precursor`, `zero_information`, `LeastKnownPolicy`, `LeastKnownValue`,
+  `survey_4` and `SURVEY_4_KINDS`.
+- `tests/studies/test_survey_4.py` (new).
+- No shared file changed: `studies/precursor.py`, `studies/premission.py`, `codec/`
+  and `core/` are untouched.
+
+### As built
+
+- **Upstream.** The toy survey (`survey_4_upstream`) observes planets 0 and 1; planet
+  1 twice. `export_precursor` calls R3's `export_records` with its measurement kind,
+  the chosen audience (public by default), the upstream document's content hash,
+  the subject map `{1: 0}` (the upstream planet 1 is the downstream target 0) and
+  the producer map `{10: 60}`.
+- **Downstream.** `survey_4(table)` is the toy survey with the pre-mission importer
+  of the exported table and the toy running mean, which folds the imported
+  measurement rows like its own. `LeastKnownPolicy` observes, at each of its first
+  four decisions, the target (0 or 1) its summary holds the fewest measurements of,
+  the first on a tie, then drains. `LeastKnownValue` is the observer's count for its
+  least-known target. With `k` precursor rows of one target and four observations
+  the value is `(4 + k) // 2` against 2 without, so the toy's sign is positive (+1
+  for the two exported rows).
+- **Variants of one shape.** `without_precursor` pads every row (nothing imported),
+  `zero_information` makes every row an auxiliary row of value 0, and an export to
+  the observer only differs from the public one in its audience column. All share
+  one compiled program per executor.
+- **Kinds.** `SURVEY_4_KINDS` registers the policy and the value for `dump_study`, so
+  the downstream study is stored as a document and its lineage checked.
+
+### Tests
+
+Tests added: 4; retired: none. Cold times, each alone, serially, caches off,
+`compute-run --threads 4`, wall time with the about 1.5 s import:
+
+| Test | Spec | Tier | Cold s |
+|---|---|---|---|
+| `test_a_precursor_exports_imports_and_verifies_its_lineage` | 4 (d), (e), (f), the import half of (b), the first decision | unit (guard) | 4.5 (3.5 in the test) |
+| `test_the_precursor_raises_the_value_by_its_known_amount` | 4 (a), pre-flight with the upstream document, executor agreement | slow | 18.5 |
+| `test_the_precursor_moves_only_decisions_that_saw_it` | 4 (b), (c) | slow | 18.6 |
+| `test_the_epoch_relation_holds_with_an_exported_precursor` | B6 | slow | 19.3 |
+
+The guard compiles no executor: it exports a synthetic upstream log of five rows (a
+correction, a datum released after the upstream horizon, a planet not exported),
+stores the downstream study with its table in files and verifies the lineage
+(right upstream, wrong upstream, a tampered file), handles the import's tick-0
+events eagerly and compares the written rows with the table, and calls the
+policy on its snapshot with and without the precursor. Quick-tier time survey 4 adds:
+4.5 s of wall time. The slow tests share one real upstream run on the compiled
+executor and the survey's runs (four variants, both executors).
+
+### Mutants
+
+Each mutant was applied to a copy of `src/` and the test file run against it
+(`$TMPDIR` script, not committed). All 12 are killed.
+
+| Mutant | Where | Failing tests |
+|---|---|---|
+| s1 the earliest released revision exported | `precursor.export_records` | guard |
+| s2 a release after the upstream horizon counts | `precursor._released_to` | guard |
+| s3 lineage always passes | `premission.lineage_findings` | guard |
+| s4 an array file's sha256 not checked on read | `codec/files.py` | guard |
+| s5 the acquisition index from the row position | `PreMissionImporter.handle` | guard |
+| s6 the imported span from tick 0, not the import | `PreMissionImporter.handle` | B6 |
+| s7 the policy alternates, ignoring its summary | `LeastKnownPolicy.decide` | guard, (a), (b) |
+| s8 the value of the best-known target | `LeastKnownValue.evaluate` | (a) |
+| s9 `without_precursor` imports every row | `survey_4.without_precursor` | guard, (a), (b) |
+| s10 the zero-information rows keep kind and payload | `survey_4.zero_information` | (b) and (c) |
+| s11 the export widens the audience to both | `precursor._table` | (b) and (c) |
+| s12 offsets from tick 0, not the upstream horizon | `precursor._table` | guard, (a) |
+
+s4 was first applied to the write-side check (`FileStore._intact`), where it is
+inert; applied to the read-side check it is killed. s8 first survived: with two
+precursor rows the final counts are equal, so a maximum and a minimum agree. Test
+(a) now also compares the value with the least-known count read from the log on
+the observer-only variant, whose counts are unequal (4 and 2).
+
+### Spec silences decided here
+
+1. **The guard is a unit test** (coordinator, 2026-11-07): export, store, lineage,
+   tamper, import and first decision on a synthetic upstream log, with no executor
+   compile. The paired difference needs whole runs and is slow.
+2. **The value is the least-known target's measurement count**, a known-answer
+   oracle (`(n_obs + k) // 2`), not the toy's threshold count, whose difference
+   depends on the drawn signals.
+3. **The upstream document is the upstream study's document**
+   (`dump_study(survey_4_upstream())`); the upstream run itself is a toy run on the
+   compiled executor (slow) or a synthetic log (guard).
+4. **(b) "decisions whose snapshot showed a precursor row"** are the decisions at or
+   after the first policy release of an imported row, read from the log. A public
+   precursor is released at tick 0, so every decision sees it; the projection must
+   then differ (counted). The observer-only export is the case no decision sees,
+   and its projection must equal the run without the precursor.
+5. **(c) zero information** is the exported table with every row an auxiliary row of
+   value 0: present, public and imported, so a second initial decision would show,
+   but folded as nothing by the toy observer and never read by the policy.
+6. **(f) is checked on the synthetic log**, since the toy survey writes no
+   correction; R3's export tests cover the same rule more widely.
+
+### Spec points not satisfied
+
+- B7 at merge time covers survey 4 (d), (e), (f) and the import half of (b); (a),
+  (b), (c) and B6 on whole runs pass in the slow tier only.
+- The full survey 4 (an RV channel on a second asset) is Slice 3, as the memo puts
+  it.
+
+## Checks run at the final tree (both surveys, review round 1)
+
+- `tests/core/test_golden_histories.py` with `tests/codec/test_run_document_runs.py`
+  (`-n 2 --dist loadfile`): 189 passed in 191.4 s. No pin file changed.
+- Quick tier (`-m "not slow" -n 2 --dist loadfile`, entry-point test deselected): 2,172
+  passed in 380.2 s. The budget plugin reported four existing, untouched unit tests
+  over 5 s on the loaded machine (`test_reserved_fields.py` `freeze_ticks` 8.3 s,
+  `test_coincident_order.py` fault-first 9.4 s, `test_profile.py` hash 6.1 s,
+  `test_declarations_match_run.py` undeclared stop 7.6 s); none of R5's.
+- `test_survey_4.py`, `test_survey_18.py`, `tests/core/test_lints.py` and
+  `tests/test_internal_refs_guard.py`: 201 passed in 63.4 s.
+- `ruff check`, `ruff format --check`, `tools/check_internal_refs.py` and `pre-commit`
+  on the touched files: clean. Every touched file is ASCII.
