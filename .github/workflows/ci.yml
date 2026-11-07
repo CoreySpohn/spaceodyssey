@@ -35,6 +35,9 @@ env:
   SPACEODYSSEY_JAX_CACHE: ${{ github.workspace }}/.jax_cache
   JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS: "1"
   PYTHONHASHSEED: "0"
+  # The budget plugin enforces per-test tier budgets measured on a laptop; one
+  # process on this runner is about three times slower, so the budgets scale by 3.
+  SPACEODYSSEY_BUDGET_SCALE: "3"
 
 jobs:
   quick:
@@ -96,9 +99,14 @@ jobs:
             --durations=15 --durations-min=1.0 \
             --junitxml=junit-quick.xml
 
+      # The quick tier, medium tests included, stays under 540 s and within 60 s of
+      # the pinned baseline summary (the baseline file records its source and state).
       - name: Job summary
         if: always()
-        run: python .github/scripts/ci_summary.py junit-quick.xml --title "Quick tier" --budget-seconds 600
+        run: |
+          python .github/scripts/ci_summary.py junit-quick.xml --title "Quick tier" \
+            --budget-seconds 540 --require-tier medium \
+            --baseline .github/budget/quick_baseline.json --max-increase-seconds 60
 
   docs:
     name: Docs with executed examples
@@ -158,6 +166,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0   # the slice gates read the commit history
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:

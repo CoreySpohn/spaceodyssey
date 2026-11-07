@@ -4,9 +4,19 @@ name: Pilot
 # compiled executor's per-step cost (the step-cost baseline and its calibrated
 # mutant) and the cold compile time of the medium study tests. Installs like the
 # quick tier of ci.yml, without the JAX compile-cache restore. No secrets are used.
+#
+# With `quick_ref` set, it instead runs the whole quick tier cold at that ref (a
+# commit, branch or tag) and prints its summary as JSON in the baseline format of
+# .github/budget/. Dispatch it once at the reference commit and once at the commit
+# to judge: the difference of the two wall times is the cold cost the change added.
 
 on:
   workflow_dispatch:
+    inputs:
+      quick_ref:
+        description: "Run the whole quick tier cold at this ref (empty: the pilot)"
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -26,6 +36,7 @@ env:
 jobs:
   pilot:
     name: Step cost and cold compiles (py3.12)
+    if: inputs.quick_ref == ''
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -66,3 +77,52 @@ jobs:
         run: |
           python .github/scripts/pilot_summary.py step_cost.json junit-pilot-*.xml \
             | tee -a "$GITHUB_STEP_SUMMARY"
+
+  quick-cold:
+    name: Quick tier cold at ${{ inputs.quick_ref }} (py3.12)
+    if: inputs.quick_ref != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.quick_ref }}
+          persist-credentials: false
+
+      # The summary script of this workflow's own commit, which an older ref lacks.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: budget-tools
+          sparse-checkout: .github
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Install the package and test tools
+        run: |
+          uv venv .venv --python 3.12
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt
+
+      - name: Quick tier, cold
+        run: |
+          # The quick-tier selection and workers of ci.yml. Cold tests exceed their
+          # laptop budgets by design, so the budget plugin only reports here; a
+          # failing test is reported in the log and does not stop the measurement.
+          pytest tests/ -m "not slow" -n 2 --dist loadfile -ra --tb=short \
+            -p no:cacheprovider --timeout=900 --durations=40 --durations-min=1.0 \
+            --testbudget-mode report --junitxml=junit-quick-cold.xml || true
+
+      - name: Job summary
+        if: always()
+        env:
+          REF: ${{ inputs.quick_ref }}
+        run: |
+          python budget-tools/.github/scripts/ci_summary.py junit-quick-cold.xml \
+            --title "Quick tier, cold, at $REF" --allow-skips \
+            --write-summary quick-cold-summary.json --commit "$(git rev-parse HEAD)"
