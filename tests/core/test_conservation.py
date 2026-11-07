@@ -139,6 +139,26 @@ def test_a_lost_completion_is_charged_to_the_program_that_paid_it():
     assert result.passed, result
 
 
+def test_a_debit_moved_to_the_wrong_program_is_caught_after_an_overflow():
+    """Fails if the lost completion's program is read from the counters it checks."""
+    script = (observe(0, 0, 10, 1), wait(1, 200), observe(2, 0, 10, 1))
+    study = refund_study(script, cap_kw=dict(n_programs=2, n_log=1))
+    run = _run(study, n_steps=120)
+    row = study.caps.n_assets
+    assert balance_conserved(run).passed
+    ledger = run.carry.ledger
+    moved = dataclasses.replace(
+        ledger,
+        debited=ledger.debited.at[row, 1].add(10.0).at[row + 1, 1].add(-10.0),
+        balance=ledger.balance.at[row, 1].add(-10.0).at[row + 1, 1].add(10.0),
+    )
+    forged = SimpleNamespace(
+        study=study, carry=dataclasses.replace(run.carry, ledger=moved), trace=run.trace
+    )
+    np.testing.assert_allclose(np.asarray(moved.balance)[row : row + 2, 1], [90, 90])
+    assert not balance_conserved(forged).passed
+
+
 def _mutant(monkeypatch, old, new):
     monkeypatch.setattr(
         handlers, "_apply_refund", mutate(handlers._apply_refund, old, new)

@@ -340,8 +340,8 @@ def test_mutant_a_refund_past_its_deadline_is_caught(monkeypatch):
 @pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
 def test_mutant_a_refund_on_any_release_leaks_an_observer_only_receipt(monkeypatch):
     """Mutant: the credit applies on any release, not the policy's first."""
-    old = "attempt = first & rec.valid"
-    _with_apply(monkeypatch, mutate(handlers._apply_refund, old, "attempt = rec.valid"))
+    old = "        first\n        & rec.valid\n"
+    _with_apply(monkeypatch, mutate(handlers._apply_refund, old, "        rec.valid\n"))
     try:
         study = refund_study(
             CANCELLED,

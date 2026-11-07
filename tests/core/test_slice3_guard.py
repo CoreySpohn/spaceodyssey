@@ -20,6 +20,7 @@ import spaceodyssey.core.snapshot as snapshot
 from spaceodyssey.core import (
     Audience,
     HostExecutor,
+    empty_trace,
     handlers,
     init_carry,
     snapshot_fingerprint,
@@ -38,8 +39,8 @@ ON_ASSET_0 = ((0, 10), (1, 11), (0, 10))
 ON_ASSET_1 = ((0, 12), (1, 12), (0, 12))
 
 
-def _by_path(carry, path):
-    obj = carry
+def _by_path(carry, path, trace=None):
+    obj = trace if path.startswith("trace.") else carry
     for part in path.split(".")[1:]:
         obj = getattr(obj, part)
     return obj
@@ -80,7 +81,9 @@ def test_a_default_study_holds_every_gated_field_empty():
     carry = eqx.filter_jit(init_carry)(study, truth)
     for path, gate in base.CONDITIONAL_FIELDS.items():
         assert not gate(carry), path
-        leaf = _by_path(carry, path)  # empty, or absent (None) for a column
+        leaf = _by_path(
+            carry, path, empty_trace(study.caps)
+        )  # empty, or absent (None) for a column
         assert leaf is None or np.asarray(leaf).size == 0, path
 
 
@@ -101,7 +104,11 @@ def test_control_an_open_gate_puts_the_empty_leaf_in_the_history(monkeypatch):
     _, run, _ = baseline_host_run()
     quiet = set(_leaves_of(run.carry, run.trace))
     # an absent (None) column has no empty leaf to put in the history
-    held = {p for p in base.CONDITIONAL_FIELDS if _by_path(run.carry, p) is not None}
+    held = {
+        p
+        for p in base.CONDITIONAL_FIELDS
+        if _by_path(run.carry, p, run.trace) is not None
+    }
     opened = {
         p: (lambda carry: True) if p in held else gate
         for p, gate in base.CONDITIONAL_FIELDS.items()

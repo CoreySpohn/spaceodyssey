@@ -172,6 +172,9 @@ class Trace(eqx.Module):
     belief_aux: jax.Array
     n_log: jax.Array
     pol_u: jax.Array
+    # The program an event's debit or settlement is charged under; absent (None, no
+    # leaf) unless the capacities hold more than one program.
+    program: jax.Array | None = None
 
 
 # Trace fields filled by the observer layout's projection of the full belief.
@@ -211,6 +214,7 @@ def empty_trace(caps):
         belief_aux=jnp.zeros(caps.n_an, F64),
         n_log=z,
         pol_u=jnp.asarray(0.0, F64),
+        program=z if caps.n_programs > 1 else None,
     )
 
 

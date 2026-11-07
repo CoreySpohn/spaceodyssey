@@ -32,7 +32,6 @@ from spaceodyssey.core.records import pedigree_of
 from spaceodyssey.core.snapshot import snapshot_view
 
 ATOL = 1e-9
-MAX_REFUSED = 16  # most refused completions whose program is searched for
 
 
 def _valid_rows(run):
@@ -277,42 +276,15 @@ def _retained_net_spend(run):
     return spent
 
 
-def _assign_programs(values, room):
-    """Give each value to a program so each program receives exactly its room.
-
-    The trace names the lane of a completion whose record the log refused, not its
-    program, so the program is the one whose balance row the missing debit fits.
-    Returns one program per value, or `None` when no assignment fits.
-    """
-    order = sorted(range(len(values)), key=lambda k: -values[k])
-    left, out = list(room), [0] * len(values)
-
-    def place(n):
-        if n == len(order):
-            return all(abs(x) <= ATOL for x in left)
-        k = order[n]
-        for p in range(len(left)):
-            if left[p] >= values[k] - ATOL:
-                left[p] -= values[k]
-                out[k] = p
-                if place(n + 1):
-                    return True
-                left[p] += values[k]
-        return False
-
-    return out if len(values) <= MAX_REFUSED and place(0) else None
-
-
-def _refused_completions(run, unexplained):
+def _refused_completions(run):
     """Full cost of settlements the trace handled whose record the log refused.
 
     A completion handled with no row written lost its record to log capacity; its
-    debit stands and nothing credits it back. Cancellations are not counted here.
-    `unexplained` is what the retained records leave of the net debits; it fixes the
-    program of each lost completion when the study holds more than one.
+    debit stands and nothing credits it back. Cancellations are not counted here. The
+    trace names the program the settlement was charged under when the study holds more
+    than one.
     """
     study, t = run.study, run.trace
-    caps = study.caps
     ids = np.asarray(study.channels.id).tolist()
     cost = _charge_totals(study)
     lost = np.zeros(np.asarray(study.budget).shape)
@@ -321,20 +293,11 @@ def _refused_completions(run, unexplained):
         & (np.asarray(t.kind) == EventKind.DONE)
         & (np.asarray(t.n_written) == 0)
     )
-    held = []  # (lane, program-scoped amount) of each refused completion
     for i in np.flatnonzero(refused):
-        lane, vec = int(t.lane[i]), cost[ids.index(int(t.channel[i])), :]
-        rows = _balance_rows(study, lane)
+        program = 0 if t.program is None else int(np.asarray(t.program)[i])
+        rows = _balance_rows(study, int(t.lane[i]), program)
         for r, row in enumerate(rows):
-            if r != 1 or caps.n_programs == 1:
-                lost[row, r] += float(vec[r])
-        held.append(float(vec[1]))
-    if caps.n_programs > 1 and held:
-        owners = range(caps.n_assets, caps.n_assets + caps.n_programs)
-        room = [float(unexplained[row, 1]) for row in owners]
-        share = _assign_programs(held, room) or [0] * len(held)
-        for amount, p in zip(held, share, strict=True):
-            lost[caps.n_assets + p, 1] += amount
+            lost[row, r] += float(cost[ids.index(int(t.channel[i])), r])
     return lost
 
 
@@ -364,9 +327,7 @@ def balance_conserved(run):
         )
     kept = _retained_net_spend(run)
     overflowed = bool(int(c.overflow_mask) & Capacity.LOG_ROWS)
-    lost = np.zeros_like(kept)
-    if overflowed:
-        lost = _refused_completions(run, net - kept)
+    lost = _refused_completions(run) if overflowed else np.zeros_like(kept)
     residual = np.abs(net - kept - lost)
     if not np.all(np.isfinite(residual) & (residual <= ATOL)):
         row, res = np.unravel_index(int(np.argmax(residual)), residual.shape)

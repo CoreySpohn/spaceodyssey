@@ -107,8 +107,11 @@ None. `tests/core/golden_histories.json` and every pin file are unchanged.
   Mutants: whole-charge credit and a missing once-only test, each on program 0 and program 1.
 - `Record.nonrefundable`, `refund_index` and `award_gen` are optional document fields (omitted
   at default, old documents load, a null is refused, populated columns round-trip).
-- Log overflow: a refused completion is charged to the program whose balance row its debit
-  fits (the trace names the lane, not the program), searched over at most 16 refusals.
+- Log overflow: a refused completion is charged to the program the trace names. `Trace.program`
+  is a conditional leaf (present only with more than one program, registered in
+  `CONDITIONAL_FIELDS` as `trace.program` under `programs_on`), so no one-program history or
+  pin moves. A debit moved to the wrong program after an overflow now fails conservation.
+- The observer-release mutant matches the handler's multiline source and is asserted before use.
 - Default lowered scan hash unchanged (2a0a4ec280c8e0bbeaea...).
 
 ## K3 and K4 attribution
