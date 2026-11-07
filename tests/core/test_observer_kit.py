@@ -9,6 +9,7 @@ compile alone is over the unit budget.
 import dataclasses
 import math
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -37,7 +38,7 @@ from spaceodyssey.core.enums import RecordStatus
 from spaceodyssey.core.keys import refit_key
 from spaceodyssey.core.records import empty_log, log_records
 from spaceodyssey.core.refresh import revision_set_digest
-from spaceodyssey.studies.premission import PedigreeRule
+from spaceodyssey.studies.premission import PedigreeRule, overlap_roles
 from spaceodyssey.studies.prior_observer import PriorObserver, prior_study
 from tests.core.kit_helpers import (
     NOISE,
@@ -402,6 +403,70 @@ def test_zero_weight_rows_control_an_observer_that_ignores_weights(rule, message
     assert check_overlap_declared(study, observer=ignores)
     result = check_zero_weight_rows(study, observer=ignores)
     assert not result and message in result.diagnostic
+
+
+class GuardsByAudience(IgnoresWeights):
+    """Control: ignores the weights but folds only rows addressed to the audience."""
+
+    def fold_for(self, belief, rec, caps, audience):
+        addressed = (rec.audience & audience) != 0
+        folded = IgnoresWeights.fold_for(self, belief, rec, caps, audience)
+        return jax.tree_util.tree_map(
+            lambda new, old: jnp.where(addressed, new, old), folded, belief
+        )
+
+
+def test_the_zero_weight_probe_carries_the_rows_real_audience():
+    """Fails if the zero-weight check folds a probe row whose metadata the import
+    never writes (audience 0, so an observer guarding its folds by audience folds
+    nothing): such an observer folds an excluded public row into both beliefs.
+    """
+    t = prior_table()
+    study = prior_study(t, PedigreeRule.EXCLUDE_ROWS)
+    guarded = GuardsByAudience(table=t, rule=int(PedigreeRule.EXCLUDE_ROWS))
+    result = check_zero_weight_rows(study, observer=guarded)
+    assert not result and "moves the belief when folded" in result.diagnostic
+    assert "evidence row 3" in result.diagnostic  # the public row prior 5 names
+
+
+class NanWeights(PriorObserver):
+    """Control: reports NaN, not 0, for every row the rule drops."""
+
+    def weights(self, caps, audience):
+        w = PriorObserver.weights(self, caps, audience).astype(jnp.float64)
+        prior, evidence, _ = overlap_roles(
+            self.table, audience, derived_kinds=caps.derived_kinds
+        )
+        return jnp.where((evidence | prior) & (w == 0), jnp.nan, w)
+
+
+@pytest.mark.parametrize("rule", list(PedigreeRule), ids=lambda r: r.name.lower())
+def test_the_prior_checks_refuse_weights_outside_zero_and_one(rule):
+    """Fails if weights that are not a finite {0, 1} vector (NaN where the rule
+    drops a row, so the observer folds the row and keeps the prior) pass either
+    check.
+    """
+    t = prior_table()
+    study = prior_study(t, rule)
+    nan = NanWeights(table=t, rule=int(rule))
+    for check in (check_overlap_declared, check_zero_weight_rows):
+        result = check(study, observer=nan)
+        assert not result and "{0, 1}" in result.diagnostic
+
+
+def test_the_prior_checks_refuse_a_table_with_nothing_to_judge():
+    """Fails if check 7 passes a table with no prior (all padding), or the zero-weight
+    check passes a table with no row of weight zero: both would pass vacuously.
+    """
+    padded = prior_table(pad=tuple(range(7)))
+    with pytest.raises(ValueError, match="no prior"):
+        check_overlap_declared(prior_study(padded))
+    with pytest.raises(ValueError, match="no row of weight zero"):
+        check_zero_weight_rows(prior_study(padded))
+    external = prior_table(pad=(2, 3, 5, 6))  # one external prior, nothing dropped
+    assert check_overlap_declared(prior_study(external))
+    with pytest.raises(ValueError, match="no row of weight zero"):
+        check_zero_weight_rows(prior_study(external))
 
 
 def test_the_prior_checks_refuse_an_observer_that_reads_no_priors():

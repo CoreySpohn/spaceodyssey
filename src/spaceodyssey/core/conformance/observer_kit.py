@@ -328,7 +328,7 @@ def check_folded_once(study, run, truths, roots):
     if not bool(again.dup_fold):
         failures.append(f"a second release of log row {slot} left dup_fold clear")
     if getattr(study.observer, "reads_priors", False):
-        failures += _zero_weight_failures(study, study.observer)
+        failures += _zero_weight_failures(study, study.observer)[0]
     n_worlds = int(np.asarray(run.carry.dup_fold).size)
     return make_result("folded_once", failures, n_worlds=n_worlds, slot=slot)
 
@@ -1247,6 +1247,22 @@ def _roles(table, caps, audience):
     return _Roles(released & derived, released & ~derived, ids, named)
 
 
+def _weights(observer, caps, audience, n_rows):
+    """The observer's weights for `audience` as booleans, or a failure text.
+
+    The weights must be a vector of one finite value in {0, 1} per table row; a NaN,
+    a fraction or another shape is refused before any comparison reads it.
+    """
+    w = np.asarray(observer.weights(caps, audience))
+    ok = w.shape == (n_rows,) and bool(np.all(np.isin(w, (0, 1))))
+    if not ok:
+        return None, (
+            f"audience {audience}: the weights are not a {{0, 1}} vector of one entry "
+            f"per row (shape {w.shape}, values {np.unique(w).tolist()[:4]})"
+        )
+    return w == 1, None
+
+
 def check_overlap_declared(study, observer=None):
     """Check 7: the weights an observer resolves for each audience are sound.
 
@@ -1256,14 +1272,23 @@ def check_overlap_declared(study, observer=None):
     weight; no two retained priors name a common source (external entries count);
     and a weight of zero is justified by that audience's own evidence: a dropped
     prior names one of its evidence rows, a dropped evidence row is named by one of
-    its priors. Refuses an observer that does not declare `reads_priors`.
+    its priors. Weights that are not a finite {0, 1} vector of one entry per row
+    fail. Refuses an observer that does not declare `reads_priors`, and a table with
+    no prior for either audience (the check would pass without judging anything).
     """
     observer = _prior_reader(study, observer)
     caps, table = study.caps, observer.table
     failures, judged = [], 0
+    n_rows = len(np.asarray(table.kind))
+    roles_of = {a: _roles(table, caps, a) for a in AUDIENCES}
+    if not any(roles.prior.any() for roles in roles_of.values()):
+        raise ValueError("the table holds no prior for either audience to judge")
     for audience in AUDIENCES:
-        roles = _roles(table, caps, audience)
-        w = np.asarray(observer.weights(caps, audience)) > 0
+        roles = roles_of[audience]
+        w, bad = _weights(observer, caps, audience, n_rows)
+        if bad:
+            failures.append(bad)
+            continue
         priors = np.flatnonzero(roles.prior)
         evidence = np.flatnonzero(roles.evidence)
         seen = {roles.ids[r] for r in evidence}
@@ -1301,9 +1326,20 @@ def check_overlap_declared(study, observer=None):
 
 
 def _imported_row(table, i, caps, audience):
-    """Row `i` of the table as an import writes it and `audience` receives it."""
+    """Raw row `i` of the table as the import writes it and `audience` folds it.
+
+    The metadata are the import's: the row's own audience, its span from the offsets
+    relative to its release at tick 0, availability at tick 0, and the release
+    stamps at tick 0 of the audiences the row is addressed to (`accepted_tick` for
+    the observer, `released_tick` for the policy, -1 for an audience it is not).
+    The payload is masked for `audience`.
+    """
     base = record_none(caps)
     width = np.shape(table.payload)[1]
+    addressed = int(table.audience[i])
+    zero, unset = jnp.asarray(0, I64), jnp.asarray(-1, I64)
+    to_observer = addressed & int(Audience.OBSERVER)
+    to_policy = addressed & int(Audience.POLICY)
     rec = dataclasses.replace(
         base,
         kind=jnp.asarray(table.kind[i], I64),
@@ -1311,9 +1347,14 @@ def _imported_row(table, i, caps, audience):
         channel=jnp.asarray(table.channel[i], I64),
         acquisition_index=jnp.asarray(table.local_index[i], I64),
         revision=jnp.asarray(table.source.revision[i], I64),
+        audience=jnp.asarray(addressed, I64),
+        start_tick=jnp.asarray(table.start_offset[i], I64),
+        end_tick=jnp.asarray(table.end_offset[i], I64),
+        available_tick=zero,
         status=jnp.asarray(RecordStatus.COMPLETED, I64),
-        released_tick=jnp.asarray(0, I64),
-        accepted_tick=jnp.asarray(0, I64),
+        accepted_tick=zero if to_observer else unset,
+        released_tick=zero if to_policy else unset,
+        superseded_by=unset,
         payload=base.payload.at[:width].set(table.payload[i]),
         valid=jnp.asarray(True),
     )
@@ -1321,15 +1362,21 @@ def _imported_row(table, i, caps, audience):
 
 
 def _zero_weight_failures(study, observer):
-    """Rows of weight zero that move an initial belief or a fold, as failures."""
+    """`(failures, probes)`: zero-weight rows that move a belief; tries made."""
     caps, table = study.caps, observer.table
-    failures = []
+    failures, probes = [], 0
+    n_rows = len(np.asarray(table.kind))
     for audience in AUDIENCES:
-        w = np.asarray(observer.weights(caps, audience))
+        kept, bad = _weights(observer, caps, audience, n_rows)
+        if bad:
+            failures.append(bad)
+            continue
+        w = kept.astype(int)
         roles = _roles(table, caps, audience)
         policy = audience == int(Audience.POLICY)
         start = observer.init_summary(caps) if policy else observer.init(caps)
         gone = np.flatnonzero(roles.prior & (w == 0))
+        probes += int(gone.size > 0)
         if gone.size:
             namespace = jnp.asarray(table.source.namespace).at[gone].set(-1)
             without = eqx.tree_at(
@@ -1342,6 +1389,7 @@ def _zero_weight_failures(study, observer):
                     "the initial belief"
                 )
         for r in np.flatnonzero(roles.evidence & (w == 0)):
+            probes += 1
             rec = _imported_row(table, int(r), caps, audience)
             if policy:
                 folded = observer.fold_summary(start, rec, caps)
@@ -1352,7 +1400,7 @@ def _zero_weight_failures(study, observer):
                     f"audience {audience}: evidence row {r} of weight zero moves the "
                     "belief when folded"
                 )
-    return failures
+    return failures, probes
 
 
 def check_zero_weight_rows(study, observer=None):
@@ -1361,9 +1409,14 @@ def check_zero_weight_rows(study, observer=None):
     For each audience, removing the priors of weight zero leaves the initial belief
     (`init` for the observer, `init_summary` for the policy) unchanged bit for bit,
     and folding an imported evidence row of weight zero, as that audience receives
-    it, leaves the belief unchanged. Needs no run; `check_folded_once` applies it to
-    such observers as well.
+    it, leaves the belief unchanged. Weights that are not a finite {0, 1} vector
+    fail. Refuses a table with no row of weight zero for either audience: there is
+    nothing to remove or fold, so the check would pass without trying. Needs no run;
+    `check_folded_once` applies it to such observers as well (where a table with
+    nothing to probe adds no failure).
     """
     observer = _prior_reader(study, observer)
-    failures = _zero_weight_failures(study, observer)
-    return make_result("zero_weight_rows", failures)
+    failures, probes = _zero_weight_failures(study, observer)
+    if probes == 0 and not failures:
+        raise ValueError("the table holds no row of weight zero to probe")
+    return make_result("zero_weight_rows", failures, n_probes=probes)
