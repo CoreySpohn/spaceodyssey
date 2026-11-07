@@ -1,11 +1,12 @@
 """Survey 3, known planets: priors with a declared pedigree and window scheduling.
 
-The run tests share one store of runs (`runs`): the survey on both executors for each
-table variant below, all of one shape, so each executor compiles the survey once.
-`EXCLUDE_ROWS` is a static rule and compiles its own program (test (c)); the epoch
-relation wraps the process and compiles another; the controls that replace the
-observer type are in the slow tier. References are computed from the run's log and
-the table alone, never from the observer's resolution.
+The merge-time guard (medium) is test (d) with replay: two table variants on both
+executors, one compiled program per executor. The other run tests are slow: they share
+one store of runs (`runs`), the survey on both executors for every table variant
+below, all of one shape; `EXCLUDE_ROWS` is a static rule and compiles its own program
+(test (c)); the epoch relation wraps the process and compiles another; the controls
+replace the observer type. References are computed from the run's log and the table
+alone, never from the observer's resolution.
 """
 
 import dataclasses
@@ -71,17 +72,22 @@ def study_of(name, rule=PedigreeRule.EXCLUDE_PRIOR):
     return survey_3(survey_3_table(**VARIANTS[name]), rule)
 
 
-@pytest.fixture(scope="module")
-def runs():
-    """`(variant, executor) -> ActionRun` for every variant on both executors."""
+def run_store(names):
+    """`({(variant, executor): ActionRun}, roots)` for `names` on both executors."""
     truths, roots = worlds(N_WORLDS, study_of("hidden").caps)
     out = {}
-    for name in VARIANTS:
+    for name in names:
         for executor in EXECUTORS:
             run = run_with_actions(executor, study_of(name), truths, roots, N_STEPS)
             assert np.asarray(run.result.complete).all(), (name, executor)
             out[name, executor] = run
     return out, roots
+
+
+@pytest.fixture(scope="module")
+def runs():
+    """The run store of every variant (slow tests)."""
+    return run_store(VARIANTS)
 
 
 def carry_of(result, w):
@@ -166,7 +172,7 @@ def prior_rows(carry, subject=TARGET):
 # ---- (a) to (c): the prior and the overlap rules -------------------------------------
 
 
-@pytest.mark.medium  # the run store: one compiled program per executor
+@pytest.mark.slow  # the run store of every variant (K6)
 def test_a_disjoint_external_prior_changes_both_beliefs(runs):
     """B7 row 3 (a). Fails if a prior whose pedigree is entirely external leaves the
     observer belief or the policy summary of its subject equal to the run without
@@ -191,7 +197,7 @@ def test_a_disjoint_external_prior_changes_both_beliefs(runs):
             assert float(carry.pbelief.weight[TARGET]) == PRIOR_3[2]
 
 
-@pytest.mark.medium  # the run store
+@pytest.mark.slow  # the run store of every variant (K6)
 def test_exclude_prior_with_an_imported_source_equals_the_raw_only_run(runs):
     """B7 row 3 (b). Fails if a prior whose pedigree names an imported raw row
     released to both audiences is installed by either audience under `EXCLUDE_PRIOR`:
@@ -210,7 +216,7 @@ def test_exclude_prior_with_an_imported_source_equals_the_raw_only_run(runs):
             assert int(carry.belief.n[1]) >= 1 and int(carry.pbelief.n[1]) >= 1
 
 
-@pytest.mark.medium  # its own compiled program per executor (the rule is static)
+@pytest.mark.slow  # its own compiled program per executor (static rule; K6)
 def test_exclude_rows_matches_independent_sufficient_statistics():
     """B7 row 3 (c). Fails if, under `EXCLUDE_ROWS`, either audience's belief is not
     its retained priors plus the rows it received less the raw row a retained prior
@@ -289,17 +295,42 @@ def written(carry):
     return sorted(rows)
 
 
-@pytest.mark.medium  # the run store
-def test_an_observer_only_source_moves_no_policy_view_or_decision(runs):
-    """B7 row 3 (d), the hidden-row check of D5 and K3 over a whole run. Fails if a
-    public prior whose pedigree names an observer-only raw row changes any policy
-    view, decision, effect, fingerprint or the policy summary against the run without
-    that row; if the observer keeps the prior or the policy drops it (a raw row the
-    policy never receives must not exclude for it); if the exclusion leaks out of the
-    observer's own row (its window); or if permuting the table changes a decision, a
-    belief beyond the go band, or any written row.
+def replay_failures(store, roots, names):
+    """Keyed replay of each world of `names` on both executors (D2)."""
+    failures = []
+    for name in names:
+        for executor in EXECUTORS:
+            run = store[name, executor]
+            for w in range(N_WORLDS):
+                carry = carry_of(run.result, w)
+                # replay raises on any mismatch of the beliefs it rebuilds
+                out = replay_run(
+                    study_of(name), roots[w], carry, index_world(run.result.trace, w)
+                )
+                for got, want in (
+                    (out.belief.weight, carry.belief.weight),
+                    (out.pbelief.weight, carry.pbelief.weight),
+                ):
+                    if not np.array_equal(np.asarray(got), np.asarray(want)):
+                        failures.append(f"{name}, {executor}, world {w}: priors")
+                if float(out.pbelief.weight[TARGET]) != PRIOR_3[2]:
+                    failures.append(f"{name}, {executor}, world {w}: policy prior")
+    return failures
+
+
+@pytest.mark.medium  # the merge-time guard: two variants, one program per executor
+def test_an_observer_only_source_moves_no_policy_view_or_decision():
+    """B7 row 3 (d), the hidden-row check of D5 and K3 over a whole run, with replay
+    (D2). Fails if a public prior whose pedigree names an observer-only raw row
+    changes any policy view, decision, effect, fingerprint or the policy summary
+    against the run without that row; if the observer keeps the prior or the policy
+    drops it (a raw row the policy never receives must not exclude for it); if the
+    exclusion leaks out of the observer's own row (its window); if keyed replay from
+    `init` and `init_summary` does not reproduce both runs, installed priors
+    included; or if the executors disagree.
     """
-    store, _ = runs
+    store, roots = run_store(("hidden", "external"))
+    assert replay_failures(store, roots, ("hidden", "external")) == []
     for executor in EXECUTORS:
         hidden, external = store["hidden", executor], store["external", executor]
         assert policy_failures(hidden, external, executor) == []
@@ -313,6 +344,21 @@ def test_an_observer_only_source_moves_no_policy_view_or_decision(runs):
             assert int(carry.belief.n[TARGET]) == int(carry.pbelief.n[TARGET]) + 1
             copies = prior_rows(carry)
             assert copies[OBS][0] == NO_WINDOW and copies[POL][0] == WINDOW
+    for name in ("hidden", "external"):
+        assert same_histories(
+            store[name, "host"].result, store[name, "compiled"].result, N_WORLDS
+        ), name
+
+
+@pytest.mark.slow  # the run store of every variant (K6)
+def test_permuting_the_table_changes_no_decision_or_written_row(runs):
+    """B7 row 3 (d), permutation. Fails if permuting the table's rows changes a
+    decision or its effects, any written row (identity, audience, payload), or a
+    belief beyond the go band.
+    """
+    store, _ = runs
+    for executor in EXECUTORS:
+        hidden = store["hidden", executor]
         permuted = store["permuted", executor]
         for w in range(N_WORLDS):
             assert hidden.decisions[w] and len(hidden.decisions[w]) == len(
@@ -386,7 +432,7 @@ def chosen_start(run, w):
     return int(ticks[1]), int(np.asarray(first.tick)[1])
 
 
-@pytest.mark.medium  # the run store
+@pytest.mark.slow  # the run store of every variant (K6)
 def test_the_policy_starts_in_the_window_or_at_the_fallback(runs):
     """B7 row 3 (f). Fails if, with the prior retained for the policy, the policy does
     not start in the prior's window (counted from the row's release); or if, with the
@@ -413,30 +459,12 @@ def test_the_policy_starts_in_the_window_or_at_the_fallback(runs):
 # ---- replay, executors and pre-flight ------------------------------------------------
 
 
-@pytest.mark.medium  # the run store; replay is eager
-def test_replay_reproduces_the_survey_with_its_priors(runs):
-    """D2 on survey 3. Fails if keyed replay from `init` and `init_summary` does not
-    reproduce either audience's belief (replay raises on a mismatch), the installed
-    priors included, on both executors, with the prior retained by both audiences or
-    by the policy only; or if the executors disagree on any variant, or pre-flight
-    refuses one.
+@pytest.mark.slow  # the run store of every variant (K6)
+def test_every_variant_passes_preflight_and_agrees_between_executors(runs):
+    """B7 on both executors. Fails if pre-flight refuses a table variant of the
+    survey, or the host and compiled executors disagree on any of them.
     """
-    store, roots = runs
-    for name in ("external", "hidden"):
-        for executor in EXECUTORS:
-            run = store[name, executor]
-            for w in range(N_WORLDS):
-                carry = carry_of(run.result, w)
-                out = replay_run(
-                    study_of(name), roots[w], carry, index_world(run.result.trace, w)
-                )
-                assert np.array_equal(
-                    np.asarray(out.belief.weight), np.asarray(carry.belief.weight)
-                )
-                assert np.array_equal(
-                    np.asarray(out.pbelief.weight), np.asarray(carry.pbelief.weight)
-                )
-                assert float(out.pbelief.weight[TARGET]) == PRIOR_3[2]
+    store, _ = runs
     for name in VARIANTS:
         assert preflight(study_of(name), executor="compiled") == [], name
         assert same_histories(
@@ -447,7 +475,7 @@ def test_replay_reproduces_the_survey_with_its_priors(runs):
 # ---- B6: the epoch relation ----------------------------------------------------------
 
 
-@pytest.mark.medium  # one program per executor, shared by every shift and table
+@pytest.mark.slow  # one program per executor, shared by every shift and table (K6)
 def test_the_epoch_relation_holds_with_windows_and_hidden_rows():
     """B6 on survey 3. Fails if a shift of the epoch origin, one of them larger than
     the oldest imported time, moves anything but the ticks on either executor, with a

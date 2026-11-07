@@ -1,8 +1,9 @@
 """Survey 6, aging ephemerides: the epoch origin changes nothing, the age moves value.
 
-The relation tests share one compiled program per executor (the shift and the
-control's `absolute` flag are arrays); the age test runs the plain study, one program
-per executor, for four ages and two decay rates.
+The relation test is the merge-time guard (medium). The control shares its compiled
+program (the shift and the `absolute` flag are arrays); the age test runs the plain
+study, one more program per executor, for four ages and two decay rates. Both are slow
+(the Slice 2b quick-tier budget, K6).
 """
 
 import numpy as np
@@ -19,8 +20,6 @@ from spaceodyssey.studies.survey_6 import (
 from tests.core.helpers import worlds
 from tests.studies.survey_helpers import run_on, same_histories
 
-pytestmark = pytest.mark.medium
-
 N_STEPS = 40
 OLDEST = 2 * AGE  # the prior starts 2 AGE before the run
 SHIFTS = (3, OLDEST - 1, 1000)  # the last is larger than the oldest age
@@ -29,6 +28,7 @@ N_DECISIONS = 4  # the wait, two observations and the drain
 AGES = tuple(AGE * 2**k for k in range(4))  # each one twice the one before
 
 
+@pytest.mark.medium  # the merge-time guard: one program per executor
 def test_the_epoch_relation_holds_for_three_shifts_on_both_executors():
     """B7 row 6 (a), and B6 on survey 6. Fails if a shift of the epoch origin, one of
     them larger than the oldest prior age, moves any decision, record, belief or
@@ -50,6 +50,7 @@ def test_the_epoch_relation_holds_for_three_shifts_on_both_executors():
             assert result.detail["n_views"] == 2 * N_DECISIONS, where
 
 
+@pytest.mark.slow  # a control; shares the relation's program (K6)
 def test_a_value_reading_an_absolute_end_tick_fails_the_epoch_relation():
     """B7 row 6 (c), control. A policy that takes the prior's age as minus its end
     tick (as if the run started at tick 0) waits for another tick once the origin
@@ -76,6 +77,7 @@ def _first_values(executor, decay, truths, roots):
     return np.asarray(out)
 
 
+@pytest.mark.slow  # the plain study, one more program per executor (K6)
 def test_doubling_the_prior_age_moves_the_value_monotonically():
     """B7 row 6 (b). Fails if, over four ages each twice the one before, the value
     `base * decay ** age` of the first decision does not strictly decrease for a decay
