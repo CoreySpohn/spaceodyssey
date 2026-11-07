@@ -29,16 +29,21 @@ from spaceodyssey.core.conformance import (
     check_folded_once,
     check_overlap_declared,
 )
+from spaceodyssey.core.conformance.observer_kit import _imported_row
 from spaceodyssey.core.enums import Audience, RecordStatus
 from spaceodyssey.core.preflight import preflight
 from spaceodyssey.core.preflight.checks import PreflightContext
 from spaceodyssey.core.refresh import (
     HostLoopRefit,
     MaskedBatchRefit,
+    RefreshSchedule,
     _gather,
 )
 from spaceodyssey.studies import toy
+from spaceodyssey.studies.premission import authored_table
 from spaceodyssey.studies.prior_observer import (
+    PRIOR_INDEX,
+    PRODUCT_INDEX,
     AudiencePriorRefit,
     PriorBelief,
     PriorRefitObserver,
@@ -223,6 +228,44 @@ def test_d010_refuses_a_table_prior_with_a_boundary_that_ignores_it(boundary):
         process=dataclasses.replace(study.process, table=gone),
     )
     assert _codes(bare, boundary()) == []
+    # no checkpoint ever asks a boundary: nothing to refuse
+    off = RefreshSchedule(0, 0, *toy.PRODUCT_CHANNELS, PRODUCT_INDEX)
+    still = dataclasses.replace(study, refresh=off)
+    assert _codes(still, boundary()) == []
+
+
+def _policy_row_table(named):
+    """A policy-only raw row of subject 1 and a public prior of subject 1 that
+    names it (`named`) or an external source.
+    """
+    source = (0, 60, 1, 0, False) if named else (7, 90, 1, 5, True)
+    return authored_table(
+        subject=[1, 1],
+        local_index=[0, 0],
+        channel=[60, 61],
+        kind=[MEAS, PRIOR_INDEX],
+        audience=[POL, 3],
+        payload=[[5.0, 0.0], [3.0, 1.0]],
+        pedigree=[(), (source,)],
+        width=1,
+    )
+
+
+def test_a_policy_only_row_is_judged_by_the_policy_rule():
+    """Fails if the observer's own refit (which the observer-init boundary also runs
+    for the policy) drops a raw row only the policy receives, or if a policy-only row
+    that the policy's rule drops is not D009 on that boundary.
+    """
+    alike = refit_study(_policy_row_table(named=False))
+    caps, observer = alike.caps, alike.observer
+    assert _codes(alike, MaskedBatchRefit()) == []
+    row = _imported_row(observer.table, 0, caps, POL)
+    rows = jax.tree_util.tree_map(lambda x: x[None], row)
+    fitted = observer.refit(observer.init(caps), rows, caps, None, None)
+    assert int(fitted.n[1]) == 1 and float(fitted.mean[1]) == 4.0
+    named = refit_study(_policy_row_table(named=True))
+    assert _codes(named, MaskedBatchRefit()) == [("D009", "error")]
+    assert _codes(named, AudiencePriorRefit()) == []
 
 
 def test_without_a_boundary_d009_and_d010_are_reported_unverified():

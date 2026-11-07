@@ -149,6 +149,7 @@ class PriorObserver(AbstractObserver):
         value = table.payload[:, 0]
         precision = table.payload[:, 1] if width > 1 else jnp.ones_like(value)
         precision = jnp.where(keep, precision, 0.0)
+        weighted = jnp.where(keep, precision * value, 0.0)  # no 0 * inf from a pad
         subject = jnp.clip(table.source.subject, 0, count - 1)
         order = _canonical_order(table)
         # sum in the canonical order of the source identities: permutation free
@@ -156,7 +157,7 @@ class PriorObserver(AbstractObserver):
         for i in range(table.n_rows):
             r, s = order[i], subject[order[i]]
             weight = weight.at[s].add(precision[r])
-            total = total.at[s].add(precision[r] * value[r])
+            total = total.at[s].add(weighted[r])
         mean = jnp.where(weight > 0, total / jnp.where(weight > 0, weight, 1.0), 0.0)
         return PriorBelief(
             mean=mean,
@@ -165,19 +166,31 @@ class PriorObserver(AbstractObserver):
             weight=weight,
         )
 
+    def dropped(self, caps, audience):
+        """Per row: a raw row `audience` receives that the rule drops for it.
+
+        A row the audience never receives is not dropped (weight 0 there means not
+        received), so a refit that folds another audience's rows with this
+        audience's rule still folds them.
+        """
+        _, evidence, _ = overlap_roles(
+            self.table, audience, derived_kinds=caps.derived_kinds
+        )
+        return evidence & (self.weights(caps, audience) == 0)
+
     def same_resolution(self, caps):
         """Per subject: both audiences start from one prior and drop the same rows.
 
-        Compares the two prior beliefs bit for bit and the weights of the public raw
-        rows (a row only one audience receives cannot reach the other's refit).
+        Compares the two prior beliefs bit for bit and, on every raw row the policy
+        receives, whether each audience's rule drops it: the observer's own refit
+        (`observer_refit_kernel`) folds the policy's rows with the observer's rule.
         """
         a = self.prior_belief(caps, OBSERVER)
         b = self.prior_belief(caps, POLICY)
         same = (a.mean == b.mean) & (a.weight == b.weight)
         table = self.table
-        derived = jnp.isin(table.kind, jnp.asarray(caps.derived_kinds, I64))
-        public = table.present & ~derived & (table.audience == PUBLIC)
-        differ = public & (self.weights(caps, OBSERVER) != self.weights(caps, POLICY))
+        _, received, _ = overlap_roles(table, POLICY, derived_kinds=caps.derived_kinds)
+        differ = received & (self.dropped(caps, OBSERVER) != self.dropped(caps, POLICY))
         subject = jnp.clip(table.source.subject, 0, caps.n_subjects - 1)
         moved = jnp.zeros(caps.n_subjects, I64).at[subject].max(differ.astype(I64))
         return same & (moved == 0)
@@ -185,10 +198,10 @@ class PriorObserver(AbstractObserver):
     def _dropped(self, rec, caps, audience):
         """Whether `rec` is an imported raw row the rule drops for `audience`."""
         table = self.table
-        derived = jnp.isin(table.kind, jnp.asarray(caps.derived_kinds, I64))
-        hit = table.present & ~derived & (table.channel == rec.channel)
-        hit = hit & (table.local_index == rec.acquisition_index)
-        return (hit & (self.weights(caps, audience) == 0)).any()
+        hit = (table.channel == rec.channel) & (
+            table.local_index == rec.acquisition_index
+        )
+        return (hit & self.dropped(caps, audience)).any()
 
     # ---- the observer contract ----------------------------------------------------
 
@@ -285,6 +298,11 @@ def _finding(code, member, entry, message, fix, severity=Severity.ERROR):
     )
 
 
+def _equal(a, b):
+    """Array equality, NaN equal to NaN in floating columns."""
+    return np.array_equal(a, b, equal_nan=a.dtype.kind == "f")
+
+
 def _table_mismatch(table, process):
     """`D006`: the observer resolves overlap on a table the process does not import."""
     imported = getattr(process, "table", None)
@@ -295,7 +313,7 @@ def _table_mismatch(table, process):
         jax.tree_util.tree_flatten(imported),
     )
     same = mine[1] == theirs[1] and all(
-        np.shape(a) == np.shape(b) and np.array_equal(np.asarray(a), np.asarray(b))
+        np.shape(a) == np.shape(b) and _equal(np.asarray(a), np.asarray(b))
         for a, b in zip(mine[0], theirs[0], strict=True)
     )
     if same:
@@ -366,9 +384,11 @@ def boundary_findings(observer, study, context):
         for a in (OBSERVER, POLICY)
     ]
     retained = bool(np.any(keeps[0] | keeps[1]))
+    if caps.rows_per_subject <= 0 or int(study.refresh.every_ticks) <= 0:
+        return []  # no checkpoint ever asks the boundary
     boundary = None if context is None else context.boundary
     if boundary is None:
-        if not retained or int(study.refresh.every_ticks) <= 0:
+        if not retained:
             return []
         return [
             _finding(
