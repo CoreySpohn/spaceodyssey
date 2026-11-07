@@ -33,10 +33,16 @@ from spaceodyssey.core.conformance.observer_kit import (
     check_folded_once as check_folded_once,
 )
 from spaceodyssey.core.conformance.observer_kit import (
+    check_overlap_declared as check_overlap_declared,
+)
+from spaceodyssey.core.conformance.observer_kit import (
     check_promotion_parity as check_promotion_parity,
 )
 from spaceodyssey.core.conformance.observer_kit import (
     check_refit_calibration as check_refit_calibration,
+)
+from spaceodyssey.core.conformance.observer_kit import (
+    check_zero_weight_rows as check_zero_weight_rows,
 )
 from spaceodyssey.core.conformance.observer_kit import (
     declared_margin as declared_margin,

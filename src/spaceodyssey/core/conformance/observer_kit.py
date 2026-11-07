@@ -19,6 +19,12 @@
   corrected rows alone, so the superseded row is not kept.
 - `check_derived_summary`: a derived summary of folded rows adds nothing to the
   belief, so the belief equals a refit that counts each datum once.
+- `check_overlap_declared` (observers declaring `reads_priors`): per audience, no
+  retained prior and an evidence row of its pedigree both carry weight, retained
+  priors have disjoint pedigrees, and a weight of zero is justified only by evidence
+  released to that audience. `check_zero_weight_rows` extends `check_folded_once` to
+  such observers: a row of weight zero moves neither initial belief nor a fold, and
+  `check_folded_once` runs it too.
 
 Every refit the kit makes is keyed by `keys.refit_key(root, subject, digest)`, where
 the digest names the revision set the refit reads, never a fold count.
@@ -82,6 +88,7 @@ from spaceodyssey.core.records import (
     derived_rows,
     log_records,
     masked_record,
+    record_none,
     refit_rows,
 )
 from spaceodyssey.core.refresh import revision_set_digest
@@ -320,6 +327,8 @@ def check_folded_once(study, run, truths, roots):
         failures.append(f"a second release of log row {slot} changed the summary")
     if not bool(again.dup_fold):
         failures.append(f"a second release of log row {slot} left dup_fold clear")
+    if getattr(study.observer, "reads_priors", False):
+        failures += _zero_weight_failures(study, study.observer)
     n_worlds = int(np.asarray(run.carry.dup_fold).size)
     return make_result("folded_once", failures, n_worlds=n_worlds, slot=slot)
 
@@ -1185,3 +1194,165 @@ def check_derived_summary(study, run, roots, *, summary_kind):
     return _refit_comparison(
         "derived_summary", study, run, roots, picks, exclude=(kind,)
     )
+
+
+# ---- observers that read imported priors --------------------------------------------
+
+AUDIENCES = (int(Audience.OBSERVER), int(Audience.POLICY))
+
+
+def _prior_reader(study, observer):
+    """The observer to judge, or a refusal unless it declares `reads_priors`."""
+    observer = study.observer if observer is None else observer
+    if not getattr(observer, "reads_priors", False):
+        raise ValueError("the observer does not declare reads_priors")
+    return observer
+
+
+class _Roles(NamedTuple):
+    """One audience's view of an imported table, computed here from its columns."""
+
+    prior: np.ndarray  # [N] a row of a derived kind released to the audience
+    evidence: np.ndarray  # [N] a raw row released to the audience
+    ids: list  # [N] the overlap identity of each row's source
+    named: list  # [N] the set of identities each row's pedigree names
+
+
+def _roles(table, caps, audience):
+    """The table's priors, evidence and identities for `audience`, independently."""
+    source, pedigree = table.source, table.pedigree
+    cols = (source.namespace, source.producer, source.subject, source.source_index)
+    ids = [tuple(int(v) for v in row) for row in np.stack(cols, axis=-1)]
+    cols = (pedigree.namespace, pedigree.producer, pedigree.subject)
+    grid = np.stack((*cols, pedigree.source_index), axis=-1)
+    count = np.asarray(table.n_pedigree)
+    named = [
+        {tuple(int(v) for v in grid[i, j]) for j in range(int(count[i]))}
+        for i in range(len(ids))
+    ]
+    present = np.asarray(source.namespace) != -1
+    derived = np.isin(np.asarray(table.kind), np.asarray(caps.derived_kinds, int))
+    released = present & ((np.asarray(table.audience) & audience) != 0)
+    return _Roles(released & derived, released & ~derived, ids, named)
+
+
+def check_overlap_declared(study, observer=None):
+    """Check 7: the weights an observer resolves for each audience are sound.
+
+    For each audience (observer, then policy), with the observer's own weights
+    (`observer.weights(caps, audience)`) and the table it holds (`observer.table`):
+    no retained prior (weight one) and an evidence row of its pedigree both carry
+    weight; no two retained priors name a common source (external entries count);
+    and a weight of zero is justified by that audience's own evidence: a dropped
+    prior names one of its evidence rows, a dropped evidence row is named by one of
+    its priors. Refuses an observer that does not declare `reads_priors`.
+    """
+    observer = _prior_reader(study, observer)
+    caps, table = study.caps, observer.table
+    failures, judged = [], 0
+    for audience in AUDIENCES:
+        roles = _roles(table, caps, audience)
+        w = np.asarray(observer.weights(caps, audience)) > 0
+        priors = np.flatnonzero(roles.prior)
+        evidence = np.flatnonzero(roles.evidence)
+        seen = {roles.ids[r] for r in evidence}
+        judged += len(priors)
+        for p in priors:
+            if not w[p]:
+                if not roles.named[p] & seen:
+                    failures.append(
+                        f"audience {audience}: prior {p} is dropped, but its "
+                        "pedigree names no evidence that audience receives"
+                    )
+                continue
+            for r in evidence:
+                if w[r] and roles.ids[r] in roles.named[p]:
+                    failures.append(
+                        f"audience {audience}: retained prior {p} and evidence row "
+                        f"{r} of its pedigree both carry weight"
+                    )
+        for r in evidence:
+            named = any(roles.ids[r] in roles.named[p] for p in priors)
+            if not w[r] and not named:
+                failures.append(
+                    f"audience {audience}: evidence row {r} is dropped, but no prior "
+                    "of that audience names it"
+                )
+        kept = [int(p) for p in priors if w[p]]
+        for i, p in enumerate(kept):
+            for q in kept[i + 1 :]:
+                if roles.named[p] & roles.named[q]:
+                    failures.append(
+                        f"audience {audience}: retained priors {p} and {q} have "
+                        "intersecting pedigrees"
+                    )
+    return make_result("overlap_declared", failures, n_priors=judged)
+
+
+def _imported_row(table, i, caps, audience):
+    """Row `i` of the table as an import writes it and `audience` receives it."""
+    base = record_none(caps)
+    width = np.shape(table.payload)[1]
+    rec = dataclasses.replace(
+        base,
+        kind=jnp.asarray(table.kind[i], I64),
+        subject=jnp.asarray(table.source.subject[i], I64),
+        channel=jnp.asarray(table.channel[i], I64),
+        acquisition_index=jnp.asarray(table.local_index[i], I64),
+        revision=jnp.asarray(table.source.revision[i], I64),
+        status=jnp.asarray(RecordStatus.COMPLETED, I64),
+        released_tick=jnp.asarray(0, I64),
+        accepted_tick=jnp.asarray(0, I64),
+        payload=base.payload.at[:width].set(table.payload[i]),
+        valid=jnp.asarray(True),
+    )
+    return masked_record(rec, caps, audience)
+
+
+def _zero_weight_failures(study, observer):
+    """Rows of weight zero that move an initial belief or a fold, as failures."""
+    caps, table = study.caps, observer.table
+    failures = []
+    for audience in AUDIENCES:
+        w = np.asarray(observer.weights(caps, audience))
+        roles = _roles(table, caps, audience)
+        policy = audience == int(Audience.POLICY)
+        start = observer.init_summary(caps) if policy else observer.init(caps)
+        gone = np.flatnonzero(roles.prior & (w == 0))
+        if gone.size:
+            namespace = jnp.asarray(table.source.namespace).at[gone].set(-1)
+            without = eqx.tree_at(
+                lambda o: o.table.source.namespace, observer, namespace
+            )
+            other = without.init_summary(caps) if policy else without.init(caps)
+            if not tree_bits_equal(other, start):
+                failures.append(
+                    f"audience {audience}: priors {gone.tolist()} of weight zero move "
+                    "the initial belief"
+                )
+        for r in np.flatnonzero(roles.evidence & (w == 0)):
+            rec = _imported_row(table, int(r), caps, audience)
+            if policy:
+                folded = observer.fold_summary(start, rec, caps)
+            else:
+                folded = observer.analyze(observer.fold(start, rec, caps))
+            if not tree_bits_equal(folded, start):
+                failures.append(
+                    f"audience {audience}: evidence row {r} of weight zero moves the "
+                    "belief when folded"
+                )
+    return failures
+
+
+def check_zero_weight_rows(study, observer=None):
+    """Check 2 for observers that read priors: a row of weight zero moves nothing.
+
+    For each audience, removing the priors of weight zero leaves the initial belief
+    (`init` for the observer, `init_summary` for the policy) unchanged bit for bit,
+    and folding an imported evidence row of weight zero, as that audience receives
+    it, leaves the belief unchanged. Needs no run; `check_folded_once` applies it to
+    such observers as well.
+    """
+    observer = _prior_reader(study, observer)
+    failures = _zero_weight_failures(study, observer)
+    return make_result("zero_weight_rows", failures)
