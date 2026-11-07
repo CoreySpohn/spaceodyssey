@@ -16,7 +16,9 @@ Both surveys run the epoch relation (B6).
 
 1. `feat(studies): survey 3, priors with a declared pedigree and window-valued scheduling`
 2. `feat(studies): survey 6, a value that reads the age of the accepted prior record`
-3. this record
+3. this record (`c6bf29a`)
+4. `test(studies): one medium guard per survey for 3 and 6, the rest slow (K6)`
+   (`1b77127`), after Corey's K6 decision; and this record's update
 
 ## What changed
 
@@ -76,42 +78,78 @@ tick 0.
 
 ## Tests
 
-Tests added: 12 (9 in `test_survey_3.py`, 3 in `test_survey_6.py`); retired: none.
+Tests added: 13 (10 in `test_survey_3.py`, 3 in `test_survey_6.py`); retired: none.
+
+### Tiers (K6 retiering)
+
+Corey's 2026-11-07 decision on K6: all of Slice 2b may add at most 60 s of cold
+quick-tier time, and survey tests that do not fit go to the slow tier. Each survey
+therefore keeps one medium merge-time guard of its central claim, and everything else
+is slow:
+
+- survey 3: test (d) with replay, on a reduced store of two table variants (hidden
+  row and external prior) on both executors, one compiled program per executor, with
+  no six-variant fixture; the unit test (e) also stays in the quick tier;
+- survey 6: test (a), the epoch relation on both executors.
+
+Quick-tier cold time R4b adds, the three tests each alone in a fresh process: 22.1 +
+3.3 + 17.2 = 42.6 s of wall time, about 38 s without the three process imports
+(survey 3 about 25 s, survey 6 about 17 s), on a machine shared with other jobs.
 
 Cold times, each test alone in a fresh process, serially
 (`SPACEODYSSEY_JAX_CACHE=off JAX_ENABLE_COMPILATION_CACHE=false`, four threads, wall
-time including the about 1.5 s import, on a machine shared with other jobs):
+time including the about 1.5 s import). Times marked * were measured before the
+retiering, with the same test body under its earlier medium mark. The two new slow
+tests were timed while another session ran the full suite on the machine.
 
 | Test | Spec | Tier | Cold s |
 |---|---|---|---|
-| `test_survey_3.py::test_a_disjoint_external_prior_changes_both_beliefs` | 3 (a) | medium | 18.3 |
-| `::test_exclude_prior_with_an_imported_source_equals_the_raw_only_run` | 3 (b) | medium | 18.3 |
-| `::test_exclude_rows_matches_independent_sufficient_statistics` | 3 (c) | medium | 15.4 |
-| `::test_an_observer_only_source_moves_no_policy_view_or_decision` | 3 (d), D5, K3 | medium | 20.1 |
-| `::test_intersecting_priors_are_refused_and_one_datum_survives_once` | 3 (e) | unit | 3.0 |
-| `::test_the_policy_starts_in_the_window_or_at_the_fallback` | 3 (f) | medium | 18.5 |
-| `::test_replay_reproduces_the_survey_with_its_priors` | D2 replay, B7 executors | medium | 21.5 |
-| `::test_the_epoch_relation_holds_with_windows_and_hidden_rows` | B6 | medium | 21.7 |
-| `::test_the_controls_fail_their_checks` | 3 (g) | slow | 23.1 |
-| `test_survey_6.py::test_the_epoch_relation_holds_for_three_shifts_on_both_executors` | 6 (a), B6 | medium | 15.0 |
-| `::test_a_value_reading_an_absolute_end_tick_fails_the_epoch_relation` | 6 (c) | medium | 8.7 |
-| `::test_doubling_the_prior_age_moves_the_value_monotonically` | 6 (b) | medium | 22.3 |
+| `test_survey_3.py::test_an_observer_only_source_moves_no_policy_view_or_decision` | 3 (d), D5, K3, D2 replay | medium (guard) | 22.1 |
+| `::test_intersecting_priors_are_refused_and_one_datum_survives_once` | 3 (e) | unit | 3.3 |
+| `::test_a_disjoint_external_prior_changes_both_beliefs` | 3 (a) | slow | 18.3* |
+| `::test_exclude_prior_with_an_imported_source_equals_the_raw_only_run` | 3 (b) | slow | 18.3* |
+| `::test_exclude_rows_matches_independent_sufficient_statistics` | 3 (c) | slow | 15.4* |
+| `::test_permuting_the_table_changes_no_decision_or_written_row` | 3 (d), permutation | slow | 24.7 |
+| `::test_the_policy_starts_in_the_window_or_at_the_fallback` | 3 (f) | slow | 18.5* |
+| `::test_every_variant_passes_preflight_and_agrees_between_executors` | B7 executors | slow | 27.2 |
+| `::test_the_epoch_relation_holds_with_windows_and_hidden_rows` | B6 | slow | 21.7* |
+| `::test_the_controls_fail_their_checks` | 3 (g) | slow | 23.1* |
+| `test_survey_6.py::test_the_epoch_relation_holds_for_three_shifts_on_both_executors` | 6 (a), B6 | medium (guard) | 17.2 |
+| `::test_a_value_reading_an_absolute_end_tick_fails_the_epoch_relation` | 6 (c) | slow | 8.7* |
+| `::test_doubling_the_prior_age_moves_the_value_monotonically` | 6 (b) | slow | 22.3* |
 
-The six survey 3 tests marked "the run store" share one module fixture: the survey on
-both executors for six table variants of one shape (no prior, external prior, hidden
-row, raw only, public row 2, permuted), so the quick tier compiles survey 3 once per
-executor for all of them; each test alone pays that fixture (about 15 s). Test (c)
-compiles its own program per executor (the rule is a static field of the observer);
-the epoch tests compile the process-wrapped study per executor. The whole of
-`test_survey_3.py` takes 72 s in one process (52 s without the slow control) and
-`test_survey_6.py` 25 s.
+The slow survey 3 run tests share one module fixture, the survey on both executors
+for six table variants of one shape (no prior, external prior, hidden row, raw only,
+public row 2, permuted); each alone pays that fixture (about 15 s). Test (c) compiles
+its own program per executor (the rule is a static field of the observer); the epoch
+tests compile the process-wrapped study per executor. The replay check moved into the
+guard; the slow agreement test keeps pre-flight and executor agreement over every
+variant, and the permutation half of (d) is its own slow test.
 
-Compiled signatures added, per executor: survey 3 (with its views captured), survey 3
-under `EXCLUDE_ROWS`, survey 3 under the epoch wrapper, survey 6, survey 6 under the
-epoch wrapper; and, slow and compiled only, the two control observers. R0a's
-inventory counted one signature for each survey; the overlap rule being static, the
-view capture of the run store and the epoch wrapper make it five medium signatures
-for the two surveys (ten cold compiles), about 60 to 70 s of medium time locally.
+Compiled signatures, per executor: in the quick tier, survey 3 (with its views
+captured) and survey 6 under the epoch wrapper; in the slow tier also survey 3 under
+`EXCLUDE_ROWS`, survey 3 under the epoch wrapper and plain survey 6, and, compiled
+only, the two control observers.
+
+### The guards kill the mutants of the claims they guard
+
+Rerun on the guard test alone after the retiering:
+
+| Mutant | Guard |
+|---|---|
+| m1 window written whatever the resolution | survey 3 (d): killed |
+| m2 both copies take the observer's resolution | survey 3 (d): killed |
+| m6 overlap ignores the audience | survey 3 (d): killed |
+| m7 `EXCLUDE_PRIOR` keeps the prior | survey 3 (d): killed |
+| m9 prior installed whatever its weight | survey 3 (d): killed |
+| m10 prior never installed | survey 3 (d): killed |
+| m12 replay starts the policy summary from `init` | survey 3 (d): killed |
+| n1 age read against tick 0 | survey 6 (a): killed |
+| n4 wait counted from tick 0 | survey 6 (a): killed |
+
+The window-start and fallback mutants (m3, m4, B6), the rule mutants that only (b),
+(c) or (e) see (m8, m11), the value mutants of (b) (n2, n3) and the control-flag
+mutant (n5) are caught only in the slow tier (and (e), unit, for m7, m9, m10, m11).
 
 ## Mutants and controls
 
@@ -153,6 +191,13 @@ fails (b), matches the double-counted statistics), `IgnoresPrior` (passes nothin
   it, medium tests included; the slow survey 3 control ran alone (above).
 - The touched files: `test_survey_3.py` 9 passed (72.4 s), `test_survey_6.py` 3
   passed (25.3 s).
+- After the K6 retiering: both survey files 13 passed in 64.8 s, and 3 passed with
+  10 deselected in 17.2 s under `-m "not slow"`; the quick tier (same options as
+  above) 2,077 passed in 211.0 s. The budget plugin reported one medium test over
+  30 s, the existing and untouched
+  `test_physical_ofti.py::test_executor_parity_on_one_certified_visit` (33.9 s, on a
+  machine shared with other jobs). The guards were rerun against the nine mutants
+  of the claims they guard (above); all are killed.
 - `ruff check`, `ruff format --check`, `tools/check_internal_refs.py`,
   `tests/core/test_lints.py` (187 passed) and `pre-commit` on the touched files:
   clean. Every touched file is ASCII.
@@ -196,10 +241,11 @@ fails (b), matches the double-counted statistics), `IgnoresPrior` (passes nothin
 9. **Survey 6's age** is measured from the prior row's `end_tick`, not its
    `accepted_tick`: the policy's copy of a public prior keeps `accepted_tick = -1`
    (R1 silence 5), and spec (c) names the end tick as the absolute reading.
-10. **Tiers.** Each survey test that runs the study is medium (one compiled program
-    per executor, under 30 s cold alone). The survey 3 controls replace the observer
-    type (two more programs) and are slow, as D11 lists them. Survey 6's control
-    shares the relation's program (its flag is an array) and is medium.
+10. **Tiers.** One medium guard per survey (above, after Corey's K6 decision); every
+    other run test is slow. The survey 3 guard is (d) with replay because it is the
+    claim no earlier task could check over a whole run (R2 left it here) and it
+    reaches the window writing, both rules of the observer and replay in one
+    program.
 11. **(e) is a unit test** on the survey's own builder: pre-flight on three
     configurations whose retained priors intersect, and the eager import beliefs on
     the one where `EXCLUDE_PRIOR` drops both summaries.
@@ -211,7 +257,7 @@ fails (b), matches the double-counted statistics), `IgnoresPrior` (passes nothin
 - B7 "on both executors": every survey test that runs a study runs both, except the
   slow survey 3 controls and the survey 6 control (compiled executor only), as R0a's
   inventory and D11 list the controls.
-- K6: the five medium signatures exceed R0a's one-per-survey estimate (above); the
-  quick-tier cost against the K6 baseline is R6's to read.
+- B7 at merge time covers survey 3 (d), (e) and replay and survey 6 (a); the other
+  rows pass in the slow tier only (K6 retiering above).
 - The window columns are written only by the survey 3 importer. A general importer
   option in `studies/premission.py` waits for a second consumer.
