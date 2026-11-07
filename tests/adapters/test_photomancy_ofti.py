@@ -12,7 +12,6 @@ import pytest
 pytest.importorskip("photomancy")
 
 from photomancy.orbit.forward import predict_relative_astrometry
-from photomancy.orbit.ofti import PARAM_NAMES
 
 from spaceodyssey.adapters.photomancy import (
     COLUMN_NAMES,
@@ -26,7 +25,6 @@ from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import F64, I64, PUBLIC, Audience, RefitStatus
 from spaceodyssey.core.executors.base import histories_equal, index_world
 from spaceodyssey.core.keys import refit_key
-from spaceodyssey.core.kinds import AbstractObserver, ObserverCapabilities
 from spaceodyssey.core.records import (
     KindRegistry,
     PayloadColumn,
@@ -39,8 +37,8 @@ from spaceodyssey.core.refresh import (
     gather_refit_rows,
     revision_set_digest,
 )
-from spaceodyssey.core.snapshot import BeliefLayout
 from spaceodyssey.studies import toy
+from spaceodyssey.studies.physical import ParticleObserver
 from spaceodyssey.studies.scripted import ScriptedRecords
 from tests.core.helpers import worlds
 
@@ -52,46 +50,10 @@ EPOCHS_D = (0.0, 12.0, 30.0)
 SIGMA = 0.02  # arcsec: a loose, short arc so the rejection sampler accepts quickly
 
 
-class ParticleBelief(eqx.Module):
-    samples: jax.Array  # [n_subjects, n_particles, 7]
-    n: jax.Array  # epochs fit, per subject
-    aux: jax.Array
+class OftiObserver(ParticleObserver):
+    """The promoted particle observer, refitting this file's astrometry kind."""
 
-
-def project_particles(belief):
-    return belief.samples[:, :, 0].mean(axis=1), belief.aux
-
-
-class OftiObserver(AbstractObserver):
-    """Holds OFTI particles per subject; it changes only by refresh."""
-
-    subject_leaves = ("samples", "n")
-    n_particles: int = eqx.field(default=N_PARTICLES, static=True)
-
-    def capabilities(self):
-        return ObserverCapabilities(
-            incremental=False, refit=True, refit_kinds=("astrometry",)
-        )
-
-    def init(self, caps):
-        return ParticleBelief(
-            jnp.zeros((caps.n_subjects, self.n_particles, len(PARAM_NAMES)), F64),
-            jnp.zeros(caps.n_subjects, I64),
-            jnp.zeros(caps.n_an, F64),
-        )
-
-    def layout(self, caps):
-        shapes = jax.eval_shape(lambda: self.init(caps))
-        return BeliefLayout(
-            belief=shapes, summary=shapes, count_leaf="n", project=project_particles
-        )
-
-    def install(self, belief, fitted, subject):
-        return ParticleBelief(
-            belief.samples.at[subject].set(fitted.samples[subject]),
-            belief.n.at[subject].set(fitted.n[subject]),
-            belief.aux,
-        )
+    refit_kind: str = eqx.field(default="astrometry", static=True)
 
 
 class AstrometryScript(ScriptedRecords):
