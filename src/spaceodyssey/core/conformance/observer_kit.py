@@ -1329,17 +1329,15 @@ def _imported_row(table, i, caps, audience):
     """Raw row `i` of the table as the import writes it and `audience` folds it.
 
     The metadata are the import's: the row's own audience, its span from the offsets
-    relative to its release at tick 0, availability at tick 0, and the release
-    stamps at tick 0 of the audiences the row is addressed to (`accepted_tick` for
-    the observer, `released_tick` for the policy, -1 for an audience it is not).
-    The payload is masked for `audience`.
+    relative to its release at tick 0 and availability at tick 0. The release folds
+    a row before it stamps it, so `accepted_tick` and `released_tick` stay -1, as
+    the observer sees them in `fold` and `fold_summary`. The payload is masked for
+    `audience`.
     """
     base = record_none(caps)
     width = np.shape(table.payload)[1]
     addressed = int(table.audience[i])
     zero, unset = jnp.asarray(0, I64), jnp.asarray(-1, I64)
-    to_observer = addressed & int(Audience.OBSERVER)
-    to_policy = addressed & int(Audience.POLICY)
     rec = dataclasses.replace(
         base,
         kind=jnp.asarray(table.kind[i], I64),
@@ -1352,8 +1350,8 @@ def _imported_row(table, i, caps, audience):
         end_tick=jnp.asarray(table.end_offset[i], I64),
         available_tick=zero,
         status=jnp.asarray(RecordStatus.COMPLETED, I64),
-        accepted_tick=zero if to_observer else unset,
-        released_tick=zero if to_policy else unset,
+        accepted_tick=unset,
+        released_tick=unset,
         superseded_by=unset,
         payload=base.payload.at[:width].set(table.payload[i]),
         valid=jnp.asarray(True),

@@ -429,6 +429,31 @@ def test_the_zero_weight_probe_carries_the_rows_real_audience():
     assert "evidence row 3" in result.diagnostic  # the public row prior 5 names
 
 
+class FoldsUnstamped(IgnoresWeights):
+    """Control: ignores the weights but folds only rows not yet stamped, as every
+    row is when the release folds it (the stamps follow the fold).
+    """
+
+    def fold_for(self, belief, rec, caps, audience):
+        unstamped = (rec.accepted_tick < 0) & (rec.released_tick < 0)
+        folded = IgnoresWeights.fold_for(self, belief, rec, caps, audience)
+        return jax.tree_util.tree_map(
+            lambda new, old: jnp.where(unstamped, new, old), folded, belief
+        )
+
+
+def test_the_zero_weight_probe_is_the_row_as_it_is_at_fold_time():
+    """Fails if the zero-weight probe folds a row already stamped as released: the
+    release folds the row before it stamps it, so an observer that folds only
+    unstamped rows would pass while folding an excluded row in the real import.
+    """
+    t = prior_table()
+    study = prior_study(t, PedigreeRule.EXCLUDE_ROWS)
+    unstamped = FoldsUnstamped(table=t, rule=int(PedigreeRule.EXCLUDE_ROWS))
+    result = check_zero_weight_rows(study, observer=unstamped)
+    assert not result and "evidence row 3" in result.diagnostic
+
+
 class NanWeights(PriorObserver):
     """Control: reports NaN, not 0, for every row the rule drops."""
 
