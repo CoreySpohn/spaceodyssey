@@ -11,6 +11,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import shutil
 from types import SimpleNamespace
 
 import jax
@@ -244,6 +245,37 @@ def test_an_unsafe_or_damaged_file_reference_is_refused_at_its_pointer(tmp_path,
     with pytest.raises(DocumentError) as info:
         load_study(text, RESOLVER, files=files)
     assert info.value.pointer == where
+
+
+@pytest.mark.parametrize("swapped", ["parent", "directory"])
+def test_a_files_directory_reached_through_a_symlink_is_refused(tmp_path, swapped):
+    """Fails if, after the files directory or its parent is replaced by a symlink to
+    an outside copy of the same bytes, `load_study` reads a file, or the pre-flight or
+    the lineage check reports anything but `L001` at a reference's name. Control: the
+    same document reads from the copy's own path.
+    """
+    base = tmp_path / "doc"
+    files = base / "files"
+    text = _stored(files)
+    copy = tmp_path / "outside"
+    shutil.copytree(base, copy)
+    if swapped == "parent":
+        shutil.rmtree(base)
+        os.symlink(copy, base)
+    else:
+        shutil.rmtree(files)
+        os.symlink(copy / "files", files)
+    load_study(text, RESOLVER, files=copy / "files")
+    with pytest.raises(DocumentError) as info:
+        load_study(text, RESOLVER, files=files)
+    assert info.value.pointer.endswith("/file/name")
+    found = preflight_document(text, RESOLVER, files=files, upstream=UPSTREAM)
+    assert [(str(f.code), f.pointer) for f in found] == [("L001", info.value.pointer)]
+    report = verify_lineage(text, UPSTREAM, files=files)
+    assert report.status == "failed"
+    assert [str(f.code) for f in report.findings] == ["L001"]
+    assert report.findings[0].pointer.startswith("/study/process/table/")
+    assert report.findings[0].pointer.endswith("/file/name")
 
 
 # ---- export from an upstream run ----------------------------------------------------

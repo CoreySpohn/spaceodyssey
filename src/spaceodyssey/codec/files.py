@@ -6,6 +6,10 @@ directory the caller names. The document keeps the dtype and shape and a referen
 `{"name": "<sha256>.bin", "sha256": "<hex>", "bytes": n}`, and the reference is part
 of the document hash, so the content of every file is covered by it. A reference
 names a file in the directory, never a path: a name with a separator is refused.
+
+The directory is opened one path component at a time, never following a symbolic
+link (other than one owned by root, such as macOS's `/tmp`), so a directory or a
+parent replaced by a link to another tree is refused, not read through.
 """
 
 import contextlib
@@ -16,6 +20,7 @@ import os
 import re
 import stat
 import tempfile
+from collections import deque
 from pathlib import Path
 
 from spaceodyssey.codec.document import DocumentError, pointer
@@ -24,6 +29,57 @@ DEFAULT_MAX_INLINE = 1024
 DEFAULT_MAX_BYTES = 1 << 30
 _NAME = re.compile(r"[0-9a-f]{64}\.bin")
 _REF_KEYS = frozenset({"name", "sha256", "bytes"})
+_MAX_LINKS = 40
+
+
+class UnsafeDirectory(OSError):
+    """The files directory is reached through a symbolic link a user could plant."""
+
+
+def open_directory(directory):
+    """A descriptor of `directory`, opened component by component from the root.
+
+    No component is followed through a symbolic link unless the link is owned by
+    root (a system link such as macOS's `/tmp` or `/var`, which no user can plant);
+    any other link, a `..` in a followed link, or more than 40 links is
+    `UnsafeDirectory`. The caller closes the descriptor.
+    """
+    parts = deque(p for p in os.path.abspath(directory).split(os.sep) if p)
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    fd = os.open(os.sep, flags)
+    links = 0
+    try:
+        while parts:
+            part = parts.popleft()
+            if part == ".":
+                continue
+            if part == "..":
+                raise UnsafeDirectory(
+                    f"a followed link climbs out with '..' in {directory}"
+                )
+            try:
+                nxt = os.open(part, flags | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError:
+                info = os.stat(part, dir_fd=fd, follow_symlinks=False)
+                if not stat.S_ISLNK(info.st_mode):
+                    raise
+                links += 1
+                if info.st_uid != 0 or links > _MAX_LINKS:
+                    raise UnsafeDirectory(
+                        f"{part!r} in {directory} is a symbolic link"
+                    ) from None
+                target = os.readlink(part, dir_fd=fd)
+                if target.startswith(os.sep):
+                    os.close(fd)
+                    fd = os.open(os.sep, flags)
+                parts.extendleft(reversed([p for p in target.split(os.sep) if p]))
+                continue
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 @dataclasses.dataclass(frozen=True)
@@ -82,7 +138,7 @@ class FileStore:
         if size > limit:
             raise ValueError("file is larger than the limit")
         _require_safe_open()
-        dir_fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+        dir_fd = open_directory(self.directory)
         try:
             flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
             fd = os.open(name, flags, dir_fd=dir_fd)
@@ -142,6 +198,12 @@ class FileStore:
         _require_safe_open(pointer((*path, "name")))
         try:
             raw = self._read(name, size, self.max_bytes)
+        except UnsafeDirectory as err:
+            raise DocumentError(
+                f"array file {name} is not read: the files directory is reached "
+                f"through a symbolic link ({err}); a link is refused",
+                pointer((*path, "name")),
+            ) from err
         except FileNotFoundError as err:
             raise DocumentError(
                 f"array file {name} is missing from {self.directory}",
@@ -176,11 +238,13 @@ def _require_safe_open(where=None):
                 "a symlink or special file could not be refused",
                 where,
             )
-    if os.open not in os.supports_dir_fd:
-        raise DocumentError(
-            "array files need dir_fd support in os.open, which this platform lacks",
-            where,
-        )
+    for call in (os.open, os.stat, os.readlink):
+        if call not in os.supports_dir_fd:
+            raise DocumentError(
+                f"array files need dir_fd support in os.{call.__name__}, which this "
+                "platform lacks",
+                where,
+            )
 
 
 _STORE = contextvars.ContextVar("file_store", default=None)
