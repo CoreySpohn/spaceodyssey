@@ -10,7 +10,9 @@ import numpy as np
 import pytest
 
 from spaceodyssey.core import CompiledExecutor, HostExecutor, battery
+from spaceodyssey.core.battery import metamorphic, views
 from spaceodyssey.core.battery.views import moved_ticks
+from spaceodyssey.core.records import empty_log, log_columns
 from tests.core.battery_helpers import (
     EPOCH_CAPS,
     EPOCH_SHIFTS,
@@ -42,6 +44,22 @@ def test_tick_columns_move_by_name_whatever_their_sign():
     assert moved_ticks("subject", times, valid, 7).tolist() == times.tolist()
     # the log comparator moves the shifted run back: a time may land on -1
     assert moved_ticks("end_tick", np.array([4]), np.array([True]), -5).tolist() == [-1]
+
+
+def test_every_log_tick_column_is_compared_and_moved():
+    """Fails if a log column named `*_tick` is not in the moved set (an importer that
+    writes it at absolute ticks would pass the relation), if a tick column is dropped
+    from the columns the log or decision-view comparator reads, or if either
+    comparator reads its columns from anywhere but the shared `log_columns`.
+    """
+    cols = log_columns(empty_log(EPOCH_CAPS))
+    ticks = {name for name in cols if name.endswith("_tick")}
+    assert ticks == set(views.TICKS)
+    assert metamorphic.log_columns is log_columns
+    assert views.log_columns is log_columns
+    valid = np.array([True])
+    for name in sorted(ticks):
+        assert moved_ticks(name, np.array([3]), valid, 7).tolist() == [10], name
 
 
 def test_shift_epoch_refuses_a_shift_that_is_not_positive():

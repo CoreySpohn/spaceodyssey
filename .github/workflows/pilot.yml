@@ -69,6 +69,7 @@ jobs:
                    tests/studies/test_survey_2_calibration.py; do
             name=$(basename "$f" .py)
             pytest "$f" -m "not slow" -p no:cacheprovider -ra --tb=short \
+              --testbudget-mode report \
               --timeout=600 --durations=0 --junitxml="junit-pilot-$name.xml" || true
           done
 
