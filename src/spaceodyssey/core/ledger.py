@@ -1,10 +1,13 @@
 """Ledger."""
 
+import dataclasses
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from spaceodyssey.core.enums import I64, TIE_NEUTRAL, CoincidentOrder
+from spaceodyssey.core.capacities import OPTIONAL
+from spaceodyssey.core.enums import I64, TIE_NEUTRAL, ChargePricing, CoincidentOrder
 
 
 class ChannelTable(eqx.Module):
@@ -17,8 +20,18 @@ class ChannelTable(eqx.Module):
     kind: jax.Array
     audience: jax.Array
     cost: jax.Array  # F64[C, R]
-    charge: jax.Array  # F64[C, R], reserved: what a receipt debits; equals cost
+    # F64[C, R], what an admission debits (the variable part). It equals cost, and is
+    # read only while the capacities hold refunds; otherwise cost is debited.
+    charge: jax.Array
     coincident_order: jax.Array  # CoincidentOrder per channel; no default
+    # Refund declarations, read only while the capacities hold refunds. Each is absent
+    # at its default: every column OCCUPANCY, no surcharge, no failure kind.
+    pricing: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    surcharge: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    failure_kind: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    refund_deadline_ticks: jax.Array | None = dataclasses.field(
+        default=None, metadata=OPTIONAL
+    )
 
 
 class Ledger(eqx.Module):
@@ -40,6 +53,34 @@ class Ledger(eqx.Module):
     refunded: jax.Array  # F64[BR, R]
     # Programs a PROGRAM Stop has closed, B[P]; present only with more than one program
     program_closed: jax.Array | None = None
+    # Failure receipts that credited nothing; present only while refunds are on
+    refund_ignored: jax.Array | None = None
+
+
+def charge_parts(study, channel_index):
+    """`(charge, fixed, pricing)` of a channel, each of one entry per resource.
+
+    `charge` is what an admission debits, `fixed` the part of it that is never
+    refundable (a surcharge), `pricing` the column's `ChargePricing`. While the
+    capacities hold no refunds, the charge is the cost, nothing is fixed and every
+    column is OCCUPANCY, so a study without refunds computes as before.
+    """
+    ch = study.channels
+    if not study.caps.refunds:
+        cost = ch.cost[channel_index]
+        zero = jnp.zeros_like(cost)
+        return cost, zero, jnp.zeros(cost.shape, I64)
+    base = ch.charge[channel_index]
+    pricing = (
+        jnp.zeros(base.shape, I64)
+        if ch.pricing is None
+        else ch.pricing[channel_index].astype(I64)
+    )
+    extra = (
+        jnp.zeros_like(base) if ch.surcharge is None else ch.surcharge[channel_index]
+    )
+    fixed = jnp.where(pricing == ChargePricing.SURCHARGE, extra, 0.0)
+    return base + fixed, fixed, pricing
 
 
 def _resource_rows(study, lane, program=0):

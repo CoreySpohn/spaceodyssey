@@ -23,6 +23,7 @@ from spaceodyssey.core.enums import (
     AdmissionCode,
     Audience,
     Capacity,
+    ChargePricing,
     EffectKind,
     EventKind,
     RecordStatus,
@@ -180,25 +181,65 @@ def no_violation(run):
     return make_result("no_violation", failures)
 
 
-def _balance_rows(study, lane):
+def _balance_rows(study, lane, program=0):
     caps = study.caps
     asset = int(np.asarray(study.assets.lane_asset)[lane])
-    return (asset, caps.n_assets, caps.n_balance_rows - 1)
+    owner = caps.n_assets + (program if caps.n_programs > 1 else 0)
+    return (asset, owner, caps.n_balance_rows - 1)
+
+
+def _charge_totals(study):
+    """What an admission debits per channel and resource, read from the declarations.
+
+    The cost, until the capacities hold refunds; then the charge plus the fixed part
+    of a SURCHARGE column. Written out here, not read from the ledger's own helper.
+    """
+    ch = study.channels
+    if not study.caps.refunds:
+        return np.asarray(ch.cost)
+    base = np.asarray(ch.charge)
+    if ch.pricing is None or ch.surcharge is None:
+        return base
+    fixed = np.asarray(ch.surcharge) * (
+        np.asarray(ch.pricing) == ChargePricing.SURCHARGE
+    )
+    return base + fixed
+
+
+def _log_program(log, i):
+    return 0 if log.program is None else int(np.asarray(log.program)[i])
+
+
+def _charged_rows(log, i, valid):
+    """The lane and program a log row's charge lands on.
+
+    A refund receipt (`refund_of` set) credits the rows of the acquisition it names, so
+    its negative charge is read there.
+    """
+    origin = int(np.asarray(log.refund_of)[i])
+    if origin >= 0:
+        ids, refs = np.asarray(log.acquisition_id), np.asarray(log.refund_of)
+        hits = [j for j in valid if int(ids[j]) == origin and int(refs[j]) < 0]
+        if hits:
+            return int(np.asarray(log.lane)[hits[0]]), _log_program(log, hits[0])
+    return int(np.asarray(log.lane)[i]), _log_program(log, i)
 
 
 def _retained_net_spend(run):
     """Net charge of the retained records plus full cost of each live occupancy."""
     study, c = run.study, run.carry
     spent = np.zeros(np.asarray(study.budget).shape)
-    log, cost = c.log, np.asarray(study.channels.cost)
+    log, cost = c.log, _charge_totals(study)
     charged = np.asarray(log.charged)
-    for i in _valid_rows(run):
-        rows = _balance_rows(study, int(log.lane[i]))
+    valid = _valid_rows(run)
+    for i in valid:
+        rows = _balance_rows(study, *_charged_rows(log, i, valid))
         for r, row in enumerate(rows):
             spent[row, r] += float(charged[i, r])
     ev = c.ev
     for i in _pending_settlements(run):
-        rows = _balance_rows(study, int(ev.lane[i]))
+        program = 0 if ev.program is None else int(np.asarray(ev.program)[i])
+        rows = _balance_rows(study, int(ev.lane[i]), program)
         for r, row in enumerate(rows):
             spent[row, r] += float(cost[int(ev.channel_index[i]), r])
     return spent
@@ -212,7 +253,7 @@ def _refused_completions(run):
     """
     study, t = run.study, run.trace
     ids = np.asarray(study.channels.id).tolist()
-    cost = np.asarray(study.channels.cost)
+    cost = _charge_totals(study)
     lost = np.zeros(np.asarray(study.budget).shape)
     refused = (
         np.asarray(t.handled)

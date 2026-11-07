@@ -49,6 +49,7 @@ CORE_KINDS: Mapping[KindRef, type] = {
     ("core", "admission_code", 1): enums.AdmissionCode,
     ("core", "coincident_order", 1): enums.CoincidentOrder,
     ("core", "charge_rule", 1): enums.ChargeRule,
+    ("core", "charge_pricing", 1): enums.ChargePricing,
     ("core", "remainder_rule", 1): enums.RemainderRule,
     ("core", "audience", 1): enums.Audience,
     ("core", "capacity", 1): enums.Capacity,

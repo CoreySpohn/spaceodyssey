@@ -17,6 +17,7 @@ from spaceodyssey.core.declarations import (
 )
 from spaceodyssey.core.enums import (
     Audience,
+    ChargePricing,
     CoincidentOrder,
     Disposition,
     EffectKind,
@@ -357,16 +358,38 @@ def reserved(study: Study):
 
     ch, assets = study.channels, study.assets
     charge, cost = np.asarray(ch.charge), np.asarray(ch.cost)
-    if not np.array_equal(charge, cost):
-        differs = np.argwhere(charge != cost) if charge.shape == cost.shape else []
-        entry = tuple(int(n) for n in differs[0]) if len(differs) else ()
-        flag(
-            "channels.charge",
-            "a value that differs from cost",
-            "channels",
-            "charge",
-            entry=entry,
-        )
+    if not study.caps.refunds:
+        # the charge and the refund declarations are read only while refunds are on
+        if not np.array_equal(charge, cost):
+            differs = np.argwhere(charge != cost) if charge.shape == cost.shape else []
+            entry = tuple(int(n) for n in differs[0]) if len(differs) else ()
+            flag(
+                "channels.charge",
+                "a value that differs from cost",
+                "channels",
+                "charge",
+                entry=entry,
+            )
+        for name, column, default, what in (
+            (
+                "pricing",
+                ch.pricing,
+                ChargePricing.OCCUPANCY,
+                "a pricing other than occupancy",
+            ),
+            ("surcharge", ch.surcharge, 0, "a nonzero surcharge"),
+            ("failure_kind", ch.failure_kind, -1, "a failure kind"),
+            (
+                "refund_deadline_ticks",
+                ch.refund_deadline_ticks,
+                0,
+                "a nonzero deadline",
+            ),
+        ):
+            found = [] if column is None else np.argwhere(np.asarray(column) != default)
+            if len(found):
+                entry = tuple(int(n) for n in found[0])
+                flag(f"channels.{name}", what, "channels", name, entry=entry)
     for name, column, default, what in (
         ("freeze_ticks", assets.freeze_ticks, 0, "a nonzero horizon"),
         ("disruptive_resource", assets.disruptive_resource, -1, "a resource row"),
@@ -378,6 +401,41 @@ def reserved(study: Study):
     for i, policy in enumerate(study.agenda.policies):
         if declaration_of(policy).disruptive:
             flag(f"policy[{i}]", "a disruptive effect", "policy", "disruptive", index=i)
+    return out
+
+
+def failure_kinds(study: Study):
+    """W002: a declared failure kind that the policy cannot read.
+
+    A refund is credited when its receipt is released to the policy, so a kind no
+    payload column of which the policy may read could never settle one.
+    """
+    out = []
+    kinds = study.channels.failure_kind
+    if not study.caps.refunds or kinds is None:
+        return out
+    table = study.caps.payload_audience
+    for i, kind in enumerate(np.asarray(kinds).tolist()):
+        if kind < 0:
+            continue
+        seen = not table or (
+            0 <= kind < len(table)
+            and any(f & int(Audience.POLICY) for f in table[kind])
+        )
+        if not seen:
+            out.append(
+                Finding(
+                    FindingCode.W002,
+                    ERROR,
+                    "channels.failure_kind",
+                    f"failure kind {kind} of channel {i} is not readable by the policy",
+                    "declare a policy-visible kind; a receipt settles when released "
+                    "to the policy",
+                    subject="channels",
+                    member="failure_kind",
+                    entry=(i,),
+                )
+            )
     return out
 
 
@@ -550,6 +608,7 @@ def preflight(
         *record_channels(study),
         *capability(study, executor),
         *reserved(study),
+        *failure_kinds(study),
         *stops(study),
         *programs(study),
         *channels(study),

@@ -225,8 +225,27 @@ ALLOWED = {
     ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "replay_belief", 1),
     (
         "handlers.py",
-        "**{f.name: getattr(log, f.name)[slot] for f in _ROW_FIELDS}, program=program",
+        "n: getattr(log, n)[slot] for n in _OPTIONAL_ROW "
+        "if getattr(log, n) is not None",
     ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_log_rec", 1),
+    (
+        "handlers.py",
+        "return Record("
+        "**{f.name: getattr(log, f.name)[slot] for f in _ROW_FIELDS}, **held)",
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_log_rec", 1),
+    ("executors/replay.py", "if getattr(log, n) is not None:"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "_row", 1
+    ),
+    ("executors/replay.py", "fields[n] = jnp.asarray(getattr(log, n)[i])"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "_row", 1
+    ),
+    ("records.py", "old = getattr(carry.log, name)"): Allowance(
+        COLUMN_BY_NAME, ("dynamic-getattr",), "write_log", 1
+    ),
+    (
+        "records.py",
+        "else old.at[s].set(jnp.where(ok, getattr(rec, name), old[s]))",
+    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "write_log", 1),
     ("records.py", "col = getattr(carry.log, name)"): Allowance(
         COLUMN_BY_NAME, ("dynamic-getattr",), "write_log", 1
     ),
@@ -235,7 +254,7 @@ ALLOWED = {
         "cols[name] = col.at[s].set(jnp.where(ok, getattr(rec, name), col[s]))",
     ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "write_log", 1),
     ("snapshot.py", "col = getattr(log, name)"): Allowance(
-        COLUMN_BY_NAME, ("dynamic-getattr",), "snapshot_view", 1
+        COLUMN_BY_NAME, ("dynamic-getattr",), "snapshot_view", 2
     ),
     (
         "snapshot.py",

@@ -11,6 +11,7 @@ from spaceodyssey.core.enums import (
     F64,
     I64,
     Audience,
+    ChargePricing,
     Disposition,
     EventKind,
     Purpose,
@@ -20,8 +21,9 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.events import enqueue, requeue, where_tree
 from spaceodyssey.core.keys import asset_coordinate, draw_key, fold_key
-from spaceodyssey.core.ledger import _resource_rows
+from spaceodyssey.core.ledger import _resource_rows, charge_parts
 from spaceodyssey.core.records import (
+    REFUND_COLUMNS,
     Record,
     derived_rows,
     masked_record,
@@ -36,14 +38,18 @@ def _emit(n, slot):
 
 
 # the columns a log row always has; `program` is present only with several programs
-_ROW_FIELDS = tuple(f for f in dataclasses.fields(Record) if f.name != "program")
+# and the refund columns only while refunds are on
+_OPTIONAL_ROW = ("program", *REFUND_COLUMNS)
+_ROW_FIELDS = tuple(
+    f for f in dataclasses.fields(Record) if f.name not in _OPTIONAL_ROW
+)
 
 
 def _log_rec(log, slot):
-    program = None if log.program is None else log.program[slot]
-    return Record(
-        **{f.name: getattr(log, f.name)[slot] for f in _ROW_FIELDS}, program=program
-    )
+    held = {
+        n: getattr(log, n)[slot] for n in _OPTIONAL_ROW if getattr(log, n) is not None
+    }
+    return Record(**{f.name: getattr(log, f.name)[slot] for f in _ROW_FIELDS}, **held)
 
 
 def h_none(c, ev, study, truth, root):
@@ -140,6 +146,9 @@ def h_done(c, ev, study, truth, root):
         charged=channels.cost[channel_index],
         valid=~dup & ~stale,
     )
+    if caps.refunds:
+        charge, fixed, _ = charge_parts(study, channel_index)
+        base = dataclasses.replace(base, charged=charge, nonrefundable=fixed)
     rec = eqx.filter_jit(_realize_rec)(
         c, study, truth, root, base, jnp.asarray(1.0, F64)
     )
@@ -246,9 +255,73 @@ def h_release(c, ev, study, truth, root):
         woke=public & ~seen,
         dup_fold=c.dup_fold | (to_observer & already) | (public & seen),
     )
+    if caps.refunds:
+        c1 = _apply_refund(c1, rec, slot, public & ~seen, study)
     if refresh_enabled(caps):
         c1 = _mark_refresh(c1, rec, to_observer & ~already, public & ~seen, study)
     return c1, _emit(0, slot), record_none(caps)
+
+
+def _apply_refund(c, rec, slot, first, study):
+    """Credit the refundable remainder of the acquisition a failure receipt names.
+
+    Runs where `first` holds: the release of the receipt to the policy audience, which
+    is the settlement boundary (a receipt written but not yet released, held back, or
+    released to the observer alone credits nothing). A record of a declared failure
+    kind is a receipt; it names its origin by subject, channel (`source`) and the
+    visible `refund_index`. The credit applies when the origin exists, the kind is the
+    failure cause its channel declares, the release is within the deadline, and no
+    receipt has credited the acquisition before. A receipt that does not apply counts
+    in `refund_ignored`. The credit is written on the receipt row as a negative
+    `charged`, so the retained records still net to the ledger.
+    """
+    caps, channels, log = study.caps, study.channels, c.log
+    n = jnp.arange(caps.n_log)
+    declared = channels.failure_kind is not None
+    if not declared:
+        return c
+    attempt = first & rec.valid & jnp.isin(rec.kind, channels.failure_kind)
+    named = channels.id == rec.source
+    ti = jnp.argmax(named)
+    cause = named.any() & (channels.failure_kind[ti] == rec.kind)
+    cand = (
+        log.valid
+        & (log.subject == rec.subject)
+        & (log.channel == rec.source)
+        & (log.acquisition_index == rec.refund_index)
+        & (log.kind != rec.kind)
+        & (n != slot)
+    )
+    origin = jnp.argmax(cand)
+    deadline = (
+        jnp.zeros((), I64)
+        if channels.refund_deadline_ticks is None
+        else channels.refund_deadline_ticks[ti]
+    )
+    in_time = c.tick <= log.end_tick[origin] + deadline
+    paid = (log.valid & (log.refund_of == log.acquisition_id[origin])).any()
+    applies = attempt & cand.any() & cause & in_time & ~paid
+    owner = 0 if log.program is None else log.program[origin]
+    rows = _resource_rows(study, log.lane[origin], owner)
+    cols = jnp.arange(caps.n_resources)
+    credit = jnp.where(
+        applies,
+        jnp.maximum(log.charged[origin] - log.nonrefundable[origin], 0.0),
+        0.0,
+    )
+    return _tree_set(
+        c,
+        **{
+            "ledger.balance": c.ledger.balance.at[rows, cols].add(credit),
+            "ledger.refunded": c.ledger.refunded.at[rows, cols].add(credit),
+            "ledger.refund_ignored": c.ledger.refund_ignored
+            + (attempt & ~applies).astype(I64),
+            "log.refund_of": log.refund_of.at[slot].set(
+                jnp.where(applies, log.acquisition_id[origin], log.refund_of[slot])
+            ),
+            "log.charged": log.charged.at[slot].add(-credit),
+        },
+    )
 
 
 def _mark_refresh(c, rec, accepted, released, study):
@@ -384,10 +457,20 @@ def _cancel_lane(
         valid=has,
         **({} if c.ev.program is None else {"program": c.ev.program[i]}),
     )
+    if caps.refunds:
+        charge, fixed, pricing = charge_parts(study, channel_index)
+        # per resource column: a flat price returns nothing on a cancel, and the fixed
+        # part of any price stays with the record
+        part = jnp.where(pricing == ChargePricing.FLAT_FRACTION, 1.0, spent)
+        kept = (charge - fixed) * part + fixed
+        base = dataclasses.replace(base, charged=kept, nonrefundable=fixed)
     rec = eqx.filter_jit(_realize_rec)(c, study, truth, root, base, frac)
     owner = 0 if c.ev.program is None else c.ev.program[i]
     rows = _resource_rows(study, lane, owner)
-    credit = jnp.where(has, channels.cost[channel_index] * (1.0 - spent), 0.0)
+    if caps.refunds:
+        credit = jnp.where(has, charge - kept, 0.0)
+    else:
+        credit = jnp.where(has, channels.cost[channel_index] * (1.0 - spent), 0.0)
     c1 = _tree_set(
         c,
         **{

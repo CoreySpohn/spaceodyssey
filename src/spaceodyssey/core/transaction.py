@@ -22,7 +22,12 @@ from spaceodyssey.core.enums import (
 from spaceodyssey.core.events import enqueue, order_key, select_next, where_tree
 from spaceodyssey.core.handlers import step
 from spaceodyssey.core.keys import policy_key
-from spaceodyssey.core.ledger import AssetTable, ChannelTable, _resource_rows
+from spaceodyssey.core.ledger import (
+    AssetTable,
+    ChannelTable,
+    _resource_rows,
+    charge_parts,
+)
 from spaceodyssey.core.snapshot import snapshot_fingerprint, snapshot_view
 
 
@@ -231,10 +236,10 @@ def _commit_observe(c, eff, e, ok, study):
         c,
         **{
             "ledger.balance": c.ledger.balance.at[rows, cols].add(
-                jnp.where(ok, -channels.cost[channel_index], 0.0)
+                jnp.where(ok, -charge_parts(study, channel_index)[0], 0.0)
             ),
             "ledger.debited": c.ledger.debited.at[rows, cols].add(
-                jnp.where(ok, channels.cost[channel_index], 0.0)
+                jnp.where(ok, charge_parts(study, channel_index)[0], 0.0)
             ),
             "ledger.lane_busy_until": c.ledger.lane_busy_until.at[lane].set(
                 jnp.where(ok, done_t, c.ledger.lane_busy_until[lane])
@@ -277,7 +282,7 @@ def _group_code(c, eff, member, study):
     lanes = [channels.lane[eff.channel_index[f]] for f in range(n)]
     programs = [_program_of(eff, f, caps) for f in range(n)]
     rows = [_resource_rows(study, lanes[f], programs[f]) for f in range(n)]
-    cost = [channels.cost[eff.channel_index[f]] for f in range(n)]
+    cost = [charge_parts(study, eff.channel_index[f])[0] for f in range(n)]
     n_members = sum(member[f].astype(I64) for f in range(n))
     room = ((~c.ev.valid).sum() >= n_members) & (c.next_sid + n_members <= caps.max_sid)
     cols = jnp.arange(caps.n_resources)

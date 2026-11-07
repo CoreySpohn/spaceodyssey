@@ -105,6 +105,7 @@ def empty_carry(caps, balance=None):
             program_closed=jnp.zeros(caps.n_programs, B)
             if caps.n_programs > 1
             else None,
+            refund_ignored=z if caps.refunds else None,
         ),
         belief=_zero_belief(caps),
         pbelief=_zero_belief(caps),

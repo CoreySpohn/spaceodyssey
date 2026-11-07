@@ -12,8 +12,10 @@ from spaceodyssey.core.capacities import OPTIONAL
 from spaceodyssey.core.enums import I64, Audience, B, RecordStatus, version_slot
 from spaceodyssey.core.records import (
     LOG_INT_FIELDS,
+    REFUND_COLUMNS,
     RecordLog,
     derived_rows,
+    hide_refund_of,
     payload_columns,
 )
 
@@ -222,6 +224,8 @@ def snapshot_view(carry, audience, caps):
             col = _superseded_in_view(log, vis, caps)
         if name == "payload":
             col = jnp.where(payload_columns(caps, log.kind, audience), col, 0.0)
+        if name == "refund_of" and caps.refunds:
+            col = hide_refund_of(col)
         mask = vis if col.ndim == 1 else vis[:, None]
         cols[name] = jnp.where(mask, col, jnp.zeros_like(col))[order]
     # a pedigree is shown only on the visible product rows that carry one
@@ -234,6 +238,13 @@ def snapshot_view(carry, audience, caps):
         cols["program"] = jnp.where(shown, log.program, 0)[order]
     else:
         cols["program"] = None
+    for name in REFUND_COLUMNS:
+        col = getattr(log, name)
+        if col is None:
+            cols[name] = None
+        else:
+            mask = vis if col.ndim == 1 else vis[:, None]
+            cols[name] = jnp.where(mask, col, jnp.zeros_like(col))[order]
     return Snapshot(
         log=RecordLog(**cols),
         n_rows=vis.sum().astype(I64),
@@ -280,11 +291,16 @@ def conditional_view_leaves(view):
     """The leaves of a view that exist only where a feature does, in digest order.
 
     The pedigree the view shows (a width-0 column when the refresh protocol is off) and
-    the program column (absent with one program). A feature that adds a leaf to the
+    the program column (absent with one program) and the refund index and award
+    generation (absent without refunds). A feature that adds a leaf to the
     view lists it here.
     """
     program = () if view.log.program is None else (view.log.program,)
-    return (view.log.product, *program)
+    # the refund columns that are integers; the amount is a float and is not hashed
+    refunds = tuple(
+        x for x in (view.log.refund_index, view.log.award_gen) if x is not None
+    )
+    return (view.log.product, *program, *refunds)
 
 
 def snapshot_fingerprint(view, layout):

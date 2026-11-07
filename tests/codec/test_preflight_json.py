@@ -606,6 +606,26 @@ def _variant_x002_charge(seed):
     return _doc(_with(study, channels=_channels(charge=charge))), None
 
 
+def _variant_x002_pricing(seed):
+    study = toy.survey_1()
+    pricing = jnp.zeros((3, 3), I64).at[1, 2].set(3 if seed else 0)
+    return _doc(_with(study, channels=_channels(pricing=pricing))), None
+
+
+def _variant_x002_failure_kind(seed):
+    study = toy.survey_1()
+    kind = jnp.asarray([-1, -1, 2 if seed else -1], I64)
+    return _doc(_with(study, channels=_channels(failure_kind=kind))), None
+
+
+def _variant_w002(seed):
+    study = toy.survey_1()
+    caps = dataclasses.replace(study.caps, refunds=True)
+    kind = jnp.asarray([-1, -1, 0 if seed else 2], I64)
+    channels = _channels(failure_kind=kind)
+    return _doc(_with(study, caps=caps, channels=channels)), None
+
+
 def _variant_x002_resource(seed):
     study = toy.survey_1()
     rows = jnp.asarray([-1, 0 if seed else -1], I64)
@@ -650,6 +670,24 @@ VARIANTS = {
         _variant_x002_charge,
         "/study/channels/charge/data/1/2",
         _is(2.0),
+    ),
+    "X002-pricing": (
+        FindingCode.X002,
+        _variant_x002_pricing,
+        "/study/channels/pricing/data/1/2",
+        _is(3),
+    ),
+    "X002-failure-kind": (
+        FindingCode.X002,
+        _variant_x002_failure_kind,
+        "/study/channels/failure_kind/data/2",
+        _is(2),
+    ),
+    "W002": (
+        FindingCode.W002,
+        _variant_w002,
+        "/study/channels/failure_kind/data/2",
+        _is(0),
     ),
     "X002-resource": (
         FindingCode.X002,

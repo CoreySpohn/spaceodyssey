@@ -177,6 +177,14 @@ def _channel_edit(**columns):
     return _replace(study, channels=dataclasses.replace(study.channels, **columns))
 
 
+def _refund_channels(**columns):
+    """`survey_1` with refunds on and the given refund declarations on its channels."""
+    study = toy.survey_1()
+    caps = dataclasses.replace(study.caps, refunds=True)
+    channels = dataclasses.replace(study.channels, **columns)
+    return _replace(study, caps=caps, channels=channels)
+
+
 def _unsupported_kind():
     return _channel_edit(kind=toy.survey_1().channels.kind.at[2].set(9))
 
@@ -269,6 +277,21 @@ SEEDED = {
     "charge_differs_from_cost": (
         C.X002,
         lambda: _channel_edit(charge=2.0 * jnp.ones((3, 3))),
+        None,
+    ),
+    "pricing_without_refunds": (
+        C.X002,
+        lambda: _channel_edit(pricing=jnp.full((3, 3), 3, I64)),
+        None,
+    ),
+    "failure_kind_without_refunds": (
+        C.X002,
+        lambda: _channel_edit(failure_kind=jnp.asarray([-1, -1, 2], I64)),
+        None,
+    ),
+    "failure_kind_unreadable": (
+        C.W002,
+        lambda: _refund_channels(failure_kind=jnp.asarray([-1, -1, 0], I64)),
         None,
     ),
     "frozen_horizon": (

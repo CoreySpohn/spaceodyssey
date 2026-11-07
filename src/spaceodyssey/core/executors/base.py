@@ -96,6 +96,9 @@ CANONICAL_FIELDS = {
         "valid",
         "product",
         "program",
+        "nonrefundable",
+        "refund_index",
+        "award_gen",
     ),
     "carry.ledger": (
         "balance",
@@ -110,6 +113,7 @@ CANONICAL_FIELDS = {
         "debited",
         "refunded",
         "program_closed",
+        "refund_ignored",
     ),
     "carry.request": (
         "kind",
@@ -208,6 +212,11 @@ def programs_on(carry):
     return carry.ledger.program_closed is not None
 
 
+def refunds_on(carry):
+    """Whether the carry holds the refund columns and counter."""
+    return carry.log.refund_index is not None
+
+
 # Fields that exist only where a feature does, by dotted path, each with the predicate
 # that says whether the carry holds the feature. A field of a feature that is off has
 # zero size and leaves the canonical history, so no history of a study without the
@@ -224,6 +233,10 @@ CONDITIONAL_FIELDS = {
     "carry.request.program": programs_on,
     "carry.refresh.program": programs_on,
     "carry.ledger.program_closed": programs_on,
+    "carry.log.nonrefundable": refunds_on,
+    "carry.log.refund_index": refunds_on,
+    "carry.log.award_gen": refunds_on,
+    "carry.ledger.refund_ignored": refunds_on,
 }
 REFRESH_GROUPS = tuple(CONDITIONAL_GROUPS)
 REFRESH_FIELDS = tuple(CONDITIONAL_FIELDS)
