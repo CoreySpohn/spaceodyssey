@@ -300,21 +300,29 @@ def test_the_policy_sees_program_ids_and_the_observer_sees_none(stop_one):
     assert full is not None
 
 
-@pytest.mark.medium  # Two runs share one compiled program; the second is warm.
-def test_relabelling_programs_moves_the_policy_fingerprint_and_not_the_observer_s():
+@pytest.fixture(scope="module")
+def relabelled():
+    """The two runs that differ only in which program owns each acquisition."""
+    return _run(*RELABEL), _run(*SWAPPED)
+
+
+@pytest.mark.medium  # The two relabelled runs are shared with the leak control.
+def test_relabelling_programs_moves_the_policy_fingerprint_and_not_the_observer_s(
+    relabelled,
+):
     """Fails if a program label reaches the observer's identity, or not the policy's."""
-    a_study, a = _run(*RELABEL)
-    b_study, b = _run(*SWAPPED)
+    (a_study, a), (b_study, b) = relabelled
     fa, fb = _fingerprints(a_study, a), _fingerprints(b_study, b)
     assert fa[Audience.POLICY][1] != fb[Audience.POLICY][1]
     assert fa[Audience.OBSERVER][1] == fb[Audience.OBSERVER][1]
 
 
-@pytest.mark.medium  # Two runs share one compiled program; the second is warm.
-def test_control_an_observer_view_that_shows_the_label_moves_its_fingerprint():
+@pytest.mark.medium  # The two relabelled runs are shared with the relabelling check.
+def test_control_an_observer_view_that_shows_the_label_moves_its_fingerprint(
+    relabelled,
+):
     """Control: a leaked label changes the observer identity, so the check bites."""
-    a_study, a = _run(*RELABEL)
-    b_study, b = _run(*SWAPPED)
+    (a_study, a), (b_study, b) = relabelled
     layout = a_study.observer.layout(a_study.caps)
     leaked = []
     for study, run in ((a_study, a), (b_study, b)):
@@ -323,6 +331,35 @@ def test_control_an_observer_view_that_shows_the_label_moves_its_fingerprint():
         view = eqx.tree_at(lambda v: v.log.program, view, shown)
         leaked.append(int(snapshot_fingerprint(view, layout)))
     assert leaked[0] != leaked[1]
+
+
+@pytest.mark.medium  # A cold host run compiles the executor, over the 5 s unit budget.
+def test_a_producer_that_names_no_program_charges_program_zero():
+    """Fails if a study that never sets `program` cannot run with several programs.
+
+    `FixedPlanPolicy` leaves the column `None`; the owner then defaults to program 0, as
+    it is with one program.
+    """
+    study = toy.survey_1(caps=Capacities(n_programs=2))
+    truth, root = one_world(caps=study.caps)
+    run = HostExecutor().run(study, truth, root, N_STEPS)
+    n = int(run.carry.n_log)
+    assert n > 0
+    assert not np.asarray(run.carry.log.program)[:n].any()  # every record is program 0
+    balance = np.asarray(run.carry.ledger.balance)
+    assert (
+        balance[_row(study, 0)] < balance[_row(study, 1)]
+    ).any()  # row 0 was charged
+    assert (
+        balance[_row(study, 1)] == balance[_row(study, 1)][0]
+    ).all()  # row 1 was not
+
+
+def test_control_the_same_study_with_one_program_charges_no_program_row():
+    """Control: with one program the effect table holds no program column at all."""
+    study = toy.survey_1()
+    assert effects_none(study.caps).program is None
+    assert effects_none(Capacities(n_programs=2)).program is not None
 
 
 def test_a_scripted_policy_is_a_policy():
@@ -334,7 +371,7 @@ def test_a_scripted_policy_is_a_policy():
 # ---- mutants (last: each clears the compile caches) ---------------------------------
 
 
-@pytest.mark.medium  # Each mutant is a cold compile of the host executor.
+@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
 def test_mutant_a_stop_that_closes_every_lane_is_caught(monkeypatch):
     """Mutant: with programs, a program Stop closes all lanes. The check must fail."""
     real = handlers.h_stop
@@ -355,7 +392,7 @@ def test_mutant_a_stop_that_closes_every_lane_is_caught(monkeypatch):
         jax.clear_caches()
 
 
-@pytest.mark.medium  # Each mutant is a cold compile of the host executor.
+@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
 def test_mutant_a_stop_that_never_sets_the_flag_admits_the_closed_program(monkeypatch):
     """Mutant: the flag is not set, so the closed program is admitted again."""
     real = handlers.h_stop
@@ -377,7 +414,7 @@ def test_mutant_a_stop_that_never_sets_the_flag_admits_the_closed_program(monkey
         jax.clear_caches()
 
 
-@pytest.mark.medium  # Each mutant is a cold compile of the host executor.
+@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
 def test_mutant_an_abort_that_ignores_the_program_cancels_both(monkeypatch):
     """Mutant: the abort drops its program filter, so it cancels every live lane."""
     real = handlers._cancel_lane
@@ -396,7 +433,7 @@ def test_mutant_an_abort_that_ignores_the_program_cancels_both(monkeypatch):
         jax.clear_caches()
 
 
-@pytest.mark.medium  # Each mutant is a cold compile of the host executor.
+@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
 def test_mutant_a_refund_to_the_first_program_row_is_caught(monkeypatch):
     """Mutant: the cancel credits program 0 whoever owns the occupancy."""
     real = handlers._resource_rows

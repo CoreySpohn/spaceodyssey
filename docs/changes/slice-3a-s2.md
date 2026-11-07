@@ -112,3 +112,20 @@ baseline (about 100 us per step); the Mac and CI runner remain the baseline of r
 edits (`events.py`, `records.py`, `snapshot.py`, `ledger.py`, `carry.py`, `service.py`,
 `refresh.py`, `executors/`, `conformance/observer_kit.py`, `transaction.py`, `handlers.py`,
 `declarations.py`, `preflight/`, `battery/` log walks) belong to S2.
+
+## Review round 1
+
+- `EffectTable.program` is an optional document field (`OPTIONAL` metadata, default `None`;
+  the codec's plain-default rule now accepts `None`). A one-program table is written without
+  the key, a document from before programs loads with `None`, `"program": null` is refused
+  as two documents for one table, and a populated column round-trips. The four codec tests
+  fail without the marker.
+- A producer that leaves `program` as `None` (`FixedPlanPolicy`) is program 0 when
+  `n_programs > 1`: `_program_of` returns 0 for a missing column, and the single-program
+  static path is unchanged. `toy.survey_1(caps=Capacities(n_programs=2))` is the test (it
+  raised `TypeError` before).
+- The four compiled mutants are slow tier. The relabelling check and the observer-leak
+  control share one module fixture. `test_programs.py` quick tier (unit and medium): 34.4 s
+  cold, alone, cache off (was 72 s); the mutants take 12.7 to 14.1 s each in the slow tier.
+- Default scan StableHLO re-checked under this machine's current JAX: `main`, 7431b06 and the
+  fixed tree lower to the identical module.

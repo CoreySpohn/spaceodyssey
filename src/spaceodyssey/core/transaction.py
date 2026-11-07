@@ -201,8 +201,11 @@ def _permitted(mask, kind):
 
 
 def _program_of(eff, e, caps):
-    """Program of effect row e: its column with several programs, else the one."""
-    if caps.n_programs > 1:
+    """Program of effect row e: its column with several programs, else the one.
+
+    A producer that leaves the column `None` names no owner; the row is program 0.
+    """
+    if caps.n_programs > 1 and eff.program is not None:
         return eff.program[e]
     return jnp.asarray(0, I64)
 
