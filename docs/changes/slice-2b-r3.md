@@ -21,8 +21,10 @@ section, no `schema_version` change and no migration, and no pinned hash moved.
 5. this record (`81661a1`)
 6. review round 1 fixes: `f633669`, `79636d2`, `0f9a67e`, `9d5550e`, `8e5bfe8`, and
    this record's update (`ee3b475`; see "Review round 1")
-7. review round 2 fixes: `3efec3f`, `156335b`, and this record's update (see "Review
-   round 2")
+7. review round 2 fixes: `3efec3f`, `156335b`, and this record's update (`84304d6`;
+   see "Review round 2")
+8. review round 3 fixes: `1c4952d`, `0bcc2d4`, and this record's update (see "Review
+   round 3")
 
 ## What changed
 
@@ -369,3 +371,59 @@ Checks rerun:
   existing `test_document.py::test_content_hash_is_stable_across_processes` (5.4 s).
 - `ruff check`, `ruff format --check`, `tools/check_internal_refs.py` and
   `pre-commit run` on every touched file: clean.
+
+## Review round 3
+
+The review accepted the alias rule (document content cannot choose the trusted
+directory), confirmed the temporary-file creation, permissions, descriptor-relative
+rename and cleanup, and killed S1 to S7. It found three more P2s. Each fix has a test
+that failed before it.
+
+1. **The writer made the trusted directory by path before the safe walk**
+   (`os.makedirs`). A store made for `ancestor/newdoc/files`, with `ancestor` then
+   replaced by a link to an outside directory, created `outside/newdoc` before it
+   refused. The walk now makes a missing component relative to its parent's
+   descriptor (`mkdir` with `dir_fd`) and then opens it with
+   `O_NOFOLLOW | O_DIRECTORY`, from the root down to the files directory, so nothing
+   is made through a link. Test:
+   `test_the_writer_creates_nothing_outside_when_an_ancestor_becomes_a_link`.
+2. **Document objects skipped the integer check.** A `StudyDocument` or `RunDocument`
+   object was read without the parsed-object copy, and `load_study` decoded it
+   directly, so a table's kind version of `10**4499` raised a plain `ValueError` in
+   the lineage check, the pre-flight and `load_study`. `check_integers`
+   (`codec/document.py`) now walks an object body before anything reads it, in the
+   JSON paths (`_parsed`) and in `load_study`. It refuses only integers too long to
+   write (and nesting too deep), so an object may still carry a raw NaN, as before.
+   A document object with such a schema version is now `L001` at `/schema_version`,
+   like the parsed object, instead of `D002`. Test:
+   `test_a_parsed_document_holding_a_huge_integer_is_a_finding` (schema, study, kind;
+   parsed object and document object, on hashing, the lineage check, the pre-flight
+   and `load_study`).
+3. **A computed byte count could not be formatted.** A shape of
+   `[10**3000, 10**3000]` passed the per-integer checks, and its byte count raised a
+   plain `ValueError` when reported. The loader now refuses, before using the shape,
+   any dimension above the platform's largest index and any shape whose byte count
+   exceeds it: `L001` at the shape's pointer on all three paths. A zero-sized shape
+   with a huge dimension is refused the same way. Test:
+   `test_an_oversize_shape_is_refused_at_its_pointer` (file, zero).
+
+| Test | Tier | Cold s | Mutant it kills |
+|---|---|---|---|
+| `test_premission_codec.py::test_the_writer_creates_nothing_outside_when_an_ancestor_becomes_a_link` | unit | 2.3 | ancestors made by path before the walk (T1) |
+| `::test_a_parsed_document_holding_a_huge_integer_is_a_finding` (3) | unit | 2.5 to 2.8 | object bodies not checked in the JSON paths (T2); `load_study` skips the object check (T3) |
+| `::test_an_oversize_shape_is_refused_at_its_pointer` (2) | unit | 2.6, 2.6 | shape not bounded (T4); product bounded, dimensions not (T5) |
+
+All five mutants are killed.
+
+Checks rerun:
+
+- `tests/core/test_golden_histories.py` with `tests/codec/test_run_document_runs.py`
+  at `0bcc2d4`: 189 passed in 194.5 s; `git diff be2e439 --
+  tests/core/golden_pin.json tests/codec/hash_pin.json` is empty.
+- The codec, premission, prior and refit files (`tests/codec` without the slow tier,
+  `test_premission.py`, `test_premission_refit.py`, `test_observer_kit.py`,
+  `test_preflight.py`, `test_lints.py`): 695 passed in 28.5 s.
+- `1c4952d` alone (its `src/` with its test file): the codec files, 302 passed.
+- `ruff check`, `ruff format --check`, `tools/check_internal_refs.py` and
+  `pre-commit run` on every touched file: clean. The quick tier was not rerun this
+  round.
