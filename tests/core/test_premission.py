@@ -543,3 +543,28 @@ def test_an_empty_table_is_a_no_op_import_also_under_tracing():
     from spaceodyssey.core.preflight import preflight
 
     assert preflight(study) == []
+
+
+def test_an_empty_table_wider_than_a_record_agrees_in_preflight_and_the_run():
+    """Fails if an empty table whose payload is wider than a record passes pre-flight
+    but its handler refuses the width when traced: nothing is written, so both must
+    accept it.
+    """
+    from spaceodyssey.core.preflight import preflight
+
+    empty = authored_table(
+        subject=[],
+        local_index=[],
+        channel=[],
+        kind=[],
+        audience=[],
+        payload=np.zeros((0, CAPS.payload_width + 1)),
+    )
+    study = study_of(empty)
+    assert preflight(study) == []
+    truth, _ = one()
+    c = core.init_carry(study, truth)
+    row = dataclasses.replace(core.empty_event_row(), valid=jnp.asarray(True))
+    for handle in (study.process.handle, eqx.filter_jit(study.process.handle)):
+        _, rec = handle(c, row, study)
+        assert not bool(rec.valid)

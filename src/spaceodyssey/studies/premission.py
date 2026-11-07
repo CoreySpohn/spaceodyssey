@@ -257,15 +257,16 @@ class PreMissionImporter(AbstractProcess):
         """Write row `ev.group` unset; the core queues the release that stamps it."""
         caps = study.caps
         table = self.table
+        if table.n_rows == 0:
+            # nothing is queued for an empty table, whatever its payload width; the
+            # handler is still traced, so it returns before reading any column
+            return carry, record_none(caps)
         width = jnp.shape(table.payload)[1]
         if width > caps.payload_width:
             raise ValueError(
                 f"the table's payload has {width} columns; the capacities hold "
                 f"{caps.payload_width}"
             )
-        if table.n_rows == 0:
-            # nothing is queued for an empty table; the handler is still traced
-            return carry, record_none(caps)
         g = ev.group
         room = carry.next_sid < caps.max_sid
         internal = carry.next_sid

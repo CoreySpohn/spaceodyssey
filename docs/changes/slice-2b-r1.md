@@ -255,3 +255,35 @@ Checks rerun after the fixes:
   deselected): 2,011 passed in 114.4 s, no budget violation.
 - `ruff check`, `ruff format --check`, the internal-reference, domain-word and
   core-import checks: clean.
+
+## Review round 2
+
+The scoped review confirmed the five round-1 fixes and found two problems in them.
+Each fix has a test that failed before it.
+
+1. **An empty table wider than a record.** The empty-table return in `handle` came
+   after the payload-width check, so an empty payload of shape `(0, 5)` under width-4
+   capacities passed pre-flight (the width finding needs a present row) but raised
+   `ValueError` when either executor traced the handler. The empty return now comes
+   first: nothing is written, so pre-flight and the run both accept it. Test:
+   `test_an_empty_table_wider_than_a_record_agrees_in_preflight_and_the_run` (eager
+   and under `filter_jit`).
+2. **Relative hook locators lost their detail.** Round 1 treated a finding with an
+   empty slot like one naming a slot that does not exist, clearing `member` and
+   `entry`, so `/study/process/table/local_index/data/1` became `/study/process`.
+   `components` now fills in only the slot for such a finding and keeps its member
+   and entry; member and entry are cleared only when the named slot or policy does
+   not exist. A member the slot does not hold is left to the codec's pointer walk,
+   which stops at the deepest value it resolves (round 1's `no.such.field` case).
+   Test: `test_a_hook_finding_without_a_slot_keeps_its_member_and_entry` (in memory and
+   through JSON).
+
+Tests added in this round: 2 (unit tier); 48 in all for R1.
+Cold times, each alone (`SPACEODYSSEY_JAX_CACHE=off`, four threads, wall time with
+imports): 3.6 s and 3.0 s.
+
+Checks rerun: the touched files with the lints (`test_premission.py`,
+`test_preflight.py`, `test_preflight_json.py`, `test_lints.py`): 408 passed;
+`test_golden_histories.py` with `test_run_document_runs.py` (golden and document hash
+pins): 189 passed, no pin moved; ruff and the internal-reference, domain-word and
+core-import checks clean.

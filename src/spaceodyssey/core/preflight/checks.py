@@ -452,10 +452,13 @@ def components(study: Study, context: PreflightContext | None = None):
     """Findings the process and the observer report on themselves.
 
     A component that defines `validate(study, context)` returns its own findings.
-    A finding is located at the validating component's slot when it leaves the slot
-    empty, names no slot of the study, or names a policy that is missing or out of
-    range; its path and message are kept. `context` is passed as given, `None`
-    included.
+    A finding that leaves its slot empty is relative to the validating component: the
+    slot is filled in and its member and entry are kept. A finding that names no slot
+    of the study, or a policy that is missing or out of range, cannot be located
+    there, so it is located at the validating component's slot alone (its member and
+    entry dropped; its path and message kept). A member the slot does not hold is left
+    to the document pointer walk, which stops at the deepest value it can resolve.
+    `context` is passed as given, `None` included.
     """
     out = []
     for slot, component in (("process", study.process), ("observer", study.observer)):
@@ -463,7 +466,9 @@ def components(study: Study, context: PreflightContext | None = None):
         if not callable(validate):
             continue
         for item in validate(study, context):
-            if not _locates(item, study):
+            if not item.subject:
+                item = dataclasses.replace(item, subject=slot, index=None)
+            elif not _locates(item, study):
                 item = dataclasses.replace(
                     item, subject=slot, index=None, member="", entry=()
                 )

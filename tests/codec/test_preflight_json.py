@@ -31,7 +31,7 @@ from spaceodyssey.core.keys import Coupling
 from spaceodyssey.core.preflight import FindingCode, preflight
 from spaceodyssey.plugins import RegistrationError
 from spaceodyssey.studies import toy
-from spaceodyssey.studies.premission import PREMISSION_KINDS
+from spaceodyssey.studies.premission import PREMISSION_KINDS, PreMissionImporter
 from tests.codec.test_document import TOY_KINDS
 from tests.core.preflight_cases import (
     DOC_KINDS,
@@ -1080,3 +1080,37 @@ def test_a_malformed_hook_locator_is_reported_at_a_resolvable_pointer(
     found = preflight_document(json.dumps(doc), kinds)
     assert [(str(f.code), f.pointer) for f in found] == [("D006", where)]
     resolve_pointer(doc, where)
+
+
+class RelativeImporter(PreMissionImporter):
+    """An importer whose findings leave the slot to the hook."""
+
+    def validate(self, study, context):
+        return [
+            dataclasses.replace(f, subject="") for f in super().validate(study, context)
+        ]
+
+
+def test_a_hook_finding_without_a_slot_keeps_its_member_and_entry():
+    """Fails if a finding that omits only its slot loses its member and entry when
+    the hook fills the slot in, so its pointer stops at the component instead of the
+    offending element.
+    """
+    seeded = import_study("index")
+    study = dataclasses.replace(
+        seeded, process=RelativeImporter(table=seeded.process.table)
+    )
+    found = preflight(study)
+    assert [(f.subject, f.member, f.entry) for f in found] == [
+        ("process", "table.local_index", (1,))
+    ]
+    kinds = KindResolver(
+        {
+            **TOY_KINDS,
+            **{k: v for k, v in PREMISSION_KINDS.items() if k[0] != "process"},
+            ("process", "test.relative_importer", 1): RelativeImporter,
+        }
+    )
+    doc = json.loads(dump_study(study, kinds).to_json())
+    found = preflight_document(json.dumps(doc), kinds)
+    assert [f.pointer for f in found] == ["/study/process/table/local_index/data/1"]
