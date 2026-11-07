@@ -264,7 +264,11 @@ def _table(log, rows, kind, audience, singles, horizon, caps, namespace):
 
 
 def _mapped(table, log, rows, subject_map, producer_map):
-    """The table with downstream subjects and channels, refusing an index clash."""
+    """The table with downstream subjects and channels, refusing an index clash.
+
+    Two rows clash when they share a downstream channel, subject and local index (the
+    upstream acquisition index, which the core counts per subject).
+    """
     subjects, channels = [], []
     for i in rows:
         s, c = int(log["subject"][i]), int(log["channel"][i])
@@ -272,15 +276,14 @@ def _mapped(table, log, rows, subject_map, producer_map):
         channels.append(int(producer_map[c]))
     seen = {}
     local = np.asarray(table.local_index).tolist()
-    for j, pair in enumerate(zip(channels, local, strict=True)):
-        if pair in seen:
+    for j, key in enumerate(zip(channels, subjects, local, strict=True)):
+        if key in seen:
             raise ValueError(
-                f"rows {seen[pair]} and {j} share local index {pair[1]} on downstream "
-                f"channel {pair[0]}: a local index is the upstream acquisition index, "
-                "which is counted per subject, and it must be unique per channel; "
-                "select one subject per downstream channel with subject_map"
+                f"rows {seen[key]} and {j} share local index {key[2]} for downstream "
+                f"subject {key[1]} on channel {key[0]}; map their upstream subjects "
+                "or channels apart"
             )
-        seen[pair] = j
+        seen[key] = j
     source = dataclasses.replace(
         table.source, subject=np.asarray(subjects, np.int64).reshape(-1)
     )

@@ -200,8 +200,10 @@ class PriorObserver(AbstractObserver):
     def _dropped(self, rec, caps, audience):
         """Whether `rec` is an imported raw row the rule drops for `audience`."""
         table = self.table
-        hit = (table.channel == rec.channel) & (
-            table.local_index == rec.acquisition_index
+        hit = (
+            (table.channel == rec.channel)
+            & (table.source.subject == rec.subject)
+            & (table.local_index == rec.acquisition_index)
         )
         return (hit & self.dropped(caps, audience)).any()
 

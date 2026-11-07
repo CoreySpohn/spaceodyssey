@@ -20,7 +20,8 @@ Identity rules:
   the k-th imported run, and `PAD` (-1) marks a padding row that is not imported.
 - `local_index` is supplied, never computed from the imported rows: the record's
   `acquisition_index` is that value, so inserting or removing an observer-only row
-  moves no public identity. It must be unique per channel.
+  moves no public identity. It must be unique per channel and subject, as the
+  core's acquisition index is.
 
 The table's own checks run in pre-flight through `PreMissionImporter.validate`
 (codes `D004` to `D007`).
@@ -420,9 +421,14 @@ def table_findings(table, caps):
 
 
 def _identity_findings(table, present, keys):
-    """`D006`: a repeated source identity, or a repeated index on one channel."""
+    """`D006`: a repeated source identity, or a repeated index of one subject.
+
+    A local index is unique per channel and subject, as the core's acquisition index
+    is (it counts per subject).
+    """
     out, seen, indices = [], {}, {}
     channel = np.asarray(table.channel)
+    subject = np.asarray(table.source.subject)
     local = np.asarray(table.local_index)
     for i in np.flatnonzero(present):
         i = int(i)
@@ -438,16 +444,16 @@ def _identity_findings(table, present, keys):
                 )
             )
         seen.setdefault(keys[i], i)
-        pair = (int(channel[i]), int(local[i]))
+        pair = (int(channel[i]), int(subject[i]), int(local[i]))
         if pair in indices:
             out.append(
                 _finding(
                     FindingCode.D006,
                     "table.local_index",
                     (i,),
-                    f"row {i} repeats local index {pair[1]} of row {indices[pair]} "
-                    f"on channel {pair[0]}",
-                    "give each row of a channel its own local index",
+                    f"row {i} repeats local index {pair[2]} of row {indices[pair]} "
+                    f"for subject {pair[1]} on channel {pair[0]}",
+                    "give each row of a subject and channel its own local index",
                 )
             )
         indices.setdefault(pair, i)

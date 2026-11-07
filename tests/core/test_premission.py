@@ -28,6 +28,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.executors.base import run_status
 from spaceodyssey.core.keys import fold_key
+from spaceodyssey.core.preflight import FindingCode, preflight
 from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
 from spaceodyssey.studies import toy
 from spaceodyssey.studies.premission import (
@@ -38,6 +39,7 @@ from spaceodyssey.studies.premission import (
     PreMissionImporter,
     PreMissionTable,
     authored_table,
+    resolve_overlap,
     split_rows,
 )
 from spaceodyssey.studies.prior_observer import PRIOR_INDEX, PriorObserver, prior_study
@@ -803,3 +805,28 @@ def test_the_observer_and_the_importer_hold_one_table():
     assert [(str(f.code), f.subject, f.member) for f in found] == [
         ("D006", "observer", "table")
     ]
+
+
+@pytest.mark.parametrize("run", [False, True], ids=["folded", "handled"])
+def test_two_subjects_sharing_a_local_index_keep_their_own_weights(run):
+    """D006 per channel and subject. Fails if pre-flight refuses two subjects whose
+    raw rows share a local index on one channel, or if the prior that drops one
+    subject's row under EXCLUDE_ROWS also drops the other subject's row, folded
+    directly or handled event by event.
+    """
+    pedigree = list(ROWS["pedigree"])
+    pedigree[5] = ((0, 60, 1, 0, False),)
+    t = prior_table(edit={"local_index": [0, 1, 2, 0, 0, 1, 2], "pedigree": pedigree})
+    rule = PedigreeRule.EXCLUDE_ROWS
+    study, c = _prior_carry(t, rule, run=run)
+    caps = study.caps
+    for audience in (OBS, POL):
+        w = resolve_overlap(t, rule, audience, derived_kinds=caps.derived_kinds)
+        assert np.asarray(w)[[0, 3]].tolist() == [1, 0]
+    assert FindingCode.D006 not in {f.code for f in preflight(study)}
+    assert _matches(c, t, rule, caps)
+    assert (
+        float(c.belief.mean[0])
+        == float(c.pbelief.mean[0])
+        == pytest.approx((10.0 * 2 + 1.0 + 3.0) / 4)
+    )

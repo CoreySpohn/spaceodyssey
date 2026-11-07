@@ -33,6 +33,7 @@ from spaceodyssey.codec.preflight import (
     read_upstream,
     resolve_pointer,
 )
+from spaceodyssey.core import HostExecutor
 from spaceodyssey.core.enums import RecordStatus
 from spaceodyssey.core.preflight import preflight
 from spaceodyssey.core.preflight.checks import PreflightContext
@@ -44,9 +45,11 @@ from spaceodyssey.studies.premission import (
     PREMISSION_KINDS,
     PreMissionImporter,
     authored_table,
+    table_findings,
 )
 from tests.codec.test_document import TOY_KINDS
 from tests.codec.test_run_document_runs import EXECUTORS, _corpus_document, _hash_pin
+from tests.core.helpers import one_world
 
 RESOLVER = KindResolver({**TOY_KINDS, **PREMISSION_KINDS})
 UPSTREAM = dump_study(toy.survey_1(), TOY_KINDS)
@@ -283,6 +286,7 @@ def test_a_files_directory_reached_through_a_symlink_is_refused(tmp_path, swappe
 MEASUREMENT = toy.RECORD_MEASUREMENT
 SOURCE = toy.survey_1()  # the upstream study: horizon 1000
 SUBJECTS = {0: 1, 1: 2, 2: 3}
+ONE = {0: 0, 1: 0}  # two upstream subjects mapped to one downstream subject
 PRODUCERS = {10: 60}
 ROW = {
     "kind": MEASUREMENT,
@@ -428,8 +432,8 @@ def test_export_places_the_upstream_end_at_tick_zero():
 
 def test_export_refuses_what_it_cannot_write():
     """Fails if an export that would misstate its rows goes through: a derived kind,
-    an unknown epoch or audience, no upstream hash, namespace 0, two rows on one
-    downstream channel with one local index, or a batched log.
+    an unknown epoch or audience, no upstream hash, namespace 0, two rows of one
+    downstream subject and channel with one local index, or a batched log.
     """
     derived = dataclasses.replace(
         SOURCE, caps=dataclasses.replace(SOURCE.caps, derived_kinds=(MEASUREMENT,))
@@ -439,7 +443,7 @@ def test_export_refuses_what_it_cannot_write():
         lambda: _export(2, study=derived),
         lambda: _export(4),
         lambda: _export(2, namespace=0),
-        lambda: _export(2, log=_log(_row(0, 0, 0), _row(1, 0, 0))),
+        lambda: _export(2, log=_log(_row(0, 0, 0), _row(1, 0, 0)), subject_map=ONE),
         lambda: export_records(
             run, MEASUREMENT, 2, "", SUBJECTS, PRODUCERS, study=SOURCE
         ),
@@ -453,6 +457,45 @@ def test_export_refuses_what_it_cannot_write():
             call()
     with pytest.raises(TypeError):
         export_records(object(), MEASUREMENT, 2, "h", SUBJECTS, PRODUCERS, study=SOURCE)
+
+
+def test_two_subjects_of_one_channel_export_with_one_local_index():
+    """Fails if two subjects measured on one channel, each at acquisition index 0 as
+    the core counts it, cannot be exported to one downstream channel, or lose their
+    own identities (local index unique per channel and subject, D006).
+    """
+    log = _log(_row(0, 0, 0), _row(1, 0, 0), _row(0, 1, 0, 300))
+    table = _export(2, log=log, subject_map={0: 0, 1: 1}).table
+    assert _ints(table.channel) == [60, 60, 60]
+    assert _ints(table.source.subject) == [0, 0, 1]
+    assert _ints(table.local_index) == [0, 1, 0]
+    assert table_findings(table, _study(table).caps) == []
+
+
+@pytest.mark.medium  # one compiled host run of the toy survey
+def test_a_toy_survey_channel_of_several_subjects_exports_to_one_channel():
+    """Fails if the measurements a real toy survey run writes on its one channel, two
+    subjects each counted from acquisition index 0, cannot be exported to one
+    downstream channel and imported without a pre-flight finding.
+    """
+    world = one_world()
+    run = HostExecutor().run(SOURCE, *world, 400)
+    log = run.carry.log
+    valid = np.asarray(log.valid)
+    assert set(np.asarray(log.subject)[valid].tolist()) == {0, 1}
+    table = export_records(
+        run,
+        MEASUREMENT,
+        3,
+        UPSTREAM.content_hash,
+        {0: 0, 1: 1},
+        {10: 60},
+        study=SOURCE,
+    ).table
+    assert table.n_rows == int(valid.sum())
+    assert sorted(_ints(table.local_index)) == [0, 0, 1, 1, 2]
+    context = PreflightContext(upstream_document=UPSTREAM)
+    assert preflight(_study(table), context=context) == []
 
 
 def _batched(log):
