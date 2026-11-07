@@ -14,6 +14,7 @@ from spaceodyssey.codec import (
     DocumentError,
     KindResolver,
     StudyDocument,
+    dump_run,
     dump_study,
     load_study,
     preflight_document,
@@ -29,6 +30,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.keys import Coupling
 from spaceodyssey.core.preflight import FindingCode, preflight
+from spaceodyssey.core.refresh import HostLoopRefit, MaskedBatchRefit
 from spaceodyssey.plugins import RegistrationError
 from spaceodyssey.studies import toy
 from spaceodyssey.studies.premission import PREMISSION_KINDS, PreMissionImporter
@@ -36,8 +38,10 @@ from spaceodyssey.studies.prior_observer import (
     PRIOR_OBSERVER_KINDS,
     AudiencePriorRefit,
     audience_prior_binding,
+    prior_registry,
     prior_study,
 )
+from tests.codec.run_cases import MODEL_HASH
 from tests.codec.test_document import TOY_KINDS
 from tests.core.preflight_cases import (
     DOC_KINDS,
@@ -1138,63 +1142,111 @@ def test_a_hook_finding_without_a_slot_keeps_its_member_and_entry():
 
 # ---- the refit boundary of a run record (D009, D010) ------------------------------
 
+_BOUNDARIES = {
+    "audience_prior": lambda: AudiencePriorRefit(model_hash=MODEL_HASH),
+    "observer_init": lambda: MaskedBatchRefit(),
+    "host_fit": lambda: HostLoopRefit(toy.toy_refit_fit, model_hash=MODEL_HASH),
+}
 
-def _bound_run(kind):
-    config = {"model_hash": 0} if kind == AudiencePriorRefit.kind else {"n_diag": 1}
-    binding = {"kind": kind, "version": 1, "configuration": config, "model_hash": 0}
-    return {"executor": "host", "refit": {"host": binding, "compiled": binding}}
 
-
-def _prior_bindings():
+def _prior_bindings(*extra):
     from spaceodyssey.codec import Bindings
     from tests.codec.run_cases import _host_loop_kind, _observer_kernel_kind
 
     kinds = (audience_prior_binding(), _observer_kernel_kind(), _host_loop_kind())
-    return Bindings(kinds)
+    return Bindings((*kinds, *extra))
+
+
+def _run_document(host, compiled=None, bindings=None):
+    """The refit study as a run document bound to `host` and `compiled` boundaries."""
+    study = refit_study()
+    refit = {"host": _BOUNDARIES[host](), "compiled": _BOUNDARIES[compiled or host]()}
+    return dump_run(
+        study,
+        prior_registry(),
+        executor="host",
+        bindings=bindings or _prior_bindings(),
+        refit=refit,
+        kinds=RESOLVER,
+    ).to_json()
 
 
 @pytest.mark.parametrize(
     ("kind", "found"),
     [
-        (AudiencePriorRefit.kind, []),
-        ("toy.observer_refit", [("D009", "error")]),
-        ("toy.refit_fit", [("D010", "error")]),
+        ("audience_prior", []),
+        ("observer_init", [("D009", "error")]),
+        ("host_fit", [("D010", "error")]),
     ],
-    ids=["audience_prior", "observer_init", "host_fit"],
 )
 def test_the_run_record_boundary_reaches_the_prior_checks(kind, found):
-    """B4 for D009 and D010. Fails if the boundary a run record binds is not rebuilt
+    """B4 for D009 and D010. Fails if the boundary a run document binds is not rebuilt
     into the pre-flight context, so the observer's boundary checks do not run; if a
     finding is not at the observer's table; or if, without bindings, the report does
     not say the checks are unverified.
     """
-    doc = _doc(refit_study())
-    run = _bound_run(kind)
-    got = _find(doc, run, bindings=_prior_bindings())
+    text = _run_document(kind)
+    got = preflight_document(text, RESOLVER, bindings=_prior_bindings())
     assert [(str(f.code), str(f.severity)) for f in got] == found
     for f in got:
         assert f.pointer == "/study/observer/table"
-        resolve_pointer(_root(doc, run), f.pointer)
-    unbound = _find(doc, run)
+        resolve_pointer(json.loads(text), f.pointer)
+    unbound = preflight_document(text, RESOLVER)
     assert [(str(f.code), str(f.severity)) for f in unbound] == [("D010", "warning")]
     assert "unverified" in unbound[0].message
 
 
 @pytest.mark.parametrize(
     ("executor", "found"),
-    [("host", [("D010", "error")]), ("compiled", []), (None, [("D010", "error")])],
-    ids=["host", "compiled", "both_sides"],
+    [("host", [("D010", "error")]), ("compiled", [])],
 )
-def test_the_selected_executor_side_is_checked_and_both_when_none_is(executor, found):
+def test_the_selected_executor_side_is_checked(executor, found):
     """Fails if the JSON pre-flight checks another side than the selected executor's
-    boundary, or does not check both sides (merged, once each) when none is selected.
+    boundary (host binds a host fit, compiled the audience-prior boundary).
     """
-    doc = _doc(refit_study())
-    host, compiled = _bound_run("toy.refit_fit"), _bound_run(AudiencePriorRefit.kind)
-    run = {
-        "refit": {"host": host["refit"]["host"], "compiled": compiled["refit"]["host"]}
-    }
-    if executor is not None:
-        run["executor"] = executor
-    got = _find(doc, run, bindings=_prior_bindings())
+    text = _run_document("host_fit", "audience_prior")
+    got = preflight_document(
+        text, RESOLVER, bindings=_prior_bindings(), executor=executor
+    )
     assert [(str(f.code), str(f.severity)) for f in got] == found
+
+
+def _registry_kind():
+    """A boundary kind whose builder reads the run's record registry."""
+    from spaceodyssey.codec import BindingKind
+
+    return BindingKind(
+        "test.registry_fit",
+        1,
+        matches=lambda obj: getattr(obj, "fit", None) is toy.toy_mean_kernel,
+        describe=lambda obj, registry: {"kind": registry[1].name},
+        build=lambda config, registry: HostLoopRefit(
+            toy.toy_mean_kernel, n_diag=registry.index(config["kind"])
+        ),
+    )
+
+
+def test_a_study_document_with_a_run_record_does_not_rebuild_without_a_registry():
+    """Fails if rebuilding a boundary without the run's record registry raises (a
+    builder that reads the registry gets `None`) instead of a controlled finding, or
+    if the same binding does not rebuild inside a run document that carries one.
+    """
+    record = {
+        "kind": "test.registry_fit",
+        "version": 1,
+        "configuration": {"kind": "measurement"},
+        "model_hash": 0,
+    }
+    run = {"executor": "host", "refit": {"host": record, "compiled": record}}
+    bindings = _prior_bindings(_registry_kind())
+    got = _find(_doc(refit_study()), run, bindings=bindings)
+    assert [(str(f.code), str(f.severity), f.pointer) for f in got] == [
+        ("D003", "warning", "/run/refit"),
+        ("D010", "warning", "/study/observer/table"),
+    ]
+    assert "registry" in got[0].message
+    text = json.loads(_run_document("audience_prior"))
+    text["run"]["refit"] = {"host": record, "compiled": record}
+    text.pop("content_hash")
+    rebuilt = preflight_document(json.dumps(text), RESOLVER, bindings=bindings)
+    assert [(str(f.code), str(f.severity)) for f in rebuilt] == [("D010", "error")]

@@ -194,11 +194,13 @@ def preflight_document(
     given, so a component's capacity check runs as it does for the in-memory call
     with a `RunBudget`. A bare study document has no budget.
 
-    With a run record and `bindings`, the refit boundary is rebuilt from the record
-    (the selected executor's side, or each side when none is selected) and passed in
-    the context, so the boundary checks of a component (`D009`, `D010`) run; findings
-    of the sides are merged. Without them no boundary is known, and a component that
-    needs one reports its check as unverified.
+    For a run document checked with `bindings`, the refit boundary is rebuilt from
+    the record with the document's record registry (the selected executor's side, or
+    each side when none is selected) and passed in the context, so the boundary
+    checks of a component (`D009`, `D010`) run; findings of the sides are merged. A
+    study document with a separate run record has no registry to rebuild with: a
+    `D003` warning says the boundary was not rebuilt. Without a boundary, a component
+    that needs one reports its check as unverified.
     """
     resolver = _resolver(kinds)
     try:
@@ -245,7 +247,9 @@ def preflight_document(
             context = PreflightContext(
                 budget=RunBudget(caps.n_events, caps.n_log, n_steps)
             )
-        boundaries = _boundaries(run, data.get("records"), bindings, executor)
+        records = data.get("records") if is_run else None
+        boundaries, unbuilt = _boundaries(run, records, bindings, executor)
+        found += unbuilt
         if not boundaries:
             found += _in_memory(study, data["study"], executor, context)
         for boundary in boundaries:
@@ -523,23 +527,37 @@ def _records(node, study):
 
 
 def _boundaries(run, records, bindings, executor):
-    """The refit boundaries the record binds, rebuilt, for the in-memory checks.
+    """`(boundaries, findings)`: the record's refit boundaries, rebuilt.
 
-    With `bindings` and a record, each side's boundary (only the selected executor's
-    when one is selected) is rebuilt as `load_run` rebuilds it; a side that does not
-    rebuild is skipped (its own findings say why). Without them there is none.
+    With `bindings`, a record and the run's record registry (a run document's
+    `records`), each side's boundary (only the selected executor's when one is
+    selected) is rebuilt as `load_run` rebuilds it; a side that does not rebuild is
+    skipped (its own findings say why). A study document checked with a separate run
+    record carries no registry, which a binding's builder may read, so nothing is
+    rebuilt there: one `D003` warning says so, and a component that needs the
+    boundary reports its check as unverified.
     """
     if bindings is None or not isinstance(run, dict):
-        return []
+        return [], []
     refit = run.get("refit")
     if not isinstance(refit, dict):
-        return []
-    registry = None
-    if records is not None:
-        try:
-            registry = decode_records(records)
-        except DocumentError:
-            return []
+        return [], []
+    if records is None:
+        return [], [
+            DocumentFinding(
+                DocumentCode.D003,
+                Severity.WARNING,
+                pointer((RUN_KEY, "refit")),
+                "the refit boundary is not rebuilt: a study document carries no "
+                "record registry for its builder, so the boundary checks are "
+                "unverified",
+                "check the run document, which carries the registry",
+            )
+        ]
+    try:
+        registry = decode_records(records)
+    except DocumentError:
+        return [], []
     sides = [executor] if executor in ("host", "compiled") else ["host", "compiled"]
     out = []
     for side in sides:
@@ -558,7 +576,7 @@ def _boundaries(run, records, bindings, executor):
             out.append(build_binding(entry, record, registry, where))
         except DocumentError:
             continue
-    return out
+    return out, []
 
 
 def _rebuilt(run, records, bindings):
