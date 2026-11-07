@@ -26,9 +26,13 @@ from spaceodyssey.core.enums import (
     Scope,
 )
 from spaceodyssey.core.preflight import FindingCode as C
+from spaceodyssey.core.preflight.checks import PreflightContext
+from spaceodyssey.core.refresh import HostLoopRefit, MaskedBatchRefit
 from spaceodyssey.studies import catalog, toy
 from spaceodyssey.studies.premission import PreMissionImporter, authored_table
+from spaceodyssey.studies.prior_observer import prior_study
 from tests.core.corpus import CORPUS, frozen
+from tests.core.prior_helpers import EXTERNAL, refit_study, summaries
 
 
 class StatedObserver(toy.ToyRunningMean):
@@ -293,6 +297,26 @@ SEEDED = {
     "import_pedigree_absent": (C.D005, lambda: import_study("pedigree"), None),
     "import_index_repeated": (C.D006, lambda: import_study("index"), None),
     "import_offset_positive": (C.D007, lambda: import_study("offset"), None),
+    "priors_summarize_one_source": (
+        C.D008,
+        lambda: prior_study(summaries(EXTERNAL)),
+        None,
+    ),
+    "prior_refit_boundary_unverified": (C.D010, refit_study, None),
+}
+
+# Mistakes that only a run's context reveals: name -> (code, builder, context).
+SEEDED_IN_CONTEXT = {
+    "prior_audiences_on_the_observer_init_boundary": (
+        C.D009,
+        refit_study,
+        lambda: PreflightContext(boundary=MaskedBatchRefit()),
+    ),
+    "prior_with_a_boundary_that_ignores_it": (
+        C.D010,
+        refit_study,
+        lambda: PreflightContext(boundary=HostLoopRefit(toy.toy_refit_fit)),
+    ),
 }
 
 # Correct studies and the codes they must raise (warnings only).
@@ -302,6 +326,7 @@ CLEAN = {
     "catalog_study": (catalog.catalog_study, ()),
     "d2_study": (toy.d2_study, ()),
     "import_study": (import_study, ()),
+    "prior_study": (lambda: prior_study(summaries((7, 90, 0, 1))), ()),
     "stated_clean_components": (
         lambda: _policy(
             reads=(),

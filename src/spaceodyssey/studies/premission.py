@@ -24,9 +24,17 @@ Identity rules:
 
 The table's own checks run in pre-flight through `PreMissionImporter.validate`
 (codes `D004` to `D007`).
+
+Overlap (`resolve_overlap`): a prior is a present row of a derived kind, and its
+pedigree names the sources it summarizes. For one audience, the evidence is the
+present raw (non-derived) rows released to that audience. A prior is considered only
+for the audiences it is released to, and its pedigree (external entries included) is
+compared with that audience's evidence by source identity. `PedigreeRule` says which
+side of an overlap is dropped.
 """
 
 import dataclasses
+from enum import IntEnum
 
 import equinox as eqx
 import jax
@@ -159,6 +167,58 @@ class PreMissionTable(eqx.Module):
     def present(self):
         """Boolean per row: the row is imported (not padding)."""
         return self.source.namespace != PAD
+
+
+class PedigreeRule(IntEnum):
+    """Which side of an overlap of a prior and its audience's evidence is dropped."""
+
+    EXCLUDE_PRIOR = 0  # the prior, when its pedigree names any evidence row
+    EXCLUDE_ROWS = 1  # every evidence row its pedigree names; the prior is kept
+
+
+def _identity(ids):
+    """The overlap identity `(namespace, producer, subject, source_index)` per entry."""
+    cols = (ids.namespace, ids.producer, ids.subject, ids.source_index)
+    return jnp.stack(cols, axis=-1)
+
+
+def overlap_roles(table, audience, *, derived_kinds):
+    """`(prior, evidence, names)` of `table` for one audience.
+
+    `prior[p]`: row `p` is a prior released to `audience`; `evidence[r]`: row `r` is a
+    raw row released to it; `names[p, r]`: prior `p`'s pedigree (its first
+    `n_pedigree` entries, external ones included) names the source of evidence row
+    `r`. Pure and traceable; the revision never enters.
+    """
+    if int(audience) not in (int(Audience.OBSERVER), int(Audience.POLICY)):
+        raise ValueError(f"overlap is resolved for one audience, not {audience}")
+    derived = jnp.isin(table.kind, jnp.asarray(tuple(derived_kinds), I64))
+    released = table.present & ((table.audience & int(audience)) != 0)
+    prior, evidence = released & derived, released & ~derived
+    width = jnp.shape(table.external)[1]
+    counted = jnp.arange(width)[None, :] < table.n_pedigree[:, None]
+    same = _identity(table.pedigree)[:, :, None, :] == _identity(table.source)
+    named = (same.all(axis=-1) & counted[:, :, None]).any(axis=1)
+    return prior, evidence, named & prior[:, None] & evidence[None, :]
+
+
+def resolve_overlap(table, rule, audience, *, derived_kinds):
+    """Per-row weights in {0, 1} for one audience under `rule`; pure, order free.
+
+    A prior or evidence row of `audience` keeps weight 1 unless `rule` drops it:
+    `EXCLUDE_PRIOR` drops a prior whose pedigree names any of the audience's evidence,
+    `EXCLUDE_ROWS` drops every evidence row a considered prior names and keeps the
+    prior. A row the audience never receives (another audience's, or padding) has
+    weight 0. `derived_kinds` are the study's derived kind indices
+    (`Capacities.derived_kinds`), which tell a prior from a raw row.
+    """
+    rule = PedigreeRule(int(rule))
+    prior, evidence, names = overlap_roles(table, audience, derived_kinds=derived_kinds)
+    if rule == PedigreeRule.EXCLUDE_PRIOR:
+        keep = jnp.where(prior, ~names.any(axis=1), evidence)
+    else:
+        keep = jnp.where(prior, True, evidence & ~names.any(axis=0))
+    return (keep & (prior | evidence)).astype(I64)
 
 
 def split_rows(table, caps):
@@ -667,12 +727,15 @@ __all__ = [
     "PAD",
     "PREMISSION_KINDS",
     "ImportDemand",
+    "PedigreeRule",
     "PreMissionImporter",
     "PreMissionTable",
     "SourceId",
     "authored_table",
     "capacity_findings",
     "lineage_findings",
+    "overlap_roles",
+    "resolve_overlap",
     "split_rows",
     "table_findings",
 ]

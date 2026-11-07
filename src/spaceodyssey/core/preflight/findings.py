@@ -30,6 +30,9 @@ class FindingCode(StrEnum):
     D005 = "D005"  # an in-table pedigree entry names a source the table lacks
     D006 = "D006"  # a table row the study cannot hold: repeated identity or index
     D007 = "D007"  # a row offset above zero, or a start after its end
+    D008 = "D008"  # two retained priors of one audience with intersecting pedigrees
+    D009 = "D009"  # audiences with different priors on a boundary that shares them
+    D010 = "D010"  # a table prior with a refit boundary that does not consume it
 
 
 @dataclasses.dataclass(frozen=True)

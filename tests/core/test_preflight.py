@@ -9,7 +9,7 @@ from spaceodyssey.core import FindingCode, Severity, StudyGraph, preflight
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.studies import toy
-from tests.core.preflight_cases import CLEAN, SEEDED
+from tests.core.preflight_cases import CLEAN, SEEDED, SEEDED_IN_CONTEXT
 
 
 def codes(findings):
@@ -35,7 +35,21 @@ def test_correct_study_is_clean(name):
 
 
 def test_every_code_has_a_seeded_mistake():
-    assert {c for c, _, _ in SEEDED.values()} == set(FindingCode)
+    seeded = {c for c, _, _ in (*SEEDED.values(), *SEEDED_IN_CONTEXT.values())}
+    assert seeded == set(FindingCode)
+
+
+@pytest.mark.parametrize("name", sorted(SEEDED_IN_CONTEXT))
+def test_seeded_mistake_in_context_is_caught(name):
+    """Fails if a mistake that a run's context reveals is not reported with its one
+    code at the observer's table, or is reported without that context.
+    """
+    code, make, context = SEEDED_IN_CONTEXT[name]
+    found = preflight(make(), context=context())
+    assert codes(found) == [str(code)], [str(f) for f in found]
+    assert found[0].severity == Severity.ERROR
+    assert {locator(f) for f in found} == {("observer", None, "table", ())}
+    assert [f.severity for f in preflight(make())] == [Severity.WARNING]
 
 
 def test_firewall_paths_name_reader_and_source():
@@ -109,6 +123,12 @@ def test_preflight_reports_counts(capsys):
         exercised |= {f.code for f in found}
         false_positives += sum(f.code != code for f in found)
         missed += code not in {f.code for f in found}
+    for code, make, context in SEEDED_IN_CONTEXT.values():
+        found = preflight(make(), context=context())
+        errors += sum(f.severity == Severity.ERROR for f in found)
+        exercised |= {f.code for f in found}
+        false_positives += sum(f.code != code for f in found)
+        missed += code not in {f.code for f in found}
     clean_errors = 0
     for make, expected in CLEAN.values():
         found = preflight(make())
@@ -118,7 +138,8 @@ def test_preflight_reports_counts(capsys):
         false_positives += sum(f.code not in expected for f in found)
         missed += len(set(expected) - {f.code for f in found})
     print(
-        f"preflight: {len(SEEDED)} seeded and {len(CLEAN)} correct studies; "
+        f"preflight: {len(SEEDED) + len(SEEDED_IN_CONTEXT)} seeded and "
+        f"{len(CLEAN)} correct studies; "
         f"{errors + clean_errors} errors ({clean_errors} on correct studies), "
         f"{warnings} warnings; codes exercised: {', '.join(sorted(exercised))}; "
         f"false positives: {false_positives}; missed: {missed}"
@@ -156,6 +177,13 @@ LOCATORS = {
     "import_pedigree_absent": ("process", None, "table.pedigree.source_index", (1, 0)),
     "import_index_repeated": ("process", None, "table.local_index", (1,)),
     "import_offset_positive": ("process", None, "table.end_offset", (0,)),
+    "priors_summarize_one_source": (
+        "observer",
+        None,
+        "table.pedigree.source_index",
+        (1, 0),
+    ),
+    "prior_refit_boundary_unverified": ("observer", None, "table", ()),
 }
 
 
