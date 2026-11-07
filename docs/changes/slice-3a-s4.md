@@ -168,7 +168,7 @@ Three findings, all accepted. The default scan and init StableHLO are unchanged
 1,292,736 bytes; `_init_worlds` `09226cf96404994bdcd4034eb93ca3487b9bd792d502d5dd55d31251afb99f71`),
 and no pin moved.
 
-### 1. A refund queued ahead of a lone Query
+### 1. A refund queued ahead of a lone Query (superseded by review round 2)
 
 A Cancel queued by an earlier decision returns balance when it runs at its tick, which can be
 ahead of the request a later decision queues at the same tick. The request carried the
@@ -176,7 +176,7 @@ fingerprint of the decision's snapshot, so `answer_pending` rebuilt a view with 
 balance and raised "the snapshot changed between the request and its answer" on both executors.
 The repro is the script Observe and Wait, Wait and Cancel, Query, Stop on the toy study.
 
-Choice: `h_request`, the handler that holds the run for the host, now stamps the request again
+Choice (replaced in round 2; kept as the record of what was tried): `h_request`, the handler that holds the run for the host, stamped the request again
 with the fingerprint of the policy snapshot as it stands when the run is held, at the
 decision that asked. It does so only while `caps.snapshot_balances` is on (a static branch), so
 the default program is untouched. Why this one:
@@ -246,3 +246,72 @@ study, 1 range mutant. The `Snapshot` shims in `test_snapshot_fingerprint.py` an
   files including the slow mutants (entry-points file deselected): 678 passed in 121 s.
 - `ruff check` and `ruff format --check` clean. Default `_scan_worlds` and `_init_worlds`
   StableHLO hashes unchanged (above); no pin moved.
+
+## Review round 2
+
+### 1. Decision-snapshot identity (replaces the round 1 re-stamp)
+
+The round 1 re-stamp let the host answer on a state the policy had not read: the policy
+decided on a balance of 9 and the service answered on 10, with REQUEST keeping the old
+fingerprint and RESULT carrying the new one. It is reverted. The request keeps the fingerprint
+of the decision's snapshot, and `h_request` now compares it with the policy snapshot as it
+stands when the run would be held (`_stale_request`, rebuilt at the decision that asked, as
+`answer_pending` rebuilds it).
+
+Defined outcome, only while `caps.snapshot_balances` is on (static):
+
+- A stale request is refused. It is not held, no answer is computed, and nothing reaches the
+  host. `AdmissionCode.QUERY_STALE = 12` (appended) is written to row 0 of the trace row of the
+  step that handled the request (`advance`), the same `admit_code` column other refusals use.
+  `finish_trace` keeps that code on any step that did not decide; a step that decided carries
+  its decision's codes. No decision can fire on the refusing step: a pending wake at the admit
+  stage would already have fired.
+- The policy is woken by a same-tick Wait event (audience public, the event a Wait effect
+  makes), queued by `h_request`, so it decides again at the same tick against the state it then
+  reads and may ask again. The second Query is answered if nothing moved in between.
+- A fresh request is held exactly as before, and the stamp, RESULT and conformance equality
+  (`event_fp` of REQUEST and RESULT equal the decision's `snapshot_fp`) are untouched.
+
+Alternatives: answering from a stored decision snapshot needs a copy of the view in the carry
+(an optional leaf, with the log columns, for every world) and a second answer path; refusing
+is a few lines and keeps the host's contract that it answers on what the policy read.
+Ordering the Request ahead of same-tick ledger events was ruled out (a new tie rank). With
+the flag off nothing changes: no history, trace, or StableHLO (the default hashes above are
+unchanged).
+
+Tests: `test_a_query_made_stale_by_a_queued_refund_is_refused_and_asked_again` runs the
+refund script on both executors (one `QUERY_STALE` row, one request reaches the host and it
+names the second decision's fingerprint, histories equal; medium). The control with balances
+off, on both executors, answers both Queries and refuses none
+(`test_with_balances_off_the_same_refund_study_answers_both_queries`, slow: two more compiles,
+12 s cold alone, 39 s under load, over the medium budget). The lone Query with nothing in
+between is the existing hosted test. Eager checks of `h_request`: a request on a moved balance
+is not held and queues one wake; a fresh one is held with none; an off study holds. Mutants:
+staleness never found (answers anyway) and always found both fail those checks.
+
+Spec-silent decision 9: the stale refusal outcome above, including its code number, where it
+is recorded and how the policy wakes.
+
+### 2. The budget does not bound every balance
+
+Negative channel costs act as credits. Choice: refuse them, because nothing else in the code
+treats a negative cost as supported and the bound by budget stays one line. With balances on,
+`Study.__check_init__` now also requires every channel `cost` and `charge` to be finite and not
+negative, besides the budget bound; a traced table is not judged. Tests: the zero-budget study
+with cost and charge of -1e20, -2e20 and NaN is refused; a mutant that skips the sign check
+fails the test.
+
+### 3. The balances-off control
+
+Restored on both executors (item 1, slow tier).
+
+### Review round 2 gate results
+
+See the section below.
+
+- Full suite including the slow tier (`-n 2 --dist loadfile`, both entry-points files
+  deselected as stale installed metadata): 3790 passed in 2445 s, peak 4.3 GB, no budget
+  violations.
+- `ruff check` and `ruff format --check` clean. Default `_scan_worlds` and `_init_worlds`
+  StableHLO hashes unchanged (sha256 `a67917728c...` and `09226cf964...`, byte counts 1,292,736
+  and 70,941); no pin moved.
