@@ -1178,3 +1178,23 @@ def test_the_run_record_boundary_reaches_the_prior_checks(kind, found):
     unbound = _find(doc, run)
     assert [(str(f.code), str(f.severity)) for f in unbound] == [("D010", "warning")]
     assert "unverified" in unbound[0].message
+
+
+@pytest.mark.parametrize(
+    ("executor", "found"),
+    [("host", [("D010", "error")]), ("compiled", []), (None, [("D010", "error")])],
+    ids=["host", "compiled", "both_sides"],
+)
+def test_the_selected_executor_side_is_checked_and_both_when_none_is(executor, found):
+    """Fails if the JSON pre-flight checks another side than the selected executor's
+    boundary, or does not check both sides (merged, once each) when none is selected.
+    """
+    doc = _doc(refit_study())
+    host, compiled = _bound_run("toy.refit_fit"), _bound_run(AudiencePriorRefit.kind)
+    run = {
+        "refit": {"host": host["refit"]["host"], "compiled": compiled["refit"]["host"]}
+    }
+    if executor is not None:
+        run["executor"] = executor
+    got = _find(doc, run, bindings=_prior_bindings())
+    assert [(str(f.code), str(f.severity)) for f in got] == found
