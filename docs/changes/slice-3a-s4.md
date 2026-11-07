@@ -84,7 +84,8 @@ branch.
 
 Added 25 new tests plus 4 codec cases and 3 pre-flight cases (32 in all); retired 0, net +32. Existing
 tests edited: the capacities guard (`test_the_slice_3a_capacities_default_to_off` lists the
-new marker) and the empty-leaf shim (`test_an_empty_leaf_moves_the_fingerprint` passes the new
+new marker) and the two `Snapshot` shims that feed `snapshot_fingerprint`
+(`test_an_empty_leaf_moves_the_fingerprint` and `test_pedigree_layout.py`, which pass the new
 field).
 
 Controls and mutants (A7):
@@ -129,6 +130,16 @@ Controls and mutants (A7):
    policy and cannot be found from its declaration.
 9. **The check is a static branch** `_refuses_mixed(caps)` rather than inline, so a mutant can
    force it.
+
+## Gate results
+
+Final tree, `compute-run --threads 4 --mem 14336`, `-n 2 --dist loadfile`, `-m "not slow"`,
+`tests/codec/test_entry_points_installed.py` deselected (its installed metadata is stale and it
+fails the same way on `main`): 2222 passed, 1 failed in 254 s, peak 3.7 GB resident. The one
+failure was `test_reserved_fields.py::test_reserved_table_field_has_no_behaviour[ChannelTable.charge]`
+over the unit budget (9.5 s) as the first compiled test of its worker under load; the file passes
+alone (15 tests, 10 s, no violations) and S4 does not touch it. The three slow admission
+mutants pass in the file run (25 passed in 23 s).
 
 ## K3 and K4 attribution
 
