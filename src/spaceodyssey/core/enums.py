@@ -39,6 +39,7 @@ class EventKind(IntEnum):
     FAULT = 8
     REQUEST = 9
     REFRESH = 10
+    WINDOW_END = 11
 
 
 class EffectKind(IntEnum):
@@ -132,12 +133,20 @@ class ChargePricing(IntEnum):
 
 
 class RemainderRule(IntEnum):
-    """What happens to an unspent balance at the end of its window (reserved)."""
+    """What happens to an unspent balance at the end of its award window."""
 
     NONE = 0
     FORFEIT = 1
     CARRY_OVER = 2
     REALLOCATE = 3
+
+
+class WindowState(IntEnum):
+    """Where a balance row stands in its award window."""
+
+    ALWAYS = 0
+    WINDOWED = 1
+    IDLE = 2
 
 
 class Audience(IntFlag):

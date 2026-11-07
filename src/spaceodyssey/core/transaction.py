@@ -12,11 +12,14 @@ from spaceodyssey.core.carry import _tree_set, empty_trace
 from spaceodyssey.core.enums import (
     I64,
     PUBLIC,
+    TIE_NEUTRAL,
     AdmissionCode,
     Audience,
     EffectKind,
     EventKind,
+    RemainderRule,
     Stage,
+    WindowState,
     version_slot,
 )
 from spaceodyssey.core.events import enqueue, order_key, select_next, where_tree
@@ -28,7 +31,11 @@ from spaceodyssey.core.ledger import (
     _resource_rows,
     charge_parts,
 )
-from spaceodyssey.core.snapshot import snapshot_fingerprint, snapshot_view
+from spaceodyssey.core.snapshot import (
+    award_columns,
+    snapshot_fingerprint,
+    snapshot_view,
+)
 
 
 def active(c):
@@ -196,6 +203,22 @@ def decision_fingerprint(carry, study):
     )
 
 
+def _with_award_columns(effects, caps):
+    """The effect table with its Allocate columns, zeroed where a producer left none."""
+    held = {
+        "amount": effects.amount,
+        "window_from": effects.window_from,
+        "window_until": effects.window_until,
+        "recipient": effects.recipient,
+        "remainder": effects.remainder,
+        "realloc_to": effects.realloc_to,
+    }
+    cols = award_columns(caps)
+    return dataclasses.replace(
+        effects, **{k: v for k, v in cols.items() if held[k] is None}
+    )
+
+
 def mask_effects(effects, wake):
     """Disable effect rows for an unwoken decision."""
     return dataclasses.replace(
@@ -273,8 +296,88 @@ def _commit_observe(c, eff, e, ok, study):
         scope=c.phase,
         acquisition_id=c.next_sid,
         program=program,
+        # the window generation of the first payer row at debit; read back into the
+        # record's `award_gen` (a Done row has no disposition of its own)
+        disposition=c.ledger.win_gen[rows[0]] if caps.awards and caps.refunds else 0,
         caps=caps,
     )
+
+
+def _commit_allocate(c, eff, e, want, study):
+    """Admit an Allocate row: grant the amount, open the window, queue its expiry.
+
+    Returns the carry and the admission code. A row is malformed (UNSUPPORTED) when its
+    recipient or reallocation row is out of range, its amount is negative or not
+    finite, its window is empty, already over or past the last tick, or its rule is
+    unknown; an award onto a row that already holds a window is FORBIDDEN (one window
+    per row), and a full queue is NO_SLOT.
+    """
+    caps = study.caps
+    rows = caps.n_balance_rows
+    t = c.tick
+    r = jnp.clip(eff.recipient[e], 0, rows - 1)
+    start, until = eff.window_from[e], eff.window_until[e]
+    rule, to = eff.remainder[e], eff.realloc_to[e]
+    amount = eff.amount[e]
+    fine = (
+        (eff.recipient[e] >= 0)
+        & (eff.recipient[e] < rows)
+        & jnp.all(jnp.isfinite(amount) & (amount >= 0.0))
+        & (start >= 0)
+        & (start < until)
+        & (until > t)
+        & (until <= caps.max_tick)
+        & (rule >= RemainderRule.NONE)
+        & (rule <= RemainderRule.REALLOCATE)
+        & ((rule != RemainderRule.REALLOCATE) | ((to >= 0) & (to < rows) & (to != r)))
+    )
+    open_ = c.ledger.win_state[r] == WindowState.WINDOWED
+    room = (~c.ev.valid).any() & (c.next_sid < caps.max_sid)
+    code = jnp.select(
+        [~fine, open_, ~room],
+        [AdmissionCode.UNSUPPORTED, AdmissionCode.FORBIDDEN, AdmissionCode.NO_SLOT],
+        AdmissionCode.OK,
+    ).astype(I64)
+    ok = want & (code == AdmissionCode.OK)
+    gen = c.ledger.win_gen[r] + 1
+    c1 = _tree_set(
+        c,
+        **{
+            "ledger.balance": c.ledger.balance.at[r].add(jnp.where(ok, amount, 0.0)),
+            "ledger.granted": c.ledger.granted.at[r].add(jnp.where(ok, amount, 0.0)),
+            "ledger.win_state": c.ledger.win_state.at[r].set(
+                jnp.where(ok, WindowState.WINDOWED, c.ledger.win_state[r])
+            ),
+            "ledger.win_gen": c.ledger.win_gen.at[r].set(
+                jnp.where(ok, gen, c.ledger.win_gen[r])
+            ),
+            "ledger.valid_from_tick": c.ledger.valid_from_tick.at[r].set(
+                jnp.where(ok, start, c.ledger.valid_from_tick[r])
+            ),
+            "ledger.valid_until_tick": c.ledger.valid_until_tick.at[r].set(
+                jnp.where(ok, until, c.ledger.valid_until_tick[r])
+            ),
+            "ledger.remainder_rule": c.ledger.remainder_rule.at[r].set(
+                jnp.where(ok, rule, c.ledger.remainder_rule[r])
+            ),
+            "ledger.realloc_row": c.ledger.realloc_row.at[r].set(
+                jnp.where(ok, to, c.ledger.realloc_row[r])
+            ),
+        },
+    )
+    c2 = enqueue(
+        c1,
+        ok,
+        kind=EventKind.WINDOW_END,
+        tick=until,
+        stage=Stage.ANALYZE,
+        tie=TIE_NEUTRAL,
+        lane=r,
+        gen=gen,
+        audience=PUBLIC,
+        caps=caps,
+    )
+    return c2, jnp.where(want, code, AdmissionCode.NONE)
 
 
 def _group_code(c, eff, member, study):
@@ -311,23 +414,34 @@ def _group_code(c, eff, member, study):
         if caps.n_programs > 1:
             # a closed program refuses its own admissions; its lanes stay open
             closed = closed | c.ledger.program_closed[programs[f]]
-        code = jnp.select(
-            [
-                closed,
-                (c.ledger.lane_busy_until[lanes[f]] > t) | clash,
-                done_t > study.horizon_tick,
-                ~funds,
-                ~room,
-            ],
-            [
-                AdmissionCode.LANE_CLOSED,
-                AdmissionCode.LANE_BUSY,
-                AdmissionCode.HORIZON,
-                AdmissionCode.NO_FUNDS,
-                AdmissionCode.NO_SLOT,
-            ],
-            AdmissionCode.OK,
-        ).astype(I64)
+        conds = [
+            closed,
+            (c.ledger.lane_busy_until[lanes[f]] > t) | clash,
+            done_t > study.horizon_tick,
+            ~funds,
+            ~room,
+        ]
+        codes_ = [
+            AdmissionCode.LANE_CLOSED,
+            AdmissionCode.LANE_BUSY,
+            AdmissionCode.HORIZON,
+            AdmissionCode.NO_FUNDS,
+            AdmissionCode.NO_SLOT,
+        ]
+        if caps.awards:
+            # a payer row that is not ALWAYS admits only inside its window
+            payer = rows[f]
+            outside = jnp.any(
+                (cost[f] > 0.0)
+                & (c.ledger.win_state[payer] != WindowState.ALWAYS)
+                & (
+                    (t < c.ledger.valid_from_tick[payer])
+                    | (t >= c.ledger.valid_until_tick[payer])
+                )
+            )
+            conds.insert(3, outside)
+            codes_.insert(3, AdmissionCode.OUTSIDE_VALIDITY)
+        code = jnp.select(conds, codes_, AdmissionCode.OK).astype(I64)
         codes.append(jnp.where(member[f], code, AdmissionCode.OK))
     first = jnp.asarray(AdmissionCode.OK, I64)
     for f in reversed(range(n)):
@@ -436,6 +550,11 @@ def _admit_rows(c, eff, mask, study, fp):
             decision=c.n_dec,
             caps=caps,
         )
+        alloc_code = AdmissionCode.UNSUPPORTED
+        if caps.awards:
+            c, alloc_code = _commit_allocate(
+                c, eff, e, act & allowed & (kind == EffectKind.ALLOCATE), study
+            )
         out[e] = jnp.select(
             [
                 ~act | (kind == EffectKind.NONE),
@@ -448,7 +567,7 @@ def _admit_rows(c, eff, mask, study, fp):
                 AdmissionCode.NONE,
                 AdmissionCode.FORBIDDEN,
                 out[e],
-                AdmissionCode.UNSUPPORTED,
+                alloc_code,
                 AdmissionCode.NO_SLOT,
             ],
             AdmissionCode.OK,
@@ -499,7 +618,8 @@ def admit(carry, effects, study, snapshot_fp=None):
     A Query is not charged. It queues a request row at the current tick in the admit
     stage, addressed to the policy audience and stamped with the fingerprint of the
     snapshot the decision read (`snapshot_fp`, computed here when not given) and the
-    decision's index; `Allocate` is declared and answers unsupported.
+    decision's index. An `Allocate` answers unsupported unless awards are on, where it
+    grants its amount to the recipient row and opens a window (`_commit_allocate`).
 
     While `caps.snapshot_balances` is on, a decision that combines a Query with any
     other effect is refused whole, every such row with `AdmissionCode.QUERY_MIXED`,
@@ -515,6 +635,9 @@ def admit(carry, effects, study, snapshot_fp=None):
         | (effects.kind == EffectKind.CANCEL)
         | (effects.kind == EffectKind.QUERY)
     )
+    if study.caps.awards:
+        effects = _with_award_columns(effects, study.caps)
+        supported = supported | (effects.kind == EffectKind.ALLOCATE)
     phase = phase_at(carry, study)
     mask = _phase_mask(_tree_set(carry, phase=phase), study)
     mixed = None
@@ -563,8 +686,19 @@ def finish_trace(trace, effects, codes, u, wake, carry, study, snapshot_fp=0):
         # a step that decided carries its decision's codes; any other step keeps the
         # refusal `advance` wrote for a stale request
         codes = jnp.where(wake, codes, trace.admit_code)
+    extra = {}
+    if study.caps.awards:
+        effects = _with_award_columns(effects, study.caps)
+        ask = effects.kind == EffectKind.ALLOCATE
+        extra = {
+            "alloc_amount": jnp.where(ask[:, None], effects.amount, 0.0),
+            "alloc_from": jnp.where(ask, effects.window_from, 0),
+            "alloc_until": jnp.where(ask, effects.window_until, 0),
+            "alloc_recipient": jnp.where(ask, effects.recipient, 0),
+        }
     return dataclasses.replace(
         trace,
+        **extra,
         n_dec=carry.n_dec,
         snapshot_fp=jnp.where(wake, jnp.asarray(snapshot_fp, I64), 0),
         eff_kind=effects.kind,

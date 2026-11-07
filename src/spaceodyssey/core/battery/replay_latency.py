@@ -11,7 +11,7 @@ from spaceodyssey.core.battery.result import (
     worlds_of,
 )
 from spaceodyssey.core.battery.views import DecisionViews, compare_views
-from spaceodyssey.core.carry import PROJECTION_FIELDS
+from spaceodyssey.core.carry import PROJECTION_FIELDS, absent
 from spaceodyssey.core.enums import EventKind, RunStatus
 from spaceodyssey.core.executors.base import run_status
 from spaceodyssey.core.records import log_columns
@@ -107,7 +107,7 @@ def _non_release(trace):
     return {
         n: np.asarray(getattr(trace, n))[keep]
         for n in type(trace).__dataclass_fields__
-        if n not in LATENCY_FREE_SKIP and (n != "program" or trace.program is not None)
+        if n not in LATENCY_FREE_SKIP and not absent(trace, n)
     }
 
 

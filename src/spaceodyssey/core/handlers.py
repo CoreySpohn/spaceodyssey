@@ -16,8 +16,10 @@ from spaceodyssey.core.enums import (
     EventKind,
     Purpose,
     RecordStatus,
+    RemainderRule,
     Scope,
     Stage,
+    WindowState,
 )
 from spaceodyssey.core.events import empty_event_row, enqueue, requeue, where_tree
 from spaceodyssey.core.keys import asset_coordinate, draw_key, fold_key
@@ -150,6 +152,9 @@ def h_done(c, ev, study, truth, root):
     if caps.refunds:
         charge, fixed, _ = charge_parts(study, channel_index)
         base = dataclasses.replace(base, charged=charge, nonrefundable=fixed)
+        if caps.awards:
+            # the window generation of the payer row at debit rides the Done row
+            base = dataclasses.replace(base, award_gen=ev.disposition)
     rec = eqx.filter_jit(_realize_rec)(
         c, study, truth, root, base, jnp.asarray(1.0, F64)
     )
@@ -510,6 +515,8 @@ def _cancel_lane(
         part = jnp.where(pricing == ChargePricing.FLAT_FRACTION, 1.0, spent)
         kept = (charge - fixed) * part + fixed
         base = dataclasses.replace(base, charged=kept, nonrefundable=fixed)
+        if caps.awards:
+            base = dataclasses.replace(base, award_gen=c.ev.disposition[i])
     rec = eqx.filter_jit(_realize_rec)(c, study, truth, root, base, frac)
     owner = 0 if c.ev.program is None else c.ev.program[i]
     rows = _resource_rows(study, lane, owner)
@@ -629,10 +636,56 @@ def h_stop(c, ev, study, truth, root):
     return c2, _emit(n_total, slot), rec
 
 
+def h_window_end(c, ev, study, truth, root):
+    """Close an award window: apply the row's remainder rule once per generation.
+
+    The event names its row in `lane` and the window generation it closes in `gen`; an
+    expiry whose generation is no longer the row's (a later award replaced the window)
+    changes nothing. A live one bumps the generation and then applies the rule the
+    award declared: NONE keeps the balance (row IDLE), FORFEIT lapses it (IDLE),
+    CARRY_OVER keeps it and reopens the row (ALWAYS), REALLOCATE moves it to the
+    declared row (granted there, lapsed here; IDLE).
+    """
+    ledger = c.ledger
+    row = ev.lane
+    live = (ev.gen == ledger.win_gen[row]) & (
+        ledger.win_state[row] == WindowState.WINDOWED
+    )
+    rule = ledger.remainder_rule[row]
+    left = ledger.balance[row]
+    drop = live & ((rule == RemainderRule.FORFEIT) | (rule == RemainderRule.REALLOCATE))
+    move = live & (rule == RemainderRule.REALLOCATE)
+    to = ledger.realloc_row[row]
+    carry_over = live & (rule == RemainderRule.CARRY_OVER)
+    gone = jnp.where(drop, left, 0.0)
+    got = jnp.where(move, left, 0.0)
+    c1 = _tree_set(
+        c,
+        **{
+            "ledger.balance": ledger.balance.at[row].add(-gone).at[to].add(got),
+            "ledger.lapsed": ledger.lapsed.at[row].add(gone),
+            "ledger.granted": ledger.granted.at[to].add(got),
+            "ledger.win_gen": ledger.win_gen.at[row].add(live.astype(I64)),
+            "ledger.win_state": ledger.win_state.at[row].set(
+                jnp.where(
+                    live,
+                    jnp.where(carry_over, WindowState.ALWAYS, WindowState.IDLE),
+                    ledger.win_state[row],
+                )
+            ),
+        },
+    )
+    return c1, _emit(0, 0), record_none(study.caps)
+
+
 @eqx.filter_jit
 def step(carry, ev, study, truth, root):
-    """The transition for one event: lax.switch over `HANDLERS` by event kind."""
-    table = HANDLERS
+    """The transition for one event: lax.switch over `HANDLERS` by event kind.
+
+    The window handler is part of the table only while awards are on, so a study
+    without them lowers the table it always had.
+    """
+    table = HANDLERS if study.caps.awards else HANDLERS[:-1]
     branches = tuple((lambda c, h=h: h(c, ev, study, truth, root)) for h in table)
     return lax.switch(
         jnp.clip(ev.kind, 0, len(table) - 1).astype(jnp.int32), branches, carry
@@ -651,5 +704,6 @@ HANDLERS = (
     h_fault,
     h_request,
     h_refresh,
+    h_window_end,
 )
 PUBLIC = Audience.OBSERVER | Audience.POLICY
