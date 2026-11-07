@@ -27,6 +27,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.preflight import FindingCode as C
 from spaceodyssey.studies import catalog, toy
+from spaceodyssey.studies.premission import PreMissionImporter, authored_table
 from tests.core.corpus import CORPUS, frozen
 
 
@@ -177,6 +178,33 @@ def _dropped_order():
     return _channel_edit(coincident_order=None)
 
 
+def import_study(mistake=None):
+    """`survey_1` importing two public measurement rows, with one seeded mistake.
+
+    `mistake` is `None` (a correct table), `"upstream"` (a declared upstream hash,
+    unverified without a document), `"pedigree"` (an in-table pedigree entry naming
+    an absent source), `"index"` (a local index repeated on one channel) or
+    `"offset"` (a row that ends after its release).
+    """
+    pedigree = [(), ()]
+    if mistake == "pedigree":
+        pedigree = [(), ((0, 60, 0, 7, False),)]
+    table = authored_table(
+        subject=[0, 1],
+        local_index=[0, 0 if mistake == "index" else 1],
+        channel=[60, 60],
+        kind=[toy.RECORD_MEASUREMENT] * 2,
+        audience=[3, 3],
+        payload=[[1.0], [2.0]],
+        start_offset=[-5, -5],
+        end_offset=[3 if mistake == "offset" else -1, -1],
+        pedigree=pedigree,
+        source_index=[0, 1],
+        upstream_hash="ab" * 32 if mistake == "upstream" else "",
+    )
+    return toy.survey_1(process=PreMissionImporter(table=table))
+
+
 # name -> (the one code the study must raise, builder, executor selected)
 SEEDED = {
     "observer_reads_truth": (C.F001, lambda: _observer(reads=(TRUTH,)), None),
@@ -261,6 +289,10 @@ SEEDED = {
         None,
     ),
     "channel_kind_unregistered": (C.R001, _unsupported_kind, None),
+    "import_upstream_unverified": (C.D004, lambda: import_study("upstream"), None),
+    "import_pedigree_absent": (C.D005, lambda: import_study("pedigree"), None),
+    "import_index_repeated": (C.D006, lambda: import_study("index"), None),
+    "import_offset_positive": (C.D007, lambda: import_study("offset"), None),
 }
 
 # Correct studies and the codes they must raise (warnings only).
@@ -269,6 +301,7 @@ CLEAN = {
     "survey_1": (toy.survey_1, ()),
     "catalog_study": (catalog.catalog_study, ()),
     "d2_study": (toy.d2_study, ()),
+    "import_study": (import_study, ()),
     "stated_clean_components": (
         lambda: _policy(
             reads=(),

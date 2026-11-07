@@ -152,6 +152,10 @@ LOCATORS = {
     "channel_without_order": ("channels", None, "coincident_order", ()),
     "channel_order_out_of_range": ("channels", None, "coincident_order", (2,)),
     "channel_kind_unregistered": ("channels", None, "kind", (2,)),
+    "import_upstream_unverified": ("process", None, "table.upstream_hash", ()),
+    "import_pedigree_absent": ("process", None, "table.pedigree.source_index", (1, 0)),
+    "import_index_repeated": ("process", None, "table.local_index", (1,)),
+    "import_offset_positive": ("process", None, "table.end_offset", (0,)),
 }
 
 
@@ -202,3 +206,80 @@ def test_a_finding_that_does_not_narrow_has_an_empty_locator():
     """Fails if a hand-built finding does not default to no locator."""
     finding = core.Finding(FindingCode.T001, Severity.WARNING, "p", "m", "f")
     assert locator(finding) == ("", None, "", ())
+
+
+def _upstream_study(declared):
+    """The import study with its table's declared upstream hash set."""
+    from tests.core.preflight_cases import import_study
+
+    study = import_study()
+    table = dataclasses.replace(study.process.table, upstream_hash=declared)
+    return dataclasses.replace(study, process=study.process.__class__(table=table))
+
+
+def test_upstream_hash_passes_fails_and_is_unverified_through_the_context():
+    """Fails if D004 does not pass with the named upstream document, fail with
+    another one, and report "declared, unverified" (a warning) with none.
+    """
+    from spaceodyssey.codec import dump_study
+    from spaceodyssey.core.preflight.checks import PreflightContext
+    from tests.codec.test_document import TOY_KINDS
+
+    upstream = dump_study(toy.survey_1(), TOY_KINDS)
+    other = dump_study(toy.survey_1(horizon_tick=900), TOY_KINDS)
+    study = _upstream_study(upstream.content_hash)
+    right = PreflightContext(upstream_document=upstream)
+    wrong = PreflightContext(upstream_document=other)
+    assert preflight(study, context=right) == []
+    found = preflight(study, context=wrong)
+    assert [(str(f.code), f.severity) for f in found] == [("D004", Severity.ERROR)]
+    assert other.content_hash in found[0].message
+    for context in (None, PreflightContext()):
+        found = preflight(study, context=context)
+        assert [(str(f.code), f.severity) for f in found] == [
+            ("D004", Severity.WARNING)
+        ]
+        assert "declared, unverified" in found[0].message
+    # no declared hash: nothing to verify, whatever document is supplied
+    assert preflight(_upstream_study(""), context=wrong) == []
+
+
+def _table_of(n_rows):
+    from spaceodyssey.studies.premission import PreMissionImporter, authored_table
+
+    table = authored_table(
+        subject=[i % 2 for i in range(n_rows)],
+        local_index=list(range(n_rows)),
+        channel=[60] * n_rows,
+        kind=[toy.RECORD_MEASUREMENT] * n_rows,
+        audience=[3] * n_rows,
+        payload=[[1.0]] * n_rows,
+    )
+    return toy.survey_1(process=PreMissionImporter(table=table))
+
+
+@pytest.mark.parametrize(
+    ("field", "held", "rows"),
+    [
+        ("n_events", "queue slots", 9),
+        ("n_log", "log rows", 10),
+        ("n_steps", "steps", 10),
+    ],
+)
+def test_an_import_one_row_too_large_fails_only_with_the_real_budget(field, held, rows):
+    """Fails if a table that just fits the run's queue, log or step budget is
+    refused, if one row more is accepted, or if the capacity check runs without a
+    budget. The queue holds every process row and the kickoff wait; the steps before
+    the first decision are one per event plus the kickoff.
+    """
+    from spaceodyssey.core.preflight.checks import PreflightContext, RunBudget
+
+    tight = {"n_events": 10, "n_log": 10, "n_steps": 2 * 10 + 1}[field]
+    budget = dataclasses.replace(RunBudget(1000, 1000, 1000), **{field: tight})
+    context = PreflightContext(budget=budget)
+    fits, over = _table_of(rows), _table_of(rows + 1)
+    assert preflight(fits, context=context) == []
+    found = preflight(over, context=context)
+    assert [str(f.code) for f in found] == ["D006"]
+    assert held in found[0].message and found[0].member == "table"
+    assert preflight(over) == []

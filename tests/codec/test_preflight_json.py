@@ -1,4 +1,4 @@
-"""JSON pre-flight: all thirteen finding codes, each with a pointer to its value."""
+"""JSON pre-flight: all seventeen finding codes, each with a pointer to its value."""
 
 import copy
 import dataclasses
@@ -31,6 +31,7 @@ from spaceodyssey.core.keys import Coupling
 from spaceodyssey.core.preflight import FindingCode, preflight
 from spaceodyssey.plugins import RegistrationError
 from spaceodyssey.studies import toy
+from spaceodyssey.studies.premission import PREMISSION_KINDS
 from tests.codec.test_document import TOY_KINDS
 from tests.core.preflight_cases import (
     DOC_KINDS,
@@ -38,9 +39,10 @@ from tests.core.preflight_cases import (
     DocObjective,
     DocObserver,
     DocPolicy,
+    import_study,
 )
 
-RESOLVER = KindResolver({**TOY_KINDS, **DOC_KINDS})
+RESOLVER = KindResolver({**TOY_KINDS, **DOC_KINDS, **PREMISSION_KINDS})
 QUERY = int(EffectKind.QUERY)
 
 
@@ -167,6 +169,10 @@ def d003_hash(seed):
     return _policy_doc(effects=(QUERY,)), _run(compiled_hash=8 if seed else 7)
 
 
+def _import(mistake):
+    return lambda seed: (_doc(import_study(mistake if seed else None)), None)
+
+
 # code, builder, pointer, check on the value at the pointer, and what it checks
 CASES = {
     "F001": (
@@ -237,6 +243,30 @@ CASES = {
         d003_hash,
         "/run/refit/compiled/model_hash",
         _is(8),
+    ),
+    "D004-unverified": (
+        FindingCode.D004,
+        _import("upstream"),
+        "/study/process/table/upstream_hash",
+        _is("ab" * 32),
+    ),
+    "D005": (
+        FindingCode.D005,
+        _import("pedigree"),
+        "/study/process/table/pedigree/source_index/data/1/0",
+        _is(7),
+    ),
+    "D006": (
+        FindingCode.D006,
+        _import("index"),
+        "/study/process/table/local_index/data/1",
+        _is(0),
+    ),
+    "D007": (
+        FindingCode.D007,
+        _import("offset"),
+        "/study/process/table/end_offset/data/0",
+        _is(3),
     ),
 }
 

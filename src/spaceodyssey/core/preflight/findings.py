@@ -24,6 +24,12 @@ class FindingCode(StrEnum):
     T001 = "T001"  # a drain that equals a close below campaign scope
     T002 = "T002"  # a channel with no valid coincident order
     R001 = "R001"  # a channel declares a record kind the registry lacks
+    D004 = (
+        "D004"  # a declared upstream hash differs from the supplied upstream document
+    )
+    D005 = "D005"  # an in-table pedigree entry names a source the table lacks
+    D006 = "D006"  # a table row the study cannot hold: repeated identity or index
+    D007 = "D007"  # a row offset above zero, or a start after its end
 
 
 @dataclasses.dataclass(frozen=True)
@@ -33,10 +39,11 @@ class Finding:
     `path` is for people. The locator is for tools: `subject` names the slot of the
     study the finding is about (`observer`, `policy`, `channel_model`, `channels`,
     `assets`, and so on), `index` the position within a slot that holds a sequence
-    (the policy), `member` the field of that slot, and `entry` the position of the
-    offending item within the member (one integer per axis). Each is empty when the
-    finding does not narrow that far, and a finding never names an item it did not
-    check.
+    (the policy), `member` the field of that slot (a dotted path, such as
+    `table.local_index`, for a field of a module the slot holds), and `entry` the
+    position of the offending item within the member (one integer per axis). Each is
+    empty when the finding does not narrow that far, and a finding never names an item
+    it did not check.
     """
 
     code: FindingCode
