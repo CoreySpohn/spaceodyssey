@@ -17,6 +17,7 @@ from spaceodyssey.core import (
     histories_equal,
 )
 from spaceodyssey.core import refresh as refresh_module
+from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.carry import _tree_set
 from spaceodyssey.core.conformance import refit_beliefs
 from spaceodyssey.core.enums import F64, I64, Capacity, EventKind, RefitStatus, Stage
@@ -158,7 +159,11 @@ def test_dedup_computes_once_when_rows_match():
 
 @functools.cache
 def _mutation_pair():
-    h, c = pair()
+    # Two programs, so the program leaves are held too: every conditional leaf is
+    # exercised (a producer that names no program charges program 0).
+    caps = Capacities(rows_per_subject=8, refit_lanes=2, n_programs=2)
+    # 20 steps: a refresh has run and an event is still pending (60 drains the queue).
+    h, c = run_pair(refresh_study(100, caps=caps), 20, 2, 7)
     host = base.RunResult(
         base.index_world(h.carry, 0), base.index_world(h.trace, 0), h.layout
     )
@@ -168,6 +173,7 @@ def _mutation_pair():
     return host, comp
 
 
+@pytest.mark.medium  # The two-program refresh pair compiles the executor cold.
 @pytest.mark.parametrize("field", sorted(REFRESH_ONLY))
 def test_refresh_leaf_mutation_fails_parity(field):
     """Each conditional refresh leaf is compared; a compiled-only change is caught."""

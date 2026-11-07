@@ -438,7 +438,11 @@ def _row(subject, index, revision, tick=200, audience=3, **fields):
 
 def _log(*rows):
     base = empty_log(SOURCE.caps)
-    cols = {f.name: np.array(getattr(base, f.name)) for f in dataclasses.fields(base)}
+    cols = {
+        f.name: np.array(getattr(base, f.name))
+        for f in dataclasses.fields(base)
+        if getattr(base, f.name) is not None  # a column the capacities do not hold
+    }
     for i, row in enumerate(rows):
         for name, value in row.items():
             cols[name][i] = value
