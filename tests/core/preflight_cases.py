@@ -91,10 +91,12 @@ class DocPolicy(toy.NullPolicy):
     executors: tuple = _field(tuple(sorted(EXECUTORS)))
     disruptive: bool = _field(False)
     programs: tuple = _field(())
+    awards: tuple = _field(())
 
     def declare(self):
         return Declaration(
             programs=self.programs,
+            awards=self.awards,
             reads=self.reads,
             needs=tuple(Need(*n) for n in self.needs),
             stops=tuple((Scope(a), Disposition(b)) for a, b in self.stops),
@@ -165,6 +167,12 @@ def _observer(**stated):
 
 def _policy(**stated):
     return _with_policy(toy.survey_1(), StatedPolicy(stated=Declaration(**stated)))
+
+
+def _award_policy(**stated):
+    """`survey_1` with awards on and a policy that states `stated`."""
+    study = toy.survey_1(caps=Capacities(awards=True))
+    return _with_policy(study, StatedPolicy(stated=Declaration(**stated)))
 
 
 def _assets(**columns):
@@ -294,6 +302,17 @@ SEEDED = {
         lambda: _refund_channels(failure_kind=jnp.asarray([-1, -1, 0], I64)),
         None,
     ),
+    "award_window_empty": (C.W001, lambda: _award_policy(awards=((2, 50, 50),)), None),
+    "award_row_out_of_range": (
+        C.W001,
+        lambda: _award_policy(awards=((9, 50, 80),)),
+        None,
+    ),
+    "award_windows_overlap": (
+        C.W001,
+        lambda: _award_policy(awards=((2, 50, 80), (2, 70, 90))),
+        None,
+    ),
     "frozen_horizon": (
         C.X002,
         lambda: _assets(freeze_ticks=jnp.asarray([5, 0], I64)),
@@ -360,6 +379,13 @@ CLEAN = {
     "d2_study": (toy.d2_study, ()),
     "import_study": (import_study, ()),
     "prior_study": (lambda: prior_study(summaries((7, 90, 0, 1))), ()),
+    "allocate_with_awards": (
+        lambda: _award_policy(
+            effects=frozenset({EffectKind.ALLOCATE}),
+            awards=((2, 50, 80), (2, 80, 90), (3, 50, 80)),
+        ),
+        (),
+    ),
     "stated_clean_components": (
         lambda: _policy(
             reads=(),

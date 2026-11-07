@@ -15,6 +15,7 @@ from spaceodyssey.core.battery.result import (
     worlds_of,
 )
 from spaceodyssey.core.battery.views import DecisionViews, compare_views, moved_ticks
+from spaceodyssey.core.carry import absent
 from spaceodyssey.core.enums import I64
 from spaceodyssey.core.executors.base import belief_leaves, canonical_history
 from spaceodyssey.core.kinds import AbstractProcess
@@ -197,11 +198,7 @@ def _epoch_world(w, cb, tb, cl, tl, delta, layout):
     if not bits_equal(handled, np.asarray(tl.handled)):
         return [f"world {w}: the handled steps changed"]
     for name in type(tb).__dataclass_fields__:
-        if (
-            name == "pol_u"
-            or name in DIGEST_FIELDS
-            or (name == "program" and tb.program is None)
-        ):
+        if name == "pol_u" or name in DIGEST_FIELDS or absent(tb, name):
             continue
         a, b = np.asarray(getattr(tb, name)), np.asarray(getattr(tl, name))
         if name == "tick":
