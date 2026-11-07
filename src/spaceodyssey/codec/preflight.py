@@ -58,6 +58,7 @@ from spaceodyssey.codec.document import (
     DocumentError,
     RunDocument,
     StudyDocument,
+    canonical_json,
     check_schema_version,
     parse_text,
     pointer,
@@ -164,6 +165,7 @@ def preflight_document(
     files=None,
     max_file_bytes=DEFAULT_MAX_BYTES,
     n_steps=None,
+    upstream=None,
 ):
     """Every pre-flight finding of a study document, errors first.
 
@@ -201,6 +203,13 @@ def preflight_document(
     study document with a separate run record has no registry to rebuild with: a
     `D003` warning says the boundary was not rebuilt. Without a boundary, a component
     that needs one reports its check as unverified.
+
+    `upstream` is the document an imported table names by its declared upstream
+    hash (JSON text, a parsed object, a `StudyDocument` or a `RunDocument`). It is
+    read with `read_upstream` and passed in the context, so the table's lineage check
+    (`D004`) compares the declaration with its content hash, at the pointer of the
+    declared hash. An upstream document that does not read fails that check; without
+    one, a declared hash is reported as declared, unverified.
     """
     resolver = _resolver(kinds)
     try:
@@ -246,6 +255,11 @@ def preflight_document(
             caps = study.caps
             context = PreflightContext(
                 budget=RunBudget(caps.n_events, caps.n_log, n_steps)
+            )
+        if upstream is not None:
+            context = dataclasses.replace(
+                context or PreflightContext(),
+                upstream_document=read_upstream(upstream),
             )
         records = data.get("records") if is_run else None
         boundaries, unbuilt = _boundaries(run, records, bindings, executor)
@@ -764,3 +778,53 @@ def service_findings(study, run):
             DocumentCode.D003, Severity.ERROR, pointer((RUN_KEY,)), message, fix
         )
     ]
+
+
+# ---- upstream documents, for the lineage check --------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class UpstreamDocument:
+    """The content hash of a supplied upstream document, or why it has none.
+
+    `content_hash` is the sha256 of the document's canonical bytes, `None` when the
+    document could not be read; `problem` then says why, with the pointer of the
+    failure in the upstream document.
+    """
+
+    content_hash: str | None
+    problem: str | None = None
+
+
+def read_upstream(upstream):
+    """The `UpstreamDocument` of a study or run document; never raises on content.
+
+    `upstream` is JSON text, a parsed object, a `StudyDocument` or a `RunDocument`
+    (an `UpstreamDocument` is returned as it is). The hash is taken over the
+    canonical bytes, so whitespace and the order of JSON object keys do not change
+    it, while any changed value, a reordered array and reordered `$dict` entries do.
+    Text or an object that carries a stored `content_hash` must match it: a document
+    edited after its hash was written is refused.
+    """
+    if isinstance(upstream, UpstreamDocument):
+        return upstream
+    try:
+        data = _parsed(upstream)
+        cls = RunDocument if data.get("format") == RUN_FORMAT else StudyDocument
+        return UpstreamDocument(cls.from_json(canonical_json(data)).content_hash)
+    except (ValueError, TypeError) as err:  # a DocumentError is a ValueError
+        return UpstreamDocument(None, f"does not read as a document ({err})")
+
+
+def read_document(document):
+    """`(data, findings)`: a document as its parsed object, and why it may not be.
+
+    `data` is `None` when the document does not parse as a JSON object; `findings`
+    then holds that failure as `L001`. A stored `content_hash` that differs from the
+    canonical bytes is an `L001` finding at `/content_hash`, and `data` is returned.
+    """
+    try:
+        data = _parsed(document)
+    except DocumentError as err:
+        return None, [_from_error(err)]
+    return data, _check_hash(data)

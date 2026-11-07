@@ -584,13 +584,15 @@ def lineage_findings(table, context):
     actual = getattr(document, "content_hash", None)
     if actual == table.upstream_hash:
         return []
+    problem = getattr(document, "problem", None)
+    found = f"document {problem}" if problem else f"document's content hash {actual}"
     return [
         _finding(
             FindingCode.D004,
             "table.upstream_hash",
             (),
             f"upstream hash {table.upstream_hash} differs from the supplied upstream "
-            f"document's content hash {actual}",
+            f"{found}",
             "export the table from that document, or supply the document it names",
         )
     ]
