@@ -461,6 +461,24 @@ def _admit_rows(c, eff, mask, study, fp):
     return c, jnp.stack(out)
 
 
+def _refuses_mixed(caps):
+    """Whether a decision that mixes a Query with another effect is refused."""
+    return caps.snapshot_balances
+
+
+def _query_mixed_rows(effects, mask, act):
+    """Rows of a decision refused for mixing a Query with another effect.
+
+    The rows are the permitted, non-empty ones of a decision that holds a Query and at
+    least one other such row; none otherwise. A row the phase mask forbids is not an
+    effect of the decision and keeps its own code.
+    """
+    live = _permitted(mask, effects.kind) & (effects.kind != EffectKind.NONE)
+    query = live & (effects.kind == EffectKind.QUERY)
+    mixed = act & query.any() & (live & ~query).any()
+    return live & mixed
+
+
 def admit(carry, effects, study, snapshot_fp=None):
     """Admit a decision's effect rows. Returns (carry, admission code per row).
 
@@ -475,6 +493,12 @@ def admit(carry, effects, study, snapshot_fp=None):
     stage, addressed to the policy audience and stamped with the fingerprint of the
     snapshot the decision read (`snapshot_fp`, computed here when not given) and the
     decision's index; `Allocate` is declared and answers unsupported.
+
+    While `caps.snapshot_balances` is on, a decision that combines a Query with any
+    other effect is refused whole, every such row with `AdmissionCode.QUERY_MIXED`,
+    and changes nothing: the request carries the fingerprint of a snapshot that
+    holds the balances, which the debits of a sibling row would move before the host
+    answers. With the flag off the check does not exist.
     """
     fp = decision_fingerprint(carry, study) if snapshot_fp is None else snapshot_fp
     supported = (
@@ -486,13 +510,23 @@ def admit(carry, effects, study, snapshot_fp=None):
     )
     phase = phase_at(carry, study)
     mask = _phase_mask(_tree_set(carry, phase=phase), study)
+    mixed = None
+    if _refuses_mixed(study.caps):
+        mixed = _query_mixed_rows(effects, mask, active(carry))
+        supported = supported & ~mixed
+        effects = dataclasses.replace(
+            effects, kind=jnp.where(mixed, EffectKind.NONE, effects.kind)
+        )
     any_eff = active(carry) & (supported & _permitted(mask, effects.kind)).any()
     c = _tree_set(carry, stage=jnp.where(any_eff, Stage.ADMIT, carry.stage))
     c = _tree_set(c, phase=jnp.where(any_eff, phase, c.phase))
     inputs = _AdmissionInputs(
         study.caps, study.assets, study.channels, study.horizon_tick
     )
-    return _admit_rows(c, effects, mask, inputs, fp)
+    c, codes = _admit_rows(c, effects, mask, inputs, fp)
+    if mixed is not None:
+        codes = jnp.where(mixed, AdmissionCode.QUERY_MIXED, codes).astype(I64)
+    return c, codes
 
 
 def close_decision(carry, effects, pstate, wake, study):

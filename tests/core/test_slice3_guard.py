@@ -202,7 +202,13 @@ def test_the_slice_3a_capacities_default_to_off():
         False,
     )
     marked = [f.name for f in dataclasses.fields(Capacities) if f.metadata == OPTIONAL]
-    assert marked == ["awards", "refunds", "n_commitments", "snapshot_balances"]
+    assert marked == [
+        "awards",
+        "refunds",
+        "n_commitments",
+        "snapshot_balances",
+        "balance_quantum",
+    ]
 
 
 # ---- key_version: runs ------------------------------------------------------------

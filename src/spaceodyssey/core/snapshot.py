@@ -142,6 +142,12 @@ class Snapshot(eqx.Module):
     tick: jax.Array
     n_dec: jax.Array
     release_version: jax.Array  # releases this audience has received so far
+    # The policy's view of the ledger (rows: assets, then programs, then the shared
+    # row; one column per resource), as the float balance and the integer count of
+    # `balance_quantum` units the fingerprint hashes. Absent (None, no leaf) unless
+    # `snapshot_balances` is on, and always absent for the observer.
+    balance: jax.Array | None = None
+    balance_q: jax.Array | None = None
 
 
 class EffectTable(eqx.Module):
@@ -245,6 +251,7 @@ def snapshot_view(carry, audience, caps):
         else:
             mask = vis if col.ndim == 1 else vis[:, None]
             cols[name] = jnp.where(mask, col, jnp.zeros_like(col))[order]
+    balance, balance_q = balance_view(carry, audience, caps)
     return Snapshot(
         log=RecordLog(**cols),
         n_rows=vis.sum().astype(I64),
@@ -252,7 +259,22 @@ def snapshot_view(carry, audience, caps):
         tick=carry.tick,
         n_dec=carry.n_dec,
         release_version=carry.release_version[version_slot(audience)],
+        balance=balance,
+        balance_q=balance_q,
     )
+
+
+def balance_view(carry, audience, caps):
+    """The balance and its integer count of quanta, or `(None, None)` when not shown.
+
+    Only the policy is shown balances, and only while `caps.snapshot_balances` is on,
+    so every other view keeps its pytree and its fingerprint. The integer is the
+    balance over `caps.balance_quantum`, rounded to the nearest unit.
+    """
+    if not caps.snapshot_balances or audience != Audience.POLICY:
+        return None, None
+    balance = carry.ledger.balance
+    return balance, jnp.round(balance / caps.balance_quantum).astype(I64)
 
 
 _GOLDEN = np.uint64(0x9E3779B97F4A7C15)
@@ -291,16 +313,17 @@ def conditional_view_leaves(view):
     """The leaves of a view that exist only where a feature does, in digest order.
 
     The pedigree the view shows (a width-0 column when the refresh protocol is off) and
-    the program column (absent with one program) and the refund index and award
-    generation (absent without refunds). A feature that adds a leaf to the
-    view lists it here.
+    the program column (absent with one program), the refund index and award generation
+    (absent without refunds), then the integer balance (absent unless balances are on;
+    the float is not hashed). A feature that adds a leaf to the view lists it here.
     """
     program = () if view.log.program is None else (view.log.program,)
     # the refund columns that are integers; the amount is a float and is not hashed
     refunds = tuple(
         x for x in (view.log.refund_index, view.log.award_gen) if x is not None
     )
-    return (view.log.product, *program, *refunds)
+    balance = () if view.balance_q is None else (view.balance_q,)
+    return (view.log.product, *program, *refunds, *balance)
 
 
 def snapshot_fingerprint(view, layout):

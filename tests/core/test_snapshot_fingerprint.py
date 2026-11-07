@@ -162,6 +162,7 @@ def test_an_empty_leaf_moves_the_fingerprint(monkeypatch):
         log=log,
         **{n: getattr(view, n) for n in ("belief", "n_rows", "tick", "n_dec")},
         release_version=view.release_version,
+        balance_q=view.balance_q,
     )
     base = int(snapshot_fingerprint(view, layout))
     assert int(snapshot_fingerprint(shim, layout)) == base

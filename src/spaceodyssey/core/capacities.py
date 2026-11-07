@@ -1,6 +1,7 @@
 """Capacities."""
 
 import dataclasses
+import math
 
 import jax
 
@@ -73,6 +74,9 @@ class Capacities:
     refunds: bool = dataclasses.field(default=False, metadata=OPTIONAL)
     n_commitments: int = dataclasses.field(default=0, metadata=OPTIONAL)
     snapshot_balances: bool = dataclasses.field(default=False, metadata=OPTIONAL)
+    # The unit the policy's integer balance view counts in; read only while
+    # `snapshot_balances` is on.
+    balance_quantum: float = dataclasses.field(default=1.0, metadata=OPTIONAL)
 
     @property
     def n_balance_rows(self) -> int:
@@ -114,6 +118,14 @@ class Capacities:
             raise ValueError("refunds must be a bool")
         if not isinstance(self.snapshot_balances, bool):
             raise ValueError("snapshot_balances must be a bool")
+        quantum = self.balance_quantum
+        if (
+            isinstance(quantum, bool)
+            or not isinstance(quantum, float)
+            or not math.isfinite(quantum)
+            or quantum <= 0.0
+        ):
+            raise ValueError("balance_quantum must be a positive finite float")
         if not self.n_an <= self.n_subjects:
             raise ValueError("n_an must not exceed n_subjects")
         largest = _order_key_py(

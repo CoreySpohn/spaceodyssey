@@ -105,6 +105,7 @@ class AdmissionCode(IntEnum):
     OUTSIDE_VALIDITY = 8
     FROZEN_HORIZON = 9
     FORBIDDEN = 10
+    QUERY_MIXED = 11
 
 
 class CoincidentOrder(IntEnum):
