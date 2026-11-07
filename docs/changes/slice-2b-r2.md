@@ -96,7 +96,7 @@ It is hashable by class and declaration, so instances share one compiled program
 |---|---|---|
 | D008 | two priors retained for one audience have pedigrees that share a source (external entries count); once per pair | `observer`, `table.pedigree.source_index`, `(later row, entry)` |
 | D009 | a retained table prior with `MaskedBatchRefit` of the observer's own kernel (it starts both refits from `observer.init` and shares them) while the audiences resolve differently for some subject | `observer`, `table` |
-| D010 | a retained table prior with any boundary other than `AudiencePriorRefit` (A10): `OftiRefit`, a host fit or kernel that never reads the installed prior, the updater boundary when it lands, and the observer-init boundary when the audiences resolve alike; with no boundary supplied and a refresh grid on, a warning that D009 and D010 are unverified | `observer`, `table` |
+| D010 | a retained table prior with any boundary other than `AudiencePriorRefit` (A10): `OftiRefit`, a host fit or kernel that never reads the installed prior, the updater boundary when it lands (the observer-init boundary when the audiences resolve alike was also refused here; the D010 amendment of 2026-11-07 accepts it, see `slice-2b-a10.md`); with no boundary supplied and a refresh grid on, a warning that D009 and D010 are unverified | `observer`, `table` |
 | D006 | (also) the observer's table differs from the table the process imports | `observer`, `table` |
 
 ## Tests
@@ -321,7 +321,8 @@ trusts the installed prior; the independent prior-plus-rows comparison in
    the adopted contract (see "Review round 2"). That case looks safe for the current
    Gaussian observer (it starts both refits from `observer.init`, which then holds
    the one common prior, and no wrong-posterior counterexample was found) and is a
-   candidate for a later, explicit spec change, not a silence here.
+   candidate for a later, explicit spec change, not a silence here. That change was
+   approved as the D010 amendment of 2026-11-07 (`slice-2b-a10.md`).
 2. **`resolve_overlap` takes `derived_kinds` (keyword).** The frozen signature cannot
    tell a prior from a raw row without the registry; a prior is a row of a derived
    kind (R1 silence 4). `overlap_roles` is added beside it for the pre-flight check.
