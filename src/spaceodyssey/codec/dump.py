@@ -17,6 +17,7 @@ from spaceodyssey.codec.document import (
 )
 from spaceodyssey.codec.files import (
     DEFAULT_MAX_INLINE,
+    UnsafeDirectory,
     current_store,
     make_store,
     using_store,
@@ -176,7 +177,12 @@ def _encode_array(arr, path, *, weak=False, container=None):
     out = {"$array": name, "shape": list(arr.shape)}
     store = current_store()
     if store is not None and store.wants(arr.size):
-        out["file"] = store.put(np.ascontiguousarray(arr).tobytes())
+        try:
+            out["file"] = store.put(np.ascontiguousarray(arr).tobytes())
+        except UnsafeDirectory as err:
+            raise DocumentError(
+                f"array files are not written: {err}", pointer(path)
+            ) from err
     elif np.issubdtype(arr.dtype, np.floating) or name == "bfloat16":
         out["data"] = _tag_floats(arr.astype(np.float64).tolist())
     else:

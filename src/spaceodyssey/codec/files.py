@@ -7,9 +7,12 @@ directory the caller names. The document keeps the dtype and shape and a referen
 of the document hash, so the content of every file is covered by it. A reference
 names a file in the directory, never a path: a name with a separator is refused.
 
-The directory is opened one path component at a time, never following a symbolic
-link (other than one owned by root, such as macOS's `/tmp`), so a directory or a
-parent replaced by a link to another tree is refused, not read through.
+The trusted directory is the files directory's parent. Its real path is resolved
+once, when the store is made (so an alias such as macOS's `/tmp` or `/var` is
+accepted), and every read and write walks that real path from the root, then the
+files directory, then the file, opening each component without following a symbolic
+link. A link anywhere below the trusted directory, or one that appears in its real
+path later, is refused, not read or written through.
 """
 
 import contextlib
@@ -18,9 +21,8 @@ import dataclasses
 import hashlib
 import os
 import re
+import secrets
 import stat
-import tempfile
-from collections import deque
 from pathlib import Path
 
 from spaceodyssey.codec.document import DocumentError, pointer
@@ -29,57 +31,50 @@ DEFAULT_MAX_INLINE = 1024
 DEFAULT_MAX_BYTES = 1 << 30
 _NAME = re.compile(r"[0-9a-f]{64}\.bin")
 _REF_KEYS = frozenset({"name", "sha256", "bytes"})
-_MAX_LINKS = 40
+_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY
 
 
 class UnsafeDirectory(OSError):
-    """The files directory is reached through a symbolic link a user could plant."""
+    """A directory on the way to an array file is a symbolic link."""
 
 
-def open_directory(directory):
-    """A descriptor of `directory`, opened component by component from the root.
-
-    No component is followed through a symbolic link unless the link is owned by
-    root (a system link such as macOS's `/tmp` or `/var`, which no user can plant);
-    any other link, a `..` in a followed link, or more than 40 links is
-    `UnsafeDirectory`. The caller closes the descriptor.
-    """
-    parts = deque(p for p in os.path.abspath(directory).split(os.sep) if p)
-    flags = os.O_RDONLY | os.O_DIRECTORY
-    fd = os.open(os.sep, flags)
-    links = 0
+def _is_link(name, dir_fd):
+    """Whether `name` below `dir_fd` is a symbolic link (not followed)."""
     try:
-        while parts:
-            part = parts.popleft()
-            if part == ".":
-                continue
-            if part == "..":
-                raise UnsafeDirectory(
-                    f"a followed link climbs out with '..' in {directory}"
-                )
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISLNK(info.st_mode)
+
+
+def _walk(fd, parts, create=False):
+    """The descriptor of `parts` opened one by one below `fd`, never through a link.
+
+    Takes ownership of `fd` (closed on return or failure). With `create`, a missing
+    component is made first. A link, an empty, `.` or `..` component is
+    `UnsafeDirectory`.
+    """
+    try:
+        for part in parts:
+            if part in ("", ".", ".."):
+                raise UnsafeDirectory(f"path component {part!r} is refused")
+            if create:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, dir_fd=fd)
             try:
-                nxt = os.open(part, flags | os.O_NOFOLLOW, dir_fd=fd)
+                nxt = os.open(part, _DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             except OSError:
-                info = os.stat(part, dir_fd=fd, follow_symlinks=False)
-                if not stat.S_ISLNK(info.st_mode):
-                    raise
-                links += 1
-                if info.st_uid != 0 or links > _MAX_LINKS:
+                if _is_link(part, fd):
                     raise UnsafeDirectory(
-                        f"{part!r} in {directory} is a symbolic link"
+                        f"{part!r} is a symbolic link; a link is refused"
                     ) from None
-                target = os.readlink(part, dir_fd=fd)
-                if target.startswith(os.sep):
-                    os.close(fd)
-                    fd = os.open(os.sep, flags)
-                parts.extendleft(reversed([p for p in target.split(os.sep) if p]))
-                continue
+                raise
             os.close(fd)
             fd = nxt
-        return fd
     except BaseException:
         os.close(fd)
         raise
+    return fd
 
 
 @dataclasses.dataclass(frozen=True)
@@ -95,6 +90,27 @@ class FileStore:
     directory: Path
     max_inline: int = DEFAULT_MAX_INLINE
     max_bytes: int = DEFAULT_MAX_BYTES
+    # the trusted directory's real path, resolved once, and the path below it
+    trusted: str = dataclasses.field(init=False, repr=False, compare=False)
+    below: tuple = dataclasses.field(init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        """Resolve the trusted directory (the files directory's parent) once."""
+        parent, name = os.path.split(os.path.abspath(self.directory))
+        object.__setattr__(self, "trusted", os.path.realpath(parent))
+        object.__setattr__(self, "below", (name,) if name else ())
+
+    def _open(self, create=False):
+        """A descriptor of the files directory, walked from the trusted real path.
+
+        With `create`, the trusted directory and the files directory are made when
+        missing. A link on the way is `UnsafeDirectory`.
+        """
+        if create:
+            os.makedirs(self.trusted, exist_ok=True)
+        root = [p for p in self.trusted.split(os.sep) if p]
+        fd = _walk(os.open(os.sep, _DIRECTORY), root)
+        return _walk(fd, self.below, create=create)
 
     def wants(self, size):
         """Whether an array of `size` elements is written to a file."""
@@ -113,16 +129,22 @@ class FileStore:
         ref = {"name": name, "sha256": digest, "bytes": len(raw)}
         if self._intact(name, digest, len(raw)):
             return ref
-        self.directory.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.directory, prefix=".", suffix=".tmp")
+        _require_safe_open(writes=True)
+        dir_fd = self._open(create=True)
         try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(raw)
-            os.replace(tmp, self.directory / name)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+            tmp = f".{secrets.token_hex(16)}.tmp"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            fd = os.open(tmp, flags, 0o600, dir_fd=dir_fd)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(raw)
+                os.rename(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp, dir_fd=dir_fd)
+                raise
+        finally:
+            os.close(dir_fd)
         return ref
 
     def _intact(self, name, digest, size):
@@ -138,7 +160,7 @@ class FileStore:
         if size > limit:
             raise ValueError("file is larger than the limit")
         _require_safe_open()
-        dir_fd = open_directory(self.directory)
+        dir_fd = self._open()
         try:
             flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
             fd = os.open(name, flags, dir_fd=dir_fd)
@@ -229,8 +251,8 @@ class FileStore:
         return raw
 
 
-def _require_safe_open(where=None):
-    """Refuse to read where a symlink or a special file cannot be ruled out."""
+def _require_safe_open(where=None, writes=False):
+    """Refuse to read, or write, where a link or a special file cannot be ruled out."""
     for flag in ("O_NOFOLLOW", "O_NONBLOCK", "O_DIRECTORY"):
         if not hasattr(os, flag):
             raise DocumentError(
@@ -238,7 +260,8 @@ def _require_safe_open(where=None):
                 "a symlink or special file could not be refused",
                 where,
             )
-    for call in (os.open, os.stat, os.readlink):
+    calls = (os.open, os.stat) + ((os.mkdir, os.rename, os.unlink) if writes else ())
+    for call in calls:
         if call not in os.supports_dir_fd:
             raise DocumentError(
                 f"array files need dir_fd support in os.{call.__name__}, which this "

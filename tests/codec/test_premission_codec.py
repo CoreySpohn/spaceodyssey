@@ -27,6 +27,7 @@ from spaceodyssey.codec import (
     load_study,
     preflight_document,
 )
+from spaceodyssey.codec.files import FileStore
 from spaceodyssey.codec.load import same_value
 from spaceodyssey.codec.preflight import (
     UpstreamDocument,
@@ -250,35 +251,133 @@ def test_an_unsafe_or_damaged_file_reference_is_refused_at_its_pointer(tmp_path,
     assert info.value.pointer == where
 
 
-@pytest.mark.parametrize("swapped", ["parent", "directory"])
-def test_a_files_directory_reached_through_a_symlink_is_refused(tmp_path, swapped):
-    """Fails if, after the files directory or its parent is replaced by a symlink to
-    an outside copy of the same bytes, `load_study` reads a file, or the pre-flight or
-    the lineage check reports anything but `L001` at a reference's name. Control: the
-    same document reads from the copy's own path.
-    """
-    base = tmp_path / "doc"
+# when and what is replaced by a link to an outside copy of the same bytes -> refused
+SWAPS = {
+    ("before", "parent"): False,  # the trusted directory as named, its alias resolved
+    ("before", "directory"): True,
+    ("during", "parent"): True,
+    ("during", "directory"): True,
+}
+
+
+def _tree(root):
+    """A file-backed document under root/doc/files and an outside copy of root/doc."""
+    base = root / "doc"
     files = base / "files"
     text = _stored(files)
-    copy = tmp_path / "outside"
+    copy = root / "outside"
     shutil.copytree(base, copy)
+    return text, base, files, copy
+
+
+def _swap(swapped, base, files, copy):
     if swapped == "parent":
         shutil.rmtree(base)
         os.symlink(copy, base)
     else:
         shutil.rmtree(files)
         os.symlink(copy / "files", files)
-    load_study(text, RESOLVER, files=copy / "files")
+
+
+@pytest.mark.parametrize(("when", "swapped"), list(SWAPS))
+def test_a_link_below_the_trusted_directory_is_refused(
+    tmp_path, monkeypatch, when, swapped
+):
+    """The trusted directory is the files directory's parent, resolved once when the
+    store is made. Fails if a files directory replaced by a link before the call, or
+    the files directory or its parent replaced by a link while the document is read
+    (after the store resolved its path), is read through by `load_study`, the
+    pre-flight or the lineage check, or reported as anything but `L001` at a
+    reference's name; or if a parent that is a link before the call (an alias of the
+    trusted directory, as macOS's `/tmp` is) is not read.
+    """
+    original = FileStore.get
+    armed = []
+
+    def get(self, ref, path, expected=None):
+        if armed:
+            armed.pop()()
+        return original(self, ref, path, expected)
+
+    monkeypatch.setattr(FileStore, "get", get)
+    refused = SWAPS[when, swapped]
+    for name in ("load", "preflight", "lineage"):
+        text, base, files, copy = _tree(tmp_path / name)
+
+        def swap(base=base, files=files, copy=copy):
+            _swap(swapped, base, files, copy)
+
+        if when == "before":
+            swap()
+        else:
+            armed.append(swap)
+        if name == "load":
+            if not refused:
+                load_study(text, RESOLVER, files=files)
+                continue
+            with pytest.raises(DocumentError) as info:
+                load_study(text, RESOLVER, files=files)
+            assert info.value.pointer.endswith("/file/name")
+        elif name == "preflight":
+            found = preflight_document(text, RESOLVER, files=files, upstream=UPSTREAM)
+            if not refused:
+                assert found == []
+                continue
+            assert [str(f.code) for f in found] == ["L001"]
+            assert found[0].pointer.endswith("/file/name")
+        else:
+            report = verify_lineage(text, UPSTREAM, files=files)
+            if not refused:
+                assert report.status == "verified"
+                continue
+            assert report.status == "failed"
+            assert [str(f.code) for f in report.findings] == ["L001"]
+            assert report.findings[0].pointer.endswith("/file/name")
+        assert not armed
+
+
+def test_a_link_below_the_trusted_directory_is_refused_whoever_owns_it(
+    tmp_path, monkeypatch
+):
+    """Fails if a link below the trusted directory is followed because it is (or is
+    reported as) owned by root: a user can replace a root-owned link in a directory
+    they can write, so ownership is no reason to follow one.
+    """
+    text, base, files, copy = _tree(tmp_path)
+    _swap("directory", base, files, copy)
+    real = os.stat
+
+    def as_root(path, *, dir_fd=None, follow_symlinks=True):
+        info = real(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        if follow_symlinks:
+            return info
+        return os.stat_result((info.st_mode, *info[1:4], 0, *info[5:]))
+
+    monkeypatch.setattr(os, "stat", as_root)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {as_root})
     with pytest.raises(DocumentError) as info:
         load_study(text, RESOLVER, files=files)
     assert info.value.pointer.endswith("/file/name")
-    found = preflight_document(text, RESOLVER, files=files, upstream=UPSTREAM)
-    assert [(str(f.code), f.pointer) for f in found] == [("L001", info.value.pointer)]
-    report = verify_lineage(text, UPSTREAM, files=files)
-    assert report.status == "failed"
-    assert [str(f.code) for f in report.findings] == ["L001"]
-    assert report.findings[0].pointer.startswith("/study/process/table/")
-    assert report.findings[0].pointer.endswith("/file/name")
+    assert "link" in info.value.detail
+
+
+def test_the_writer_refuses_a_files_directory_reached_through_a_link(tmp_path):
+    """Fails if `dump_study` writes array files through a files directory that is a
+    link to another tree, or refuses without saying so. Control: a real directory
+    takes the files.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    base = tmp_path / "doc"
+    base.mkdir()
+    os.symlink(outside, base / "files")
+    study = _study(_table())
+    with pytest.raises(DocumentError) as info:
+        dump_study(study, RESOLVER, files=base / "files", max_inline=2)
+    assert "link" in str(info.value)
+    assert list(outside.iterdir()) == []
+    dump_study(study, RESOLVER, files=base / "real" / "files", max_inline=2)
+    assert any((base / "real" / "files").iterdir())
 
 
 # ---- export from an upstream run ----------------------------------------------------
