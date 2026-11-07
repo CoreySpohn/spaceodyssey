@@ -23,6 +23,7 @@ from spaceodyssey.codec import (
     SCHEMA_VERSION,
     DocumentError,
     KindResolver,
+    StudyDocument,
     dump_study,
     load_study,
     preflight_document,
@@ -738,3 +739,38 @@ def test_the_lineage_check_never_raises_on_a_broken_document(tmp_path, how):
     if how in ("malformed", "digits", "deep"):
         with pytest.raises(DocumentError):
             load_study(text, RESOLVER, files=tmp_path)
+
+
+@pytest.mark.parametrize("where", ["schema", "study"])
+def test_a_parsed_document_holding_a_huge_integer_is_a_finding(tmp_path, where):
+    """Fails if a parsed document whose schema version, or a value in its study (with
+    a stored hash), is an integer too long to write raises from the lineage check,
+    the pre-flight or `read_upstream`, instead of an `L001` finding at its pointer;
+    or if the same value in a document object raises anything but a finding or a
+    `DocumentError` at its pointer.
+    """
+    data = json.loads(_exported(tmp_path))
+    if where == "schema":
+        data = {"format": data["format"], "schema_version": 10**4499, "study": {}}
+        where_ = "/schema_version"
+    else:
+        data["study"]["horizon_tick"]["data"] = 10**4499
+        where_ = "/study/horizon_tick/data"
+    report = verify_lineage(data, UPSTREAM, files=tmp_path)
+    assert report.status == "failed"
+    assert ("L001", where_) in {(str(f.code), f.pointer) for f in report.findings}
+    found = preflight_document(data, RESOLVER, files=tmp_path, upstream=UPSTREAM)
+    assert ("L001", where_) in {(str(f.code), f.pointer) for f in found}
+    read = read_upstream(data)
+    assert read.content_hash is None and where_ in read.problem
+    # the same value in a document object: refused when hashed, never a ValueError
+    if where == "schema":
+        doc = StudyDocument(study={}, schema_version=10**4499)
+        report = verify_lineage(doc, UPSTREAM)
+        assert [(str(f.code), f.pointer) for f in report.findings] == [
+            ("D002", "/schema_version")
+        ]
+    else:
+        with pytest.raises(DocumentError) as info:
+            StudyDocument(study=data["study"]).canonical_bytes()
+        assert info.value.pointer == where_

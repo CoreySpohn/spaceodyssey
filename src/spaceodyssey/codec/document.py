@@ -45,6 +45,7 @@ import dataclasses
 import hashlib
 import json
 import math
+import sys
 
 FORMAT = "spaceodyssey.study"
 RUN_FORMAT = "spaceodyssey.run_document"
@@ -271,13 +272,24 @@ def parse_text(text):
         raise DocumentError("the JSON nests too deeply to read", "") from None
 
 
+def int_too_long(value):
+    """Whether an integer has more digits than Python converts to text.
+
+    JSON writes integers as text, so such a value cannot be hashed or reported;
+    `sys.get_int_max_str_digits()` sets the limit (0 means none).
+    """
+    limit = sys.get_int_max_str_digits()
+    return limit > 0 and value.bit_length() > (limit - 1) * math.log2(10)
+
+
 def check_schema_version(version):
     """Refuse a schema version this loader does not read; newer ones are `D002`."""
     if type(version) is not int or version < 1:
         raise DocumentError("schema_version is a positive integer", "/schema_version")
     if version > SCHEMA_VERSION:
+        shown = "too long to write" if int_too_long(version) else version
         raise DocumentError(
-            f"schema_version {version} is newer than this loader ({SCHEMA_VERSION})",
+            f"schema_version {shown} is newer than this loader ({SCHEMA_VERSION})",
             "/schema_version",
             code="D002",
         )
@@ -316,6 +328,8 @@ def check_parsed(value, path=()):
             check_parsed(item, (*path, i))
     elif type(value) is float and not math.isfinite(value):
         raise DocumentError("a number is not finite; write a $float tag", pointer(path))
+    elif type(value) is int and int_too_long(value):
+        raise DocumentError("an integer is too long to write", pointer(path))
 
 
 def _plain(value):

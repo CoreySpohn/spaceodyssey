@@ -60,6 +60,7 @@ from spaceodyssey.codec.document import (
     StudyDocument,
     canonical_json,
     check_schema_version,
+    int_too_long,
     parse_text,
     pointer,
 )
@@ -342,6 +343,8 @@ def _json(value, path=()):
         return [_json(v, (*path, i)) for i, v in enumerate(value)]
     if type(value) is float and not math.isfinite(value):
         raise DocumentError("a number is not finite; write a $float tag", pointer(path))
+    if type(value) is int and int_too_long(value):
+        raise DocumentError("an integer is too long to write", pointer(path))
     if value is None or type(value) in (bool, int, float, str):
         return value
     raise DocumentError(f"{type(value).__name__} is not a JSON value", pointer(path))
