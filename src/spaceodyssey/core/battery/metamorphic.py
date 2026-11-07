@@ -197,7 +197,11 @@ def _epoch_world(w, cb, tb, cl, tl, delta, layout):
     if not bits_equal(handled, np.asarray(tl.handled)):
         return [f"world {w}: the handled steps changed"]
     for name in type(tb).__dataclass_fields__:
-        if name == "pol_u" or name in DIGEST_FIELDS:
+        if (
+            name == "pol_u"
+            or name in DIGEST_FIELDS
+            or (name == "program" and tb.program is None)
+        ):
             continue
         a, b = np.asarray(getattr(tb, name)), np.asarray(getattr(tl, name))
         if name == "tick":

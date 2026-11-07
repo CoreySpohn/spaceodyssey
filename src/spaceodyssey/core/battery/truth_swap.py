@@ -93,7 +93,7 @@ def _prefix_equal(trace_a, trace_b, steps, skip=()):
     """Names of the trace fields that differ in the first `steps` steps."""
     bad = []
     for name in type(trace_a).__dataclass_fields__:
-        if name in skip:
+        if name in skip or (trace_a.program is None and name == "program"):
             continue
         a, b = np.asarray(getattr(trace_a, name)), np.asarray(getattr(trace_b, name))
         if not bits_equal(a[:steps], b[:steps]):
