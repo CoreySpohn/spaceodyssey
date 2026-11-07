@@ -15,6 +15,7 @@ context and component hook, and findings `D004` to `D007`.
 2. `feat(studies): pre-mission table, source identities and importer with findings D004 to D007`
 3. `test(core): import protocol, kickoff and identity checks for pre-mission tables`
 4. this record
+5. review round 1 fixes (see the section of that name)
 
 Commit 2 is about 800 lines (the module and the finding cases of both pre-flight test
 files land together so every commit is green), above the 600-line guide.
@@ -32,9 +33,9 @@ files land together so every commit is green), above the 600-line guide.
   path (`table.local_index`) naming a field of a module the slot holds.
 - `codec/preflight.py`: the pointer walk follows a dotted member field by field, so a
   table finding points at its element (`/study/process/table/local_index/data/1`). The
-  docstring counts seventeen codes. The JSON path passes no context yet: `D005` to
-  `D007` and the unverified `D004` warning are reported; the boundary (R2) and the
-  upstream document (R3) are not wired.
+  docstring counts seventeen codes. With a run record (or an `n_steps` argument) the
+  JSON path passes the run's budget to the in-memory checks (see review round 1); the
+  boundary (R2) and the upstream document (R3) are not wired.
 - `studies/premission.py` (new): `SourceId`, `PreMissionTable`, `PAD`,
   `split_rows`, `ImportDemand`, `PreMissionImporter` (`declare`, `seed`, `handle`,
   `validate`), the finding functions, `authored_table` and `PREMISSION_KINDS`.
@@ -145,13 +146,18 @@ unchanged. No core runtime file changed: the only core edits are
 4. A prior is a row of a derived kind (`caps.derived_kinds`); only a public one is
    split. The record subject is `source.subject` (the schema has no separate local
    subject) and the record revision is `source.revision`.
-5. The policy copy of a split prior keeps `accepted_tick = -1`: `h_release` accepts
-   only observer rows, and changing that is a core change. Its metadata is fixed
-   whatever the exclusion, which is what D5 needs; the spec's "accepted tick 0" for
-   both rows is not met.
+5. D5 is met with the core's existing stamping, which this slice does not change. A
+   row's `accepted_tick` records acceptance by the observer and its `released_tick`
+   release to the policy (`h_release`), so a policy-only row keeps `accepted_tick =
+   -1` and an observer-only row keeps `released_tick = -1`, as every policy-only or
+   observer-only row in the core does. D5's "accepted tick 0" for both copies of a
+   public prior reads as "stamped at tick 0 by its audience": the observer copy is
+   accepted at 0 and the policy copy released at 0, and neither value depends on any
+   exclusion, which is what D5 requires. The B1 run test asserts exactly this.
 6. The two copies of a split prior share `(channel, subject, acquisition index,
-   revision)` and differ in audience and acquisition id. R2 should confirm the kit
-   invariants accept that.
+   revision, status)` and differ in audience and acquisition id. The battery's record
+   matching includes the audience (review round 1, finding 2); R2 should confirm the
+   observer kit invariants accept the pair.
 7. Registration is the mapping `PREMISSION_KINDS` (`process/premission.importer`,
    `table/premission.table`, `table/premission.source_id`), merged into the mapping a
    document is dumped and loaded with. No entry points: `test_entry_points_installed`
@@ -165,11 +171,87 @@ unchanged. No core runtime file changed: the only core edits are
    `spaceodyssey.core.preflight.checks`; `core/preflight/__init__.py` and
    `core/__init__.py` are not edited (K2 lists only `findings.py` and `checks.py`).
 10. The capacity check runs only with a budget, as D10 states, although `n_events` and
-    `n_log` are also in the study's capacities.
+    `n_log` are also in the study's capacities. A document records no step budget, so
+    `RunBudget.n_steps` may be `None` (steps unchecked).
 
 ## Spec points not satisfied
 
-- The JSON pre-flight builds no context: no budget or boundary from the run record and
-  no upstream document argument (R2 and R3 own those mappings).
-- The policy copy of a split prior is not accepted at tick 0 (silence 5).
+- The JSON pre-flight passes no boundary and no upstream document (R2 and R3 own
+  those mappings); the budget is wired.
 - Windows are not written into imported records (silence 8).
+
+## Review round 1
+
+Codex returned five P2 findings. Each fix has a test that failed before it.
+
+1. **Payload rows reassigned.** `authored_table` reshaped the payload to `[n, -1]`, so
+   three rows of two values became two rows of three and pre-flight passed. It now
+   refuses any payload that is not `[n, P]` (`_payload_rows`); a zero-row table may give
+   an empty payload. A document with a wrong payload row count was already refused at
+   load by the table's own shape check; it is reported as the in-band `L001` at
+   `/study/process/table`, now pinned by a test. Tests:
+   `test_the_authored_helper_refuses_a_payload_of_another_row_count_or_rank`,
+   `test_a_payload_of_another_row_count_is_a_load_finding_at_the_table`.
+2. **Split priors collided in the battery.** `log_index` keyed rows by (subject,
+   acquisition index, channel, revision, status), so the two copies of a split prior
+   were one key (4 keys for 5 rows), and `_payload_matches_log` found two candidates for
+   a policy view row and returned false. `log_index` now adds the audience to the key
+   and raises `ValueError` on two rows with one key; `_payload_matches_log` matches
+   only among rows the policy can see (`visible_rows`), with the audience, and raises
+   on more than one match. Both are in `core/battery/` (K2 allows it; `views.py` is
+   R4a's file, so R4a should rebase on this). Test:
+   `test_the_battery_matches_split_rows_by_audience_and_refuses_collisions` (built by
+   handling the tick-0 events eagerly, no executor).
+3. **Empty table.** A zero-row table passed pre-flight, but tracing `handle` indexed
+   the empty columns and raised `IndexError`; `authored_table` could not build one.
+   `handle` now returns no record for a zero-row table (a static check, so it traces),
+   and `authored_table` accepts empty columns. Test:
+   `test_an_empty_table_is_a_no_op_import_also_under_tracing` (eager and under
+   `filter_jit`, plus pre-flight).
+4. **Capacity unreachable through JSON.** `preflight_document` passed no context.
+   With a run record, or with the new `n_steps` argument, it now builds
+   `PreflightContext(budget=RunBudget(caps.n_events, caps.n_log, n_steps))`;
+   `RunBudget.n_steps` may be `None` and the step check then does not run. A bare
+   study document has no budget. Test:
+   `test_a_run_reaches_the_import_capacity_check_through_the_json_path` (five rows need
+   six slots with five held: `D006` at `/study/process/table`, equal to the in-memory
+   finding; four rows pass; `n_steps=8` refuses four rows needing 9 steps).
+5. **Malformed hook locators.** A validator's finding naming no slot, or a policy that
+   is missing or out of range, raised `AttributeError`, `TypeError` or `IndexError` in
+   the JSON walk. `components` now relocates such a finding to the validating
+   component's slot (keeping its path and message), and the codec's `_tokens` falls
+   back to `/study` or `/study/agenda/policies` for any finding it cannot locate. The
+   core check reads the study's slot names from `STUDY_SLOTS`, a literal list, because
+   the core's dispatch lint forbids field introspection there;
+   `test_the_locatable_slots_are_the_fields_of_the_study` keeps it equal to `Study`'s
+   fields.
+   Tests: `test_a_malformed_hook_locator_is_reported_at_a_resolvable_pointer` (seven
+   locators, each pointer resolving in the document) and
+   `test_a_hook_finding_outside_the_study_falls_back_to_its_component`.
+
+Tests added in this round: 14 (`test_premission.py` 3, `test_preflight_json.py` 9
+counting the seven locator cases, `test_preflight.py` 2); 46 in all for R1. Cold
+times, each alone (`SPACEODYSSEY_JAX_CACHE=off`, four threads, wall time with
+imports): the battery test 4.6 s, the empty-table test 2.8 s, the others 2.0 to 2.3 s.
+All are unit tier.
+
+`log_index` keeps the line `int(getattr(log, n)[i])` that the dispatch lint's
+allowance names, so the allowlist is unchanged.
+
+Checks rerun after the fixes:
+
+- `tests/core/test_golden_histories.py`: 124 passed (137.8 s);
+  `tests/codec/test_run_document_runs.py` (corpus reload and document hash pin): 65
+  passed (74.9 s). No pin moved.
+- The battery files that use the changed helpers (`test_battery_guards.py`,
+  `test_fork.py`, `test_latency_shift.py`, `test_metamorphic.py`,
+  `test_null_reference.py`, `test_truth_swap.py`, `test_visible_relations.py`,
+  `test_belief_layout.py`, `test_declarations_match_run.py`): 65 passed; the survey
+  files using them (`test_survey_25.py`, `test_survey_2_static.py`,
+  `test_survey_5.py`): 16 passed; `tests/test_slice1_gate.py`: 166 passed.
+- The touched files (`test_premission.py`, `test_preflight.py`,
+  `test_preflight_json.py`): 219 passed.
+- Quick tier at the final tree (`-m "not slow" -n 2 --dist loadfile`, entry-point test
+  deselected): 2,011 passed in 114.4 s, no budget violation.
+- `ruff check`, `ruff format --check`, the internal-reference, domain-word and
+  core-import checks: clean.
