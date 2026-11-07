@@ -176,12 +176,15 @@ def stub_study():
 KEY = np.asarray(jax.random.PRNGKey(0))
 
 
-def test_a_failed_or_unsupported_entry_is_a_status_never_an_exception():
+def test_a_failed_or_unsupported_entry_is_a_status_never_an_exception(monkeypatch):
     """Exhausted batches, no rows and an unusable row each map to a status.
 
     Fails if OFTI's RuntimeError escapes the boundary, or an entry that cannot be
-    fit returns slices that would install.
+    fit returns slices that would install. The sampler is replaced by one that
+    raises its exhaustion error; the real sampler exhausting is the medium test
+    `test_exhausted_batches_leave_the_belief_unchanged`.
     """
+    fake_ofti(monkeypatch, error=RuntimeError("OFTI accepted 0 of 4 samples"))
     study, table = stub_study(), astrometry_table()
     fit = refit(batch=8, max_batches=1)._fit
     slices, status, diag = fit(study, entry_of(table, KEY))
@@ -269,6 +272,7 @@ def test_a_column_one_audience_cannot_read_is_no_support_for_that_audience():
     assert not np.asarray(done.refresh_dirty).any()
 
 
+@pytest.mark.medium  # two real OFTI fits, one compile
 def test_the_same_rows_and_key_give_the_same_particles_and_a_new_set_a_new_key():
     """The fit is a pure function of rows and key; a revision moves the key.
 
