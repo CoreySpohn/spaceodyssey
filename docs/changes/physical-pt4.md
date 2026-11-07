@@ -21,7 +21,11 @@ On main `96a6447` (PT0 to PT3 merged):
 1. `fix(adapters): cadence codes as the profile table states them` (`a625907`)
 2. `feat(adapters): summary reporting law, record kind and calibration id` (`b31cf73`)
 3. `test(adapters): score the B4 refinement with the reporting law` (`533ca85`)
-4. this record
+4. `docs(changes): physical PT4 reporting law record` (`9449fe2`)
+5. `fix(adapters): calibration id covers every budget declaration, per-law survey ids, Monte Carlo panels slow` (`88a042c`)
+6. `docs(adapters): literal separation-rate bound in the support docstring` (`64003ee`)
+7. `build(adapters): merged library pins, yippy 2.12 floor, fixed-frame default cadence, blocked anchors become ordinary` (`6ec9e9a`)
+8. this record's update
 
 ## What is in
 
@@ -60,15 +64,20 @@ On main `96a6447` (PT0 to PT3 merged):
   refuses a profile that fails `check_profile` (KP5) or whose columns are not
   `SUMMARY_COLUMNS` in order.
 - `calibration_id(report, law)`: a six-byte BLAKE2b digest, as an integer below 2^48
-  (exact in a float64 column, never zero), of the detector spec and cadence, the optics
-  (aperture, obscuration, attenuating elements), the response (working angles, pixel
-  scale, throughput, core area and leakage curves at the nominal host, field radius),
-  the band, the variance declarations (`bg_multiplier`, `ppfact`, `eps_warm_T_cold`,
-  node count, orbit epoch), the nominal scene and the law. Floats are digested to 12
-  significant digits and curves to 9, so last-bit platform differences do not move it.
+  (exact in a float64 column, never zero), of every declaration a predicted budget
+  depends on: the detector spec and cadence; every field of the optical path the nominal
+  scene is evaluated on (primary, attenuating elements, detector, disperser,
+  `n_channels`, `npix_multiplier`, speckle) except the coronagraph, which enters through
+  its working angles, pixel scale and its throughput, core area, occulter transmission
+  and leakage curves at the nominal host; the observatory (its orbit sets the local zodi,
+  its temperature the thermal term); the band; `bg_multiplier`, `ppfact`,
+  `eps_warm_T_cold`, the time nodes and weights and the orbit epoch; the field radius and
+  leakage step; the nominal scene; and the law. Floats are digested to 12 significant
+  digits and curves to 9, so last-bit platform differences do not move it.
 - `CADENCE_CODES` is now `fixed_frame: 0, photon_counting_legacy: 1`, as the profile
   table's `cadence` column states (PT3 had them swapped; nothing had written a record
-  yet).
+  yet). `DetectorSpec.fixture()` reads in fixed frames (code 0); the legacy cadence is
+  used only when a detector declares it.
 
 ## Anchors and results
 
@@ -98,23 +107,26 @@ ladder 2.5 for log p and P(null). The 8-node default stays inside the allocation
 
 ## Survey: 200 worlds over the planned visits (slow tier)
 
-Plan from nominal quantities only (profile target 0, declared i = 60 deg, node 0,
-Jupiter radius, albedo 0.5; the fixture detector in the legacy cadence; true scene
-equal to the nominal one, n_ez = 3): the first day of each 120-day step with the whole
-occupancy outside keepout and the nominal planet between IWA + 0.5 and the field edge
-less 1 lambda/D, within four years of the study epoch. Six visits qualify (science
-starts JD 2462681.5, 2462801.5, 2463193.5, 2463313.5, 2463759.5, 2463879.5); exposures
-from `exptime_ayo` for SNR 10 are 40, 93, 346, 75, 39 and 95 s; limits 2.5, 3.4, 6.4,
-2.7, 2.3 and 3.9 e-. Worlds come from photomancy's prior through
-`PhysicalWorldSource.from_profile` (seed 2026); draws fold in world and visit.
+Numbers at `6ec9e9a` (merged libraries, fixed-frame cadence). Plan from nominal
+quantities only (profile target 0, declared i = 60 deg, node 0, Jupiter radius, albedo
+0.5; the fixture detector in fixed 1000 s frames; true scene equal to the nominal one,
+n_ez = 3): the first day of each 120-day step with the whole occupancy outside keepout
+and the nominal planet between IWA + 0.5 and the field edge less 1 lambda/D, within four
+years of the study epoch. Six visits qualify (science starts JD 2462681.5, 2462801.5,
+2463193.5, 2463313.5, 2463759.5, 2463879.5); `exptime_ayo` for SNR 10 in whole fixed
+frames gives one 1000 s frame at every visit (the legacy plan was 40 to 346 s); limits
+11.8, 10.7, 10.3, 9.3, 10.9 and 11.9 e-. Worlds come from photomancy's prior through
+`PhysicalWorldSource.from_profile` (seed 2026); draws fold in world and visit. Each
+kappa's rows carry that law's own calibration id (47548537668345 at kappa 1,
+246545890451345 at kappa 2).
 
-- 1,200 rows, 326 detections against 323.0 expected (standard error 3.8); per visit
-  43, 57, 67, 57, 47, 55. Detections per world: 0 for 123 worlds, then 10, 9, 6, 12, 8
-  and 32 worlds with 1 to 6. Every row's log likelihood at the truth is finite.
+- 1,200 rows, 423 detections against 427.6 expected (standard error 3.9); per visit
+  70, 72, 68, 72, 70, 71. Detections per world: 0 for 112 worlds, then 5, 7, 3, 19, 5
+  and 49 worlds with 1 to 6. Every row's log likelihood at the truth is finite.
 - s(theta)/s0 at the truth runs from 0.77 to 27.9 (median 1.11): planet shot noise
   above the threshold, and the background at the true position differing from the
-  planned position's below it. For the 729 rows below 1 s0, s/s0 is 0.92 to 1.18 (5 to
-  95 percent) with four rows above 1.5 (largest 23.6, planets near the inner working
+  planned position's below it. For the 605 rows below 1 s0, s/s0 is 0.91 to 1.17 (5 to
+  95 percent) with four rows above 1.5 (largest 23.7, planets near the inner working
   angle where the leakage is far above the planned reference); one row below 1 s0 is a
   detection.
 - photomancy null difference (law minus fixed-denominator form, log P(null) at the
@@ -122,37 +134,39 @@ from `exptime_ayo` for SNR 10 are 40, 93, 346, 75, 39 and 95 s; limits 2.5, 3.4,
 
 | N/s0 | Rows | Median difference | Largest magnitude |
 |---|---|---|---|
-| 0 to 1 | 729 | -4.6e-7 | 0.54 |
-| 1 to 3 | 114 | -4.2e-3 | 0.083 |
-| 3 to 5 | 36 | -0.11 | 0.15 |
-| 5 to 7 | 25 | +0.41 | 1.7 |
-| above 7 | 296 | +1.5e3 | 2.1e6 |
+| 0 to 1 | 605 | -3.5e-7 | 0.54 |
+| 1 to 3 | 121 | -7.5e-4 | 0.021 |
+| 3 to 5 | 48 | -0.034 | 0.10 |
+| 5 to 7 | 36 | +0.21 | 0.83 |
+| above 7 | 390 | +3.5e3 | 2.6e7 |
 
   Below the threshold the law penalizes more; above it photomancy's fixed denominator
   ignores the planet's shot noise and over-penalizes a missed bright planet by orders of
   magnitude.
 - photomancy's magnitude-space detection term (`dmag_err = 1.0857 / snr`, Jacobian
-  added) against the law's counts term: median difference 0.026 nats (95th percentile
-  0.26). Where the observable noise matches the truth (s / s_hat below 1.1, 310 of 326
-  detections) the median is 0.024 and the largest 0.67; the remainder, up to 2.2e5,
-  are detections whose true background exceeds the planned reference (s / s_hat up to
-  8.6), where `snr` from observables overstates the signal-to-noise.
+  added) against the law's counts term: median difference 0.013 nats (95th percentile
+  0.13). Where the observable noise matches the truth (s / s_hat below 1.1, 421 of 423
+  detections) the median is 0.013 and the largest 0.46; the remainder, up to 3.3e5, are
+  detections whose true background exceeds the planned reference (s / s_hat up to
+  10.5), where `snr` from observables overstates the signal-to-noise.
 - kappa sensitivity: Laplace widths at the truth (detections' photometric, noise and
-  astrometric Fisher information plus a Gaussian stand-in for each prior) for the 67
+  astrometric Fisher information plus a Gaussian stand-in for each prior) for the 83
   worlds with two or more detections. kappa 2 over kappa 1, median (5 to 95 percent):
-  a 1.16 (1.00 to 1.75), e 1.69 (1.14 to 1.94), cos i 1.75 (1.22 to 1.98), Omega 1.51
-  (1.09 to 1.89), omega 1.51 (1.02 to 1.92), tp 1.59 (1.03 to 1.86), log10 Lambda 1.13
-  (1.04 to 1.46). Every ratio lies in [1, 2]: the orbital angles and epoch widen nearly
+  a 1.37 (1.00 to 1.91), e 1.71 (1.16 to 1.96), cos i 1.74 (1.25 to 1.99), Omega 1.56
+  (1.14 to 1.97), omega 1.53 (1.03 to 1.94), tp 1.60 (1.04 to 1.93), log10 Lambda 1.09
+  (1.02 to 1.56). Every ratio lies in [1, 2]: the orbital angles and epoch widen nearly
   in proportion to kappa, the brightness scale barely.
-- The 79 worlds whose planet never reaches 0.5 s0 gain at most 1.7e-4 nats between the
+- The 61 worlds whose planet never reaches 0.5 s0 gain at most 1.5e-4 nats between the
   truth and the same orbit with no reflected light.
-- The survey's calibration id is 154065249283369; it runs in about 38 s cold.
+- The survey runs in about 51 s cold.
 
 ## Builder self-review
 
 - Cold budget (each test alone, `SPACEODYSSEY_JAX_CACHE=off`, four threads, setup plus
-  call): all 13 unit tests under 1.7 s (slowest: no-science rows 1.7 s, photomancy
-  cross-check 1.0 s, sampling at corr 0 1.0 s). Slow: survey 37.6 s, B4 9.6 s.
+  call): the 10 unit tests under 1.7 s (slowest: no-science rows 1.7 s, photomancy
+  cross-check 1.0 s, calibration mutations 1.3 s); the digested-field medium test 1.6 s.
+  Slow: survey 50.7 s, B4 15.7 s, and the 20,000-draw panels (1.2 s and 0.6 s) and the
+  correlated-error control (0.2 s), which spec section E assigns to the slow tier.
 - Mutants (in-memory patches, each run against the quick tests of the file, each
   failing): snr from the expected budget (observables-only test); the fixed-denominator
   null, a doubled variance, a detection threshold on the true noise, a sign-cancelling
@@ -160,7 +174,9 @@ from `exptime_ayo` for SNR 10 are 40, 93, 346, 75, 39 and 95 s; limits 2.5, 3.4,
   from sampling or flipped in the row (sampling test); no support restriction
   (normalization test); kappa ignored (kappa test); NaN guard removed and the zero-limit
   validity check removed (no-science test); the law left out of the calibration digest
-  (calibration test); swapped cadence codes (KP5 test). The 0.1-sigma centroid shift
+  (calibration test); the optical path, the occulter transmission curve or the
+  observatory left out of the digest (calibration test, naming the mutations that
+  collide); swapped cadence codes (KP5 test). The 0.1-sigma centroid shift
   passed the chi-square check alone and was caught only after the whitened-mean
   check was added.
 - Audience isolation: every column is readable by observer, policy and scorer, as the
@@ -175,15 +191,63 @@ from `exptime_ayo` for SNR 10 are 40, 93, 346, 75, 39 and 95 s; limits 2.5, 3.4,
 - Sibling sites: the cadence code is read only through `DetectorSpec.cadence_code`
   (one site); the profile's columns are read by `summary_kind` and the PT0 page test.
 - Goldens unchanged; the golden test and both gate files run in the quick tier.
-- Quick tier at `533ca85` (serial, `-m "not slow"`, entry-point install test
-  deselected): 1,961 passed, 5 expected failures (PT3's blocked anchors), 0 failed, in
-  301 s, peak footprint 3.7 GiB. The touched slow tests (survey, B4, PT3's leakage
-  anchor and detectability survey) pass at the same tree. The full suite was not rerun.
-- Docs: no warning comes from this change; `sphinx -W` stops on an existing docstring
-  in `adapters/skyscapes.py` (`|d separation / dt|` read as a substitution), which
-  predates PT4 and is left for its owner.
-- Tests added 14 (13 unit cases including parametrizations, 1 slow survey; the B4
-  test is rescored, not added), retired 0, net +14.
+- Quick tier at `6ec9e9a` (serial, `-m "not slow"`, entry-point install test
+  deselected): 1,964 passed, 0 expected failures, 0 failed, in 221 s, peak footprint
+  2.4 GiB. Every slow and medium test of the three touched adapter files (survey, B4,
+  Monte Carlo panels, PT3's leakage anchor, cached-rate parity, jaxedith agreement and
+  detectability survey) passes at the same tree. The full suite was not rerun.
+- Docs: `sphinx -W` builds at `64003ee` (the separation-rate docstring in
+  `adapters/skyscapes.py` now quotes `|d separation / dt|` as a literal).
+- Tests added 15 (10 unit, 1 medium, 4 slow including the survey; the B4 test is
+  rescored, not added), retired 0, net +15.
+
+## Review fixes
+
+1. The calibration id now digests every field of the optical path except the
+   coronagraph (so `n_channels`, `npix_multiplier`, the primary, the attenuating
+   elements and the detector), the coronagraph's occulter transmission curve beside its
+   other curves, the observatory and the time weights. `test_calibration_id_digests_every_declaration`
+   applies 21 single-field mutations and requires 22 distinct ids;
+   `test_every_digested_report_field_moves_the_predicted_budget` (medium) shows each
+   report mutation changes a predicted budget.
+2. The survey computes the id once per law; the kappa-2 rows carry the kappa-2 law's
+   id, and the survey test asserts each kappa's rows carry exactly their law's id.
+3. The 20,000-draw panels and the correlated-error control are marked slow with reasons.
+4. The `sphinx -W` failure in `adapters/skyscapes.py` is fixed.
+
+## Library merges
+
+jaxedith `9f1c13b` (QE times dQE on photon rates, frame-time read noise, the
+fixed-frame variance and planners), optixstuff `735a651` (`SimplePrimary.from_yip`,
+dQE default 1.0) and skyscapes `bf22955` (`FlatStar.diameter_arcsec`) are on main but
+unreleased: `.github/sibling-pins.txt` pins them beside photomancy, and the fixture
+manifest records those revisions with development floors (2.0.1.dev0, 4.0.2.dev0,
+2.1.1.dev0) that the manifest test checks against the pins. yippy 2.12.0 carries the
+response metadata, so the yippy pin is dropped and both yippy floors are `>=2.12.0`
+(manifest revision `ac0c24f`, the release merge). The manifest test now covers every
+manifest library, jaxedith and optixstuff included.
+
+- PT3's five strict expected failures are ordinary anchors, renamed without
+  `blocked_`: QE once, dQE as a survival fraction, the fixed-frame detector variance
+  (sub-frame, one, three and three-plus-partial frames), the fixed-frame SNR against
+  jaxedith with the floor off and on, and the primary from the package header. All pass.
+- The adapter imports `count_variance_components_ayo` directly; the `NotImplementedError`
+  refusal of the fixed-frame cadence is gone.
+- `DetectorSpec.fixture()` reads in fixed frames (Q8 A, the profile's cadence),
+  recording code 0; the legacy cadence stays available by declaration. The hand budget
+  test declares the legacy cadence (it writes out the legacy detector term); the
+  jaxedith agreement test checks `snr_ayo` in both cadences and, for fixed frames,
+  `exptime_ayo` with minimum-duration planning (SNR 10) and whole-frame planning (SNR at
+  least 10, one frame less below it); both surveys plan in fixed frames.
+- The profile's `cadence` convention now states fixed frames with the legacy cadence by
+  declaration, and the `detector_variance` boundary is `pinned`; the page matches.
+- In the workspace, the editable installs of jaxedith, optixstuff, skyscapes and yippy
+  were reinstalled without dependencies so their recorded versions match the checked-out
+  commits, and the yippy clone was fast-forwarded to `origin/main` (the 2.12.0 release
+  commit, a changelog only).
+- FlatStar does not replace the PT1 `Star`: it has no coordinates or luminosity, which
+  the local zodi and the exozodi scaling read, and its flat spectrum differs from the
+  blackbody table across the band. The profile page says so.
 
 ## Spec silence
 

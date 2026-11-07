@@ -102,6 +102,14 @@ Consequence of J0 for current numbers: on jaxedith main the planet and photon ba
 rates carry no detector QE, so with the fixture's QE 0.9 every photon count is 1/0.9 of the
 declared detector's. The adapter does not compensate (no copy of the branch).
 
+Update (PT4 branch): the jaxedith (`9f1c13b`), optixstuff (`735a651`) and skyscapes
+(`bf22955`) changes are on main and pinned in `.github/sibling-pins.txt`, and yippy 2.12.0
+carries the response metadata. The five anchors above are ordinary tests now, renamed
+without the `blocked_` prefix; the adapter imports `count_variance_components_ayo`
+directly and no longer refuses the fixed-frame cadence; `DetectorSpec.fixture()` reads
+in fixed frames (cadence code 0, as the profile table states) and the legacy cadence is
+used only when declared. Details are in the PT4 record.
+
 ## Tests
 
 | Test | File | Tier | Cold s (setup + call) |
