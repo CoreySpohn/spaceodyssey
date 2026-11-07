@@ -18,13 +18,17 @@ On main `97753d5` (PT0 to PT4 merged), branch `pt6-ofti`:
 
 1. `feat(studies): OFTI stand-in refit of physical summary rows with particle observer, fixed plan and scripted rows` (`c161a4f`)
 2. `test(studies): OFTI stand-in anchors, one real fit, contraction survey and both executors` (`e71495e`)
-3. this record
+3. `docs(changes): physical PT6 OFTI stand-in refit record` (`cfa6764`)
+4. `fix(studies): readable stand-in scope in saved run documents and a medium executor-parity guard`
+5. this record's review-fix update
 
 ## Scope
 
 The stand-in is an approximation with a declared domain. `STANDIN_SCOPE` states it as
 plain JSON, and it is carried in the refit's model declaration (`support.scope`), so in
-its model hash and in every run document that binds it; the module and class docstrings
+its model hash, and readable in the refit's configuration (`scope`), so in words in every
+run document that binds it, with the scripted rows' reporting law (threshold 5, kappa 7,
+correlation 0, planned signal-to-noise 10, limit 10 e-). The module and class docstrings
 state the same.
 
 - Conditional on detection: only rows with `detected = 1` and `valid_science = 1` count
@@ -61,7 +65,8 @@ state the same.
   the profile and the time origin from the study epoch. `standin_model` restates OFTI's
   model with the scope and the time origin; the model hash differs from plain OFTI's.
   `standin_binding()` names it `spaceodyssey.ofti_standin` in run documents, built from
-  `configuration()` (the time origin included, `columns` left out).
+  `configuration()` (the time origin and the readable `scope` included, `columns` left
+  out). Rebuilding refuses a document whose scope differs from `STANDIN_SCOPE`.
 - `fixed_plan(context)`: five `PlannedVisit`s of 47 UMa b with occupancy starts 178, 298,
   690, 810 and 1256 days after the study epoch, one day of settling and one 1000 s frame.
   These are the first five visits the PT4 planner chose from the nominal orbit
@@ -84,8 +89,9 @@ state the same.
 
 ## Tests
 
-`tests/studies/test_physical_ofti.py`, five unit tests (seven cases), one medium, two
-slow. Cold times are each test alone with the compile cache off (setup plus call).
+`tests/studies/test_physical_ofti.py`, six unit tests (eight cases), two medium, two
+slow. Cold times are each test alone with the compile cache off (setup plus call; for
+the review-fix tests, the whole process with imports in brackets).
 
 | Test | Tier | Cold |
 |---|---|---|
@@ -93,7 +99,9 @@ slow. Cold times are each test alone with the compile cache off (setup plus call
 | null and no-science rows never count as astrometry | unit | 0.72 s |
 | an audience blind to a column the stand-in reads gets no rows (3 cases) | unit | 0.01 s |
 | the scope is declared in the model hash and the document configuration | unit | 0.02 s |
+| a saved run document states the scope in words | unit | 0.86 s (5.6 s) |
 | one real fit reproduces the orbit and equals OFTI on the T4d table | medium | 4.54 s |
+| executor parity on one certified visit | medium | 18.6 s (24.6 s) |
 | survey: posterior contraction over five scripted visits | slow | 96.6 s (call) |
 | five refreshes install particles on both executors | slow | 90.6 s (call) |
 
@@ -123,11 +131,20 @@ Mutants (applied to a copy of the tree, each run against its anchor, each failin
 | no-science rows counted | row anchor; the medium real fit alone |
 | flag columns left out of the audience check | blind-audience test |
 | scope left out of the model declaration | scope test |
+| scope left out of the saved configuration | saved-document test |
+| scripted kappa dropped from the saved scope | saved-document test |
+| refit keyed by a call counter, so the host and compiled fits differ | medium parity test |
 
 ## Survey: contraction over the five scripted visits (slow)
 
+This survey is a deterministic single-seed regression (one row draw, one refit key per
+visit count), not a statistical campaign: it shows contraction on one realization and
+pins it against regressions. It stays in the slow tier for its cost (about 100 s, most
+of it the five-epoch fit).
+
 Rows: the certified fixed plan, drawn with key 2026 under `ReportingLaw(kappa=7)` at
-signal-to-noise 10; all five visits are detections (per-axis errors 20.1 to 21.1 mas, observed signal-to-noise 9.5 to 10.0).
+signal-to-noise 10; all five visits are detections (per-axis errors 20.1 to 21.1
+mas, observed signal-to-noise 9.5 to 10.0).
 After visit k the stand-in refits the first k rows (64 particles, one key, the
 profile's period support). Spread is the root mean square, over 32 epochs spanning one
 period after the last visit, of the particles' predicted (east, north) scatter.
@@ -181,6 +198,30 @@ Five refreshes install particles on both executors, the PT6 done criterion.
 5. The particle observer is parameterized by refit kind so the T4d test keeps its
    astrometry kind; its run documents name the observer class as before.
 
+## Review fixes
+
+1. Saved outputs carried only the constructor settings and the model hash. The
+   configuration now holds the readable `STANDIN_SCOPE`, which also states the domain
+   (about 20 mas, kappa 7, not the profile's kappa 1) and the scripted reporting law.
+   `test_a_saved_run_document_states_the_scope_in_words` dumps a physical study bound to
+   the stand-in, checks the serialized JSON for the induced prior, the midpoint
+   astrometry, the ignored nulls, the loose domain and kappa 7, checks every `scope`
+   object in it equals `STANDIN_SCOPE`, and reloads it to the same model hash.
+2. Executor parity had no merge-time guard. `check_executor_parity` (host and compiled
+   runs: `OK` products with counts for both audiences, record epochs at the science
+   midpoints on both executors, bit-identical particles, epoch counts and policy
+   summaries) is shared by the slow five-visit demonstration and the new medium
+   `test_executor_parity_on_one_certified_visit` (the first visit of the plan,
+   certified, four particles, batches of 4,096, eight steps). A seeded parity mutant (a
+   refit keyed by a call counter) fails it at the particle comparison.
+
+After the fixes, one launcher run (`-n 2 --dist loadfile`) of the whole PT6 file slow
+tests included, the T4d tests and the golden suite (golden histories, run-document
+runs, corpus): 246 passed in 494 s, peak footprint 8.7 GiB; `golden_pin.json`,
+`golden_histories.json` and `hash_pin.json` unchanged. The quick-tier physical addition
+is now two medium tests (4.5 s and 18.6 s cold) and six unit tests (under 3 s
+together), about 26 s inside the track's 30 s share.
+
 ## Builder self-review
 
 - Golden suite (`tests/core/test_golden_histories.py`, `tests/codec/test_run_document_runs.py`,
@@ -196,5 +237,5 @@ Five refreshes install particles on both executors, the PT6 done criterion.
   promoted observer.
 - ruff, the internal-reference check and the pre-commit hooks are clean; the Python is
   ASCII.
-- Tests added 9 (5 unit, 7 cases with the parametrized one; 1 medium; 2 slow), retired 0.
+- Tests added 11 (6 unit, 8 cases with the parametrized one; 2 medium; 2 slow), retired 0.
   The T4d test lost its local observer and belief classes.
