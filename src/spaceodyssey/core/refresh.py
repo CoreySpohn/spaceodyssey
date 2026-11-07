@@ -40,7 +40,7 @@ from spaceodyssey.core.enums import (
     RefitStatus,
     Stage,
 )
-from spaceodyssey.core.events import empty_event_row, enqueue, where_tree
+from spaceodyssey.core.events import blank_row, enqueue, where_tree
 from spaceodyssey.core.keys import fold_keys, refit_key
 from spaceodyssey.core.records import (
     PayloadColumn,
@@ -486,7 +486,7 @@ def commit_refresh(carry, request, result, study):
     done = _tree_set(
         done,
         ev=ev,
-        refresh=empty_event_row(),
+        refresh=blank_row(done.refresh),
         overflow=done.overflow | refused,
         overflow_mask=done.overflow_mask | refused_bits,
     )
@@ -506,7 +506,7 @@ def drop_hold(carry):
     then would leave a belief and product rows the trace never shows, so the
     checkpoint is left as it was queued and the run reports `TRUNCATED`.
     """
-    return _tree_set(carry, refresh=empty_event_row())
+    return _tree_set(carry, refresh=blank_row(carry.refresh))
 
 
 def answer_refresh(carry, root, study, boundary, *, can_finish=True):

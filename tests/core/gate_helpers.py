@@ -132,9 +132,6 @@ ALLOWED = {
     ("battery/fork.py", "out[Purpose(purpose).name] = ("): Allowance(
         ENUM_LABEL, ("study.name",), "key_report", 1
     ),
-    ("battery/fork.py", "f.name: jnp.asarray(getattr(log, f.name)[i])"): Allowance(
-        COLUMN_BY_NAME, ("dynamic-getattr",), "_log_record", 1
-    ),
     ("battery/fork.py", "np.asarray(getattr(trunk, name))[:first],"): Allowance(
         COLUMN_BY_NAME, ("dynamic-getattr",), "_trace_prefix", 1
     ),
@@ -142,16 +139,8 @@ ALLOWED = {
         COLUMN_BY_NAME, ("dynamic-getattr",), "_trace_prefix", 1
     ),
     (
-        "battery/fork.py",
-        "getattr(trunk.log, name)[i], getattr(side.log, name)[j]",
-    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_records", 1),
-    (
         "battery/metamorphic.py",
         "a, b = np.asarray(getattr(tb, name)), np.asarray(getattr(tl, name))",
-    ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_epoch_world", 1),
-    (
-        "battery/metamorphic.py",
-        "a, b = np.asarray(getattr(cb.log, name)), np.asarray(getattr(cl.log, name))",
     ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_epoch_world", 1),
     ("battery/replay_latency.py", "n: np.asarray(getattr(trace, n))[keep]"): Allowance(
         COLUMN_BY_NAME, ("dynamic-getattr",), "_non_release", 1
@@ -160,12 +149,6 @@ ALLOWED = {
         "battery/replay_latency.py",
         "np.asarray(getattr(tb, name))[wb], np.asarray(getattr(tl, name))[wl]",
     ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_compare_world", 1),
-    ("battery/replay_latency.py", "np.asarray(getattr(cb.log, name)[i]),"): Allowance(
-        COLUMN_BY_NAME, ("dynamic-getattr",), "_compare_world", 1
-    ),
-    ("battery/replay_latency.py", "np.asarray(getattr(cl.log, name)[j]),"): Allowance(
-        COLUMN_BY_NAME, ("dynamic-getattr",), "_compare_world", 1
-    ),
     (
         "battery/replay_latency.py",
         "if not bits_equal(getattr(cb.ledger, name), getattr(cl.ledger, name)):",
@@ -185,9 +168,6 @@ ALLOWED = {
         COLUMN_BY_NAME, ("dynamic-getattr",), "compare_views", 1
     ),
     ("battery/views.py", "if not bits_equal(x, getattr(vb, name)):"): Allowance(
-        COLUMN_BY_NAME, ("dynamic-getattr",), "compare_views", 1
-    ),
-    ("battery/views.py", "x = np.asarray(getattr(va.log, name))"): Allowance(
         COLUMN_BY_NAME, ("dynamic-getattr",), "compare_views", 1
     ),
     ("battery/views.py", "if not bits_equal(x, getattr(vb.log, name)):"): Allowance(
@@ -245,7 +225,7 @@ ALLOWED = {
     ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "replay_belief", 1),
     (
         "handlers.py",
-        "**{f.name: getattr(log, f.name)[slot] for f in dataclasses.fields(Record)}",
+        "**{f.name: getattr(log, f.name)[slot] for f in _ROW_FIELDS}, program=program",
     ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_log_rec", 1),
     ("records.py", "col = getattr(carry.log, name)"): Allowance(
         COLUMN_BY_NAME, ("dynamic-getattr",), "write_log", 1
@@ -264,16 +244,9 @@ ALLOWED = {
     ("battery/fork.py", "for name in type(trunk).__dataclass_fields__"): Allowance(
         FIELD_WALK, ("introspection",), "_trace_prefix", 1
     ),
-    ("battery/fork.py", "for name in type(trunk.log).__dataclass_fields__:"): Allowance(
-        FIELD_WALK, ("introspection",), "_records", 1
-    ),
     ("battery/metamorphic.py", "for name in type(tb).__dataclass_fields__:"): Allowance(
         FIELD_WALK, ("introspection",), "_epoch_world", 1
     ),
-    (
-        "battery/metamorphic.py",
-        "for name in type(cb.log).__dataclass_fields__:",
-    ): Allowance(FIELD_WALK, ("introspection",), "_epoch_world", 1),
     ("battery/metamorphic.py", "new_assets = type(assets)("): Allowance(
         FIELD_WALK, ("introspection",), "with_zero_time_asset", 1
     ),
@@ -282,16 +255,9 @@ ALLOWED = {
         "for n in type(trace).__dataclass_fields__",
     ): Allowance(FIELD_WALK, ("introspection",), "_non_release", 1),
     (
-        "battery/replay_latency.py",
-        "for name in type(cb.log).__dataclass_fields__:",
-    ): Allowance(FIELD_WALK, ("introspection",), "_compare_world", 1),
-    (
         "battery/truth_swap.py",
         "for name in type(trace_a).__dataclass_fields__:",
     ): Allowance(FIELD_WALK, ("introspection",), "_prefix_equal", 1),
-    ("battery/views.py", "for name in type(va.log).__dataclass_fields__:"): Allowance(
-        FIELD_WALK, ("introspection",), "compare_views", 1
-    ),
     (
         "records.py",
         "if not all(isinstance(c, PayloadColumn) for c in self.columns):",

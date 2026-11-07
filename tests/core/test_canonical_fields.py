@@ -137,7 +137,7 @@ def test_inactive_storage_and_trace_padding_are_ignored(executor_pair):
         assert invalid.any()
         updates = {}
         for field in dataclasses.fields(table):
-            if field.name != "valid":
+            if field.name != "valid" and getattr(table, field.name) is not None:
                 array = np.array(getattr(table, field.name), copy=True)
                 array[invalid] += 31
                 updates[field.name] = array

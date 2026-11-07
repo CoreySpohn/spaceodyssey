@@ -14,6 +14,7 @@ from spaceodyssey.core.battery.views import DecisionViews, compare_views
 from spaceodyssey.core.carry import PROJECTION_FIELDS
 from spaceodyssey.core.enums import EventKind, RunStatus
 from spaceodyssey.core.executors.base import run_status
+from spaceodyssey.core.records import log_columns
 from spaceodyssey.core.snapshot import named_leaves
 
 # Log columns a release delay may move, all by exactly the delay.
@@ -129,11 +130,9 @@ def _compare_world(w, cb, tb, cl, tl, delay, layout):
         return out
     for key, i in rb.items():
         j = rl[key]
-        for name in type(cb.log).__dataclass_fields__:
-            x, y = (
-                np.asarray(getattr(cb.log, name)[i]),
-                np.asarray(getattr(cl.log, name)[j]),
-            )
+        cols_l = log_columns(cl.log)
+        for name, col in log_columns(cb.log).items():
+            x, y = np.asarray(col[i]), np.asarray(cols_l[name][j])
             if name in SHIFTED_LOG_FIELDS:
                 want = np.where(x >= 0, x + delay, x)
                 if not bits_equal(want, y):

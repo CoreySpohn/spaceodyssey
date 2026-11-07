@@ -66,6 +66,7 @@ CANONICAL_FIELDS = {
         "version",
         "decision",
         "valid",
+        "program",
     ),
     "carry.log": (
         "kind",
@@ -94,6 +95,7 @@ CANONICAL_FIELDS = {
         "payload",
         "valid",
         "product",
+        "program",
     ),
     "carry.ledger": (
         "balance",
@@ -107,6 +109,7 @@ CANONICAL_FIELDS = {
         "disruptive_used",
         "debited",
         "refunded",
+        "program_closed",
     ),
     "carry.request": (
         "kind",
@@ -131,6 +134,7 @@ CANONICAL_FIELDS = {
         "version",
         "decision",
         "valid",
+        "program",
     ),
     "carry.refresh": (
         "kind",
@@ -155,6 +159,7 @@ CANONICAL_FIELDS = {
         "version",
         "decision",
         "valid",
+        "program",
     ),
     "trace": (
         "handled",
@@ -198,6 +203,11 @@ def refresh_on(carry):
     return np.asarray(carry.refresh_status).size > 0
 
 
+def programs_on(carry):
+    """Whether the carry holds more than one program (the closed flags exist)."""
+    return carry.ledger.program_closed is not None
+
+
 # Fields that exist only where a feature does, by dotted path, each with the predicate
 # that says whether the carry holds the feature. A field of a feature that is off has
 # zero size and leaves the canonical history, so no history of a study without the
@@ -209,6 +219,11 @@ CONDITIONAL_FIELDS = {
     "carry.refresh_dirty": refresh_on,
     "carry.refresh_status": refresh_on,
     "carry.log.product": refresh_on,
+    "carry.ev.program": programs_on,
+    "carry.log.program": programs_on,
+    "carry.request.program": programs_on,
+    "carry.refresh.program": programs_on,
+    "carry.ledger.program_closed": programs_on,
 }
 REFRESH_GROUPS = tuple(CONDITIONAL_GROUPS)
 REFRESH_FIELDS = tuple(CONDITIONAL_FIELDS)

@@ -291,7 +291,7 @@ def double_fold_failures(carry):
 def _deliver_again(carry, study, truth, root, slot):
     """Handle a second release of log row `slot` through the transaction's step."""
     ev = dataclasses.replace(
-        empty_event_row(),
+        empty_event_row(study.caps),
         kind=jnp.asarray(EventKind.RELEASE, I64),
         tick=carry.tick,
         stage=jnp.asarray(Stage.RELEASE, I64),

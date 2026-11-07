@@ -200,6 +200,13 @@ def _permitted(mask, kind):
     return ((mask >> kind) & 1) == 1
 
 
+def _program_of(eff, e, caps):
+    """Program of effect row e: its column with several programs, else the one."""
+    if caps.n_programs > 1:
+        return eff.program[e]
+    return jnp.asarray(0, I64)
+
+
 def _commit_observe(c, eff, e, ok, study):
     """Debit, occupy the lane and queue the settlement of effect row e where `ok`."""
     caps, channels = study.caps, study.channels
@@ -211,7 +218,8 @@ def _commit_observe(c, eff, e, ok, study):
         + study.assets.transition_ticks[lane]
         + channels.occupancy_ticks[channel_index]
     )
-    rows = _resource_rows(study, lane)
+    program = _program_of(eff, e, caps)
+    rows = _resource_rows(study, lane, program)
     cols = jnp.arange(caps.n_resources)
     gen = c.ledger.lane_gen[lane] + ok.astype(I64)
     subject = eff.subject[e]
@@ -248,6 +256,7 @@ def _commit_observe(c, eff, e, ok, study):
         audience=channels.audience[channel_index],
         scope=c.phase,
         acquisition_id=c.next_sid,
+        program=program,
         caps=caps,
     )
 
@@ -263,7 +272,8 @@ def _group_code(c, eff, member, study):
     n = caps.n_effects
     t = c.tick
     lanes = [channels.lane[eff.channel_index[f]] for f in range(n)]
-    rows = [_resource_rows(study, lanes[f]) for f in range(n)]
+    programs = [_program_of(eff, f, caps) for f in range(n)]
+    rows = [_resource_rows(study, lanes[f], programs[f]) for f in range(n)]
     cost = [channels.cost[eff.channel_index[f]] for f in range(n)]
     n_members = sum(member[f].astype(I64) for f in range(n))
     room = ((~c.ev.valid).sum() >= n_members) & (c.next_sid + n_members <= caps.max_sid)
@@ -281,9 +291,13 @@ def _group_code(c, eff, member, study):
         for g in range(n):
             demand = demand + jnp.where(member[g] & (rows[g] == rows[f]), cost[g], 0.0)
         funds = jnp.all(c.ledger.balance[rows[f], cols] >= demand)
+        closed = c.ledger.lane_closed[lanes[f]] | c.draining
+        if caps.n_programs > 1:
+            # a closed program refuses its own admissions; its lanes stay open
+            closed = closed | c.ledger.program_closed[programs[f]]
         code = jnp.select(
             [
-                c.ledger.lane_closed[lanes[f]] | c.draining,
+                closed,
                 (c.ledger.lane_busy_until[lanes[f]] > t) | clash,
                 done_t > study.horizon_tick,
                 ~funds,
@@ -370,6 +384,7 @@ def _admit_rows(c, eff, mask, study, fp):
             audience=PUBLIC,
             scope=eff.scope[e],
             disposition=eff.disposition[e],
+            program=_program_of(eff, e, caps),
             caps=caps,
         )
         c = enqueue(

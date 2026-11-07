@@ -64,20 +64,39 @@ class EventTable(eqx.Module):
     version: jax.Array  # release version of that snapshot
     decision: jax.Array  # index of the decision that asked
     valid: jax.Array
+    # The program a Done row charges and settles under; absent (None, no leaf) unless
+    # the capacities hold more than one program, so a study with one is unchanged.
+    program: jax.Array | None = None
 
 
 def empty_events(caps):
     """Return an empty fixed-capacity event table."""
     z = jnp.zeros(caps.n_events, I64)
     return EventTable(
-        **{n: z for n in EVENT_INT_FIELDS}, valid=jnp.zeros(caps.n_events, B)
+        **{n: z for n in EVENT_INT_FIELDS},
+        valid=jnp.zeros(caps.n_events, B),
+        program=z if caps.n_programs > 1 else None,
     )
 
 
-def empty_event_row():
-    """One unoccupied event row with scalar leaves."""
+def empty_event_row(caps=None):
+    """One unoccupied event row with scalar leaves.
+
+    A row that sits beside the table (a request, a refresh) takes `caps` so it has the
+    table's program leaf exactly where the table has one.
+    """
     z = jnp.asarray(0, I64)
-    return EventTable(**{n: z for n in EVENT_INT_FIELDS}, valid=jnp.asarray(False))
+    on = caps is not None and caps.n_programs > 1
+    return EventTable(
+        **{n: z for n in EVENT_INT_FIELDS},
+        valid=jnp.asarray(False),
+        program=z if on else None,
+    )
+
+
+def blank_row(row):
+    """An unoccupied row with the structure of `row` (a request or refresh row)."""
+    return jax.tree_util.tree_map(jnp.zeros_like, row)
 
 
 def where_tree(pred, a, b):
@@ -118,6 +137,7 @@ def enqueue(
     version=0,
     decision=0,
     tie=TIE_NEUTRAL,
+    program=0,
     caps,
 ):
     """Add one row to the queue where `ok`, applying the micro placement rule.
@@ -143,10 +163,15 @@ def enqueue(
     tick_w = jnp.where(earlier, carry.tick, tick)
     stage_w = jnp.where(earlier, carry.stage, stage)
 
+    # only a table that holds a program column takes one (static: the leaf is absent)
+    extra = {}
+    if carry.ev.program is not None:
+        extra["program"] = jnp.asarray(program, I64)
     ev = _set_row(
         carry.ev,
         i,
         write,
+        **extra,
         kind=jnp.asarray(kind, I64),
         tick=tick_w,
         stage=stage_w,
@@ -234,5 +259,5 @@ def select_next(carry, caps):
 
 
 EVENT_INT_FIELDS = tuple(
-    f.name for f in dataclasses.fields(EventTable) if f.name != "valid"
+    f.name for f in dataclasses.fields(EventTable) if f.name not in ("valid", "program")
 )

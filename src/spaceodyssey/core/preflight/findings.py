@@ -22,6 +22,7 @@ class FindingCode(StrEnum):
     X001 = "X001"  # a capability the selected executors do not provide
     X002 = "X002"  # a reserved field set to a non-default value
     T001 = "T001"  # a drain that equals a close below campaign scope
+    P001 = "P001"  # a policy names a program the capacities do not hold
     T002 = "T002"  # a channel with no valid coincident order
     R001 = "R001"  # a channel declares a record kind the registry lacks
     D004 = (

@@ -23,7 +23,7 @@ from spaceodyssey.core.keys import (
     draw_key,
     policy_key,
 )
-from spaceodyssey.core.records import Record, record_none
+from spaceodyssey.core.records import Record, log_columns, record_none
 
 # Purposes addressed by record identity; a policy draw is keyed by decision instead.
 RECORD_PURPOSES = (
@@ -79,9 +79,10 @@ def key_report(coupling, *, record_key=draw_key, decision_key=policy_key, branch
 
 
 def _log_record(log, i):
+    cols = log_columns(log)
     return Record(
         **{
-            f.name: jnp.asarray(getattr(log, f.name)[i])
+            f.name: jnp.asarray(cols[f.name][i]) if f.name in cols else None
             for f in dataclasses.fields(Record)
         }
     )
@@ -209,10 +210,9 @@ def _records(w, study, truth, root, trunk, side, at, branch, counts):
         same = bits_equal(pay_t[i], pay_s[j])
         if index < at:
             counts["prefix"] += 1
-            for name in type(trunk.log).__dataclass_fields__:
-                if not bits_equal(
-                    getattr(trunk.log, name)[i], getattr(side.log, name)[j]
-                ):
+            side_cols = log_columns(side.log)
+            for name, col in log_columns(trunk.log).items():
+                if not bits_equal(col[i], side_cols[name][j]):
                     out.append(
                         f"world {w}: prefix record {key} column {name} "
                         "differs across the fork"

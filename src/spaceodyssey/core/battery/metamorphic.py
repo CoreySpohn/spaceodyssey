@@ -18,6 +18,7 @@ from spaceodyssey.core.battery.views import DecisionViews, compare_views, moved_
 from spaceodyssey.core.enums import I64
 from spaceodyssey.core.executors.base import belief_leaves, canonical_history
 from spaceodyssey.core.kinds import AbstractProcess
+from spaceodyssey.core.records import log_columns
 
 # Float columns of a canonical history that no draw feeds.
 DRAW_FREE_FLOATS = ("cost", "charged", "balance")
@@ -205,8 +206,9 @@ def _epoch_world(w, cb, tb, cl, tl, delta, layout):
             ok = bits_equal(a, b)
         if not ok:
             out.append(f"world {w}: trace field {name} changed under the shift")
-    for name in type(cb.log).__dataclass_fields__:
-        a, b = np.asarray(getattr(cb.log, name)), np.asarray(getattr(cl.log, name))
+    cols_l = log_columns(cl.log)
+    for name, col in log_columns(cb.log).items():
+        a, b = np.asarray(col), np.asarray(cols_l[name])
         b = moved_ticks(name, b, cl.log.valid, -delta)
         if not bits_equal(a, b):
             out.append(f"world {w}: log column {name} changed under the shift")

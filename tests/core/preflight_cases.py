@@ -10,6 +10,7 @@ import dataclasses
 import equinox as eqx
 import jax.numpy as jnp
 
+from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import (
     DRAW_COORDS,
     EXECUTORS,
@@ -89,9 +90,11 @@ class DocPolicy(toy.NullPolicy):
     requires: tuple = _field(())
     executors: tuple = _field(tuple(sorted(EXECUTORS)))
     disruptive: bool = _field(False)
+    programs: tuple = _field(())
 
     def declare(self):
         return Declaration(
+            programs=self.programs,
             reads=self.reads,
             needs=tuple(Need(*n) for n in self.needs),
             stops=tuple((Scope(a), Disposition(b)) for a, b in self.stops),
@@ -287,6 +290,7 @@ SEEDED = {
         ),
         None,
     ),
+    "program_out_of_range": (C.P001, lambda: _policy(programs=(1,)), None),
     "channel_without_order": (C.T002, _dropped_order, None),
     "channel_order_out_of_range": (
         C.T002,
@@ -334,6 +338,13 @@ CLEAN = {
             needs=(Need(10, 0, 500),),
             requires=frozenset({"gradients"}),
             stops=((Scope.CAMPAIGN, Disposition.DRAIN),),
+        ),
+        (),
+    ),
+    "policy_names_held_programs": (
+        lambda: _with_policy(
+            toy.survey_1(caps=Capacities(n_programs=2)),
+            StatedPolicy(stated=Declaration(programs=(0, 1))),
         ),
         (),
     ),

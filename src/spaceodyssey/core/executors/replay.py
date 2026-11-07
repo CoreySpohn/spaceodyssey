@@ -10,7 +10,7 @@ import numpy as np
 from spaceodyssey.core import refresh
 from spaceodyssey.core.carry import _tree_set
 from spaceodyssey.core.enums import I64, Audience, Capacity, EventKind, RecordStatus
-from spaceodyssey.core.events import empty_event_row
+from spaceodyssey.core.events import blank_row
 from spaceodyssey.core.executors.base import (
     KILL_TOLERANCE,
     belief_leaves,
@@ -31,6 +31,8 @@ def _row(log, i):
     fields.update({n: jnp.asarray(getattr(log, n)[i]) for n in ("cost", "charged")})
     fields["payload"] = jnp.asarray(log.payload[i])
     fields["valid"] = jnp.asarray(True)
+    if log.program is not None:
+        fields["program"] = jnp.asarray(log.program[i])
     return Record(**fields)  # the full row; callers mask it for their audience
 
 
@@ -455,7 +457,7 @@ def _hold(study, carry, roots, boundary, at, state):
     ahead = n_log < log.valid.shape[0] and bool(log.valid[n_log])
     next_sid = vars(log)["acquisition_id"][n_log] if ahead else carry.next_sid
     held = dataclasses.replace(
-        empty_event_row(),
+        blank_row(carry.request),
         tick=jnp.asarray(at["tick"], I64),
         acquisition_index=jnp.asarray(ordinal, I64),
         sid=jnp.asarray(-1, I64),

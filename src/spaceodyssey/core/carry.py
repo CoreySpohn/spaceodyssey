@@ -102,6 +102,9 @@ def empty_carry(caps, balance=None):
             disruptive_used=jnp.zeros(caps.n_assets, I64),
             debited=jnp.zeros((br, nr), F64),
             refunded=jnp.zeros((br, nr), F64),
+            program_closed=jnp.zeros(caps.n_programs, B)
+            if caps.n_programs > 1
+            else None,
         ),
         belief=_zero_belief(caps),
         pbelief=_zero_belief(caps),
@@ -123,8 +126,8 @@ def empty_carry(caps, balance=None):
         dec_ordinal=z,
         next_sid=z,
         release_version=jnp.zeros(2, I64),
-        request=empty_event_row(),
-        refresh=empty_event_row(),
+        request=empty_event_row(caps),
+        refresh=empty_event_row(caps),
         refresh_dirty=jnp.zeros((2, n_refresh), B),
         refresh_status=jnp.full((2, n_refresh), -1, I64),
     )

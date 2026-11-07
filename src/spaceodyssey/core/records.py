@@ -170,11 +170,15 @@ def payload_columns(caps, kind, audience):
 def masked_record(rec, caps, audience):
     """Hide queue-derived identities and payload columns the audience cannot read."""
     keep = payload_columns(caps, rec.kind, audience)
-    return dataclasses.replace(
+    out = dataclasses.replace(
         rec,
         acquisition_id=jnp.zeros_like(rec.acquisition_id),
         payload=jnp.where(keep, rec.payload, 0.0),
     )
+    if rec.program is not None and audience != Audience.POLICY:
+        # a program id is the policy's to read; the observer is shown none
+        out = dataclasses.replace(out, program=jnp.zeros_like(rec.program))
+    return out
 
 
 class Record(eqx.Module):
@@ -205,6 +209,9 @@ class Record(eqx.Module):
     charged: jax.Array  # F64[R], reserved: what the receipt debited; equals cost
     payload: jax.Array  # F64[P]
     valid: jax.Array
+    # The program the acquisition was charged under; absent (None, no leaf) unless the
+    # capacities hold more than one program, so a study with one is unchanged.
+    program: jax.Array | None = None
 
 
 def record_none(caps):
@@ -217,6 +224,7 @@ def record_none(caps):
         charged=jnp.zeros(caps.n_resources, F64),
         payload=jnp.zeros(caps.payload_width, F64),
         valid=jnp.asarray(False),
+        program=z if caps.n_programs > 1 else None,
     )
 
 
@@ -248,6 +256,7 @@ class RecordLog(eqx.Module):
     charged: jax.Array  # F64[L, R]
     payload: jax.Array  # F64[L, P]
     valid: jax.Array
+    program: jax.Array | None  # I64[L], present only with more than one program
     # Pedigree of a product row, I64[L, product_width]: audience, refit status, row
     # count and the revision set as (channel, acquisition index, revision) triples. It
     # is not a `Record` field: only a refresh writes it; every other row holds zeros.
@@ -260,8 +269,13 @@ def log_records(log, **replace):
     Keyword arguments replace the named columns.
     """
     # `RecordLog` lists the fields of `Record` in order, then `product` last
-    rows = Record(*jax.tree_util.tree_leaves(log)[:-1])
+    rows = Record(**{f.name: vars(log)[f.name] for f in dataclasses.fields(Record)})
     return dataclasses.replace(rows, **replace)
+
+
+def log_columns(log):
+    """The columns a log holds, by name (no program column with one program)."""
+    return {n: v for n, v in log.__dict__.items() if v is not None}
 
 
 def empty_log(caps):
@@ -274,6 +288,7 @@ def empty_log(caps):
         charged=jnp.zeros((caps.n_log, caps.n_resources), F64),
         payload=jnp.zeros((caps.n_log, caps.payload_width), F64),
         valid=jnp.zeros(caps.n_log, B),
+        program=z if caps.n_programs > 1 else None,
         product=jnp.zeros((caps.n_log, caps.product_width), I64),
     )
 
@@ -301,7 +316,10 @@ def write_log(carry, rec, caps):
         col = getattr(carry.log, name)
         cols[name] = col.at[s].set(jnp.where(ok, getattr(rec, name), col[s]))
     cols["valid"] = carry.log.valid.at[s].set(jnp.where(ok, True, carry.log.valid[s]))
-    log = RecordLog(**cols, product=carry.log.product)
+    col = carry.log.program
+    if col is not None:
+        col = col.at[s].set(jnp.where(ok, rec.program, col[s]))
+    log = RecordLog(**cols, program=col, product=carry.log.product)
     out = eqx.tree_at(
         lambda c: (c.log, c.n_log, c.overflow, c.overflow_mask),
         carry,
@@ -387,10 +405,10 @@ def pedigree_of(log, slot):
 RECORD_INT_FIELDS = tuple(
     f.name
     for f in dataclasses.fields(Record)
-    if f.name not in ("cost", "charged", "payload", "valid", "product")
+    if f.name not in ("cost", "charged", "payload", "valid", "product", "program")
 )
 LOG_INT_FIELDS = tuple(
     f.name
     for f in dataclasses.fields(RecordLog)
-    if f.name not in ("cost", "charged", "payload", "valid", "product")
+    if f.name not in ("cost", "charged", "payload", "valid", "product", "program")
 )

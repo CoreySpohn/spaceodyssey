@@ -80,7 +80,8 @@ def test_a_default_study_holds_every_gated_field_empty():
     carry = eqx.filter_jit(init_carry)(study, truth)
     for path, gate in base.CONDITIONAL_FIELDS.items():
         assert not gate(carry), path
-        assert np.asarray(_by_path(carry, path)).size == 0, path
+        leaf = _by_path(carry, path)  # empty, or absent (None) for a column
+        assert leaf is None or np.asarray(leaf).size == 0, path
 
 
 @pytest.mark.medium  # A cold host run compiles the executor, over the 5 s unit budget.
@@ -99,10 +100,15 @@ def test_control_an_open_gate_puts_the_empty_leaf_in_the_history(monkeypatch):
     """Control: the gates are what keep the leaves out, so opening them adds them."""
     _, run, _ = baseline_host_run()
     quiet = set(_leaves_of(run.carry, run.trace))
-    opened = dict.fromkeys(base.CONDITIONAL_FIELDS, lambda carry: True)
+    # an absent (None) column has no empty leaf to put in the history
+    held = {p for p in base.CONDITIONAL_FIELDS if _by_path(run.carry, p) is not None}
+    opened = {
+        p: (lambda carry: True) if p in held else gate
+        for p, gate in base.CONDITIONAL_FIELDS.items()
+    }
     monkeypatch.setattr(base, "CONDITIONAL_FIELDS", opened)
     loud = _leaves_of(run.carry, run.trace)
-    assert set(base.CONDITIONAL_FIELDS) <= set(loud) - quiet
+    assert held <= set(loud) - quiet
 
 
 # ---- the snapshot fingerprint -----------------------------------------------------
@@ -211,22 +217,40 @@ def _same(a, b):
     )
 
 
-@pytest.mark.medium  # A cold host run compiles the executor, over the 5 s unit budget.
-def test_a_draw_on_asset_zero_is_unchanged_by_key_version_2():
+@pytest.fixture(scope="module")
+def key_runs():
+    """The four runs the key-version tests compare, taken once: two compiles, no more.
+
+    The plans differ in data only, so the runs of one key version share a compiled
+    program; the version is static, so the two versions compile apart.
+    """
+    return {
+        (plan, version): _state(_run(plan, version))
+        for plan in (ON_ASSET_0, ON_ASSET_1)
+        for version in (1, 2)
+    }
+
+
+@pytest.mark.medium  # The shared runs compile the executor twice, over the unit budget.
+def test_a_draw_on_asset_zero_is_unchanged_by_key_version_2(key_runs):
     """Fails if version 2 moves a draw on asset 0: those keys stay the old ones."""
-    assert _same(_state(_run(ON_ASSET_0, 1)), _state(_run(ON_ASSET_0, 2)))
+    assert _same(key_runs[ON_ASSET_0, 1], key_runs[ON_ASSET_0, 2])
 
 
-@pytest.mark.medium  # A cold host run compiles the executor, over the 5 s unit budget.
-def test_a_draw_on_a_later_asset_moves_under_key_version_2():
+@pytest.mark.medium  # The shared runs compile the executor twice, over the unit budget.
+def test_a_draw_on_a_later_asset_moves_under_key_version_2(key_runs):
     """Fails if version 2 keys asset 1 as before (the version would do nothing)."""
-    assert not _same(_state(_run(ON_ASSET_1, 1)), _state(_run(ON_ASSET_1, 2)))
+    assert not _same(key_runs[ON_ASSET_1, 1], key_runs[ON_ASSET_1, 2])
 
 
-@pytest.mark.medium  # A cold host run compiles the executor, over the 5 s unit budget.
-def test_control_a_lookup_that_returns_zero_leaves_the_draws_alone(monkeypatch):
+@pytest.mark.medium  # The shared runs compile the executor twice, over the unit budget.
+def test_control_a_lookup_that_returns_zero_leaves_the_draws_alone(
+    key_runs, monkeypatch
+):
     """Control: with the lookup pinned to zero, version 2 reproduces version 1."""
-    one = _state(_run(ON_ASSET_1, 1))
     monkeypatch.setattr(handlers, "asset_coordinate", lambda study, index: 0)
     jax.clear_caches()  # the compiled program closed over the real lookup
-    assert _same(one, _state(_run(ON_ASSET_1, 2)))
+    try:
+        assert _same(key_runs[ON_ASSET_1, 1], _state(_run(ON_ASSET_1, 2)))
+    finally:
+        jax.clear_caches()
