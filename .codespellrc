@@ -2,4 +2,6 @@
 skip = .git,*.ipynb,uv.lock,*/_build,*.fits
 # add domain words only if codespell flags them (clean on the libraries sampled)
 # premission: the pre-mission table module, studies/premission.py
-ignore-words-list = premission
+# lod: lambda over D, the angular unit in the adapter tests
+# disjointness: the set property (a real word codespell does not know)
+ignore-words-list = premission,lod,disjointness
