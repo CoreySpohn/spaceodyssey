@@ -66,12 +66,12 @@ None. `tests/core/golden_histories.json` is unchanged and no pin file is edited.
 |---|---|---|---|
 | `tests/codec/test_optional_fields.py` | 15 | unit | 2.5 s, slowest 0.7 s |
 | `tests/core/test_key_version.py` | 12 | unit | 1.6 s, slowest 0.45 s |
-| `tests/core/test_slice3_guard.py` | 17 (6 medium) | unit and medium | 33 s, medium tests about 10 s each |
-| `tests/core/test_metamorphic.py` | 3 new (11 in the file) | slow (existing file) | the facility-insertion guard below; each run-level test one cold compile pair |
+| `tests/core/test_slice3_guard.py` | 18 (6 medium) | unit and medium | 33 s, medium tests about 10 s each |
+| `tests/core/test_metamorphic.py` | 2 new (10 in the file) | slow (existing file) | the facility-insertion guard below; each run-level test one cold compile pair |
 
 Three slowest new tests: the asset-zero key test, the zero-lookup control and the
 canonical-history gate test, each one cold executor compile. The medium tier of the guard
-file takes about 35 s in total; no new test is in the slow tier. Added 48, retired 0, net +48.
+file takes about 35 s in total; the only new slow-tier tests are the two run-level ones in the existing slow file `test_metamorphic.py`. Added 48, retired 0, net +48 (the idle-facility coordinate test is in the guard file, unit tier).
 
 Each check has a control: an encoder that keeps defaults, a loader that requires every field,
 an open conditional gate, a nonempty extra view leaf, a zeroed `refund_of`, a changed layout

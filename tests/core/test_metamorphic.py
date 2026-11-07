@@ -10,7 +10,6 @@ import pytest
 from spaceodyssey.core import battery, handlers
 from spaceodyssey.core.battery.metamorphic import with_zero_time_asset
 from spaceodyssey.core.enums import I64
-from spaceodyssey.core.keys import asset_coordinate
 from tests.core.battery_helpers import PLAN, SelectingPolicy, survey
 from tests.core.corpus import frozen
 from tests.core.helpers import worlds
@@ -122,15 +121,6 @@ def test_zero_time_asset_catches_a_key_that_counts_assets(inputs, monkeypatch):
     result = battery.zero_time_asset(study, truths, roots, N_STEPS)
     assert not result
     assert "trace or the records changed" in result.diagnostic
-
-
-def test_the_added_asset_keeps_every_existing_asset_coordinate():
-    """Fails if inserting the idle facility renumbers a channel's asset."""
-    study = survey(key_version=2)
-    more = with_zero_time_asset(study)
-    assert more.key_version == 2
-    for index in range(study.caps.n_channels):
-        assert int(asset_coordinate(more, index)) == int(asset_coordinate(study, index))
 
 
 def test_the_added_asset_holds_nothing():
