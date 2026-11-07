@@ -20,7 +20,9 @@ section, no `schema_version` change and no migration, and no pinned hash moved.
 4. `fix(studies): the subject map selects exported subjects, so one subject of a shared channel can be exported` (`0c94a4b`)
 5. this record (`81661a1`)
 6. review round 1 fixes: `f633669`, `79636d2`, `0f9a67e`, `9d5550e`, `8e5bfe8`, and
-   this record's update (see "Review round 1")
+   this record's update (`ee3b475`; see "Review round 1")
+7. review round 2 fixes: `3efec3f`, `156335b`, and this record's update (see "Review
+   round 2")
 
 ## What changed
 
@@ -98,10 +100,13 @@ max_file_bytes=...)` returns a `LineageReport` and never raises on document cont
 
 ### File references
 
-Pinned for the table and through both new paths: the files directory is opened one
-path component at a time from the root without following a symbolic link, except one
-owned by root (macOS's `/tmp` and `/var`), so a directory or parent replaced by a link
-is refused at the reference's `.../file/name` (review round 1). A file name is
+Pinned for the table and through both new paths (review rounds 1 and 2): the trusted
+directory is the files directory's parent, whose real path is resolved once when the
+store is made (an alias such as macOS's `/tmp` is accepted there). Every read and
+write walks that real path from the root, then the files directory, then the file,
+never following a link, so a files directory that is a link, and a link that appears
+later anywhere on the walk, are refused at the reference's `.../file/name` (the
+writer refuses with a `DocumentError` naming the link). A file name is
 `<sha256>.bin` and nothing else, so a relative path (`../x.bin`) and an
 absolute path are refused at `.../file/name` before any file is opened; a symlink
 (even to a file of the right bytes outside the directory) is refused by `O_NOFOLLOW`;
@@ -220,9 +225,7 @@ the quick tier. No core file changed.
 - Survey 4's paired-difference, correction and tamper checks on a real run are R5's;
   R3's export tests use a synthetic record log of one world (the export reads only the
   log, so a `RunResult`, `Carry` or `RecordLog` are read alike).
-- The writing side of the file store (`FileStore.put`) still creates the directory
-  and its files through the path; review round 1 concerned the reader.
-- Review round 2 (scoped) and the full suite are the coordinator's.
+- The full suite is the coordinator's.
 
 ## Review round 1
 
@@ -239,9 +242,9 @@ that failed before it.
    `O_NOFOLLOW | O_DIRECTORY`, following only a root-owned link (a system link no
    user can plant; a `..` in it, or more than 40 links, is refused), and the file is
    opened relative to that descriptor. The refusal is `L001` at the reference's
-   `/name` on all three paths. `_require_safe_open` also requires `dir_fd` support in
-   `os.stat` and `os.readlink`. Test:
+   `/name` on all three paths. Test:
    `test_a_files_directory_reached_through_a_symlink_is_refused` (parent, directory).
+   Superseded in round 2 by the trusted-directory walk.
 2. **P2: an array `upstream_hash` crashed the lineage check.** It decoded, then raised
    `ValueError` in `lineage_findings`. The field now has a converter that accepts only
    a string, so the loader refuses anything else at
@@ -301,5 +304,68 @@ Checks rerun:
 - The codec, premission, prior and refit files (`tests/codec` without the slow tier,
   `test_premission.py`, `test_premission_refit.py`, `test_observer_kit.py`,
   `test_preflight.py`, `test_lints.py`): 685 passed.
+- `ruff check`, `ruff format --check`, `tools/check_internal_refs.py` and
+  `pre-commit run` on every touched file: clean.
+
+## Review round 2
+
+The scoped review confirmed every round-1 reproduction returns a controlled finding,
+the link cap, cycle and `..` handling, the agreement of the subject-keyed D006 and the
+lookup, the two-subject separation through refit and replay, and that no pin moved. It
+found two new P2s and the writer gap. Each fix has a test that failed before it.
+
+1. **Following a root-owned link was not race-free.** The ownership check was a lookup
+   and the `readlink` a second one, and a user can replace a root-owned link in a
+   directory they can write. The reviewer's simpler rule replaces it: the trusted
+   directory (the files directory's parent) is resolved to its real path once, when
+   the store is made, and every open walks that real path from the root, then the
+   files directory, then the file, with `O_NOFOLLOW` (`O_DIRECTORY` for
+   directories). No link is followed and no link is read; ownership no longer
+   matters. A link below the trusted directory, or one that appears in its real path
+   after it was resolved, is `UnsafeDirectory`, reported as `L001` at the reference's
+   `/name` on all three paths. Consequence: a parent that is already a link when the
+   store is made is the trusted directory as named and is read (the alias rule); a
+   files directory that is a link, and either replaced by a link during the read, are
+   refused. Tests: `test_a_link_below_the_trusted_directory_is_refused` (before and
+   during, parent and directory, replacing the round-1 test) and
+   `test_a_link_below_the_trusted_directory_is_refused_whoever_owns_it` (a link
+   reported as root-owned).
+2. **Parsed large integers escaped.** A parsed object whose schema version, or a value
+   in its study (with a stored hash), is an integer too long to write raised the
+   integer-conversion `ValueError`. `int_too_long` (`codec/document.py`) is now
+   checked by the parsed-object copy (`_json`) and by `check_parsed` (so hashing a
+   document object refuses it at its pointer), and the schema-version message no
+   longer formats such a value. Test:
+   `test_a_parsed_document_holding_a_huge_integer_is_a_finding` (schema, study; also
+   a document object).
+3. **The writer wrote through directory links.** `FileStore.put` now makes the trusted
+   directory, walks to it, creates the files directory and the temporary file below
+   that descriptor with `O_NOFOLLOW` (exclusive create, mode 0600, an unpredictable
+   name) and renames it into place within the directory. A link is refused, and the
+   dumper reports it as a `DocumentError` at the array's pointer naming the link.
+   Test: `test_the_writer_refuses_a_files_directory_reached_through_a_link`.
+
+| Test | Tier | Cold s | Mutant it kills |
+|---|---|---|---|
+| `test_premission_codec.py::test_a_link_below_the_trusted_directory_is_refused` (4) | unit | 2.5 to 2.7 | walk follows links (S1); trusted path re-resolved at every open (S2); trusted directory is the files directory (S3) |
+| `::test_a_link_below_the_trusted_directory_is_refused_whoever_owns_it` | unit | 2.5 | S1, S3, and the round-1 root-ownership rule (failed before the fix) |
+| `::test_the_writer_refuses_a_files_directory_reached_through_a_link` | unit | 2.3 | writer writes through the path (S4); S1, S3 |
+| `::test_a_parsed_document_holding_a_huge_integer_is_a_finding` (2) | unit | 2.6, 2.6 | parsed objects keep huge integers (S5); hashing meets huge integers (S6); schema message formats the version (S7) |
+
+All seven mutants are killed.
+
+Checks rerun:
+
+- `tests/core/test_golden_histories.py` with `tests/codec/test_run_document_runs.py`
+  at `156335b`: 189 passed in 233.5 s; `git diff be2e439 --
+  tests/core/golden_pin.json tests/codec/hash_pin.json` is empty.
+- The codec, premission, prior and refit files (`tests/codec` without the slow tier,
+  `test_premission.py`, `test_premission_refit.py`, `test_observer_kit.py`,
+  `test_preflight.py`, `test_lints.py`): 691 passed in 75.1 s.
+- Quick tier (`-m "not slow" -n 2 --dist loadfile`, entry-point test deselected) at
+  `156335b`: 2,115 passed in 452.8 s. It ran beside another session's full suite
+  (197 s alone in round 1), and the budget plugin reported ten existing tests over
+  budget under that load; none is new, and the only one in a touched file is the
+  existing `test_document.py::test_content_hash_is_stable_across_processes` (5.4 s).
 - `ruff check`, `ruff format --check`, `tools/check_internal_refs.py` and
   `pre-commit run` on every touched file: clean.
