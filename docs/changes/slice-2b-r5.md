@@ -12,8 +12,10 @@ once R3 is on `main`.
 ## Commits
 
 1. `feat(studies): survey 18, a star-level precursor that chooses between two plans`
+   (`a90a85d`)
 2. `test(studies): survey 18 assertions, one medium guard and the rest slow (K6)`
-3. this record
+   (`55c459d`)
+3. this record (`6a1c2bc`, with its commit list)
 
 ## What changed
 
