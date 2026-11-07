@@ -269,18 +269,27 @@ def _apply_refund(c, rec, slot, first, study):
     is the settlement boundary (a receipt written but not yet released, held back, or
     released to the observer alone credits nothing). A record of a declared failure
     kind is a receipt; it names its origin by subject, channel (`source`) and the
-    visible `refund_index`. The credit applies when the origin exists, the kind is the
-    failure cause its channel declares, the release is within the deadline, and no
-    receipt has credited the acquisition before. A receipt that does not apply counts
-    in `refund_ignored`. The credit is written on the receipt row as a negative
-    `charged`, so the retained records still net to the ledger.
+    visible `refund_index`. The origin may share the receipt's kind; a record written
+    on the channel it names is not a receipt, and none names its own row. The credit
+    applies when the origin exists, the kind is the failure cause its channel
+    declares, the release is within the deadline, and no receipt has credited the
+    acquisition before. A receipt that does not apply counts in `refund_ignored`. The
+    credit is written on the receipt row as a negative `charged`, so the retained
+    records still net to the ledger.
     """
     caps, channels, log = study.caps, study.channels, c.log
     n = jnp.arange(caps.n_log)
     declared = channels.failure_kind is not None
     if not declared:
         return c
-    attempt = first & rec.valid & jnp.isin(rec.kind, channels.failure_kind)
+    # a receipt is written by something other than the channel it names, so an
+    # acquisition of the failure kind (its channel is its source) is never one
+    attempt = (
+        first
+        & rec.valid
+        & jnp.isin(rec.kind, channels.failure_kind)
+        & (rec.channel != rec.source)
+    )
     named = channels.id == rec.source
     ti = jnp.argmax(named)
     cause = named.any() & (channels.failure_kind[ti] == rec.kind)
@@ -289,7 +298,6 @@ def _apply_refund(c, rec, slot, first, study):
         & (log.subject == rec.subject)
         & (log.channel == rec.source)
         & (log.acquisition_index == rec.refund_index)
-        & (log.kind != rec.kind)
         & (n != slot)
     )
     origin = jnp.argmax(cand)

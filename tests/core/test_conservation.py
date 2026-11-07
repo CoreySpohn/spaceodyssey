@@ -8,16 +8,17 @@ carries a negative `charged` on its own row, so the records still net to the led
 import dataclasses
 from types import SimpleNamespace
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from spaceodyssey.core import HostExecutor
+from spaceodyssey.core import HostExecutor, handlers
 from spaceodyssey.core.conformance.invariants import balance_conserved
 from spaceodyssey.core.enums import ChargePricing
 from tests.core.helpers import one_world
 from tests.core.program_helpers import cancel, observe, wait
-from tests.core.refund_helpers import receipt, refund_study
+from tests.core.refund_helpers import mutate, receipt, refund_study
 
 pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
 
@@ -122,3 +123,68 @@ def test_the_check_still_holds_when_the_log_overflows():
     )
     result = balance_conserved(_run(study))
     assert result.passed, result
+
+
+def test_a_lost_completion_is_charged_to_the_program_that_paid_it():
+    """Two programs, a one-row log: the refused completion belongs to program 1."""
+    script = (observe(0, 0, 10, 1), wait(1, 200), observe(2, 0, 10, 1))
+    study = refund_study(script, cap_kw=dict(n_programs=2, n_log=1))
+    run = _run(study, n_steps=120)
+    assert int(run.carry.n_log) == 1
+    assert int(np.asarray(run.carry.overflow_mask)) != 0
+    held = np.asarray(run.carry.ledger.balance)
+    program_rows = held[study.caps.n_assets : study.caps.n_assets + 2, 1]
+    np.testing.assert_allclose(program_rows, [100.0, 80.0])
+    result = balance_conserved(run)
+    assert result.passed, result
+
+
+def _mutant(monkeypatch, old, new):
+    monkeypatch.setattr(
+        handlers, "_apply_refund", mutate(handlers._apply_refund, old, new)
+    )
+    jax.clear_caches()  # the compiled step closed over the real handler
+
+
+@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
+@pytest.mark.parametrize("program", [0, 1])
+def test_mutant_a_refund_of_the_whole_charge_fails_conservation(monkeypatch, program):
+    """Mutant: the credit includes the surcharge; the ledger and receipt agree on it."""
+    _mutant(
+        monkeypatch,
+        "log.charged[origin] - log.nonrefundable[origin]",
+        "log.charged[origin]",
+    )
+    try:
+        script = (observe(0, 0, 10, program), wait(0, 60), cancel(1, 0))
+        study = refund_study(
+            script,
+            **SURCHARGE,
+            receipts=(receipt(200),),
+            cap_kw=dict(n_programs=2),
+        )
+        run = _run(study)
+        assert int(run.carry.n_log) == 2  # the acquisition and the receipt
+        assert not balance_conserved(run).passed
+    finally:
+        jax.clear_caches()
+
+
+@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
+@pytest.mark.parametrize("program", [0, 1])
+def test_mutant_a_second_receipt_credit_fails_conservation(monkeypatch, program):
+    """Mutant: no once-only test, so two receipts credit one acquisition twice."""
+    _mutant(monkeypatch, " & ~paid", "")
+    try:
+        script = (observe(0, 0, 10, program), wait(0, 60), cancel(1, 0))
+        study = refund_study(
+            script,
+            **SURCHARGE,
+            receipts=(receipt(200), receipt(210)),
+            cap_kw=dict(n_programs=2),
+        )
+        run = _run(study)
+        assert int(run.carry.n_log) == 3  # the acquisition and two receipts
+        assert not balance_conserved(run).passed
+    finally:
+        jax.clear_caches()

@@ -26,6 +26,7 @@ from spaceodyssey.core import (
 from spaceodyssey.core.enums import I64, ChargePricing
 from spaceodyssey.core.preflight import FindingCode, preflight
 from spaceodyssey.core.records import masked_record, record_none
+from spaceodyssey.studies import toy
 from tests.core.helpers import one_world
 from tests.core.program_helpers import cancel, observe, wait
 from tests.core.refund_helpers import mutate, receipt, refund_study
@@ -143,6 +144,32 @@ def test_a_receipt_of_a_kind_the_channel_does_not_declare_credits_nothing(runs):
     _, run = runs["wrong_channel"]
     np.testing.assert_allclose(_held(run), 93.0)
     assert _ignored(run) == 1
+
+
+def test_a_receipt_of_the_kind_of_its_own_origin_still_credits():
+    """Fails if a receipt is ignored because its kind equals the origin's kind."""
+    study = refund_study(
+        CANCELLED, **SURCHARGE, receipts=(receipt(200),), failure=toy.RECORD_MEASUREMENT
+    )
+    run = _run(study)
+    log = run.carry.log
+    kinds = np.asarray(log.kind)[np.asarray(log.valid)]
+    assert len(kinds) == 2 and kinds[0] == kinds[1] == toy.RECORD_MEASUREMENT
+    np.testing.assert_allclose(_held(run), 98.0)
+    assert _ignored(run) == 0
+
+
+def test_an_acquisition_of_the_failure_kind_is_not_a_receipt():
+    """Fails if a second acquisition of the failure kind refunds the first."""
+    script = (observe(0, 0, 10, 0), observe(1, 0, 10, 0))
+    study = refund_study(script, charge=10.0, failure=toy.RECORD_MEASUREMENT)
+    run = _run(study)
+    log = run.carry.log
+    valid = np.asarray(log.valid)
+    assert valid.sum() == 2
+    assert (np.asarray(log.subject)[valid] == 0).all()
+    np.testing.assert_allclose(_held(run)[0], 80.0)
+    assert _ignored(run) == 0
 
 
 def test_control_a_receipt_inside_the_deadline_credits(runs):

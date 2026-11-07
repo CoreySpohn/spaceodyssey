@@ -26,6 +26,7 @@ from spaceodyssey.codec.kinds import (
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import I64, ChargePricing
 from spaceodyssey.core.ledger import ChannelTable
+from spaceodyssey.core.records import Record, record_none
 from spaceodyssey.core.snapshot import EffectTable, effects_none
 from spaceodyssey.core.study import Study
 from spaceodyssey.studies import toy
@@ -35,6 +36,7 @@ from tests.codec.test_document import TOY_KINDS, assert_same_pytree
 CAP_FIELDS = ("awards", "refunds", "n_commitments", "snapshot_balances")
 STUDY_FIELDS = ("key_version",)
 CHANNEL_FIELDS = ("pricing", "surcharge", "failure_kind", "refund_deadline_ticks")
+RECORD_FIELDS = ("nonrefundable", "refund_index", "award_gen")
 
 
 def _text(study):
@@ -51,7 +53,7 @@ def test_the_optional_fields_are_the_ones_slice_3a_added():
     """Fails if a field gains or loses the marker: it would move every document."""
     marked = {
         (cls.__name__, f.name)
-        for cls in (Capacities, Study, EffectTable, ChannelTable)
+        for cls in (Capacities, Study, EffectTable, ChannelTable, Record)
         for f in dataclasses.fields(cls)
         if is_optional_field(f)
     }
@@ -60,6 +62,7 @@ def test_the_optional_fields_are_the_ones_slice_3a_added():
         | {("Study", n) for n in STUDY_FIELDS}
         | {("EffectTable", "program")}
         | {("ChannelTable", n) for n in CHANNEL_FIELDS}
+        | {("Record", n) for n in RECORD_FIELDS}
     )
 
 
@@ -317,3 +320,49 @@ def test_a_refund_column_written_as_null_is_refused(name):
     doc["study"]["channels"][name] = None
     with pytest.raises(DocumentError):
         load_study(json.dumps(doc), TOY_KINDS)
+
+
+# ---- the refund columns of a record (S3a) -------------------------------------------
+
+
+_RECORD_KINDS = as_resolver({("test", "record", 1): Record})
+
+
+def _record_node(refunds):
+    caps = dataclasses.replace(Capacities(), refunds=refunds)
+    return encode(record_none(caps), ("record",), _RECORD_KINDS)
+
+
+def test_a_record_without_refunds_is_written_without_the_refund_fields():
+    """Fails if the default record writes nulls its older documents lack."""
+    node = _record_node(False)
+    assert node  # a nonempty node, so the absence below is about the fields
+    assert not set(RECORD_FIELDS) & set(node)
+
+
+def test_a_record_document_from_before_refunds_still_loads():
+    """Fails if a document without the refund columns is refused or filled non-None."""
+    node = {k: v for k, v in _record_node(False).items() if k not in RECORD_FIELDS}
+    built = load_module.decode(node, ("record",), _RECORD_KINDS)
+    assert all(getattr(built, n) is None for n in RECORD_FIELDS)
+
+
+def test_a_record_written_with_a_null_refund_column_is_refused():
+    """Control: a null column is the default written out, so it is two documents."""
+    node = {**_record_node(False), "nonrefundable": None}
+    with pytest.raises(DocumentError, match="at its default"):
+        load_module.decode(node, ("record",), _RECORD_KINDS)
+
+
+def test_a_populated_record_refund_columns_round_trip():
+    """Fails if a refund column is dropped, omitted or rebuilt with another dtype."""
+    caps = dataclasses.replace(Capacities(), refunds=True)
+    rec = dataclasses.replace(
+        record_none(caps),
+        nonrefundable=jnp.full(caps.n_resources, 2.0),
+        refund_index=jnp.asarray(3, I64),
+    )
+    node = encode(rec, ("record",), _RECORD_KINDS)
+    assert set(RECORD_FIELDS) <= set(node)
+    built = load_module.decode(node, ("record",), _RECORD_KINDS)
+    assert_same_pytree(rec, built)
