@@ -204,13 +204,33 @@ def swap_check(runner, caps, coupling):
     a = runner("A", coupling=coupling)
     b = runner("swapped", coupling=coupling)
     for w, (wa, wb) in enumerate(zip(a, b, strict=True)):
+        out += [
+            f"world {w}: {bad}" for bad in _missing_evidence(wa) + _missing_evidence(wb)
+        ]
         step, _ = first_truth_dependent_release(wa, wb, caps)
         if (step is None) != (coupling == 0):
             out.append(f"world {w}: a released row differs at step {step}")
             continue
         until = None if step is None else int(np.asarray(wa[1].tick)[step])
+        decisions, _ = plan_of(wa, until)
+        if not decisions:
+            out.append(f"world {w}: no decision before tick {until}")
         if plan_of(wa, until) != plan_of(wb, until):
             out.append(f"world {w}: the plan changed before tick {until}")
+    return out
+
+
+def _missing_evidence(world):
+    """What a full run of the survey lacks: its decisions, acquisitions and folds."""
+    decisions, acquisitions = plan_of(world)
+    out = []
+    if len(decisions) < N_DECISIONS:
+        out.append(f"{len(decisions)} decisions, not {N_DECISIONS}")
+    if len(acquisitions) != N_OBSERVATIONS:
+        out.append(f"{len(acquisitions)} acquisitions, not {N_OBSERVATIONS}")
+    folded = int(np.sum(np.asarray(world[0].belief.n)))
+    if folded != N_OBSERVATIONS:
+        out.append(f"{folded} measurements folded, not {N_OBSERVATIONS}")
     return out
 
 
@@ -331,15 +351,21 @@ def test_the_epoch_relation_holds_with_released_and_delayed_precursors():
     released later; for instance if the delay were counted from tick 0.
     """
     truths, roots = WORLDS["A"]()
-    for executor in (CompiledExecutor(), HostExecutor()):
+    for name, executor in (("compiled", CompiledExecutor()), ("host", HostExecutor())):
+        runner = Runner(name)
         for delay in (0, DELAY):
             study = study_of(release_delay=delay)
             result = battery.shift_epoch(
                 study, truths, roots, N_STEPS, 1000, executor=executor
             )
-            assert result, (
-                f"{type(executor).__name__}, delay {delay}: {result.diagnostic}"
-            )
+            assert result, f"{name}, delay {delay}: {result.diagnostic}"
+            # evidence: the unshifted run decided, observed and folded; the relation
+            # compared every decision view and record of it
+            worlds = runner("A", release_delay=delay)
+            assert not [bad for w in worlds for bad in _missing_evidence(w)], delay
+            n_decisions = sum(len(plan_of(w)[0]) for w in worlds)
+            assert result.detail["n_views"] == n_decisions, (name, delay)
+            assert result.detail["n_records"] == N_WORLDS * (1 + N_OBSERVATIONS)
             assert result.detail["n_before_start"] == N_WORLDS
 
 
@@ -356,9 +382,6 @@ class TruthReadingPolicy(Survey18Policy):
 class TruthReadingRunner(Runner):
     """Runs of the control: one world per run, the policy given that world's level."""
 
-    def __init__(self):
-        super().__init__("compiled")
-
     def __call__(self, name, **variant):
         key = (name, tuple(sorted(variant.items())))
         if key not in self.runs:
@@ -368,7 +391,7 @@ class TruthReadingRunner(Runner):
                 one = jax.tree_util.tree_map(lambda x, w=w: x[w : w + 1], truths)
                 policy = TruthReadingPolicy(truth_level=one.level[0])
                 study = study_of(**variant, policy=policy)
-                run = run_on("compiled", study, one, roots[w : w + 1], N_STEPS)
+                run = run_on(self.executor, study, one, roots[w : w + 1], N_STEPS)
                 worlds += worlds_of(run)
             self.runs[key] = worlds
         return self.runs[key]
@@ -376,19 +399,20 @@ class TruthReadingRunner(Runner):
 
 @pytest.mark.slow  # another policy type and one world per run (K6)
 def test_a_policy_reading_the_truth_latent_fails_rows_a_to_e():
-    """B7 row 18 (f), control, compiled executor. Fails if a policy that chooses its
-    plan by the target star's true level passes any of (a) to (e): each check
-    compares plans across worlds whose levels straddle the threshold, so such a
-    policy must differ there.
+    """B7 row 18 (f), control, both executors. Fails if a policy that chooses its
+    plan by the target star's true level passes any of (a) to (e) on either executor:
+    each check compares plans across worlds whose levels straddle the threshold, so
+    such a policy must differ there.
     """
-    runner = TruthReadingRunner()
     caps = study_of().caps
-    assert withheld_check(runner)
-    assert delayed_check(runner)
-    assert observer_only_check(runner)
-    assert swap_check(runner, caps, 1.0)
-    assert swap_check(runner, caps, 0.0)
-    assert released_check(runner)
+    for executor in EXECUTORS:
+        runner = TruthReadingRunner(executor)
+        assert withheld_check(runner), executor
+        assert delayed_check(runner), executor
+        assert observer_only_check(runner), executor
+        assert swap_check(runner, caps, 1.0), executor
+        assert swap_check(runner, caps, 0.0), executor
+        assert released_check(runner), executor
 
 
 @pytest.mark.slow  # every variant on both executors (K6)
