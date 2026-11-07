@@ -140,9 +140,11 @@ jobs:
 
       # Every Python fence in README.md and docs runs as a test. A block that cannot run on a
       # runner carries the info string `python notest` and a one-line reason above it.
+      # docs/changes holds change records (design notes with sketches), not user docs, so
+      # it is not executed.
       - name: Execute fenced code blocks
         run: |
-          pytest README.md docs --markdown-docs --markdown-docs-syntax=superfences \
+          pytest README.md docs --ignore=docs/changes --markdown-docs --markdown-docs-syntax=superfences \
             -p no:cacheprovider --timeout=120 -ra --tb=short \
             --junitxml=junit-docs.xml
 
