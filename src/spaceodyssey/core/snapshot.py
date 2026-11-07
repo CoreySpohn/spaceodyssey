@@ -265,6 +265,15 @@ def digest_ints(words, salt=0):
     return jax.lax.bitcast_convert_type(h, I64)
 
 
+def conditional_view_leaves(view):
+    """The leaves of a view that exist only where a feature does, in digest order.
+
+    Today the pedigree the view shows (a width-0 column when the refresh protocol is
+    off). A feature that adds a leaf to the view lists it here.
+    """
+    return (view.log.product,)
+
+
 def snapshot_fingerprint(view, layout):
     """Identity of the decision snapshot a view holds, as an int64.
 
@@ -280,9 +289,9 @@ def snapshot_fingerprint(view, layout):
     count = layout.count(view.belief)
     leaves = [getattr(log, n) for n in LOG_INT_FIELDS] + [log.valid]
     leaves += [view.n_rows, count, view.tick, view.n_dec, view.release_version]
-    if log.product.shape[-1] > 0:
-        # the pedigree the view shows; a width-0 column leaves the digest as it was
-        leaves.append(log.product)
+    # A leaf of a feature that is off is empty and is not listed at all: the digest
+    # tags and counts every leaf it hashes, so even an empty one would move it.
+    leaves += [x for x in conditional_view_leaves(view) if jnp.size(x) > 0]
     # Tag field boundaries, then chain all words in one scan.
     words = []
     for i, leaf in enumerate(leaves):

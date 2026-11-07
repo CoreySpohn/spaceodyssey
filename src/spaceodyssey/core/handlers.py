@@ -19,7 +19,7 @@ from spaceodyssey.core.enums import (
     Stage,
 )
 from spaceodyssey.core.events import enqueue, requeue, where_tree
-from spaceodyssey.core.keys import draw_key, fold_key
+from spaceodyssey.core.keys import asset_coordinate, draw_key, fold_key
 from spaceodyssey.core.ledger import _resource_rows
 from spaceodyssey.core.records import (
     Record,
@@ -76,6 +76,7 @@ def _realize_rec(c, study, truth, root, base, fraction):
         root,
         coords,
         Purpose.MEASUREMENT,
+        asset=asset_coordinate(study, base.channel_index),
         branch=study.fork.branch_of(base.acquisition_index),
         coupling=study.coupling,
     )

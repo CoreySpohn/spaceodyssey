@@ -43,7 +43,14 @@ from spaceodyssey.codec.files import (
     make_store,
     using_store,
 )
-from spaceodyssey.codec.kinds import as_resolver, is_kind_class, is_version_field
+from spaceodyssey.codec.kinds import (
+    as_resolver,
+    at_default,
+    is_kind_class,
+    is_optional_field,
+    is_version_field,
+    optional_default,
+)
 from spaceodyssey.core.capacities import Capacities, require_x64
 from spaceodyssey.core.study import Agenda, Study
 
@@ -212,7 +219,8 @@ def _decode_kind(node, path, table):
     migrated = None
     if ref[2] == version:
         _only(node, {"$kind", *stored}, path)
-        missing = [n for n in stored if n not in node]
+        optional = {f.name for f in fields if is_optional_field(f)}
+        missing = [n for n in stored if n not in node and n not in optional]
         if missing:
             raise DocumentError(f"field {missing[0]!r} is missing", pointer(path))
     else:
@@ -234,12 +242,19 @@ def _build(cls, node, path, table, version, migrated, fields):
         where = (*path, field.name)
         if is_version_field(cls, field.name):
             value = version
+        elif migrated is None and field.name not in node:
+            # an optional field the encoder omitted at its default
+            value = optional_default(field, cls)
         elif migrated is None:
             item = node[field.name]
             if cls is Agenda and field.name == "phase_until":
                 item = _lowered_no_switch(item, where)
             value = decode(item, where, table)
             _check_field(cls, field, value, where)
+            if is_optional_field(field) and at_default(field, value, cls):
+                raise DocumentError(
+                    f"field {field.name!r} is at its default; omit it", pointer(where)
+                )
         else:
             value = migrated[field.name]
             _check_field(cls, field, value, where if field.name in node else path)
