@@ -37,6 +37,24 @@ OPTIONAL_COORDS = frozenset({"asset", "branch"})
 _OPTIONAL_TAGS = {"asset": 0x6173736574, "branch": 0x6272616E6368}
 
 
+KEY_VERSIONS = (1, 2)
+
+
+def asset_coordinate(study, channel_index):
+    """The asset coordinate of a measurement draw on `channel_index`.
+
+    Version 1 returns the Python integer 0, so the key is built exactly as before
+    assets were a coordinate and the compiled program does not change. Version 2
+    looks the asset up from the layout (channel to lane to asset), a gather on arrays
+    fixed at construction, so a channel keeps its coordinate when another asset is
+    added and asset 0 keeps the key it always had.
+    """
+    if study.key_version == 1:
+        return 0
+    lane = study.channels.lane[channel_index]
+    return study.assets.lane_asset[lane].astype(I64)
+
+
 class Coupling(eqx.Module):
     """Per purpose, the coordinates whose changes leave that purpose's draws alone.
 

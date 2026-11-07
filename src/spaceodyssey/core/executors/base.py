@@ -192,15 +192,26 @@ CANONICAL_FIELDS = {
 # comparator leaf of the full belief and of the policy summary (see `belief_leaves`).
 LAYOUT_FIELDS = ("carry.belief", "carry.pbelief")
 
-# Fields that exist only where the refresh protocol does: they leave a canonical history
-# when the capacities do not carry it (their leaf has zero size), so no history of a
-# study without refresh moves.
-REFRESH_GROUPS = ("carry.refresh",)
-REFRESH_FIELDS = (
-    "carry.refresh_dirty",
-    "carry.refresh_status",
-    "carry.log.product",
-)
+
+def refresh_on(carry):
+    """Whether the carry holds the refresh protocol (its status leaf has size)."""
+    return np.asarray(carry.refresh_status).size > 0
+
+
+# Fields that exist only where a feature does, by dotted path, each with the predicate
+# that says whether the carry holds the feature. A field of a feature that is off has
+# zero size and leaves the canonical history, so no history of a study without the
+# feature moves; a feature adds its fields here (the guard in `test_slice3_guard.py`
+# checks that each is empty while its predicate is false, and `canonical_history`
+# drops it). `CONDITIONAL_GROUPS` does the same for a whole carry group.
+CONDITIONAL_GROUPS = {"carry.refresh": refresh_on}
+CONDITIONAL_FIELDS = {
+    "carry.refresh_dirty": refresh_on,
+    "carry.refresh_status": refresh_on,
+    "carry.log.product": refresh_on,
+}
+REFRESH_GROUPS = tuple(CONDITIONAL_GROUPS)
+REFRESH_FIELDS = tuple(CONDITIONAL_FIELDS)
 
 # Whole-field exclusions: dotted output path -> reason. Empty on purpose; invalid
 # queue/log rows and unhandled trace rows are masked in `canonical_history`, not
@@ -300,9 +311,8 @@ def _canonical_leaves(carry, trace, handled, layout):
     The retained request and the scalar carry fields compare in full.
     """
     out = {}
-    refreshing = np.asarray(carry.refresh_status).size > 0
     for group, names in CANONICAL_FIELDS.items():
-        if group in REFRESH_GROUPS and not refreshing:
+        if group in CONDITIONAL_GROUPS and not CONDITIONAL_GROUPS[group](carry):
             continue
         obj = carry if group == "carry" else trace if group == "trace" else None
         if obj is None:
@@ -315,7 +325,8 @@ def _canonical_leaves(carry, trace, handled, layout):
         elif group in ("carry.ev", "carry.log"):
             mask = np.asarray(obj.valid)
         for name in names:
-            if f"{group}.{name}" in REFRESH_FIELDS and not refreshing:
+            gate = CONDITIONAL_FIELDS.get(f"{group}.{name}")
+            if gate is not None and not gate(carry):
                 continue
             leaf = np.asarray(getattr(obj, name))
             if mask is not None and name != "valid":

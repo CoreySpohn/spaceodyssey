@@ -16,7 +16,13 @@ from spaceodyssey.core.battery.result import (
 )
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import BIG, F64, EventKind, Purpose, RecordStatus
-from spaceodyssey.core.keys import Coupling, Fork, draw_key, policy_key
+from spaceodyssey.core.keys import (
+    Coupling,
+    Fork,
+    asset_coordinate,
+    draw_key,
+    policy_key,
+)
 from spaceodyssey.core.records import Record, record_none
 
 # Purposes addressed by record identity; a policy draw is keyed by decision instead.
@@ -86,7 +92,12 @@ def _keyed_draw(study, truth, root, log, i, branch):
     rec = _log_record(log, i)
     coords = dataclasses.replace(rec, status=jnp.asarray(RecordStatus.COMPLETED))
     key = draw_key(
-        root, coords, Purpose.MEASUREMENT, branch=branch, coupling=study.coupling
+        root,
+        coords,
+        Purpose.MEASUREMENT,
+        asset=asset_coordinate(study, rec.channel_index),
+        branch=branch,
+        coupling=study.coupling,
     )
     value, variate = study.channel_model.realize(
         truth,

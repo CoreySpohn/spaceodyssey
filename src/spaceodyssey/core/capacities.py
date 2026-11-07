@@ -7,6 +7,12 @@ import jax
 from spaceodyssey.core.enums import BIG, N_STAGES, N_TIES
 from spaceodyssey.core.events import _order_key_py
 
+# Field metadata that marks a declaration field as optional in a document: the
+# encoder omits it at its default and the loader fills it when missing. Only fields
+# added after the first document format carry it, so every older document keeps its
+# hash.
+OPTIONAL = {"optional": True}
+
 PEDIGREE_HEAD = 3  # audience, refit status, row count
 PEDIGREE_TRIPLE = 3  # channel, acquisition index, revision
 
@@ -60,6 +66,13 @@ class Capacities:
     max_micro: int = 8
     micro_guard: int = 6
     max_sid: int = 4096
+    # Slice 3a features. Each is off at its default, and a leaf that exists only for
+    # a feature has zero size (and leaves every history and fingerprint as they were)
+    # while the feature is off. They are optional document fields (`OPTIONAL`).
+    awards: bool = dataclasses.field(default=False, metadata=OPTIONAL)
+    refunds: bool = dataclasses.field(default=False, metadata=OPTIONAL)
+    n_commitments: int = dataclasses.field(default=0, metadata=OPTIONAL)
+    snapshot_balances: bool = dataclasses.field(default=False, metadata=OPTIONAL)
 
     @property
     def n_balance_rows(self) -> int:
@@ -92,6 +105,15 @@ class Capacities:
                 f"product_width {self.product_width} is below the pedigree width "
                 f"{need} that rows_per_subject {self.rows_per_subject} needs"
             )
+        n_commit = self.n_commitments
+        if isinstance(n_commit, bool) or not isinstance(n_commit, int) or n_commit < 0:
+            raise ValueError("n_commitments must be a nonnegative integer")
+        if not isinstance(self.awards, bool):
+            raise ValueError("awards must be a bool")
+        if not isinstance(self.refunds, bool):
+            raise ValueError("refunds must be a bool")
+        if not isinstance(self.snapshot_balances, bool):
+            raise ValueError("snapshot_balances must be a bool")
         if not self.n_an <= self.n_subjects:
             raise ValueError("n_an must not exceed n_subjects")
         largest = _order_key_py(

@@ -76,6 +76,44 @@ def is_version_field(cls, name):
     )
 
 
+def is_optional_field(field):
+    """Whether a dataclass field is optional in a document (`OPTIONAL` metadata).
+
+    The encoder omits an optional field at its default and the loader fills it when
+    it is missing, so a document written before the field existed keeps its hash.
+    The default must be a plain value (a bool, int, float, str, or a tuple of them),
+    so that "at its default" has one meaning.
+    """
+    return bool(field.metadata.get("optional"))
+
+
+def optional_default(field, cls=None):
+    """The default of an optional field; a registration error if it is not plain."""
+    default = field.default
+    if default is dataclasses.MISSING or not _plain(default):
+        raise RegistrationError(
+            f"optional field {field.name!r}"
+            f"{'' if cls is None else ' of ' + _name(cls)} needs a plain default"
+        )
+    return default
+
+
+def _plain(value):
+    if type(value) is tuple:
+        return all(map(_plain, value))
+    return type(value) in (bool, int, float, str)
+
+
+def at_default(field, value, cls=None):
+    """Whether `value` is the default of an optional field, in type and content."""
+    default = optional_default(field, cls)
+    if type(value) is not type(default):
+        return False
+    if type(value) is float:
+        return repr(value) == repr(default)
+    return value == default
+
+
 def declared_version(cls):
     """The default of a kind class's `version` field, or `None` if it has none.
 

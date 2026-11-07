@@ -4,9 +4,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from spaceodyssey.core.capacities import Capacities, require_x64
+from spaceodyssey.core.capacities import OPTIONAL, Capacities, require_x64
 from spaceodyssey.core.enums import F64, I64, LEVEL_EFFECTS
-from spaceodyssey.core.keys import DEFAULT_COUPLING, Coupling, Fork
+from spaceodyssey.core.keys import DEFAULT_COUPLING, KEY_VERSIONS, Coupling, Fork
 from spaceodyssey.core.kinds import (
     AbstractChannelModel,
     AbstractDesign,
@@ -90,6 +90,10 @@ class Study(eqx.Module):
     coupling: Coupling = eqx.field(default_factory=lambda: DEFAULT_COUPLING)
     fork: Fork = eqx.field(default_factory=Fork)
     refresh: RefreshSchedule = eqx.field(default_factory=RefreshSchedule)
+    # Version 1 gives every asset the asset-0 measurement key, which every history so
+    # far uses; version 2 keys a measurement draw by the asset of its channel
+    # (`keys.asset_coordinate`). An optional document field (`OPTIONAL`).
+    key_version: int = eqx.field(default=1, static=True, metadata=OPTIONAL)
 
     def __check_init__(self):
         """Validate precision, kinds, the observer's layout, refit and refresh.
@@ -99,6 +103,11 @@ class Study(eqx.Module):
         study refuses them.
         """
         require_x64()
+        version = self.key_version
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise ValueError(f"key_version must be one of {KEY_VERSIONS}")
+        if version not in KEY_VERSIONS:
+            raise ValueError(f"key_version must be one of {KEY_VERSIONS}")
         if not self.caps.payload_audience:
             raise ValueError(
                 "Study capacities have no registered record kinds; lower a registry "

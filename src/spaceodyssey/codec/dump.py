@@ -21,7 +21,12 @@ from spaceodyssey.codec.files import (
     make_store,
     using_store,
 )
-from spaceodyssey.codec.kinds import as_resolver, is_version_field
+from spaceodyssey.codec.kinds import (
+    as_resolver,
+    at_default,
+    is_optional_field,
+    is_version_field,
+)
 from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.study import Agenda, Study
 
@@ -135,6 +140,8 @@ def _encode_kind(value, path, table):
         if is_version_field(cls, field.name):
             continue
         item = getattr(value, field.name)
+        if is_optional_field(field) and at_default(field, item, cls):
+            continue
         if field.type is jax.Array and not isinstance(item, (jax.Array, np.ndarray)):
             raise DocumentError(
                 f"field {field.name!r} is annotated as an array but holds a "
