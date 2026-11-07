@@ -1,9 +1,9 @@
 {
- "cache": "warm: the JAX compile cache was restored from an earlier main commit (key prefix jax-Linux-py3.12-, saved at 031c074); the comparison it serves, the quick tier of ci.yml, restores the same way",
+ "cache": "cold: the Pilot quick_ref job runs the whole quick tier with no JAX compile cache, so every program compiles; the warm quick tier of ci.yml is compared against it, which can only be lenient",
  "commit": "97753d57564770664fca3b73c26840d0681dacf2",
- "run_id": "42325472621",
- "source": "CI run 42325472621, job 128259618434 (Quick tier, py3.12, ubuntu-latest) on the push of 97753d5, the last commit before the Slice 2b build; the junit testsuite time of that job (pytest: 1 failed, 1965 passed in 418.37 s)",
+ "run_id": "42402352841",
+ "source": "Pilot run 42402352841, job 128492675530 (Quick tier cold at 97753d5, py3.12, ubuntu-latest), the last commit before the Slice 2b build; quick-cold-summary wall (pytest: 1 failed, 1965 passed in 434.47 s)",
  "status": "provisional: the Slice 2 close-out quick-tier summary replaces it when that run exists",
  "tests": 1966,
- "wall_s": 418.37
+ "wall_s": 434.46
 }
