@@ -20,8 +20,10 @@ from spaceodyssey.core.conformance import (
     check_declared_margins,
     check_delayed_correction,
     check_derived_summary,
+    check_overlap_declared,
     check_promotion_parity,
     check_refit_calibration,
+    check_zero_weight_rows,
     declared_margin,
     t_quantile,
 )
@@ -35,6 +37,8 @@ from spaceodyssey.core.enums import RecordStatus
 from spaceodyssey.core.keys import refit_key
 from spaceodyssey.core.records import empty_log, log_records
 from spaceodyssey.core.refresh import revision_set_digest
+from spaceodyssey.studies.premission import PedigreeRule
+from spaceodyssey.studies.prior_observer import PriorObserver, prior_study
 from tests.core.kit_helpers import (
     NOISE,
     OBSERVERS,
@@ -46,6 +50,14 @@ from tests.core.kit_helpers import (
     kit_study,
     pit_of_mean,
 )
+from tests.core.prior_helpers import (
+    EXTERNAL,
+    ROWS,
+    IgnoresWeights,
+    RuleOff,
+    TableWide,
+)
+from tests.core.prior_helpers import table as prior_table
 
 STUDY = kit_study(OBSERVERS["mean"])
 
@@ -326,3 +338,76 @@ def test_the_correction_checks_refuse_what_they_cannot_judge(build, call, match)
     """
     with pytest.raises(ValueError, match=match):
         call(build(), None, None)
+
+
+# ---- observers that read imported priors (check 7 and the zero-weight extension) ---
+
+
+def _intersecting():
+    """The table with prior 6 also naming prior 4's external source."""
+    pedigree = list(ROWS["pedigree"])
+    pedigree[6] = ((0, 60, 1, 2, False), (*EXTERNAL, True))
+    return prior_table(edit={"pedigree": pedigree})
+
+
+@pytest.mark.parametrize("rule", list(PedigreeRule), ids=lambda r: r.name.lower())
+def test_the_prior_observer_passes_overlap_and_zero_weight_checks(rule):
+    """Fails if the prior observer's per-audience weights let a retained prior and
+    an evidence row of its pedigree both count, drop a row for evidence the audience
+    never receives, retain intersecting priors, or if a row of weight zero moves an
+    initial belief or a fold.
+    """
+    study = prior_study(prior_table(), rule)
+    result = check_overlap_declared(study)
+    assert result, result.diagnostic
+    assert result.detail["n_priors"] == 6  # three public priors, two audiences
+    zero = check_zero_weight_rows(study)
+    assert zero, zero.diagnostic
+
+
+@pytest.mark.parametrize(
+    ("observer", "build", "message"),
+    [
+        (RuleOff, prior_table, "both carry weight"),
+        (TableWide, prior_table, "names no evidence that audience receives"),
+        (PriorObserver, _intersecting, "intersecting pedigrees"),
+    ],
+    ids=["rule_off", "table_wide_weight", "intersecting_summaries"],
+)
+def test_overlap_declared_controls(observer, build, message):
+    """Fails if an observer with no overlap rule, one whose weights ignore the
+    audience, or one retaining two summaries of one source passes check 7.
+    """
+    t = build()
+    study = prior_study(t, PedigreeRule.EXCLUDE_PRIOR)
+    result = check_overlap_declared(study, observer=observer(table=t))
+    assert not result and message in result.diagnostic
+
+
+@pytest.mark.parametrize(
+    ("rule", "message"),
+    [
+        (PedigreeRule.EXCLUDE_PRIOR, "move the initial belief"),
+        (PedigreeRule.EXCLUDE_ROWS, "moves the belief when folded"),
+    ],
+    ids=lambda x: getattr(x, "name", "").lower() or None,
+)
+def test_zero_weight_rows_control_an_observer_that_ignores_weights(rule, message):
+    """Fails if an observer that reports the right weights but installs every prior
+    and folds every row passes the zero-weight check (check 7 cannot see it).
+    """
+    t = prior_table()
+    study = prior_study(t, rule)
+    ignores = IgnoresWeights(table=t, rule=int(rule))
+    assert check_overlap_declared(study, observer=ignores)
+    result = check_zero_weight_rows(study, observer=ignores)
+    assert not result and message in result.diagnostic
+
+
+def test_the_prior_checks_refuse_an_observer_that_reads_no_priors():
+    """Fails if check 7 or the zero-weight check judges an observer without
+    `reads_priors`.
+    """
+    for check in (check_overlap_declared, check_zero_weight_rows):
+        with pytest.raises(ValueError, match="reads_priors"):
+            check(STUDY)

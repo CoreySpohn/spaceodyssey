@@ -34,13 +34,26 @@ from spaceodyssey.studies.premission import (
     PAD,
     PREMISSION_KINDS,
     ImportDemand,
+    PedigreeRule,
     PreMissionImporter,
     PreMissionTable,
     authored_table,
     split_rows,
 )
+from spaceodyssey.studies.prior_observer import PRIOR_INDEX, PriorObserver, prior_study
 from tests.codec.test_document import TOY_KINDS, assert_same_pytree
 from tests.core.helpers import transition_j, worlds
+from tests.core.prior_helpers import (
+    EXTERNAL,
+    ROWS,
+    IgnoresPrior,
+    RuleOff,
+    TableWide,
+    expected,
+    imported_beliefs,
+    summaries,
+)
+from tests.core.prior_helpers import table as prior_table
 
 OBS, POL = int(Audience.OBSERVER), int(Audience.POLICY)
 MEAS = toy.RECORD_MEASUREMENT
@@ -468,7 +481,10 @@ def test_the_authored_helper_refuses_a_payload_of_another_row_count_or_rank():
 
 
 def _imported(study):
-    """The carry after every tick-0 import event, handled one by one, eagerly."""
+    """The carry after the tick-0 import events, handled one by one, eagerly.
+
+    Stops at the first event after tick 0 or of another kind (a refresh checkpoint).
+    """
     from spaceodyssey.core.events import select_next
     from spaceodyssey.core.handlers import h_process, h_release, h_wait
 
@@ -481,7 +497,7 @@ def _imported(study):
     c = core.init_carry(study, truth)
     while True:
         nxt, ev, has = select_next(c, study.caps)
-        if not bool(has) or int(ev.tick) > 0:
+        if not bool(has) or int(ev.tick) > 0 or int(ev.kind) not in handlers:
             return c
         c = handlers[int(ev.kind)](nxt, ev, study, truth, root)[0]
 
@@ -568,3 +584,222 @@ def test_an_empty_table_wider_than_a_record_agrees_in_preflight_and_the_run():
     for handle in (study.process.handle, eqx.filter_jit(study.process.handle)):
         _, rec = handle(c, row, study)
         assert not bool(rec.valid)
+
+
+# ---- priors: per-audience overlap and installation (R2, B2) ------------------------
+
+
+def _prior_carry(t, rule=PedigreeRule.EXCLUDE_PRIOR, observer=PriorObserver, run=False):
+    """The prior study of `t` and its beliefs after the tick-0 imports.
+
+    With `run`, the carry after handling the import events one by one; otherwise the
+    two beliefs folded directly from the imported rows (`imported_beliefs`), which
+    is faster and folds the same records.
+    """
+    study = prior_study(t, rule)
+    study = dataclasses.replace(study, observer=observer(table=t, rule=int(rule)))
+    if run:
+        return study, _imported(study)
+    return study, imported_beliefs(study.observer, study.caps)
+
+
+def _matches(c, t, rule, caps):
+    """Whether both beliefs equal the independent sufficient statistics."""
+    for belief, audience in ((c.belief, OBS), (c.pbelief, POL)):
+        mean, n, weight = expected(t, rule, audience, caps)
+        ok = np.allclose(np.asarray(belief.mean), mean, rtol=0, atol=1e-12)
+        ok &= np.array_equal(np.asarray(belief.n), n)
+        ok &= np.array_equal(np.asarray(belief.weight), weight)
+        if not ok:
+            return False
+    return True
+
+
+def test_a_disjoint_external_prior_changes_both_beliefs():
+    """B2 (a). Fails if a prior whose pedigree is entirely external leaves the
+    observer belief or the policy summary at the no-prior values, or if either
+    differs from prior plus rows. Control: an observer that ignores the installed
+    prior holds the no-prior beliefs.
+    """
+    with_prior, without = prior_table(pad=(5, 6)), prior_table(pad=(4, 5, 6))
+    study, c = _prior_carry(with_prior)
+    _, flat = _prior_carry(without)
+    caps = study.caps
+    assert _matches(c, with_prior, PedigreeRule.EXCLUDE_PRIOR, caps)
+    assert float(c.belief.mean[0]) == float(c.pbelief.mean[0]) == 6.0
+    for got, base in ((c.belief, flat.belief), (c.pbelief, flat.pbelief)):
+        assert float(got.mean[0]) != float(base.mean[0])
+        assert float(got.weight[0]) == 2.0 and float(base.weight[0]) == 0.0
+    _, ignored = _prior_carry(with_prior, observer=IgnoresPrior)
+    assert_same_pytree(ignored.belief, flat.belief)
+    assert_same_pytree(ignored.pbelief, flat.pbelief)
+    assert not _matches(ignored, with_prior, PedigreeRule.EXCLUDE_PRIOR, caps)
+
+
+@pytest.mark.parametrize("rule", list(PedigreeRule), ids=lambda r: r.name.lower())
+def test_exclusion_rules_match_independent_sufficient_statistics(rule):
+    """B2 (b), (c). Fails if either belief differs from the retained priors plus the
+    kept rows computed from the table alone; under EXCLUDE_PRIOR, if a subject whose
+    prior summarizes an imported row differs from the raw-only belief; under
+    EXCLUDE_ROWS, if the prior is not kept or a row it names is folded. Control: with
+    no rule both sides count and the statistics differ.
+    """
+    t = prior_table()
+    study, c = _prior_carry(t, rule)
+    caps = study.caps
+    assert _matches(c, t, rule, caps)
+    if rule == PedigreeRule.EXCLUDE_PRIOR:
+        _, raw = _prior_carry(prior_table(pad=(4, 5, 6)), rule)
+        assert float(c.belief.mean[1]) == float(raw.belief.mean[1]) == 3.0
+        assert float(c.pbelief.mean[1]) == float(raw.pbelief.mean[1]) == 4.0
+    else:
+        assert float(c.belief.mean[1]) == float(c.pbelief.mean[1]) == -5.0
+        assert int(c.belief.n[1]) == int(c.pbelief.n[1]) == 0
+    _, off = _prior_carry(t, rule, observer=RuleOff)
+    assert not _matches(off, t, rule, caps)
+    # the double count: the summary and both rows it summarizes or sits beside
+    assert float(off.belief.mean[1]) == pytest.approx((-5.0 + 2.0 + 4.0) / 3)
+
+
+def test_a_row_dropped_for_one_audience_is_still_folded_by_the_other():
+    """B2 (c), (d). Fails if a public raw row that only an observer-only prior names
+    is dropped for the policy, or folded by the observer under EXCLUDE_ROWS.
+    """
+    t = authored_table(
+        subject=[3, 3],
+        local_index=[0, 0],
+        channel=[60, 61],
+        kind=[MEAS, PRIOR_INDEX],
+        audience=[3, OBS],
+        payload=[[2.0, 0.0], [8.0, 1.0]],
+        pedigree=[(), ((0, 60, 3, 0, False),)],
+        width=1,
+    )
+    study, c = _prior_carry(t, PedigreeRule.EXCLUDE_ROWS)
+    assert _matches(c, t, PedigreeRule.EXCLUDE_ROWS, study.caps)
+    assert (float(c.belief.mean[3]), int(c.belief.n[3])) == (8.0, 0)
+    assert (float(c.pbelief.mean[3]), int(c.pbelief.n[3])) == (2.0, 1)
+
+
+def _without_hidden_row():
+    """The table with the observer-only row removed (its summary now external)."""
+    pedigree = list(ROWS["pedigree"])
+    pedigree[6] = ((0, 60, 1, 2, True),)
+    return prior_table(pad=(2,), edit={"pedigree": pedigree})
+
+
+def _policy_view(study, c):
+    view = snapshot_view(c, Audience.POLICY, study.caps)
+    layout = study.observer.layout(study.caps)
+    return written(view.log, int(view.n_rows)), int(snapshot_fingerprint(view, layout))
+
+
+@pytest.mark.medium  # two imports handled eagerly, event by event: about 6 s cold
+def test_overlap_observer_only_row_does_not_move_policy():
+    """K3, B2 (d). Fails if an observer-only raw row named by a public prior changes
+    the policy's weights, summary, released rows or snapshot fingerprint, or if it
+    does not make the observer drop that prior. Control: a table-wide weight drops
+    the prior for the policy too, and the policy summary moves.
+    """
+    hidden, shown = prior_table(), _without_hidden_row()
+    sa, ca = _prior_carry(hidden, run=True)
+    sb, cb = _prior_carry(shown, run=True)
+    caps = sa.caps
+    for audience in (OBS, POL):
+        wa = np.asarray(sa.observer.weights(caps, audience))
+        wb = np.asarray(sb.observer.weights(caps, audience))
+        same = np.delete(wa, 2) == np.delete(wb, 2)
+        assert same.all() if audience == POL else not same.all()
+    assert_same_pytree(ca.pbelief, cb.pbelief)
+    assert _policy_view(sa, ca) == _policy_view(sb, cb)
+    assert float(ca.belief.weight[2]) == 0.0 and float(cb.belief.weight[2]) == 3.0
+    assert float(ca.pbelief.weight[2]) == 3.0
+    _, wide = _prior_carry(hidden, observer=TableWide)
+    assert float(wide.pbelief.weight[2]) == 0.0
+    assert not np.array_equal(
+        np.asarray(wide.pbelief.mean), np.asarray(ca.pbelief.mean)
+    )
+
+
+@pytest.mark.parametrize("rule", list(PedigreeRule), ids=lambda r: r.name.lower())
+def test_overlap_permutation_invariant(rule):
+    """K3. Fails if permuting the table's rows changes a row's weight (moved with
+    it), the observer belief or the policy summary, bit for bit.
+    """
+    order = (6, 3, 0, 5, 2, 4, 1)
+    t, p = prior_table(), prior_table(order=order)
+    sa, ca = _prior_carry(t, rule)
+    sb, cb = _prior_carry(p, rule)
+    for audience in (OBS, POL):
+        wa = np.asarray(sa.observer.weights(sa.caps, audience))
+        wb = np.asarray(sb.observer.weights(sb.caps, audience))
+        assert np.array_equal(wa[list(order)], wb)
+    assert_same_pytree(ca.belief, cb.belief)
+    assert_same_pytree(ca.pbelief, cb.pbelief)
+
+
+def _three_priors(order):
+    """Three external priors of one subject whose sum depends on the order added."""
+    rows = dict(
+        subject=[3, 3, 3],
+        local_index=[0, 1, 2],
+        channel=[61, 61, 61],
+        kind=[PRIOR_INDEX] * 3,
+        audience=[3, 3, 3],
+        payload=[[0.1, 1.0], [0.2, 1.0], [0.3, 1.0]],
+        source_index=[0, 1, 2],
+        pedigree=[((*EXTERNAL[:3], k, True),) for k in (10, 11, 12)],
+    )
+    return authored_table(**{k: [v[i] for i in order] for k, v in rows.items()})
+
+
+def test_installed_priors_do_not_depend_on_the_row_order():
+    """K3. Fails if the installed prior of a subject with three priors depends on the
+    order of the table's rows, bit for bit: the values are chosen so that adding them
+    in another order rounds differently.
+    """
+    assert (0.1 + 0.2) + 0.3 != 0.1 + (0.2 + 0.3)
+    beliefs = set()
+    for order in ((0, 1, 2), (2, 1, 0), (1, 2, 0)):
+        study = prior_study(_three_priors(order))
+        belief = study.observer.init(study.caps)
+        beliefs.add((float(belief.mean[3]), float(belief.weight[3])))
+    assert len(beliefs) == 1
+
+
+def test_retained_priors_disjoint():
+    """K3, D008. Fails if two retained summaries of one datum are accepted (their
+    precisions would add), or if two disjoint summaries are refused or their
+    installed belief is not the sum of their sufficient statistics.
+    """
+    from spaceodyssey.core.preflight import preflight
+
+    same = prior_study(summaries(EXTERNAL))
+    found = preflight(same)
+    assert [(str(f.code), f.subject, f.member, f.entry) for f in found] == [
+        ("D008", "observer", "table.pedigree.source_index", (1, 0))
+    ]
+    # what D008 refuses: both installed, the one datum counts twice
+    assert float(same.observer.init(same.caps).weight[0]) == 4.0
+    disjoint = prior_study(summaries((7, 90, 0, 1)))
+    assert preflight(disjoint) == []
+    for belief in (
+        disjoint.observer.init(disjoint.caps),
+        disjoint.observer.init_summary(disjoint.caps),
+    ):
+        assert float(belief.weight[0]) == 4.0 and float(belief.mean[0]) == 2.0
+
+
+def test_the_observer_and_the_importer_hold_one_table():
+    """Fails if a prior observer that resolves overlap on another table than the one
+    the process imports passes pre-flight (its evidence would not be the run's).
+    """
+    from spaceodyssey.core.preflight import preflight
+
+    study = prior_study(prior_table())
+    assert preflight(study) == []
+    other = dataclasses.replace(study.observer, table=prior_table(pad=(2,)))
+    found = preflight(dataclasses.replace(study, observer=other))
+    assert [(str(f.code), f.subject, f.member) for f in found] == [
+        ("D006", "observer", "table")
+    ]
