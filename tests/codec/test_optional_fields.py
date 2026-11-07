@@ -9,6 +9,7 @@ document. The corpus hashes themselves are pinned in `test_run_document_runs.py`
 import dataclasses
 import json
 
+import jax.numpy as jnp
 import pytest
 
 from spaceodyssey.codec import DocumentError, dump_study, load_study
@@ -23,6 +24,8 @@ from spaceodyssey.codec.kinds import (
     optional_default,
 )
 from spaceodyssey.core.capacities import Capacities
+from spaceodyssey.core.enums import I64, ChargePricing
+from spaceodyssey.core.ledger import ChannelTable
 from spaceodyssey.core.snapshot import EffectTable, effects_none
 from spaceodyssey.core.study import Study
 from spaceodyssey.studies import toy
@@ -31,6 +34,7 @@ from tests.codec.test_document import TOY_KINDS, assert_same_pytree
 
 CAP_FIELDS = ("awards", "refunds", "n_commitments", "snapshot_balances")
 STUDY_FIELDS = ("key_version",)
+CHANNEL_FIELDS = ("pricing", "surcharge", "failure_kind", "refund_deadline_ticks")
 
 
 def _text(study):
@@ -47,7 +51,7 @@ def test_the_optional_fields_are_the_ones_slice_3a_added():
     """Fails if a field gains or loses the marker: it would move every document."""
     marked = {
         (cls.__name__, f.name)
-        for cls in (Capacities, Study, EffectTable)
+        for cls in (Capacities, Study, EffectTable, ChannelTable)
         for f in dataclasses.fields(cls)
         if is_optional_field(f)
     }
@@ -55,6 +59,7 @@ def test_the_optional_fields_are_the_ones_slice_3a_added():
         {("Capacities", n) for n in CAP_FIELDS}
         | {("Study", n) for n in STUDY_FIELDS}
         | {("EffectTable", "program")}
+        | {("ChannelTable", n) for n in CHANNEL_FIELDS}
     )
 
 
@@ -64,6 +69,7 @@ def test_the_encoder_omits_every_optional_field_at_its_default():
     assert not set(STUDY_FIELDS) & set(doc["study"])
     assert not set(CAP_FIELDS) & set(doc["study"]["caps"])
     assert "n_programs" in doc["study"]["caps"]  # a field with a default, not optional
+    assert not set(CHANNEL_FIELDS) & set(doc["study"]["channels"])
 
 
 def test_no_corpus_document_holds_an_optional_field():
@@ -72,6 +78,7 @@ def test_no_corpus_document_holds_an_optional_field():
         doc = _doc(case.make_study())
         assert not set(STUDY_FIELDS) & set(doc["study"]), case.name
         assert not set(CAP_FIELDS) & set(doc["study"]["caps"]), case.name
+        assert not set(CHANNEL_FIELDS) & set(doc["study"]["channels"]), case.name
 
 
 def test_a_nondefault_optional_field_is_written_and_round_trips():
@@ -267,3 +274,46 @@ def test_a_populated_program_column_round_trips():
     assert "program" in node
     built = load_module.decode(node, ("effects",), as_resolver(None))
     assert_same_pytree(eff, built)
+
+
+def _refund_channel_study():
+    study = toy.survey_1(caps=dataclasses.replace(Capacities(), refunds=True))
+    n, r = study.channels.cost.shape
+    channels = dataclasses.replace(
+        study.channels,
+        pricing=jnp.full((n, r), int(ChargePricing.SURCHARGE), I64),
+        surcharge=jnp.full((n, r), 2.0),
+        failure_kind=jnp.asarray([-1, -1, 2], I64),
+        refund_deadline_ticks=jnp.asarray([0, 0, 50], I64),
+    )
+    return dataclasses.replace(study, channels=channels)
+
+
+def test_a_channel_refund_declaration_is_written_and_round_trips():
+    """Fails if a pricing, surcharge, failure kind or deadline is dropped."""
+    study = _refund_channel_study()
+    doc = _doc(study)
+    assert set(CHANNEL_FIELDS) <= set(doc["study"]["channels"])
+    text = _text(study)
+    loaded = load_study(text, TOY_KINDS)
+    assert_same_pytree(study, loaded)
+    assert _text(loaded) == text
+
+
+def test_a_document_from_before_the_refund_columns_keeps_its_hash():
+    """Fails if a default channel table starts writing a column: every hash moves."""
+    study = toy.survey_1()
+    before = json.loads(_text(study))["content_hash"]
+    loaded = load_study(json.dumps(_doc(study)), TOY_KINDS)
+    assert json.loads(_text(loaded))["content_hash"] == before
+    assert loaded.channels.pricing is None
+    assert loaded.channels.failure_kind is None
+
+
+@pytest.mark.parametrize("name", CHANNEL_FIELDS)
+def test_a_refund_column_written_as_null_is_refused(name):
+    """Fails if an explicit null loads: the omitted form is the only default."""
+    doc = _doc(_refund_channel_study())
+    doc["study"]["channels"][name] = None
+    with pytest.raises(DocumentError):
+        load_study(json.dumps(doc), TOY_KINDS)

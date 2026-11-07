@@ -27,6 +27,7 @@ from spaceodyssey.core.enums import AdmissionCode as AdmissionCode
 from spaceodyssey.core.enums import Audience as Audience
 from spaceodyssey.core.enums import B as B
 from spaceodyssey.core.enums import Capacity as Capacity
+from spaceodyssey.core.enums import ChargePricing as ChargePricing
 from spaceodyssey.core.enums import ChargeRule as ChargeRule
 from spaceodyssey.core.enums import CoincidentOrder as CoincidentOrder
 from spaceodyssey.core.enums import Disposition as Disposition

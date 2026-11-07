@@ -16,7 +16,12 @@ from spaceodyssey.core.executors.base import (
     belief_leaves,
 )
 from spaceodyssey.core.keys import fold_key
-from spaceodyssey.core.records import LOG_INT_FIELDS, Record, masked_record
+from spaceodyssey.core.records import (
+    LOG_INT_FIELDS,
+    REFUND_COLUMNS,
+    Record,
+    masked_record,
+)
 from spaceodyssey.core.refresh import refresh_enabled
 from spaceodyssey.core.snapshot import named_leaves
 
@@ -33,6 +38,9 @@ def _row(log, i):
     fields["valid"] = jnp.asarray(True)
     if log.program is not None:
         fields["program"] = jnp.asarray(log.program[i])
+    for n in REFUND_COLUMNS:
+        if getattr(log, n) is not None:
+            fields[n] = jnp.asarray(getattr(log, n)[i])
     return Record(**fields)  # the full row; callers mask it for their audience
 
 

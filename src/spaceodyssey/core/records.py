@@ -167,12 +167,22 @@ def payload_columns(caps, kind, audience):
     return ((row & int(audience)) != 0) & known[..., None]
 
 
+def hide_refund_of(refund_of):
+    """`refund_of` as a view shows it: the legacy -1 where a row names no origin.
+
+    The column holds -1 on every legacy row, so a value of zero or more is an internal
+    acquisition id a refund resolved. It is queue-derived and never shown.
+    """
+    return jnp.where(refund_of >= 0, -1, refund_of)
+
+
 def masked_record(rec, caps, audience):
     """Hide queue-derived identities and payload columns the audience cannot read."""
     keep = payload_columns(caps, rec.kind, audience)
     out = dataclasses.replace(
         rec,
         acquisition_id=jnp.zeros_like(rec.acquisition_id),
+        refund_of=hide_refund_of(rec.refund_of) if caps.refunds else rec.refund_of,
         payload=jnp.where(keep, rec.payload, 0.0),
     )
     if rec.program is not None and audience != Audience.POLICY:
@@ -212,6 +222,13 @@ class Record(eqx.Module):
     # The program the acquisition was charged under; absent (None, no leaf) unless the
     # capacities hold more than one program, so a study with one is unchanged.
     program: jax.Array | None = None
+    # Refund columns, absent (None, no leaf) unless the capacities hold refunds: the
+    # fixed part of the charge, the semantic acquisition index a failure receipt names
+    # (visible; `refund_of` holds the internal id the handler resolves it to), and the
+    # window generation of the payer row at debit.
+    nonrefundable: jax.Array | None = None  # F64[R]
+    refund_index: jax.Array | None = None
+    award_gen: jax.Array | None = None
 
 
 def record_none(caps):
@@ -225,6 +242,15 @@ def record_none(caps):
         payload=jnp.zeros(caps.payload_width, F64),
         valid=jnp.asarray(False),
         program=z if caps.n_programs > 1 else None,
+        **(
+            dict(
+                nonrefundable=jnp.zeros(caps.n_resources, F64),
+                refund_index=z,
+                award_gen=z,
+            )
+            if caps.refunds
+            else {}
+        ),
     )
 
 
@@ -257,6 +283,10 @@ class RecordLog(eqx.Module):
     payload: jax.Array  # F64[L, P]
     valid: jax.Array
     program: jax.Array | None  # I64[L], present only with more than one program
+    # the refund columns of `Record`, present only while refunds are on
+    nonrefundable: jax.Array | None  # F64[L, R]
+    refund_index: jax.Array | None
+    award_gen: jax.Array | None
     # Pedigree of a product row, I64[L, product_width]: audience, refit status, row
     # count and the revision set as (channel, acquisition index, revision) triples. It
     # is not a `Record` field: only a refresh writes it; every other row holds zeros.
@@ -278,6 +308,9 @@ def log_columns(log):
     return {n: v for n, v in log.__dict__.items() if v is not None}
 
 
+REFUND_COLUMNS = ("nonrefundable", "refund_index", "award_gen")
+
+
 def empty_log(caps):
     """Return an empty fixed-capacity record log."""
     z = jnp.zeros(caps.n_log, I64)
@@ -289,6 +322,11 @@ def empty_log(caps):
         payload=jnp.zeros((caps.n_log, caps.payload_width), F64),
         valid=jnp.zeros(caps.n_log, B),
         program=z if caps.n_programs > 1 else None,
+        nonrefundable=jnp.zeros((caps.n_log, caps.n_resources), F64)
+        if caps.refunds
+        else None,
+        refund_index=z if caps.refunds else None,
+        award_gen=z if caps.refunds else None,
         product=jnp.zeros((caps.n_log, caps.product_width), I64),
     )
 
@@ -319,6 +357,13 @@ def write_log(carry, rec, caps):
     col = carry.log.program
     if col is not None:
         col = col.at[s].set(jnp.where(ok, rec.program, col[s]))
+    for name in REFUND_COLUMNS:
+        old = getattr(carry.log, name)
+        cols[name] = (
+            None
+            if old is None
+            else old.at[s].set(jnp.where(ok, getattr(rec, name), old[s]))
+        )
     log = RecordLog(**cols, program=col, product=carry.log.product)
     out = eqx.tree_at(
         lambda c: (c.log, c.n_log, c.overflow, c.overflow_mask),
@@ -402,13 +447,18 @@ def pedigree_of(log, slot):
     return audience, status, triples
 
 
+_NOT_INT = (
+    "cost",
+    "charged",
+    "payload",
+    "valid",
+    "product",
+    "program",
+    *REFUND_COLUMNS,
+)
 RECORD_INT_FIELDS = tuple(
-    f.name
-    for f in dataclasses.fields(Record)
-    if f.name not in ("cost", "charged", "payload", "valid", "product", "program")
+    f.name for f in dataclasses.fields(Record) if f.name not in _NOT_INT
 )
 LOG_INT_FIELDS = tuple(
-    f.name
-    for f in dataclasses.fields(RecordLog)
-    if f.name not in ("cost", "charged", "payload", "valid", "product", "program")
+    f.name for f in dataclasses.fields(RecordLog) if f.name not in _NOT_INT
 )

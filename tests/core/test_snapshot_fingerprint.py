@@ -153,7 +153,10 @@ def test_an_empty_leaf_moves_the_fingerprint(monkeypatch):
     layout = study.observer.layout(study.caps)
     names = (*snapshot.LOG_INT_FIELDS, "valid", "product")
     log = types.SimpleNamespace(
-        program=view.log.program, **{n: getattr(view.log, n) for n in names}
+        program=view.log.program,
+        refund_index=view.log.refund_index,
+        award_gen=view.log.award_gen,
+        **{n: getattr(view.log, n) for n in names},
     )
     shim = types.SimpleNamespace(
         log=log,

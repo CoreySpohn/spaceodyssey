@@ -120,6 +120,15 @@ class ChargeRule(IntEnum):
     RECEIPT = 0
 
 
+class ChargePricing(IntEnum):
+    """How a channel's charge is built and credited, per resource column."""
+
+    OCCUPANCY = 0  # the declared charge, credited by the unspent fraction on a cancel
+    STATISTICAL = 1  # a declared fraction of cost (set in `charge`), credited likewise
+    FLAT_FRACTION = 2  # nothing credited on a cancel; refundable on a failure
+    SURCHARGE = 3  # the charge plus a fixed amount that is never returned
+
+
 class RemainderRule(IntEnum):
     """What happens to an unspent balance at the end of its window (reserved)."""
 
