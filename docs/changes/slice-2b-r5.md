@@ -287,7 +287,7 @@ executor and the survey's runs (four variants, both executors).
 ### Mutants
 
 Each mutant was applied to a copy of `src/` and the test file run against it
-(`$TMPDIR` script, not committed). All 12 are killed.
+(`$TMPDIR` script, not committed). All 13 are killed.
 
 | Mutant | Where | Failing tests |
 |---|---|---|
@@ -303,6 +303,7 @@ Each mutant was applied to a copy of `src/` and the test file run against it
 | s10 the zero-information rows keep kind and payload | `survey_4.zero_information` | (b) and (c) |
 | s11 the export widens the audience to both | `precursor._table` | (b) and (c) |
 | s12 offsets from tick 0, not the upstream horizon | `precursor._table` | guard, (a) |
+| s13 `zero_information` pads every row (no import at all) | `survey_4.zero_information` | (b) and (c) (review round 1) |
 
 s4 was first applied to the write-side check (`FileStore._intact`), where it is
 inert; applied to the read-side check it is killed. s8 first survived: with two
@@ -352,3 +353,16 @@ the observer-only variant, whose counts are unequal (4 and 2).
   `tests/test_internal_refs_guard.py`: 201 passed in 63.4 s.
 - `ruff check`, `ruff format --check`, `tools/check_internal_refs.py` and `pre-commit`
   on the touched files: clean. Every touched file is ASCII.
+
+## Review round 1 (survey 4)
+
+The review reproduced s1, s5 and s8, confirmed the guard runs no executor, and found
+one P2: the zero-information control compared projections only, so a
+`zero_information` that imported nothing (the `without_precursor` table) passed.
+Test (b) and (c) now first requires, in every world and on both executors, the two
+imported auxiliary rows on the precursor channel, public, with `released_tick` and
+`accepted_tick` at 0. Mutant s13 (`zero_information` returns the padded table) is
+killed by it; s10 still is. Checks rerun: `test_survey_4.py` with
+`tests/core/test_lints.py` and `tests/test_internal_refs_guard.py`, 195 passed in
+23.1 s; ruff and `pre-commit` on the touched files clean. No source file changed, so
+the golden and quick-tier results above stand.
