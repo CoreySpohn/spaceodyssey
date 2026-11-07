@@ -18,7 +18,9 @@ section, no `schema_version` change and no migration, and no pinned hash moved.
 2. `feat(studies): export a precursor table from an upstream run, at the latest revision released to the audience` (`7b433b9`)
 3. `feat(studies): verify_lineage checks a document's tables, their files and declared upstream hash (D004)` (`b3f5a05`)
 4. `fix(studies): the subject map selects exported subjects, so one subject of a shared channel can be exported` (`0c94a4b`)
-5. this record
+5. this record (`81661a1`)
+6. review round 1 fixes: `f633669`, `79636d2`, `0f9a67e`, `9d5550e`, `8e5bfe8`, and
+   this record's update (see "Review round 1")
 
 ## What changed
 
@@ -61,21 +63,24 @@ producer_map, epoch="end_at_zero", *, study, namespace=1)`:
   written as zero, so a scorer-only column never leaves the run.
 - Source identity: `(namespace, upstream channel, downstream subject, upstream
   acquisition index)` with the exported revision; `local_index` is the upstream
-  acquisition index (the R0a rule); `channel` is `producer_map[upstream channel]`.
+  acquisition index (the R0a rule), unique per downstream channel and subject (D006,
+  review round 1); `channel` is `producer_map[upstream channel]`.
   Rows are ordered by (channel, subject, acquisition index); there is no pedigree
   (width 1, `n_pedigree` 0); `upstream_hash` is the declared hash.
 - Refused (`ValueError`): a derived kind, an epoch other than `end_at_zero`, an
   audience other than 1, 2 or 3, an empty upstream hash, namespace 0, two rows with
-  one local index on one downstream channel, a batched log; `TypeError` for an object
-  that holds no record log.
+  one local index for one downstream subject and channel, a batched log; `TypeError`
+  for an object that holds no record log.
 
 ### Lineage as built
 
 `verify_lineage(document, upstream_document=None, *, expected=None, files=None,
 max_file_bytes=...)` returns a `LineageReport` and never raises on document content:
 
-- The document is read with `read_document` (a stale stored `content_hash` is `L001`
-  at `/content_hash`). Every `PreMissionTable` node in the study (the importer's and,
+- The document is read with `read_document`: a document that does not parse (also an
+  over-long integer or deep nesting), a wrong envelope or format, or a schema version
+  this loader does not read fails before any table is read (`L001`, `D002`); a stale
+  stored `content_hash` is `L001` at `/content_hash`. Every `PreMissionTable` node in the study (the importer's and,
   in a prior study, the observer's copy) is decoded as the loader decodes it, with the
   file store, so every file reference is checked at its pointer. A failure is a
   finding with the loader's code (`L001`, or `D001` for an unknown kind version).
@@ -93,8 +98,11 @@ max_file_bytes=...)` returns a `LineageReport` and never raises on document cont
 
 ### File references
 
-Unchanged codec behavior, now pinned for the table and through both new paths: a file
-name is `<sha256>.bin` and nothing else, so a relative path (`../x.bin`) and an
+Pinned for the table and through both new paths: the files directory is opened one
+path component at a time from the root without following a symbolic link, except one
+owned by root (macOS's `/tmp` and `/var`), so a directory or parent replaced by a link
+is refused at the reference's `.../file/name` (review round 1). A file name is
+`<sha256>.bin` and nothing else, so a relative path (`../x.bin`) and an
 absolute path are refused at `.../file/name` before any file is opened; a symlink
 (even to a file of the right bytes outside the directory) is refused by `O_NOFOLLOW`;
 a missing file is refused at `.../file/name`; a digest mismatch, including the same
@@ -180,8 +188,7 @@ the quick tier. No core file changed.
    is refused (an exported prior would have no pedigree).
 7. **Both maps select.** Rows on channels outside `producer_map` or of subjects outside
    `subject_map` are not exported. The subject map selected nothing at first (an
-   unmapped subject raised); it selects since commit 4, so one subject of a shared
-   channel can be exported (see the open point below).
+   unmapped subject raised); it selects since commit 4.
 8. **`verify_lineage` decodes each table with the loader** instead of reading the JSON,
    so a file reference is checked exactly as `load_study` checks it, at the same
    pointer, and a table node that does not decode is a finding with the loader's code.
@@ -206,21 +213,93 @@ the quick tier. No core file changed.
 
 ## Spec points not satisfied, and open points
 
-- **The local index rule and D006 conflict for a shared channel.** The core counts
-  acquisition indices per subject (the first measurement of every subject is index
-  0), while R0a fixes `local_index` to the upstream acquisition index and D006
-  requires it unique per channel. Exporting a toy survey's measurements of several
-  subjects to one channel is therefore refused (`ValueError`); one subject per
-  downstream channel works (checked on a real toy run: subject 0's three rows export
-  with offsets -990, -730 and -470). Fixing this is a contract change, not an R3
-  choice: either D006 becomes unique per (channel, subject), which also needs the
-  prior observer's raw-row lookup (by channel and local index, in
-  `studies/prior_observer.py`) to add the subject, or the exporter writes a frozen
-  injective index such as `acquisition_index * n_subjects + subject`. R5 (survey 4)
-  needs one of the two, or a precursor of one subject per channel.
+- The conflict between the local index rule and a per-channel D006 is resolved by
+  the integration owner (review round 1, item 5).
 - `load_run` takes no upstream document; D004 through JSON is reached with
   `preflight_document(..., upstream=)`, which `load_run` does not call with one.
 - Survey 4's paired-difference, correction and tamper checks on a real run are R5's;
   R3's export tests use a synthetic record log of one world (the export reads only the
   log, so a `RunResult`, `Carry` or `RecordLog` are read alike).
-- The review rounds (tier 2) are not run here.
+- The writing side of the file store (`FileStore.put`) still creates the directory
+  and its files through the path; review round 1 concerned the reader.
+- Review round 2 (scoped) and the full suite are the coordinator's.
+
+## Review round 1
+
+The tier-2 review (Codex) returned "fix first" with one P1, three P2s and the open
+local index conflict. It confirmed revision selection, strict audience masking, horizon
+offsets, canonical hashing and the checked replacement of files. Each fix has a test
+that failed before it.
+
+1. **P1: a symlinked directory bypassed file containment** (`codec/files.py`). The
+   directory was opened by its path, so `O_NOFOLLOW` protected only the file: with the
+   document's directory or a parent replaced by a link to an outside copy, `load_study`
+   loaded, pre-flight found nothing and the lineage was verified. `open_directory`
+   now opens the path one component at a time from the root with
+   `O_NOFOLLOW | O_DIRECTORY`, following only a root-owned link (a system link no
+   user can plant; a `..` in it, or more than 40 links, is refused), and the file is
+   opened relative to that descriptor. The refusal is `L001` at the reference's
+   `/name` on all three paths. `_require_safe_open` also requires `dir_fd` support in
+   `os.stat` and `os.readlink`. Test:
+   `test_a_files_directory_reached_through_a_symlink_is_refused` (parent, directory).
+2. **P2: an array `upstream_hash` crashed the lineage check.** It decoded, then raised
+   `ValueError` in `lineage_findings`. The field now has a converter that accepts only
+   a string, so the loader refuses anything else at
+   `/study/process/table/upstream_hash` on every path (load, pre-flight, lineage).
+   Test case `hash_array`.
+3. **P2: parser and depth failures escaped.** A 4,500-digit integer raised a plain
+   `ValueError` and 1,100 nested arrays a `RecursionError`. `parse_text` now turns
+   both into `DocumentError` (so `load_study` and the pre-flight report them),
+   `_parsed` does the same for a parsed object, and `read_upstream`,
+   `read_document` and the table walk of `verify_lineage` catch depth failures. Test
+   cases `digits` and `deep`; `load_study` must raise `DocumentError` for both.
+4. **P2: the envelope and schema were not checked by the lineage path.** With the
+   stored hash removed, format `bogus` or schema version 999 was `verified`.
+   `read_document` now checks the envelope and schema version first and returns no
+   data when either is wrong, so no table is interpreted. Test cases `format`, `schema`.
+5. **The local index conflict: the integration owner's choice, option (a).** D006 is
+   now unique per (channel, subject, local index), as the core's acquisition index is
+   counted per subject. `SourceId` and the upstream acquisition indices are unchanged.
+   The exporter's clash check includes the downstream subject. The one allowed
+   `studies/prior_observer.py` edit adds `table.source.subject == rec.subject` to the
+   raw-row lookup (`_dropped`), so one subject's excluded row cannot suppress
+   another's. Replay and fold keys already include the subject; no pin, document hash
+   or schema version moved. The seeded `D006` fixture (`import_study("index")`) now
+   repeats an index for one subject. Tests:
+   `test_two_subjects_sharing_a_local_index_keep_their_own_weights` (folded and
+   handled event by event), `test_two_subjects_sharing_a_local_index_fold_refit_and_replay_apart`
+   (host run of the refresh study, both audiences' folds and refits, keyed replay),
+   `test_two_subjects_of_one_channel_export_with_one_local_index` and
+   `test_a_toy_survey_channel_of_several_subjects_exports_to_one_channel` (a real
+   toy survey run, two subjects each from index 0, exported to channel 60 and imported
+   with no pre-flight finding).
+
+Tests added or changed in this round (cold, each alone, caches off, wall time with
+imports):
+
+| Test | Tier | Cold s | Mutant it kills |
+|---|---|---|---|
+| `test_premission_codec.py::test_a_files_directory_reached_through_a_symlink_is_refused` (2) | unit | 2.8, 2.6 | directory opened by path (R1); any user's link followed (R2) |
+| `::test_the_lineage_check_never_raises_on_a_broken_document` (10, 5 new) | unit | 2.6 to 2.9 | long integers escape the parser (R3); deep nesting escapes the parser (R4); envelope not checked (R5); `upstream_hash` of any type (R6) |
+| `::test_two_subjects_of_one_channel_export_with_one_local_index` | unit | 2.8 | D006 per channel only (R7); export clash per channel only (R9) |
+| `::test_a_toy_survey_channel_of_several_subjects_exports_to_one_channel` | medium | 8.5 | R7, R9 |
+| `::test_export_refuses_what_it_cannot_write` (changed: the clash is one downstream subject) | unit | 2.8 | export clash never refused (R10) |
+| `test_premission.py::test_two_subjects_sharing_a_local_index_keep_their_own_weights` (2) | unit | 3.4, 4.8 | R7; lookup ignores the subject (R8) |
+| `test_premission_refit.py::test_two_subjects_sharing_a_local_index_fold_refit_and_replay_apart` | medium | 13.7 | R7, R8 |
+
+All ten mutants are killed. R4 first survived (`_parsed` also catches depth), so the
+test now also requires `load_study` to raise `DocumentError` (`9d5550e`). The handled
+node of the shared-index unit test is 4.8 s cold, close to the 5 s unit budget.
+
+Checks rerun:
+
+- `tests/core/test_golden_histories.py` with `tests/codec/test_run_document_runs.py`
+  at `8e5bfe8`: 189 passed in 190.1 s; `git diff be2e439 --
+  tests/core/golden_pin.json tests/codec/hash_pin.json` is empty.
+- Quick tier (`-m "not slow" -n 2 --dist loadfile`, entry-point test deselected) at
+  `8e5bfe8`: 2,109 passed in 197.3 s, no budget violation.
+- The codec, premission, prior and refit files (`tests/codec` without the slow tier,
+  `test_premission.py`, `test_premission_refit.py`, `test_observer_kit.py`,
+  `test_preflight.py`, `test_lints.py`): 685 passed.
+- `ruff check`, `ruff format --check`, `tools/check_internal_refs.py` and
+  `pre-commit run` on every touched file: clean.
