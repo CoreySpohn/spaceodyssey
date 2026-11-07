@@ -59,6 +59,7 @@ from spaceodyssey.codec.document import (
     RunDocument,
     StudyDocument,
     canonical_json,
+    check_integers,
     check_schema_version,
     int_too_long,
     parse_text,
@@ -305,26 +306,17 @@ def _parsed(document):
     """The document as a JSON object, validated as the loader validates it.
 
     Text goes through the loader's parser: malformed JSON, a repeated key and a
-    non-finite number are refused with a pointer. A `StudyDocument` is read as it is,
-    as `load_study` reads it, with no stored hash. A parsed object is copied, and a
+    non-finite number are refused with a pointer. A `StudyDocument` (or `RunDocument`)
+    is read as it is, with no stored hash; only an integer too long to write is
+    refused there (`check_integers`). A parsed object is copied, and a
     value JSON cannot hold (a set, a non-string key, a non-finite number) is refused
     with a pointer.
     """
-    if isinstance(document, RunDocument):
-        return {
-            "format": RUN_FORMAT,
-            "schema_version": document.schema_version,
-            "study": document.study,
-            "run": document.run,
-            "records": document.records,
-        }
-    if isinstance(document, StudyDocument):
-        return {
-            "format": FORMAT,
-            "schema_version": document.schema_version,
-            "study": document.study,
-        }
     try:
+        if isinstance(document, StudyDocument):  # a RunDocument too
+            data = document.body()
+            check_integers(data)
+            return data
         data = parse_text(document) if isinstance(document, str) else _json(document)
     except RecursionError:
         raise DocumentError("the document nests too deeply to read", "") from None

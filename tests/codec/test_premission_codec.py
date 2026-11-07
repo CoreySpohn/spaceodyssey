@@ -763,21 +763,25 @@ def test_the_lineage_check_never_raises_on_a_broken_document(tmp_path, how):
             load_study(text, RESOLVER, files=tmp_path)
 
 
-@pytest.mark.parametrize("where", ["schema", "study"])
+@pytest.mark.parametrize("where", ["schema", "study", "kind"])
 def test_a_parsed_document_holding_a_huge_integer_is_a_finding(tmp_path, where):
-    """Fails if a parsed document whose schema version, or a value in its study (with
-    a stored hash), is an integer too long to write raises from the lineage check,
-    the pre-flight or `read_upstream`, instead of an `L001` finding at its pointer;
-    or if the same value in a document object raises anything but a finding or a
-    `DocumentError` at its pointer.
+    """Fails if a parsed document whose schema version, a value in its study (with a
+    stored hash) or a table's kind version is an integer too long to write raises
+    from the lineage check, the pre-flight or `read_upstream`, instead of an `L001`
+    finding at its pointer; or if the same value in a document object raises anything
+    but a finding or a `DocumentError` at its pointer from hashing, the lineage check,
+    the pre-flight or `load_study`.
     """
     data = json.loads(_exported(tmp_path))
     if where == "schema":
         data = {"format": data["format"], "schema_version": 10**4499, "study": {}}
         where_ = "/schema_version"
-    else:
+    elif where == "study":
         data["study"]["horizon_tick"]["data"] = 10**4499
         where_ = "/study/horizon_tick/data"
+    else:
+        data["study"]["process"]["table"]["$kind"][2] = 10**4499
+        where_ = "/study/process/table/$kind/2"
     report = verify_lineage(data, UPSTREAM, files=tmp_path)
     assert report.status == "failed"
     assert ("L001", where_) in {(str(f.code), f.pointer) for f in report.findings}
@@ -785,14 +789,49 @@ def test_a_parsed_document_holding_a_huge_integer_is_a_finding(tmp_path, where):
     assert ("L001", where_) in {(str(f.code), f.pointer) for f in found}
     read = read_upstream(data)
     assert read.content_hash is None and where_ in read.problem
-    # the same value in a document object: refused when hashed, never a ValueError
+    # the same value in a document object: a finding or a DocumentError, never a
+    # ValueError, on every entry
     if where == "schema":
         doc = StudyDocument(study={}, schema_version=10**4499)
-        report = verify_lineage(doc, UPSTREAM)
-        assert [(str(f.code), f.pointer) for f in report.findings] == [
-            ("D002", "/schema_version")
-        ]
+        expected = ("L001", where_)
     else:
+        doc = StudyDocument(study=data["study"])
+        expected = ("L001", where_)
         with pytest.raises(DocumentError) as info:
-            StudyDocument(study=data["study"]).canonical_bytes()
+            doc.canonical_bytes()
         assert info.value.pointer == where_
+    report = verify_lineage(doc, UPSTREAM, files=tmp_path)
+    assert report.status == "failed"
+    assert expected in {(str(f.code), f.pointer) for f in report.findings}
+    found = preflight_document(doc, RESOLVER, files=tmp_path, upstream=UPSTREAM)
+    assert expected in {(str(f.code), f.pointer) for f in found}
+    with pytest.raises(DocumentError) as info:
+        load_study(doc, RESOLVER, files=tmp_path)
+    assert info.value.pointer == where_
+
+
+@pytest.mark.parametrize("how", ["file", "zero"])
+def test_an_oversize_shape_is_refused_at_its_pointer(tmp_path, how):
+    """Fails if an array whose shape no array can hold ([10**3000, 10**3000] on a
+    file reference, or [0, 10**3000] with no data), in a document with a correct
+    hash, raises anything but `L001` at the shape's pointer from the lineage check
+    or the pre-flight, or anything but a `DocumentError` there from `load_study`.
+    """
+    data = json.loads(_exported(tmp_path))
+    node = data["study"]["process"]["table"]["payload"]
+    if how == "file":
+        node["shape"] = [10**3000, 10**3000]
+    else:
+        node.pop("file")
+        node["shape"] = [0, 10**3000]
+        node["data"] = []
+    text = StudyDocument(study=data["study"]).to_json()
+    where = "/study/process/table/payload/shape"
+    report = verify_lineage(text, UPSTREAM, files=tmp_path)
+    assert report.status == "failed"
+    assert [(str(f.code), f.pointer) for f in report.findings] == [("L001", where)]
+    found = preflight_document(text, RESOLVER, files=tmp_path, upstream=UPSTREAM)
+    assert [(str(f.code), f.pointer) for f in found] == [("L001", where)]
+    with pytest.raises(DocumentError) as info:
+        load_study(text, RESOLVER, files=tmp_path)
+    assert info.value.pointer == where

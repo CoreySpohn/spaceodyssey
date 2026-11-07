@@ -282,6 +282,32 @@ def int_too_long(value):
     return limit > 0 and value.bit_length() > (limit - 1) * math.log2(10)
 
 
+def check_integers(value, path=()):
+    """Refuse an integer too long to write anywhere in a document object's body.
+
+    A document object (not text) is read as it is, raw NaN included, but such an
+    integer could not be reported or hashed, so it is refused at its pointer; nesting
+    too deep to walk is refused too.
+    """
+    try:
+        _integers(value, path)
+    except RecursionError:
+        raise DocumentError(
+            "the document nests too deeply to read", pointer(path)
+        ) from None
+
+
+def _integers(value, path):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _integers(item, (*path, key))
+    elif isinstance(value, (list, tuple)):
+        for i, item in enumerate(value):
+            _integers(item, (*path, i))
+    elif type(value) is int and int_too_long(value):
+        raise DocumentError("an integer is too long to write", pointer(path))
+
+
 def check_schema_version(version):
     """Refuse a schema version this loader does not read; newer ones are `D002`."""
     if type(version) is not int or version < 1:
