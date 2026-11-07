@@ -15,13 +15,15 @@ t + 55; the credit-free channel 13 until t + 45).
 import dataclasses
 from types import SimpleNamespace
 
+import equinox as eqx
+import jax.random as jr
 import numpy as np
 import pytest
 
 from spaceodyssey.core import HostExecutor
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.conformance.invariants import balance_conserved
-from spaceodyssey.core.enums import AdmissionCode, Disposition, EffectKind, Scope
+from spaceodyssey.core.enums import F64, AdmissionCode, Disposition, EffectKind, Scope
 from spaceodyssey.core.executors.base import histories_equal
 from spaceodyssey.studies import toy
 from tests.core.helpers import one_world, worlds
@@ -206,36 +208,39 @@ def test_control_one_pool_would_have_charged_one_row():
     assert (_requests(run) == CLOSED).sum() == 2  # its two later requests
 
 
-POLICY_OWNED = ("carry.pstate", "trace.pol_u")  # state and draws of the policy itself
+class _PlanScript(ScriptedPrograms):
+    """The script, with the state increments and uniform draws of `FixedPlanPolicy`.
 
+    The plan position `pstate[0]` advances on every Observe and the policy returns its
+    own uniform draw, so the two policies leave the same state and draws in the history.
+    """
 
-def _without_policy(history):
-    """The history less the leaves only the policy writes (its state and its draws)."""
-    floats = {k: v for k, v in history.floats.items() if k not in POLICY_OWNED}
-    return dataclasses.replace(history, floats=floats), floats
+    n_plan: int = eqx.field(static=True, default=0)
+
+    def decide(self, pstate, view, study, key):
+        eff, _, _ = super().decide(pstate, view, study, key)
+        advance = (eff.kind[0] == EffectKind.OBSERVE) & (view.n_dec < self.n_plan)
+        new_ps = pstate.at[0].add(advance.astype(F64))
+        return eff, new_ps, jr.uniform(key, dtype=F64)
 
 
 @pytest.mark.slow  # two more compiled programs (K6)
 def test_a_one_program_study_has_the_history_of_survey_1():
     """B7 row 9 (a). The plan of `survey_1` written as a script, with one program and
-    no awards, makes the same history: ints exact, floats in the go band, apart from
-    the leaves the policy itself owns. Fails if the program machinery changes what a
-    one-program study does.
+    no awards, makes the same history: ints exact, floats in the go band, with no leaf
+    set aside. Fails if the program machinery changes what a one-program study does.
     """
     plan = ((0, 10), (1, 10), (0, 10), (1, 10), (0, 10))
     script = (*(observe(n, s, c, 0) for n, (s, c) in enumerate(plan)), end(5))
     caps = Capacities()
-    scripted = toy.survey_1(caps=caps, policies=(ScriptedPrograms(script=script),))
+    policy = _PlanScript(script=script, n_plan=len(plan))
+    scripted = toy.survey_1(caps=caps, policies=(policy,))
     plain = toy.survey_1(caps=caps)
     assert caps.n_programs == 1 and plain.caps.n_programs == 1
     truths, roots = worlds(1, caps)
     a = run_on("compiled", scripted, truths, roots, 60).history(0)
     b = run_on("compiled", plain, truths, roots, 60).history(0)
     assert a.n_records == b.n_records == len(plan)  # every request ran
-    # the leaves set aside are the policy's, and they are the only ones that differ
-    assert not histories_equal(a, b).go
-    (a, kept), (b, _) = _without_policy(a), _without_policy(b)
-    assert len(kept) > 0
     report = histories_equal(a, b)
     assert not report.vacuous
     assert report.go, report
@@ -302,7 +307,10 @@ def test_controls_a_misplaced_credit_free_start_delays_funded_work_and_credit_is
     _, base = credit_runs["base"]
     _, bad = credit_runs["bad"]
     assert len(_funded_starts(base)) == 2
-    assert _funded_starts(bad) != _funded_starts(base)
+    assert _funded_starts(base) == (5, 115)
+    assert _funded_starts(bad) == (5,)  # the first start survives, the second is lost
+    # the credit-free admission that interfered: one start of channel 13, unfunded
+    assert (_records(bad, channel=0)["channel"] == FREE).sum() == 1
     assert (_requests(bad) == BUSY).sum() == 1
     _, priced = credit_runs["priced"]
     assert (_requests(priced) == NO_FUNDS).sum() >= 1
