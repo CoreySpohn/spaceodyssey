@@ -26,8 +26,8 @@ fingerprint or document hash moves.
   at its default; the loader fills a missing optional field with that default and refuses a
   present one that is at its default ("omit it"), so one study has one document. Defaults
   must be plain (bool, int, float, str, or a tuple of them); a factory or an array default is
-  a registration error. Comparison is by exact type and content (`True` is not `1`, `-0.0` is
-  not `0.0`, `nan` equals `nan`). Migrated documents are unchanged.
+  a registration error. Comparison is by exact type and content, element by element for a tuple (`True` is not
+  `1`, `-0.0` is not `0.0`, `nan` equals `nan`, also inside a tuple). Migrated documents are unchanged.
 - **`key_version` (D9).** A static optional `Study` field, 1 or 2, validated at
   construction. Version 1 keeps the asset coordinate at the Python integer 0 for every
   channel, so keys and compiled programs are as before. Version 2 looks the coordinate up,
@@ -67,14 +67,27 @@ None. `tests/core/golden_histories.json` is unchanged and no pin file is edited.
 | `tests/codec/test_optional_fields.py` | 15 | unit | 2.5 s, slowest 0.7 s |
 | `tests/core/test_key_version.py` | 12 | unit | 1.6 s, slowest 0.45 s |
 | `tests/core/test_slice3_guard.py` | 17 (6 medium) | unit and medium | 33 s, medium tests about 10 s each |
+| `tests/core/test_metamorphic.py` | 3 new (11 in the file) | slow (existing file) | the facility-insertion guard below; each run-level test one cold compile pair |
 
 Three slowest new tests: the asset-zero key test, the zero-lookup control and the
 canonical-history gate test, each one cold executor compile. The medium tier of the guard
-file takes about 35 s in total; no new test is in the slow tier. Added 44, retired 0, net +44.
+file takes about 35 s in total; no new test is in the slow tier. Added 48, retired 0, net +48.
 
 Each check has a control: an encoder that keeps defaults, a loader that requires every field,
 an open conditional gate, a nonempty extra view leaf, a zeroed `refund_of`, a changed layout
-for the lookup and a lookup pinned to zero.
+for the lookup, a lookup pinned to zero and a lookup that keys by `asset * n_assets`.
+
+## Review round 1
+
+- Tuple defaults are compared element by element with the scalar rules, so `(True,)` against
+  `(1,)`, `(-0.0,)` against `(0.0,)` and a `nan` tuple are decided as scalars are. The test
+  failed first on `(True,)`.
+- The facility-insertion guard extends the existing `zero_time_asset` test: asset-1 draws
+  under key version 2 must be unchanged after an idle asset is added, a `asset * n_assets`
+  lookup must fail the relation, and inserting the asset must keep every channel's
+  coordinate.
+- `.gitignore` now ignores `/src/spaceodyssey/_version.py` only, so `tests/core/test_key_version.py`
+  is no longer hidden.
 
 ## Spec silences decided here
 

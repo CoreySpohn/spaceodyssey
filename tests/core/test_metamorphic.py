@@ -3,12 +3,14 @@
 import dataclasses
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import pytest
 
-from spaceodyssey.core import battery
+from spaceodyssey.core import battery, handlers
 from spaceodyssey.core.battery.metamorphic import with_zero_time_asset
 from spaceodyssey.core.enums import I64
+from spaceodyssey.core.keys import asset_coordinate
 from tests.core.battery_helpers import PLAN, SelectingPolicy, survey
 from tests.core.corpus import frozen
 from tests.core.helpers import worlds
@@ -88,6 +90,47 @@ def test_zero_time_asset_catches_a_policy_that_counts_assets(inputs):
     result = battery.zero_time_asset(study, truths, roots, N_STEPS)
     assert not result
     assert "trace or the records changed" in result.diagnostic
+
+
+# channel 12 sits on lane 2, which is on asset 1: these draws carry a nonzero asset
+# coordinate under key version 2
+ASSET_1_PLAN = ((0, 12),) * 5
+
+
+def test_zero_time_asset_with_asset_1_draws_under_key_version_2(inputs):
+    """Adding an idle facility moves no asset-1 key, payload or belief."""
+    truths, roots = inputs
+    study = survey(frozen(plan=ASSET_1_PLAN), key_version=2)
+    result = battery.zero_time_asset(study, truths, roots, N_STEPS)
+    assert result, result.diagnostic
+    assert result.detail["n_records"] >= 10
+
+
+def test_zero_time_asset_catches_a_key_that_counts_assets(inputs, monkeypatch):
+    """Negative control: a lookup of `asset * n_assets` moves asset-1 keys when an
+    asset is added, which the relation must report.
+    """
+
+    def counting(study, channel_index):
+        lane = study.channels.lane[channel_index]
+        return study.assets.lane_asset[lane].astype(I64) * study.caps.n_assets
+
+    truths, roots = inputs
+    study = survey(frozen(plan=ASSET_1_PLAN), key_version=2)
+    monkeypatch.setattr(handlers, "asset_coordinate", counting)
+    jax.clear_caches()  # a compiled program closed over the real lookup
+    result = battery.zero_time_asset(study, truths, roots, N_STEPS)
+    assert not result
+    assert "trace or the records changed" in result.diagnostic
+
+
+def test_the_added_asset_keeps_every_existing_asset_coordinate():
+    """Fails if inserting the idle facility renumbers a channel's asset."""
+    study = survey(key_version=2)
+    more = with_zero_time_asset(study)
+    assert more.key_version == 2
+    for index in range(study.caps.n_channels):
+        assert int(asset_coordinate(more, index)) == int(asset_coordinate(study, index))
 
 
 def test_the_added_asset_holds_nothing():
