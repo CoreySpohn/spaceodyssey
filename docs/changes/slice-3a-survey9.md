@@ -20,10 +20,9 @@ decision cadence is part of the evidence: a public release and a wait each wake 
   program 1 holds no credit. It starts on an idle lane, is refused `LANE_BUSY` once, and the
   funded start ticks equal those of a run without it.
 - **(a) one program equals `survey_1`.** The `survey_1` plan written as a script, with one
-  program, makes the same history: ints exact, floats within the go band. Two leaves differ and
-  are set aside by name because the policy itself owns them (`carry.pstate`, the policy state,
-  and `trace.pol_u`, its draws); the test asserts they differ and that every other float leaf
-  is compared.
+  program, makes the same history: ints exact, floats within the go band, with no leaf set
+  aside. The script reproduces `FixedPlanPolicy`'s plan-position increments and uniform draws,
+  so `carry.pstate` and `trace.pol_u` match as well.
 - **Parity.** (b) and (c) make the same history on the host and compiled executors.
 
 ## Controls
