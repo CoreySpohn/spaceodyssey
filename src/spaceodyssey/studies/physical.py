@@ -32,6 +32,7 @@ Pieces:
   `physical_study` is the study that runs them on a refresh grid.
 """
 
+import copy
 import dataclasses
 import hashlib
 import math
@@ -75,7 +76,16 @@ from spaceodyssey.core.snapshot import BeliefLayout
 from spaceodyssey.studies import toy
 from spaceodyssey.studies.scripted import ScriptedRecords
 
-# What the stand-in is, as plain JSON: every model declaration carries it.
+# The summary record's index in `physical_registry`.
+SUMMARY_KIND_INDEX = 4
+# Centroid error per axis in (lambda/D) / snr of the scripted rows: about 20 mas at
+# signal-to-noise 10 at 1000 nm on a 7.2 m aperture, inside the stand-in's domain.
+STANDIN_KAPPA = 7.0
+# Planned signal-to-noise and planet-free noise [e-] of a scripted visit.
+SCRIPTED_SNR = 10.0
+SCRIPTED_LIMIT_COUNTS = 10.0
+# What the stand-in is, as plain JSON: the model declaration and every run document
+# that binds the refit carry it, readable.
 STANDIN_SCOPE = {
     "approximation": "OFTI stand-in refit",
     "conditional_on": "detection: rows with detected = 1 and valid_science = 1",
@@ -87,17 +97,23 @@ STANDIN_SCOPE = {
     "nulls": (
         "ignored: no detection row is NO_SUPPORT and leaves the belief unchanged"
     ),
-    "domain": "loose astrometry the rejection sampler accepts at a usable rate",
+    "domain": (
+        "loose astrometry the rejection sampler accepts at a usable rate: per-axis "
+        "errors near 20 mas on a 0.15 arcsec orbit (kappa 7 at signal-to-noise 10 "
+        "at 1000 nm on 7.2 m); not the profile's kappa 1"
+    ),
+    "scripted_rows": {
+        "law": {
+            "threshold": ReportingLaw().threshold,
+            "kappa": STANDIN_KAPPA,
+            "corr": ReportingLaw().corr,
+        },
+        "planned_snr": SCRIPTED_SNR,
+        "limit_counts": SCRIPTED_LIMIT_COUNTS,
+        "position_error": "kappa (lambda/D) / snr per axis",
+    },
 }
 
-# The summary record's index in `physical_registry`.
-SUMMARY_KIND_INDEX = 4
-# Centroid error per axis in (lambda/D) / snr of the scripted rows: about 20 mas at
-# signal-to-noise 10 at 1000 nm on a 7.2 m aperture, inside the stand-in's domain.
-STANDIN_KAPPA = 7.0
-# Planned signal-to-noise and planet-free noise [e-] of a scripted visit.
-SCRIPTED_SNR = 10.0
-SCRIPTED_LIMIT_COUNTS = 10.0
 # Occupancy starts of the fixed plan, days after the study epoch: visits chosen from
 # the nominal orbit, outside keepout for the whole occupancy, with the nominal
 # planet between the inner working angle plus 0.5 lambda/D and the field edge less
@@ -195,7 +211,7 @@ def standin_model(base, time_origin_jd):
         name="ofti_standin_conditional_on_detection",
         prior=dict(base.prior),
         likelihood=likelihood,
-        support={**base.support, "scope": dict(STANDIN_SCOPE)},
+        support={**base.support, "scope": copy.deepcopy(STANDIN_SCOPE)},
         parameterization=base.parameterization,
         mass_model=dict(base.mass_model),
     )
@@ -251,10 +267,16 @@ class StandInOftiRefit(OftiRefit):
         return cls(**{**base, **kwargs})
 
     def configuration(self):
-        """The constructor arguments as plain JSON, with the declared scope."""
+        """The constructor arguments as plain JSON, with the readable scope.
+
+        `scope` is `STANDIN_SCOPE`, so a saved run document states the
+        approximation, its domain and the scripted reporting law in words, beside
+        the model hash.
+        """
         out = super().configuration()
         del out["columns"]
         out["time_origin_jd"] = self.time_origin_jd
+        out["scope"] = copy.deepcopy(STANDIN_SCOPE)
         return out
 
     def _readable(self, study):
@@ -287,6 +309,10 @@ class StandInOftiRefit(OftiRefit):
 
 
 def _build_standin(config, registry):
+    """Rebuild from a configuration; a document of another scope is refused."""
+    config = dict(config)
+    if config.pop("scope", None) != STANDIN_SCOPE:
+        raise ValueError("the document's stand-in scope is not this stand-in's")
     return StandInOftiRefit(**config)
 
 

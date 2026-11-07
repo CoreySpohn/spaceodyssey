@@ -12,6 +12,7 @@ plan, and five refreshes that install particles on both executors.
 import copy
 import dataclasses
 import itertools
+import json
 import math
 import types
 
@@ -32,6 +33,7 @@ from spaceodyssey.adapters.physical_context import (
     require_certified,
 )
 from spaceodyssey.adapters.physical_profile import load_profile
+from spaceodyssey.codec import dump_run, load_run
 from spaceodyssey.core import CompiledExecutor, HostExecutor
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import RefitStatus
@@ -39,6 +41,7 @@ from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.records import record_none
 from spaceodyssey.core.refresh import RefitEntry
 from spaceodyssey.studies import physical as ph
+from spaceodyssey.studies import toy
 from tests.core.helpers import worlds
 
 PROFILE = load_profile()
@@ -256,8 +259,9 @@ def test_the_scope_is_declared_in_the_model_hash_and_the_document_configuration(
     assert declaration["support"]["scope"] == ph.STANDIN_SCOPE
     assert declaration["likelihood"]["time_origin_jd"] == ORIGIN_JD
     assert declaration["name"] == "ofti_standin_conditional_on_detection"
+    text = json.dumps(ph.STANDIN_SCOPE)
     for word in ("detection", "induced prior", "midpoint", "ignored", "loose"):
-        assert word in " ".join(ph.STANDIN_SCOPE.values())
+        assert word in text
     target = PROFILE["targets"][T4D_TARGET]
     plain = ofti_model(
         stellar_mass_kg=target["mass_msun"] * Msun2kg,
@@ -267,14 +271,83 @@ def test_the_scope_is_declared_in_the_model_hash_and_the_document_configuration(
     assert refit.model_hash == refit.model.digest() != plain.digest()
     config = refit.configuration()
     assert "columns" not in config and config["time_origin_jd"] == ORIGIN_JD
+    assert config["scope"] == ph.STANDIN_SCOPE
     binding = ph.standin_binding()
     rebuilt = binding.build(binding.describe(refit, None), None)
     assert rebuilt.model_hash == refit.model_hash
     assert rebuilt.binding()["kind"] == "spaceodyssey.ofti_standin"
-    moved = ph.StandInOftiRefit(**{**config, "time_origin_jd": ORIGIN_JD + 1.0})
+    with pytest.raises(ValueError, match="scope"):
+        binding.build({**config, "scope": {"domain": "tight astrometry"}}, None)
+    arguments = {k: v for k, v in config.items() if k != "scope"}
+    moved = ph.StandInOftiRefit(**{**arguments, "time_origin_jd": ORIGIN_JD + 1.0})
     assert moved.model_hash != refit.model_hash
     with pytest.raises(TypeError, match="summary columns"):
-        ph.StandInOftiRefit(**config, columns=(0, 1, 2, 3, 4, 5))
+        ph.StandInOftiRefit(**arguments, columns=(0, 1, 2, 3, 4, 5))
+
+
+KINDS = {
+    ("observer", "test.particle_observer", 1): ph.ParticleObserver,
+    ("process", "test.physical_script", 1): ph.PhysicalScript,
+    ("policy", "toy.null", 1): toy.NullPolicy,
+    ("world_source", "toy.uniform_signal", 1): toy.ToyWorldSource,
+    ("channel_model", "toy.photometry", 1): toy.ToyPhotometry,
+    ("design", "toy.gain", 1): toy.ToyDesign,
+    ("objective", "toy.threshold", 1): toy.ToyObjective,
+}
+
+
+def test_a_saved_run_document_states_the_scope_in_words():
+    """The serialized run document carries the readable scope beside the hash.
+
+    The document of a physical study bound to the stand-in names the induced
+    prior, the instantaneous midpoint astrometry, the ignored nulls, the loose
+    astrometry domain and the scripted law (kappa 7, threshold 5, signal-to-noise
+    10), and reloads to the same boundary. Fails if a saved output holds only the
+    constructor settings and an opaque model hash.
+    """
+    context = t4d_context()
+    rows = ph.scripted_rows(context, t4d_visits(context), T4D_ORBIT, target=T4D_TARGET)
+    study = ph.physical_study(rows, context)
+    refit = standin()
+    doc = dump_run(
+        study,
+        ph.physical_registry(),
+        executor="host",
+        bindings=ph.standin_bindings(),
+        refit=refit,
+        kinds=KINDS,
+    )
+    text = doc.to_json()
+    for phrase in (
+        "induced prior",
+        "not the world-source prior",
+        "instantaneous at the science-interval midpoint",
+        "nulls",
+        "ignored: no detection row is NO_SUPPORT",
+        "loose astrometry",
+        "kappa 7",
+        "detected = 1 and valid_science = 1",
+    ):
+        assert phrase in text, phrase
+    saved = json.loads(text)
+    scopes = []
+
+    def find(node):
+        if isinstance(node, dict):
+            if "scope" in node and isinstance(node["scope"], dict):
+                scopes.append(node["scope"])
+            for value in node.values():
+                find(value)
+        elif isinstance(node, list):
+            for value in node:
+                find(value)
+
+    find(saved)
+    assert scopes and all(scope == ph.STANDIN_SCOPE for scope in scopes)
+    law = ph.STANDIN_SCOPE["scripted_rows"]["law"]
+    assert law == {"threshold": 5.0, "kappa": ph.STANDIN_KAPPA, "corr": 0.0}
+    run = load_run(text, ph.standin_bindings(), KINDS)
+    assert run.refit["host"].model_hash == refit.model_hash
 
 
 @pytest.mark.medium
@@ -388,6 +461,70 @@ def test_survey_posterior_contraction_over_five_scripted_visits():
     assert all(b < 1.15 * a for a, b in itertools.pairwise(spreads))
 
 
+def check_executor_parity(context, rows, refit, n_steps, observer=None):
+    """Run `rows` on both executors; check installs, record epochs and parity.
+
+    On each executor: one `OK` product row per audience at each visit's refresh,
+    with one more counting row each time; every summary record's epoch equals its
+    science-interval midpoint within half a tick. The compiled executor's particles
+    and epoch counts equal the host executor's bit for bit.
+    """
+    n = len(rows.end_ticks)
+    study = ph.physical_study(rows, context, observer=observer)
+    truths, roots = worlds(1, study.caps)
+    host = HostExecutor().run(
+        study, index_world(truths, 0), roots[0], n_steps, refit=refit
+    )
+    compiled = CompiledExecutor().run(study, truths, roots, n_steps, refit=refit)
+    first = jax.tree_util.tree_map(lambda x: np.asarray(x)[0], compiled.carry.log)
+    half_tick_d = 0.5 / context.clock.ticks_per_day
+    for log in (host.carry.log, first):
+        valid = np.asarray(log.valid)
+        kind = np.asarray(log.kind)
+        payload = np.asarray(log.payload)
+        products = payload[valid & (kind == toy.PRODUCT_KIND)][:, :2]
+        assert products[:, 0].tolist() == [RefitStatus.OK] * (2 * n)
+        assert products[:, 1].tolist() == [k for k in range(1, n + 1) for _ in (0, 1)]
+        summary = valid & (kind == ph.SUMMARY_KIND_INDEX)
+        assert int(summary.sum()) == n
+        starts = np.asarray(log.start_tick)[summary]
+        ends = np.asarray(log.end_tick)[summary]
+        midpoints = np.asarray(context.science_midpoint_jd(starts, ends))
+        epochs = payload[summary][:, COL["time_d"]]
+        assert np.all(np.abs(epochs - midpoints) <= half_tick_d)
+    assert int(host.carry.belief.n[0]) == n
+    np.testing.assert_array_equal(
+        np.asarray(compiled.carry.belief.n)[0], host.carry.belief.n
+    )
+    assert np.asarray(compiled.carry.belief.samples)[0].tobytes() == (
+        np.asarray(host.carry.belief.samples).tobytes()
+    )
+    for belief in (host.carry.pbelief, compiled.carry.pbelief):
+        assert np.asarray(belief.samples).reshape(-1).tobytes() == (
+            np.asarray(host.carry.belief.samples).reshape(-1).tobytes()
+        )
+    return host, compiled
+
+
+@pytest.mark.medium
+def test_executor_parity_on_one_certified_visit():
+    """One certified visit, four particles: both executors install the same fit.
+
+    Medium: two cold study compiles and two OFTI scorers (about 25 s cold). The
+    merge-time guard for executor parity; the five-visit demonstration is slow.
+    Fails if the compiled executor's particles, epoch counts or product rows differ
+    from the host executor's, or a record's epoch is not its science midpoint.
+    """
+    context = context_from_profile(PROFILE, targets=[0])
+    plan = ph.fixed_plan(context)[:1]
+    require_certified(context, plan)
+    rows = ph.scripted_rows(context, plan, ph.nominal_orbit(PROFILE), key=SURVEY_KEY)
+    refit = ph.StandInOftiRefit.from_profile(PROFILE, 0, batch=4096)
+    check_executor_parity(
+        context, rows, refit, 8, observer=ph.ParticleObserver(n_particles=4)
+    )
+
+
 @pytest.mark.slow  # ten OFTI fits and two cold study compiles (about 90 s)
 def test_five_refreshes_install_particles_on_both_executors():
     """Each visit's refresh installs particles, and the executors agree.
@@ -399,31 +536,9 @@ def test_five_refreshes_install_particles_on_both_executors():
     the host executor.
     """
     context, rows = plan_rows()
-    study = ph.physical_study(rows, context)
     refit = ph.StandInOftiRefit.from_profile(PROFILE, 0)
-    truths, roots = worlds(1, study.caps)
-    host = HostExecutor().run(study, index_world(truths, 0), roots[0], 25, refit=refit)
+    host, _ = check_executor_parity(context, rows, refit, 25)
     log = host.carry.log
-    valid = np.asarray(log.valid)
-    kind = np.asarray(log.kind)
-    products = np.asarray(log.payload)[valid & (kind == 3)][:, :2]
-    assert products[:, 0].tolist() == [RefitStatus.OK] * 10
-    assert products[:, 1].tolist() == [1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
-    assert int(host.carry.belief.n[0]) == 5
-    summary = valid & (kind == ph.SUMMARY_KIND_INDEX)
-    epochs = np.asarray(log.payload)[summary][:, COL["time_d"]]
-    starts, ends = (
-        np.asarray(log.start_tick)[summary],
-        np.asarray(log.end_tick)[summary],
-    )
-    midpoints = np.asarray(context.science_midpoint_jd(starts, ends))
-    half_tick_d = 0.5 / context.clock.ticks_per_day
-    assert np.all(np.abs(epochs - midpoints) <= half_tick_d)
-
-    compiled = CompiledExecutor().run(study, truths, roots, 25, refit=refit)
-    assert int(np.asarray(compiled.carry.belief.n)[0, 0]) == 5
-    assert np.asarray(compiled.carry.belief.samples)[0].tobytes() == (
-        np.asarray(host.carry.belief.samples).tobytes()
-    )
+    summary = np.asarray(log.valid) & (np.asarray(log.kind) == ph.SUMMARY_KIND_INDEX)
     row = SummaryRow.from_payload(np.asarray(log.payload)[summary][0, :15])
     assert float(row.valid_science) == 1.0 and float(row.detected) == 1.0
