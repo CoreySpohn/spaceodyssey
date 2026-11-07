@@ -15,7 +15,7 @@ from spaceodyssey.core.battery.result import (
     tree_bits_equal,
     worlds_of,
 )
-from spaceodyssey.core.battery.views import DecisionViews, compare_views
+from spaceodyssey.core.battery.views import DecisionViews, compare_views, moved_ticks
 from spaceodyssey.core.carry import init_carry
 from spaceodyssey.core.enums import I64
 from spaceodyssey.core.executors.base import belief_leaves, canonical_history
@@ -28,14 +28,6 @@ DRAW_FREE_FLOATS = ("cost", "charged", "balance")
 DIGEST_FIELDS = ("snapshot_fp", "event_fp")
 # Integer fields that hold a stable channel id, which a relabeling maps.
 CHANNEL_ID_FIELDS = ("channel", "source")
-# Log columns that hold a tick (-1 marks an unset one).
-TICK_LOG_FIELDS = (
-    "start_tick",
-    "end_tick",
-    "available_tick",
-    "released_tick",
-    "accepted_tick",
-)
 
 
 def relabel_ids(
@@ -188,8 +180,7 @@ def _epoch_world(w, cb, tb, cl, tl, delta, layout):
             out.append(f"world {w}: trace field {name} changed under the shift")
     for name in type(cb.log).__dataclass_fields__:
         a, b = np.asarray(getattr(cb.log, name)), np.asarray(getattr(cl.log, name))
-        if name in TICK_LOG_FIELDS:
-            b = np.where(np.asarray(cb.log.valid) & (b >= 0), b - delta, b)
+        b = moved_ticks(name, b, cl.log.valid, -delta)
         if not bits_equal(a, b):
             out.append(f"world {w}: log column {name} changed under the shift")
     out += [

@@ -16,8 +16,28 @@ from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.records import payload_columns
 from spaceodyssey.core.snapshot import snapshot_fingerprint, visible_rows
 
-TICKS = {"start_tick", "end_tick", "available_tick", "released_tick", "accepted_tick"}
+# Log columns that hold a time, named rather than recognized by sign: a datum observed
+# before the run starts has a negative start and end tick.
+TICKS = ("start_tick", "end_tick", "available_tick", "released_tick", "accepted_tick")
+# Stamps that hold -1 until their event happens. No other tick column has an unset
+# value, so -1 there is a time like any other.
+STAMP_TICKS = ("released_tick", "accepted_tick")
 RELEASE_TICKS = {"available_tick", "released_tick", "accepted_tick"}
+
+
+def moved_ticks(name, column, valid, shift):
+    """Log column `name` with its times on `valid` rows moved by `shift` ticks.
+
+    A column outside `TICKS` is returned as it is. A tick column moves on every valid
+    row, whatever its sign; a release or acceptance stamp still at -1 (unset) stays.
+    """
+    column = np.asarray(column)
+    if name not in TICKS:
+        return column
+    moving = np.asarray(valid, bool)
+    if name in STAMP_TICKS:
+        moving = moving & (column != -1)
+    return np.where(moving, column + shift, column)
 
 
 _CAPTURES = weakref.WeakValueDictionary()
@@ -165,7 +185,9 @@ def compare_views(
     """Compare decision views under an id, epoch or release-time transformation.
 
     `layout` is the observer's `BeliefLayout`; under a relabeling only the summary's
-    count leaf is compared, since draws move with the new ids.
+    count leaf is compared, since draws move with the new ids. The `left` view's tick
+    columns move by `epoch`, and its release ticks also by `delay`, before comparison
+    (`moved_ticks`); payload columns never move.
     """
     if len(left) != len(right):
         return ["the number of policy decision views changed"]
@@ -200,9 +222,8 @@ def compare_views(
                     lambda v: channel_map.get(int(v), int(v)), otypes=[x.dtype]
                 )(x)
                 x = np.where(valid, mapped, x)
-            if name in TICKS:
-                shift = epoch + (delay if name in RELEASE_TICKS else 0)
-                x = np.where(valid & (x >= 0), x + shift, x)
+            shift = epoch + (delay if name in RELEASE_TICKS else 0)
+            x = moved_ticks(name, x, valid, shift)
             if channel_map and name == "payload":
                 if not (
                     _payload_matches_log(va, ca, caps)
