@@ -14,13 +14,16 @@ import pytest
 from spaceodyssey.codec import DocumentError, dump_study, load_study
 from spaceodyssey.codec import dump as dump_module
 from spaceodyssey.codec import load as load_module
+from spaceodyssey.codec.dump import encode
 from spaceodyssey.codec.kinds import (
     RegistrationError,
+    as_resolver,
     at_default,
     is_optional_field,
     optional_default,
 )
 from spaceodyssey.core.capacities import Capacities
+from spaceodyssey.core.snapshot import EffectTable, effects_none
 from spaceodyssey.core.study import Study
 from spaceodyssey.studies import toy
 from spaceodyssey.studies.conformance import CORPUS
@@ -44,13 +47,15 @@ def test_the_optional_fields_are_the_ones_slice_3a_added():
     """Fails if a field gains or loses the marker: it would move every document."""
     marked = {
         (cls.__name__, f.name)
-        for cls in (Capacities, Study)
+        for cls in (Capacities, Study, EffectTable)
         for f in dataclasses.fields(cls)
         if is_optional_field(f)
     }
-    assert marked == {("Capacities", n) for n in CAP_FIELDS} | {
-        ("Study", n) for n in STUDY_FIELDS
-    }
+    assert marked == (
+        {("Capacities", n) for n in CAP_FIELDS}
+        | {("Study", n) for n in STUDY_FIELDS}
+        | {("EffectTable", "program")}
+    )
 
 
 def test_the_encoder_omits_every_optional_field_at_its_default():
@@ -223,3 +228,42 @@ def test_at_default_compares_tuple_elements_by_type_and_content():
     assert at_default(field(((1, 0.0), "b")), ((1, 0.0), "b"))
     assert not at_default(field(((1, 0.0), "b")), ((1, -0.0), "b"))
     assert not at_default(field((1, 2)), (1,))
+
+
+# ---- the program column of an effect table (S2) -------------------------------------
+
+
+def _effect_node(n_programs):
+    caps = Capacities(n_programs=n_programs)
+    return encode(effects_none(caps), ("effects",), as_resolver(None))
+
+
+def test_a_one_program_effect_table_is_written_without_a_program_field():
+    """Fails if the default table writes `"program": null` its old documents lack."""
+    assert "program" not in _effect_node(1)
+
+
+def test_an_effect_table_document_from_before_programs_still_loads():
+    """Fails if a document without `program` is refused or fills anything but None."""
+    node = {k: v for k, v in _effect_node(1).items() if k != "program"}  # as before
+    table = as_resolver(None)
+    built = load_module.decode(node, ("effects",), table)
+    assert built.program is None
+
+
+def test_an_effect_table_written_with_a_null_program_is_refused():
+    """Control: `"program": null` is the default written out, so it is two documents."""
+    node = {**_effect_node(1), "program": None}
+    with pytest.raises(DocumentError, match="at its default"):
+        load_module.decode(node, ("effects",), as_resolver(None))
+
+
+def test_a_populated_program_column_round_trips():
+    """Fails if a program column is dropped, omitted or rebuilt with another dtype."""
+    caps = Capacities(n_programs=2)
+    eff = effects_none(caps)
+    eff = dataclasses.replace(eff, program=eff.program.at[1].set(1))
+    node = encode(eff, ("effects",), as_resolver(None))
+    assert "program" in node
+    built = load_module.decode(node, ("effects",), as_resolver(None))
+    assert_same_pytree(eff, built)

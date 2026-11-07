@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from spaceodyssey.core.capacities import OPTIONAL
 from spaceodyssey.core.enums import I64, Audience, B, RecordStatus, version_slot
 from spaceodyssey.core.records import (
     LOG_INT_FIELDS,
@@ -160,7 +161,7 @@ class EffectTable(eqx.Module):
     disruptive: jax.Array  # reserved: asks to break a frozen horizon
     # The program a row charges (and, for a Stop, closes); absent (None, no leaf) unless
     # the capacities hold more than one program, so a study with one is unchanged.
-    program: jax.Array | None = None
+    program: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
 
 
 def effects_none(caps):

@@ -81,8 +81,8 @@ def is_optional_field(field):
 
     The encoder omits an optional field at its default and the loader fills it when
     it is missing, so a document written before the field existed keeps its hash.
-    The default must be a plain value (a bool, int, float, str, or a tuple of them),
-    so that "at its default" has one meaning.
+    The default must be a plain value (a bool, int, float, str, None, or a tuple of
+    them), so that "at its default" has one meaning.
     """
     return bool(field.metadata.get("optional"))
 
@@ -101,7 +101,7 @@ def optional_default(field, cls=None):
 def _plain(value):
     if type(value) is tuple:
         return all(map(_plain, value))
-    return type(value) in (bool, int, float, str)
+    return type(value) in (bool, int, float, str, type(None))
 
 
 def _same(value, default):
