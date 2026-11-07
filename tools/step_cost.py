@@ -76,6 +76,7 @@ def measure(executor, n_worlds, n_steps, repeats):
         "warm_min_s": round(min(warm), 6),
         "warm_max_s": round(max(warm), 6),
         "per_step_us": round(1e6 * median / n_steps, 2),
+        "per_step_min_us": round(1e6 * min(warm) / n_steps, 2),
     }
 
 

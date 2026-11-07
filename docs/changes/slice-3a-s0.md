@@ -69,12 +69,15 @@ The calibrated mutant (`--mutant`, `ExtraPassExecutor`) adds one select-and-hand
 pass per step, kept only under a condition that never holds and that the compiler
 cannot fold away. Measured: 1.48 and 1.51 times the plain per-step time, well above the 1.10 threshold, so it fails K3 as a control must.
 
-The K3 baseline proper is on the CI runner with caches off; this local figure fixes
-the method and the mutant. To take it there: the pilot job of `slice-2b-r0a.md`
-(quick-tier layout, compile-cache restore removed, `SPACEODYSSEY_JAX_CACHE=off`) runs
-`python tools/step_cost.py --mutant`, and the result is recorded in S5's change record
-as the eleven-handler baseline. S5 and S10 rerun the same command at the final table
-(thirteen handlers) and compare `plain.per_step_us`.
+The K3 baseline proper is on the CI runner with caches off; the local figures above
+fix the method and calibrate the mutant. The runner figures come from the first run of
+the dispatch-only workflow `.github/workflows/pilot.yml` (added with R0a; see
+`slice-2b-r0a.md`), dispatched on `main` right after this branch merges. It runs
+`python tools/step_cost.py --mutant --repeats 30` with every compile cache off and
+writes the per-step minimum and median, plain and mutant, to the job summary. S5's
+change record holds that run id and figure as the eleven-handler baseline; S5 and S10
+rerun the same workflow at the final table (thirteen handlers), in the interleaved form
+recommended above, and compare the per-step minimum.
 
 ## Answers to the S0 questions
 

@@ -15,7 +15,9 @@ adapter, and freezes the pre-mission table contract that R1 to R6 build against.
 2. `test(codec): pin the content hash of every corpus run document` (`8a40926`)
 3. `test(core): an empty fingerprint leaf moves the digest` (`9666a72`)
 4. `chore(tools): step-cost probe for the compiled executor with a calibrated extra-pass mutant` (`ba822c7`)
-5. this record and `slice-3a-s0.md`
+5. this record and `slice-3a-s0.md` (`9731288`)
+6. `ci(pilot): dispatch-only runner pilot for step cost and cold compiles`, with these
+   record updates and the codespell word `premission` (see `git log`)
 
 ## The pins
 
@@ -106,29 +108,36 @@ implementation choice.
 
 ```python
 class SourceId(eqx.Module):
-    namespace: I64[N]      # 0 for this table, k for the k-th imported run, -1 pads
-    producer: I64[N]       # the source's channel in its own namespace
+    namespace: I64[N]  # 0 for this table, k for the k-th imported run, -1 pads
+    producer: I64[N]  # the source's channel in its own namespace
     subject: I64[N]
     source_index: I64[N]
-    revision: I64[N]       # recorded for lineage, not part of overlap
+    revision: I64[N]  # recorded for lineage, not part of overlap
+
 
 class PreMissionTable(eqx.Module):
     source: SourceId
     local_index: I64[N]
-    channel: I64[N]; kind: I64[N]; audience: I64[N]
-    start_offset: I64[N]; end_offset: I64[N]
-    window_lo_rel: I64[N]; window_hi_rel: I64[N]
+    channel: I64[N]
+    kind: I64[N]
+    audience: I64[N]
+    start_offset: I64[N]
+    end_offset: I64[N]
+    window_lo_rel: I64[N]
+    window_hi_rel: I64[N]
     payload: F64[N, P]
-    pedigree: SourceId               # shape [N, W]
+    pedigree: SourceId  # shape [N, W]
     external: B[N, W]
     n_pedigree: I64[N]
     upstream_hash: str
+
 
 class PedigreeRule(IntEnum):
     EXCLUDE_PRIOR = 0
     EXCLUDE_ROWS = 1
 
-def resolve_overlap(table, rule, audience): ...   # pure; weights in {0, 1} per row
+
+def resolve_overlap(table, rule, audience): ...  # pure; weights in {0, 1} per row
 ```
 
 Overlap is equality of `(namespace, producer, subject, source_index)`; the revision
@@ -223,23 +232,30 @@ disabled"; whether the medium survey tests fit depends on the pilot figure, and 
 do not, either some survey tests move to the slow tier or K6 is read with the compile
 cache warm. That is a decision for the R6 owner and Corey, made on the pilot figure.
 
-### Pilot method (to run on the CI runner; not run here)
+### The CI-runner pilot: `.github/workflows/pilot.yml`
 
-GitHub CI cannot be run from this session. The pilot is a `workflow_dispatch` run of
-the quick-tier job on this branch, with two changes to that job only: the
-"Restore the JAX compile cache" step removed and `SPACEODYSSEY_JAX_CACHE=off`
-(`JAX_COMPILATION_CACHE_DIR` unset), so every program compiles cold. In that job:
+The pilot is measured on the hosted runner by a dispatch-only workflow this branch
+adds, `.github/workflows/pilot.yml` (`workflow_dispatch` only; read-only token;
+pinned actions; no secrets; `zizmor` clean). It installs like the quick tier of
+`ci.yml` with the JAX compile-cache restore removed, `SPACEODYSSEY_JAX_CACHE=off` and
+`JAX_ENABLE_COMPILATION_CACHE=false`, so every program compiles cold, then:
 
-1. `python tools/step_cost.py --repeats 5`: the compiled executor's cold first call
-   (`plain.cold_s`), the per-signature compile figure on the runner.
-2. `pytest tests/studies/test_survey_5.py -p no:cacheprovider --durations=0`: a medium
-   survey test on both executors, the pattern every 2b survey follows.
-3. The quick-tier wall time of the unchanged suite from the same job (the K6 reference
-   is still the Slice 2 close-out summary, pinned in R6, not this run).
+1. `python tools/step_cost.py --mutant --repeats 30`: the compiled executor's cold
+   first call and the per-step median and minimum, plain and mutant (the K3 baseline
+   of Slice 3a S0 and its calibrated control).
+2. Each medium study test file in its own fresh process
+   (`tests/studies/test_survey_5.py`, `test_survey_2.py`,
+   `test_survey_2_calibration.py`, `-m "not slow"`): the cold cost of the compiled
+   signatures they need on both executors, the pattern every 2b survey and fixture
+   in the inventory above follows. The 2b signatures themselves do not exist until
+   R1 to R5 land.
+3. `.github/scripts/pilot_summary.py` prints both results as tables to the log and
+   the job summary, and fails when an output is missing.
 
-The estimate is (medium signatures) x (step 2 per signature and executor), compared
-with the 60 s relative limit (K6) and the 540 s ceiling (K7). Record the run id and the
-three figures in the R6 record; replace the local estimate above with them.
+The figures in this record are local. The CI-runner figures come from the first run of
+that workflow, dispatched on `main` right after this branch merges, and are recorded
+with the run id in R6's change record (the signature cost, against K6's 60 s and K7's
+540 s, replacing the local estimate above) and in S5's (the K3 baseline).
 
 ## Checks run
 

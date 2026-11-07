@@ -1,0 +1,68 @@
+name: Pilot
+
+# Manual-only measurement run on the hosted runner, with every compile cache off: the
+# compiled executor's per-step cost (the step-cost baseline and its calibrated
+# mutant) and the cold compile time of the medium study tests. Installs like the
+# quick tier of ci.yml, without the JAX compile-cache restore. No secrets are used.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pilot-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  JAX_PLATFORMS: cpu
+  # Same threading as the quick tier, so the figures are comparable with it.
+  XLA_FLAGS: --xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1
+  SPACEODYSSEY_JAX_CACHE: "off"
+  JAX_ENABLE_COMPILATION_CACHE: "false"
+  PYTHONHASHSEED: "0"
+
+jobs:
+  pilot:
+    name: Step cost and cold compiles (py3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Install the package and test tools
+        run: |
+          uv venv .venv --python 3.12
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt
+
+      - name: Step cost, plain and mutant
+        run: |
+          python tools/step_cost.py --mutant --repeats 30 | tee step_cost.json
+
+      - name: Cold medium study tests, one process per file
+        run: |
+          # Each file starts a fresh process with no compile cache, so every program
+          # it needs compiles cold; a failure is reported in the summary, not here.
+          for f in tests/studies/test_survey_5.py tests/studies/test_survey_2.py \
+                   tests/studies/test_survey_2_calibration.py; do
+            name=$(basename "$f" .py)
+            pytest "$f" -m "not slow" -p no:cacheprovider -ra --tb=short \
+              --timeout=600 --durations=0 --junitxml="junit-pilot-$name.xml" || true
+          done
+
+      - name: Job summary
+        if: always()
+        run: |
+          python .github/scripts/pilot_summary.py step_cost.json junit-pilot-*.xml \
+            | tee -a "$GITHUB_STEP_SUMMARY"
