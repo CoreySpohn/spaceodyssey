@@ -6,13 +6,18 @@ are in the slow tier, where the control that needs a second compiled policy also
 relation runs with negative times in the survey 6 guard.
 """
 
+import dataclasses
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
 from spaceodyssey.core import CompiledExecutor, HostExecutor, battery
 from spaceodyssey.core.battery import metamorphic, views
 from spaceodyssey.core.battery.views import moved_ticks
+from spaceodyssey.core.enums import Audience, EventKind
 from spaceodyssey.core.records import empty_log, log_columns
+from spaceodyssey.core.snapshot import MeanBelief, Snapshot, mean_layout
 from tests.core.battery_helpers import (
     EPOCH_CAPS,
     EPOCH_SHIFTS,
@@ -50,9 +55,11 @@ def test_every_log_tick_column_is_compared_and_moved():
     """Fails if a log column named `*_tick` is not in the moved set (an importer that
     writes it at absolute ticks would pass the relation), if a tick column is dropped
     from the columns the log or decision-view comparator reads, or if either
-    comparator reads its columns from anywhere but the shared `log_columns`.
+    comparator reads its columns from anywhere but the shared `log_columns`, rejects
+    a correct shift, or accepts a start tick left absolute in the shifted log.
     """
-    cols = log_columns(empty_log(EPOCH_CAPS))
+    log = empty_log(EPOCH_CAPS)
+    cols = log_columns(log)
     ticks = {name for name in cols if name.endswith("_tick")}
     assert ticks == set(views.TICKS)
     assert metamorphic.log_columns is log_columns
@@ -60,6 +67,83 @@ def test_every_log_tick_column_is_compared_and_moved():
     valid = np.array([True])
     for name in sorted(ticks):
         assert moved_ticks(name, np.array([3]), valid, 7).tolist() == [10], name
+
+    log = dataclasses.replace(
+        log,
+        **{name: np.asarray(col)[:1].copy() for name, col in cols.items()},
+    )
+    log = dataclasses.replace(
+        log,
+        valid=valid,
+        kind=np.array([1]),
+        audience=np.array([int(Audience.OBSERVER | Audience.POLICY)]),
+        start_tick=np.array([-3]),
+        end_tick=np.array([-1]),
+        superseded_by=np.array([-1]),
+    )
+    shifted = dataclasses.replace(
+        log,
+        start_tick=np.array([4]),
+        end_tick=np.array([6]),
+        available_tick=np.array([7]),
+        released_tick=np.array([7]),
+        accepted_tick=np.array([7]),
+    )
+
+    @dataclasses.dataclass
+    class DecisionTrace:
+        handled: np.ndarray
+        wake: np.ndarray
+        kind: np.ndarray
+        tick: np.ndarray
+        n_dec: np.ndarray
+
+    trace = DecisionTrace(
+        valid, valid, np.array([EventKind.RELEASE]), np.array([0]), np.array([1])
+    )
+    late_trace = dataclasses.replace(trace, tick=trace.tick + 7)
+    belief = MeanBelief(mean=np.array([0.0]), n=np.array([1]), aux=np.zeros(0))
+    layout = mean_layout(belief, belief)
+    carry = SimpleNamespace(
+        log=log,
+        belief=belief,
+        pbelief=belief,
+        acquisition_counts=np.array([1]),
+        ledger=SimpleNamespace(balance=np.array([0.0])),
+    )
+    view = Snapshot(
+        log=log,
+        n_rows=np.array(1),
+        belief=belief,
+        tick=np.array(0),
+        n_dec=np.array(0),
+        release_version=np.array(1),
+    )
+    for absolute in (False, True):
+        late_log = (
+            dataclasses.replace(shifted, start_tick=log.start_tick)
+            if absolute
+            else shifted
+        )
+        late_carry = SimpleNamespace(**{**vars(carry), "log": late_log})
+        late_view = dataclasses.replace(view, log=late_log, tick=view.tick + 7)
+        assert metamorphic._epoch_world(
+            0, carry, trace, late_carry, late_trace, 7, layout
+        ) == (
+            ["world 0: log column start_tick changed under the shift"]
+            if absolute
+            else []
+        )
+        assert views.compare_views(
+            [(view, None)],
+            [(late_view, None)],
+            carry,
+            late_carry,
+            EPOCH_CAPS,
+            trace,
+            layout=layout,
+            epoch=7,
+        ) == (["decision 0: policy view log start_tick changed"] if absolute else [])
 
 
 def test_shift_epoch_refuses_a_shift_that_is_not_positive():
