@@ -31,6 +31,7 @@ from spaceodyssey.core.enums import (
     AdmissionCode,
     Disposition,
     EffectKind,
+    EventKind,
     RecordStatus,
     Scope,
 )
@@ -368,12 +369,49 @@ def test_a_scripted_policy_is_a_policy():
     assert policy.declare().programs == (1,)
 
 
-# ---- mutants (last: each clears the compile caches) ---------------------------------
+# ---- mutants: a rule changed, applied by hand to the carry before its event ---------
+#
+# The real handler and the mutated one run eagerly (no jit, so no program is compiled
+# for either) on the carry of the shared run just before the Stop or the Cancel, and the
+# mutant must differ from the real one where the real-run tests above assert the rule.
 
 
-@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
-def test_mutant_a_stop_that_closes_every_lane_is_caught(monkeypatch):
+def _before_step(study, run, pick):
+    """The carry just before the first handled step that `pick(trace)` selects."""
+    handled = np.asarray(run.trace.handled)
+    step = int(np.flatnonzero(handled & pick(run.trace))[0])
+    truth, root = one_world(caps=study.caps)
+    return HostExecutor().run(study, truth, root, step).carry, truth, root
+
+
+def _is_stop(trace):
+    return np.asarray(trace.kind) == EventKind.STOP
+
+
+def _stop_event(carry):
+    """The pending Stop row of the table, as the step hands it to `h_stop`."""
+    row = int(
+        np.flatnonzero(np.asarray(carry.ev.valid & (carry.ev.kind == EventKind.STOP)))[
+            0
+        ]
+    )
+    return jax.tree_util.tree_map(lambda x: x[row], carry.ev)
+
+
+def _stopped(handler, study, run):
+    """The carry and log rows after `handler` handles the Stop of the run."""
+    carry, truth, root = _before_step(study, run, _is_stop)
+    ev = _stop_event(carry)
+    carry = _tree_set(carry, tick=ev.tick)
+    with jax.disable_jit():
+        out, _emit, _rec = handler(carry, ev, study, truth, root)
+    return out
+
+
+@pytest.mark.medium  # The shared run's compile is paid in its setup.
+def test_mutant_a_stop_that_closes_every_lane_is_caught(stop_one, monkeypatch):
     """Mutant: with programs, a program Stop closes all lanes. The check must fail."""
+    study, run = stop_one
     real = handlers.h_stop
 
     def closes_all(c, ev, study, truth, root):
@@ -381,20 +419,15 @@ def test_mutant_a_stop_that_closes_every_lane_is_caught(monkeypatch):
         closed = jnp.where(ev.scope == Scope.PROGRAM, True, out.ledger.lane_closed)
         return _tree_set(out, **{"ledger.lane_closed": closed}), emit, rec
 
-    table = tuple(closes_all if h is real else h for h in handlers.HANDLERS)
-    monkeypatch.setattr(handlers, "HANDLERS", table)
-    jax.clear_caches()  # the compiled step closed over the real handler table
-    try:
-        _, run = _run(*STOP_ONE)
-        assert np.asarray(run.carry.ledger.lane_closed).all()
-        assert list(_rows(run)["program"]) == [0]  # program 1 was refused on its lane
-    finally:
-        jax.clear_caches()
+    assert not np.asarray(_stopped(real, study, run).ledger.lane_closed).any()
+    # the closed lane would refuse program 1, which the real run admits on it
+    assert np.asarray(_stopped(closes_all, study, run).ledger.lane_closed).all()
 
 
-@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
-def test_mutant_a_stop_that_never_sets_the_flag_admits_the_closed_program(monkeypatch):
+@pytest.mark.medium  # The shared run's compile is paid in its setup.
+def test_mutant_a_stop_that_never_sets_the_flag_admits_the_closed_program(stop_one):
     """Mutant: the flag is not set, so the closed program is admitted again."""
+    study, run = stop_one
     real = handlers.h_stop
 
     def forgets(c, ev, study, truth, root):
@@ -402,21 +435,17 @@ def test_mutant_a_stop_that_never_sets_the_flag_admits_the_closed_program(monkey
         flag = c.ledger.program_closed
         return _tree_set(out, **{"ledger.program_closed": flag}), emit, rec
 
-    table = tuple(forgets if h is real else h for h in handlers.HANDLERS)
-    monkeypatch.setattr(handlers, "HANDLERS", table)
-    jax.clear_caches()
-    try:
-        _, run = _run(*STOP_ONE)
-        assert not np.asarray(run.carry.ledger.program_closed).any()
-        # program 0 is admitted again on its free lane, so program 1 finds it busy
-        assert list(_rows(run)["program"]) == [0, 0]
-    finally:
-        jax.clear_caches()
+    assert list(np.asarray(_stopped(real, study, run).ledger.program_closed)) == [
+        True,
+        False,
+    ]
+    assert not np.asarray(_stopped(forgets, study, run).ledger.program_closed).any()
 
 
-@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
-def test_mutant_an_abort_that_ignores_the_program_cancels_both(monkeypatch):
+@pytest.mark.medium  # The shared run's compile is paid in its setup.
+def test_mutant_an_abort_that_ignores_the_program_cancels_both(abort_one, monkeypatch):
     """Mutant: the abort drops its program filter, so it cancels every live lane."""
+    study, run = abort_one
     real = handlers._cancel_lane
 
     def any_program(*args, **kwargs):
@@ -424,29 +453,48 @@ def test_mutant_an_abort_that_ignores_the_program_cancels_both(monkeypatch):
         kwargs.pop("by_program", None)
         return real(*args, **kwargs)
 
+    def cancelled_programs():
+        out = _stopped(handlers.h_stop, study, run)
+        n = int(out.n_log)
+        assert set(np.asarray(out.log.status)[:n]) <= {int(RecordStatus.PARTIAL)}
+        return sorted(np.asarray(out.log.program)[:n].tolist())
+
+    # only program 0's occupancy is cancelled; program 1's is still live on lane 1
+    assert cancelled_programs() == [0]
     monkeypatch.setattr(handlers, "_cancel_lane", any_program)
-    jax.clear_caches()
-    try:
-        _, run = _run(*TWO_LIVE, stop(1, PROGRAM, ABORT, 0))
-        assert set(_rows(run)["status"]) == {int(RecordStatus.PARTIAL)}
-    finally:
-        jax.clear_caches()
+    assert cancelled_programs() == [0, 1]
 
 
-@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
-def test_mutant_a_refund_to_the_first_program_row_is_caught(monkeypatch):
+@pytest.mark.medium  # The shared run's compile is paid in its setup.
+def test_mutant_a_refund_to_the_first_program_row_is_caught(cancelled, monkeypatch):
     """Mutant: the cancel credits program 0 whoever owns the occupancy."""
+    study, run = cancelled
+    carry, truth, root = _before_step(study, run, lambda t: np.asarray(t.tick) == 20)
+    carry = _tree_set(carry, tick=jnp.asarray(20, I64))
+
+    def cancel_lane():
+        with jax.disable_jit():
+            out = handlers._cancel_lane(
+                carry,
+                study,
+                truth,
+                root,
+                jnp.asarray(0, I64),
+                jnp.asarray(True),
+                jnp.asarray(RecordStatus.PARTIAL, I64),
+                jnp.asarray(True),
+            )[0]
+        return np.asarray(out.ledger.balance)
+
+    balance = cancel_lane()
+    assert balance[_row(study, 1), 1] == pytest.approx(99.9)
+    assert balance[_row(study, 0), 1] == pytest.approx(100.0)
     real = handlers._resource_rows
 
     def first_row(study, lane, program=0):
         return real(study, lane, 0)
 
     monkeypatch.setattr(handlers, "_resource_rows", first_row)
-    jax.clear_caches()
-    try:
-        study, run = _run(*CANCEL_OWNED)
-        balance = np.asarray(run.carry.ledger.balance)
-        assert balance[_row(study, 1), 1] == pytest.approx(99.0)  # never credited
-        assert balance[_row(study, 0), 1] > 100.0  # credited to the wrong owner
-    finally:
-        jax.clear_caches()
+    balance = cancel_lane()
+    assert balance[_row(study, 1), 1] == pytest.approx(99.0)  # never credited
+    assert balance[_row(study, 0), 1] > 100.0  # credited to the wrong owner
