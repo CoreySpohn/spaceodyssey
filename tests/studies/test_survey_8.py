@@ -4,8 +4,9 @@ Two assets each own lanes (asset 0 owns lanes 0 and 1, asset 1 owns lane 2) and 
 only priced resource is fuel, resource 0, held per asset. The script, keyed by tick so a
 different number of releases cannot move it, asks asset 0 for fuel it does not have and
 keeps asking asset 1 for work. A level-1 array policy reads the balances and, once asset
-0 is dry, emits `Stop(ASSET)` for it. The merge-time guard (medium) runs the study on
-both executors and checks (a) to (d); the control is slow.
+0 is dry, emits `Stop(ASSET)` for it. The merge-time guard (medium) runs the study and
+its reference on the host executor and checks (a) to (d); the control and the
+two-executor parity are slow.
 """
 
 import dataclasses
@@ -142,12 +143,10 @@ def survey_study(*, fuel=FUEL_DRY, stops=True, faults=((FAULT_TICK, 2, 2, 2),)):
     return eqx.tree_at(lambda s: s.process, study, process)
 
 
-def _run(study):
-    """The study on both executors, one world each: `(compiled, host)` batched runs."""
+def _run(study, executor="host"):
+    """The study on one executor, one world: the batched run."""
     truths, roots = worlds(1, study.caps)
-    return tuple(
-        run_on(name, study, truths, roots, N_STEPS) for name in ("compiled", "host")
-    )
+    return run_on(executor, study, truths, roots, N_STEPS)
 
 
 def _first_world(run):
@@ -231,21 +230,18 @@ def _assert_a_and_b(world, study):
 @pytest.fixture(scope="module")
 def stopped():
     study = survey_study()
-    compiled, host = _run(study)
-    return study, compiled, host
+    return study, _run(study)
 
 
-@pytest.mark.medium  # the merge-time guard: one study on both executors
+@pytest.mark.medium  # merge-time guard: the study and its reference, host executor
 def test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected(stopped):
     """B7 row 8 (a) to (d). Fails if the policy does not stop the dry asset or stops
     it before it is dry, if the refusal code does not change across the Stop, if the
     other asset's records or balances differ from a run with fuel, or if the fault on
     its lane does anything but fail the work on that lane.
     """
-    study, compiled, host = stopped
-    # both executors make the same history, and it is not empty
-    assert int(np.asarray(compiled.carry.n_log)[0]) == 6 > 0
-    assert same_histories(compiled, host, 1)
+    study, host = stopped
+    assert int(np.asarray(host.carry.n_log)[0]) == 6 > 0
     world = _first_world(host)
     _assert_a_and_b(world, study)
     out = _outcomes(world)
@@ -259,7 +255,7 @@ def test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected(stopped)
     admitted = _admit_ticks(study, rows)
     assert admitted.tolist() == [0, 120, 140, 230]
     assert (admitted > SECOND).sum() == 2
-    _, ref_host = _run(survey_study(fuel=FUEL_FULL))
+    ref_host = _run(survey_study(fuel=FUEL_FULL))
     ref_world = _first_world(ref_host)
     ref = _records(ref_world, study, lane=2)
     assert ref.keys() == rows.keys()
@@ -299,7 +295,7 @@ def test_control_without_the_policy_stop_every_refusal_is_no_funds_and_row_b_fai
     ends, and the assertions that row (a) and row (b) make fail on it.
     """
     study = survey_study(stops=False)
-    _, host = _run(study)
+    host = _run(study)
     world = _first_world(host)
     out = _outcomes(world)
     assert [t for t in _stop_ticks(world) if t < FINISH] == []
@@ -308,3 +304,12 @@ def test_control_without_the_policy_stop_every_refusal_is_no_funds_and_row_b_fai
     assert out[(AFTER, 10)] == out[(AFTER, 11)] == NO_FUNDS
     with pytest.raises(AssertionError):
         _assert_a_and_b(world, study)
+
+
+@pytest.mark.slow  # the compiled executor compiles every program again (K6)
+def test_both_executors_make_the_same_history_for_the_dry_asset_study(stopped):
+    """Parity for (a) to (d): ints exact, floats in the go band, on both executors."""
+    study, host = stopped
+    compiled = _run(study, "compiled")
+    assert int(np.asarray(compiled.carry.n_log)[0]) == 6 > 0
+    assert same_histories(compiled, host, 1)

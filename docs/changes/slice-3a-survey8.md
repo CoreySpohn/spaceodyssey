@@ -46,10 +46,12 @@ refuses every request on asset 0 after the fuel is gone `NO_FUNDS`: three refusa
 
 ## Tiers
 
-The merge-time guard covers (a) to (d) and parity: one study on both executors plus one more
-host run for the reference, medium (about 22 s cold, nearly all of it compiling the two
-executors). The control is slow; it reuses the same compiled shapes and takes under a second
-once they are built, but it needs them built when run alone.
+The merge-time guard covers (a) to (d): the study and its reference run on the host
+executor only, medium. It costs the same as survey 9's guard measured on the same loaded
+machine (about 20 s against 19 s, with survey 9 at 7 s on a quiet one), almost all of it
+compiling the host programs. The reference run recompiles nothing. The control and the
+two-executor parity are slow: the control takes under two seconds once the host programs
+are built, and parity compiles the compiled executor again.
 
 ## Notes for review
 
