@@ -3,16 +3,27 @@
 import dataclasses
 import inspect
 import textwrap
+from types import SimpleNamespace
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-from spaceodyssey.core import AbstractProcess, EventKind, Stage, enqueue, record_none
+from spaceodyssey.core import (
+    AbstractProcess,
+    EventKind,
+    HostExecutor,
+    Stage,
+    enqueue,
+    handlers,
+    record_none,
+)
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, I64, PUBLIC, ChargePricing, RecordStatus
 from spaceodyssey.studies import toy
+from tests.core.helpers import one_world
 from tests.core.program_helpers import ScriptedPrograms
 
 RECEIPT_CHANNEL = 50
@@ -99,6 +110,35 @@ class ScriptedReceipts(AbstractProcess):
         return carry, rec
 
 
+def before_release(study, trace, tick):
+    """The run just before the release at `tick`, and the log row that release names.
+
+    `trace` is the trace of a full run of `study`. The run is repeated up to the step
+    that handles the release, on the compiled step the study already shares, so a rule
+    applied by hand to this carry is tested without compiling a program of its own.
+    """
+    handled = np.asarray(trace.handled)
+    release = np.flatnonzero(
+        handled
+        & (np.asarray(trace.kind) == EventKind.RELEASE)
+        & (np.asarray(trace.tick) == tick)
+    )
+    assert len(release) >= 1
+    truth, root = one_world(caps=study.caps)
+    result = HostExecutor().run(study, truth, root, int(release[0]))
+    carry = eqx.tree_at(lambda c: c.tick, result.carry, jnp.asarray(tick, I64))
+    run = SimpleNamespace(study=study, carry=carry, trace=result.trace)
+    return run, int(carry.n_log) - 1
+
+
+def apply_refund(apply, run, slot, first=True):
+    """`run` after the refund rule `apply` runs on the receipt row `slot`, by hand."""
+    carry = run.carry
+    rec = handlers._log_rec(carry.log, slot)
+    carry = apply(carry, rec, jnp.asarray(slot, I64), jnp.asarray(first), run.study)
+    return SimpleNamespace(study=run.study, carry=carry, trace=run.trace)
+
+
 def _column(value, c, r, dtype):
     return jnp.broadcast_to(jnp.asarray(value, dtype), (c, r))
 
@@ -162,4 +202,12 @@ def refund_study(
     )
 
 
-__all__ = ["PUBLIC", "ScriptedReceipts", "mutate", "receipt", "refund_study"]
+__all__ = [
+    "PUBLIC",
+    "ScriptedReceipts",
+    "apply_refund",
+    "before_release",
+    "mutate",
+    "receipt",
+    "refund_study",
+]
