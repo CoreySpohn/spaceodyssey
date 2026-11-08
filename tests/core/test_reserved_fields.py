@@ -125,19 +125,29 @@ def perturbed(study, name):
     )
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "ChannelTable.charge",
-        "AssetTable.freeze_ticks",
-        "AssetTable.disruptive_resource",
-    ],
-)
-def test_reserved_table_field_has_no_behaviour(runs, name):
-    study, scan, _ = runs
+PERTURBED = [
+    "ChannelTable.charge",
+    "AssetTable.freeze_ticks",
+    "AssetTable.disruptive_resource",
+]
+
+
+@pytest.fixture(scope="module")
+def perturbed_runs(runs):
+    """The compiled run of each perturbed study, made once with the baseline."""
+    study = runs[0]
     truths, roots = worlds(1)
-    cs, ts = CompiledExecutor().run(perturbed(study, name), truths, roots, N_STEPS)
+    return {
+        name: CompiledExecutor().run(perturbed(study, name), truths, roots, N_STEPS)
+        for name in PERTURBED
+    }
+
+
+@pytest.mark.parametrize("name", PERTURBED)
+def test_reserved_table_field_has_no_behaviour(runs, perturbed_runs, name):
+    study, scan, _ = runs
     layout = study.observer.layout(study.caps)
+    cs, ts = perturbed_runs[name]
     changed = canonical_history(index_world(cs, 0), index_world(ts, 0), layout)
     baseline = canonical_history(*scan, layout)
     assert histories_equal(baseline, changed).ok
