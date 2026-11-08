@@ -243,18 +243,18 @@ def _check_rows(effects, caps, source=""):
     The shapes are static, so the check costs nothing at run time. `source` names the
     producer, when the caller knows it.
     """
-    for name in (
-        "kind",
-        "subject",
-        "channel_index",
-        "group",
-        "tick",
-        "lane",
-        "scope",
-        "disposition",
-        "disruptive",
-    ):
-        column = getattr(effects, name)
+    columns = (
+        ("kind", effects.kind),
+        ("subject", effects.subject),
+        ("channel_index", effects.channel_index),
+        ("group", effects.group),
+        ("tick", effects.tick),
+        ("lane", effects.lane),
+        ("scope", effects.scope),
+        ("disposition", effects.disposition),
+        ("disruptive", effects.disruptive),
+    )
+    for name, column in columns:
         if column is None:
             continue
         rows = jnp.shape(column)
@@ -829,8 +829,7 @@ def transition(carry, i, root, study, truth, *, wake_fn=wake_by_audience):
     c, trace, wake = advance(carry, root, study, truth, wake_fn=wake_fn)
     view = _policy_view(c, study)
     eff, pstate, u = decide(c, root, study, view)
-    names = ", ".join(type(p).__name__ for p in study.agenda.policies)
-    _check_rows(eff, study.caps, f" (policies: {names})")
+    _check_rows(eff, study.caps, f" (policies: {study.agenda.policies})")
     eff = mask_effects(eff, wake)
     fp = decision_fingerprint(c, study, view)
     c, codes = admit(c, eff, study, fp)

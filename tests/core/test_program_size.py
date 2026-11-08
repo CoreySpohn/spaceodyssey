@@ -138,5 +138,5 @@ def test_transition_names_the_policy_that_emits_a_short_table():
     caps = Capacities(n_effects=3)
     study = toy.survey_1(caps=caps, policies=(_OneRow(plan=((0, 10),)),))
     truths, roots = worlds(1, caps)
-    with pytest.raises(ValueError, match=r"n_effects is 3.*policies: _OneRow"):
+    with pytest.raises(ValueError, match=r"n_effects is 3.*policies: .*_OneRow"):
         CompiledExecutor().run(study, truths, roots, 4)
