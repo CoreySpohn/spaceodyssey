@@ -516,7 +516,64 @@ def test_a_changed_script_reuses_the_program(scripted_run):
     assert _traces["n"] == before
 
 
+def test_refresh_gather_and_commit_share_one_program_across_values():
+    """Fails if a scripted value retraces the refresh gather or commit calls, single
+    world or batched, which a plain `eqx.filter_jit` in their place would do."""
+    from spaceodyssey.core import refresh
+
+    def study(values):
+        return scripted.scripted_refresh_study(
+            ticks=(100, 200), values=values, ids=(1, 2)
+        )
+
+    variants = ((2.0, 9.0), (3.0, 8.0), (4.0, 7.0))
+    base = study(variants[0])
+    truths, roots = make_worlds(base, 1)
+    carry = init_carry(base, index_world(truths, 0))
+    carries = jax.tree.map(lambda x: x[None], carry)
+    root = roots[0]
+    request = refresh._gather(carry, root, base)
+    requests = refresh._gather_worlds(carries, roots, base)
+    boundary = toy.toy_masked_refit()
+
+    def zeros(tree):
+        return jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), tree)
+
+    one = zeros(
+        eqx.filter_eval_shape(
+            boundary.refit_batch, base, jax.tree.map(lambda x: x[None], request)
+        )
+    )
+    one = jax.tree.map(lambda x: x[0], one)
+    many = zeros(eqx.filter_eval_shape(boundary.refit_batch, base, requests))
+    _shares_one_program(
+        refresh._gather,
+        [lambda v=v: refresh._gather(carry, root, study(v)) for v in variants],
+    )
+    _shares_one_program(
+        refresh._gather_worlds,
+        [
+            lambda v=v: refresh._gather_worlds(carries, roots, study(v))
+            for v in variants
+        ],
+    )
+    _shares_one_program(
+        refresh._commit,
+        [lambda v=v: refresh._commit(carry, request, one, study(v)) for v in variants],
+    )
+    _shares_one_program(
+        refresh._commit_worlds,
+        [
+            lambda v=v: refresh._commit_worlds(carries, requests, many, study(v))
+            for v in variants
+        ],
+    )
+
+
 def test_step_and_decision_fingerprint_share_one_program_across_values(monkeypatch):
+    """Fails if a policy value retraces the step or the decision fingerprint, or if
+    the trace counters stop seeing traces: a float32 value is a new program and must
+    count exactly once, so an all-zero count cannot pass."""
     import equinox as eqx
 
     from spaceodyssey import core
@@ -527,32 +584,37 @@ def test_step_and_decision_fingerprint_share_one_program_across_values(monkeypat
     truth = core.index_world(truths, 0)
     carry = eqx.filter_jit(core.init_carry)(study, truth)
     carry, ev, _ = core.select_next(carry, study.caps)
-    values = (3.25, 4.25, 5.25)  # no other test calls these: never cached before
+    values = (3.25, 4.25, 5.25)
+    narrow = _threshold(jnp.float32(3.5))  # another dtype: a program of its own
 
     original = handlers.HANDLERS[0]
-    count = {"n": 0}
+    steps = {"n": 0}
 
     def counted(*args, **kw):
-        count["n"] += 1
+        steps["n"] += 1
         return original(*args, **kw)
 
     monkeypatch.setattr(handlers, "HANDLERS", (counted, *handlers.HANDLERS[1:]))
-    seen = []
-    for x in values:
-        core.step(carry, ev, _threshold(x), truth, roots[0])
-        seen.append(count["n"])
-    assert seen[0] <= 1 and seen[1:] == seen[:1] * 2
-
     original_fp = transaction._policy_fingerprint
-    fp = {"n": 0}
+    prints = {"n": 0}
 
     def counted_fp(*args, **kw):
-        fp["n"] += 1
+        prints["n"] += 1
         return original_fp(*args, **kw)
 
     monkeypatch.setattr(transaction, "_policy_fingerprint", counted_fp)
-    seen = []
-    for x in values:
-        core.decision_fingerprint(carry, _threshold(x))
-        seen.append(fp["n"])
-    assert seen[0] <= 1 and seen[1:] == seen[:1] * 2
+
+    def run_step(s):
+        core.step(carry, ev, s, truth, roots[0])
+
+    def run_print(s):
+        core.decision_fingerprint(carry, s)
+
+    for counter, call in ((steps, run_step), (prints, run_print)):
+        call(_threshold(3.0))  # warm: the caches may be cleared
+        seen = counter["n"]
+        for x in values:
+            call(_threshold(x))
+        assert counter["n"] == seen
+        call(narrow)
+        assert counter["n"] == seen + 1
