@@ -185,6 +185,10 @@ class EffectTable(eqx.Module):
     recipient: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
     remainder: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
     realloc_to: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    # The tick an Observe row starts at and the commitment a Cancel row names (the one
+    # of its lane that starts then), present only while commitments are on. A start at
+    # or before the decision tick is an immediate activity (a live cancel for a Cancel).
+    start_tick: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
 
 
 def effects_none(caps):
@@ -195,7 +199,15 @@ def effects_none(caps):
         disruptive=jnp.zeros(caps.n_effects, B),
         program=z if caps.n_programs > 1 else None,
         **award_columns(caps),
+        **start_columns(caps),
     )
+
+
+def start_columns(caps):
+    """The start-tick column of an empty effect table: only with commitments on."""
+    if not caps.commitments:
+        return {}
+    return {"start_tick": jnp.zeros(caps.n_effects, I64)}
 
 
 def award_columns(caps):
@@ -412,6 +424,7 @@ OPTIONAL_EFFECT_FIELDS = (
     "recipient",
     "remainder",
     "realloc_to",
+    "start_tick",
 )
 EFFECT_FIELDS = tuple(
     f.name

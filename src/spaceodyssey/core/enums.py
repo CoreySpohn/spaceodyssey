@@ -40,6 +40,7 @@ class EventKind(IntEnum):
     REQUEST = 9
     REFRESH = 10
     WINDOW_END = 11
+    COMMIT_START = 12
 
 
 class EffectKind(IntEnum):
@@ -69,6 +70,15 @@ class Disposition(IntEnum):
     CLOSE = 0
     DRAIN = 1
     ABORT = 2
+
+
+class CommitState(IntEnum):
+    """Integer codes for a commitment slot."""
+
+    NONE = 0
+    PENDING = 1
+    STARTED = 2
+    CANCELLED = 3
 
 
 class RecordStatus(IntEnum):
