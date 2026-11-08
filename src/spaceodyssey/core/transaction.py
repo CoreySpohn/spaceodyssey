@@ -186,8 +186,15 @@ def decide(carry, root, study, view=None):
     ph = phase_at(carry, study)
     pstate = jnp.where(ph != carry.phase, jnp.zeros_like(carry.pstate), carry.pstate)
     key = decision_key(carry, root, study)
+
+    def run_policy(ps, v, k, p):
+        out = p.decide(ps, v, study, k)
+        # checked per policy, before the switch asks its branches to agree
+        _check_rows(out[0], study.caps, f" (policy: {p})")
+        return out
+
     branches = tuple(
-        (lambda ps, v, k, p=p: p.decide(ps, v, study, k)) for p in study.agenda.policies
+        (lambda ps, v, k, p=p: run_policy(ps, v, k, p)) for p in study.agenda.policies
     )
     if len(branches) == 1:
         return branches[0](pstate, view, key)
@@ -253,6 +260,7 @@ def _check_rows(effects, caps, source=""):
         ("scope", effects.scope),
         ("disposition", effects.disposition),
         ("disruptive", effects.disruptive),
+        ("program", effects.program),
     )
     for name, column in columns:
         if column is None:
@@ -829,7 +837,6 @@ def transition(carry, i, root, study, truth, *, wake_fn=wake_by_audience):
     c, trace, wake = advance(carry, root, study, truth, wake_fn=wake_fn)
     view = _policy_view(c, study)
     eff, pstate, u = decide(c, root, study, view)
-    _check_rows(eff, study.caps, f" (policies: {study.agenda.policies})")
     eff = mask_effects(eff, wake)
     fp = decision_fingerprint(c, study, view)
     c, codes = admit(c, eff, study, fp)
