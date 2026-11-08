@@ -173,9 +173,16 @@ def decision_key(carry, root, study):
     )
 
 
-def decide(carry, root, study):
-    """Run the policy of the current phase on the policy-audience view."""
-    view = eqx.filter_jit(snapshot_view)(carry, Audience.POLICY, study.caps)
+def _policy_view(carry, study):
+    return eqx.filter_jit(snapshot_view)(carry, Audience.POLICY, study.caps)
+
+
+def decide(carry, root, study, view=None):
+    """Run the policy of the current phase on the policy-audience view.
+
+    `view` is that view of `carry` when the caller already built it.
+    """
+    view = _policy_view(carry, study) if view is None else view
     ph = phase_at(carry, study)
     pstate = jnp.where(ph != carry.phase, jnp.zeros_like(carry.pstate), carry.pstate)
     key = decision_key(carry, root, study)
@@ -197,11 +204,13 @@ def _policy_fingerprint(view, study):
     return snapshot_fingerprint(view, study.observer.layout(study.caps))
 
 
-def decision_fingerprint(carry, study):
-    """Fingerprint of the snapshot the policy reads at the current state."""
-    return eqx.filter_jit(_policy_fingerprint)(
-        eqx.filter_jit(snapshot_view)(carry, Audience.POLICY, study.caps), study
-    )
+def decision_fingerprint(carry, study, view=None):
+    """Fingerprint of the snapshot the policy reads at the current state.
+
+    `view` is the policy-audience view of `carry` when the caller already built it.
+    """
+    view = _policy_view(carry, study) if view is None else view
+    return eqx.filter_jit(_policy_fingerprint)(view, study)
 
 
 def _with_award_columns(effects, caps):
@@ -788,9 +797,10 @@ def finish_trace(trace, effects, codes, u, wake, carry, study, snapshot_fp=0):
 def transition(carry, i, root, study, truth, *, wake_fn=wake_by_audience):
     """advance, then decide, admit and close under a mask on the wake."""
     c, trace, wake = advance(carry, root, study, truth, wake_fn=wake_fn)
-    eff, pstate, u = decide(c, root, study)
+    view = _policy_view(c, study)
+    eff, pstate, u = decide(c, root, study, view)
     eff = mask_effects(eff, wake)
-    fp = decision_fingerprint(c, study)
+    fp = decision_fingerprint(c, study, view)
     c, codes = admit(c, eff, study, fp)
     c = close_decision(c, eff, pstate, wake, study)
     return c, finish_trace(trace, eff, codes, u, wake, c, study, fp)
