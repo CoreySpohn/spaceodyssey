@@ -18,10 +18,12 @@ import pytest
 from spaceodyssey.codec import DocumentError, dump_study, load_study
 from spaceodyssey.codec.records import check_lowering
 from spaceodyssey.core.conformance.corpus import make_worlds
+from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.executors.compiled import CompiledExecutor, _scan_worlds
-from spaceodyssey.core.lift import lift_traced
+from spaceodyssey.core.executors.host import HostExecutor
+from spaceodyssey.core.lift import lift_traced, lifting_jit
 from spaceodyssey.core.transaction import wake_by_audience
-from spaceodyssey.studies import scripted, toy
+from spaceodyssey.studies import oracle, scripted, toy
 from tests.codec.test_document import TOY_KINDS
 from tests.core.corpus import HAND_STUDIES
 
@@ -197,3 +199,106 @@ def test_a_marked_policy_can_be_built_inside_a_transform():
 def test_a_bucket_must_be_a_positive_int(bucket):
     with pytest.raises(ValueError, match="bucket"):
         _run(toy.survey_1(), 17, bucket=bucket)
+
+
+def _traces_of(monkeypatch, module, name, calls):
+    """Count traces of the jitted function `module.name` over the callables `calls`."""
+    original = getattr(module, name).__wrapped__
+    count = {"n": 0}
+
+    def counted(*args, **kw):
+        count["n"] += 1
+        return original(*args, **kw)
+
+    monkeypatch.setattr(module, name, lifting_jit(counted))
+    seen = []
+    for call in calls:
+        call()
+        seen.append(count["n"])
+    return seen
+
+
+def _threshold(x):
+    return toy.survey_1(policies=(toy.ThresholdStopPolicy(stop_snr=x),))
+
+
+def test_replay_entry_points_share_one_program_across_values(monkeypatch):
+    from spaceodyssey.core.conformance import observer_kit
+    from spaceodyssey.core.executors import replay
+
+    study = _threshold(3.0)
+    truths, roots = make_worlds(study, 1)
+    out = CompiledExecutor().run(study, truths, roots, 40)
+    carry = index_world(out.carry, 0)
+    trace = index_world(out.trace, 0)
+    values = (3.0, 4.0, 5.0)
+    seen = _traces_of(
+        monkeypatch,
+        replay,
+        "_fold",
+        [
+            lambda x=x: replay.replay_belief(_threshold(x), carry, trace, roots[0])
+            for x in values
+        ],
+    )
+    assert seen == [1, 1, 1]
+    seen = _traces_of(
+        monkeypatch,
+        observer_kit,
+        "_replay",
+        [
+            lambda x=x: observer_kit.replay_beliefs(_threshold(x), out, roots)
+            for x in values
+        ],
+    )
+    assert seen == [1, 1, 1]
+
+
+def test_masked_refit_shares_one_program_across_values(monkeypatch):
+    from spaceodyssey.core import refresh
+    from tests.core.refresh_helpers import SpyBoundary
+
+    def study(values):
+        return scripted.scripted_refresh_study(
+            ticks=(100, 200), values=values, ids=(1, 2)
+        )
+
+    base = study((2.0, 9.0))
+    truths, roots = make_worlds(base, 1)
+    spy = SpyBoundary(toy.toy_masked_refit())
+    CompiledExecutor().run(base, truths, roots, 40, refit=spy)
+    requests = jax.tree.map(jnp.asarray, spy.calls[0])
+    boundary = toy.toy_masked_refit()
+    seen = _traces_of(
+        monkeypatch,
+        refresh,
+        "_masked_call",
+        [
+            lambda v=v: boundary.refit_batch(study(v), requests)
+            for v in ((2.0, 9.0), (3.0, 8.0), (4.0, 7.0))
+        ],
+    )
+    assert seen == [1, 1, 1]
+
+
+@pytest.mark.parametrize(
+    ("make", "field", "bad"),
+    [
+        (lambda v: oracle.oracle_study(query_at=v)[0], "query_at", 1.5),
+        (
+            lambda v: toy.survey_1(
+                policies=(toy.StochasticPolicy(theta=10.0, n_obs=v),)
+            ),
+            "n_obs",
+            5.5,
+        ),
+        (lambda v: oracle.oracle_study(query_at=v)[0], "query_at", 2**70),
+    ],
+)
+def test_lifting_refuses_a_value_the_dtype_cannot_hold(make, field, bad):
+    study = make(bad)
+    truths, roots = make_worlds(study, 1)
+    with pytest.raises(ValueError, match=field):
+        CompiledExecutor().run(study, truths, roots, 10)
+    with pytest.raises(ValueError, match=field):
+        HostExecutor().run(study, index_world(truths, 0), roots[0], 10)
