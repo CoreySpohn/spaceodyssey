@@ -70,6 +70,27 @@ def test_refresh_ran_and_installed_something():
     assert np.asarray(h.carry.belief.n[0]).sum() > 0  # control: the belief moved
 
 
+@pytest.mark.parametrize("every", [100, 300])
+def test_checkpoints_fall_once_per_grid_tick_with_their_grid_ordinal(every):
+    """Fails if releases sharing a checkpoint queue it twice, or an ordinal is not k.
+
+    With `every=300` the releases at 130 and 260 are both eligible before the
+    checkpoint at 300, which must hold and complete once. A checkpoint at grid tick
+    `k * every` writes its product rows with ordinal `k`, whatever tick released it.
+    """
+    h, c = pair() if every == 100 else run_pair(refresh_study(every), 60, N_WORLDS, 7)
+    for res in (h, c):
+        for w in range(N_WORLDS):
+            steps = handled_steps(base.index_world(res.trace, w))
+            releases = {x[1] for x in steps if x[0] == EventKind.RELEASE}
+            refresh = [x[1] for x in steps if x[0] == EventKind.REFRESH]
+            due = {-(-tick // every) * every for tick in releases}  # next grid tick
+            assert refresh == sorted(2 * list(due))  # a hold and a completion each
+            rows = product_rows(base.index_world(res.carry, w))
+            assert rows
+            assert all(row[3] == row[2] * every for row in rows)  # ordinal k at k*every
+
+
 def test_host_loop_matches_masked_batch():
     study = refresh_study(100)
     truths, roots = worlds(1)
@@ -86,6 +107,9 @@ def test_awaiting_without_a_boundary_on_both_executors():
     c = CompiledExecutor().run(study, truths, roots, 60)  # the default chunk is 32
     assert h.status.tolist() == [RunStatus.AWAITING] * N_WORLDS
     assert c.status.tolist() == [RunStatus.AWAITING] * N_WORLDS
+    # one world is its own batch shape: the stuck mask is indexed per world
+    one = CompiledExecutor().run(study, *worlds(1), 60)
+    assert one.status.tolist() == [RunStatus.AWAITING]
 
 
 def test_no_refresh_study_ignores_a_boundary():
