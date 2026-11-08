@@ -51,8 +51,11 @@ pinned digest, fingerprint, FAULT fixture or corpus hash changes.
   left-to-right sum as the charges. Two grouped rows that each cost 1 plus one activation are
   refused whole against a balance of 3, and no balance goes below zero.
 - A second Cancel of a commitment that already has a Cancel pending is `UNSUPPORTED` and spends
-  no activation. The activation of a Cancel is debited only when the Cancel is enqueued; a
-  full queue refuses it as `NO_SLOT`.
+  no activation. So is a Cancel behind an ABORT, already in the queue, whose scope reaches
+  the commitment (lane, asset, program or campaign; `stop_reaches` in `handlers.py` is the
+  one reach rule, shared with `h_stop`); a Cancel ahead of the abort, or behind one that does
+  not reach it, is unaffected. The activation of a Cancel is debited only when the Cancel is
+  enqueued; a full queue, or event ids spent, refuses it as `NO_SLOT`.
 - A disruptive resource index outside `-1 .. n_resources - 1` is the pre-flight finding A001
   (path `assets.disruptive_resource`), covering the negative bound too.
 
@@ -64,12 +67,6 @@ later commitment on a lane would overwrite what earlier work on that lane still 
 Supporting both needs per-commitment capture leaves, a debit at the window current at the
 commit, the windowed-refund cancel path, expiry between commit and cancel, and tests: about
 two cards. The decision to build it is Corey's.
-
-## Known limit
-
-A Stop that aborts a lane, enqueued in the same decision before a Cancel naming one of its
-commitments, makes that Cancel non-live after its activation was debited. The activation is
-not credited back (as for any cancel).
 
 ## What a cancel of a pending commitment credits
 
