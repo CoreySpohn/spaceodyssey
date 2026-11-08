@@ -29,6 +29,12 @@ against unlifted, leaf by leaf (dtype, shape, weak type and raw bytes), on both
 executors, for every study listed above in its default and varied forms: no leaf
 differs.
 
+A lift never changes a value. A marked field that its dtype cannot hold exactly, such as
+`1.5` or an integer out of int64 range in an integer field, is refused with a `ValueError`
+that names the field. Every compiled entry point that takes a policy, process or observer
+(the executors, the replay and conformance replays, the masked refit and the service
+commit) lifts through `lifting_jit`, so a value variant reuses the program there too.
+
 Left as they are, because lifting changes a program or a history, or the field selects a
 Python branch or a shape:
 
