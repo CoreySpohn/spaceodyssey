@@ -8,7 +8,7 @@ import numpy as np
 
 from spaceodyssey.core import HostExecutor
 from spaceodyssey.core.capacities import Capacities
-from spaceodyssey.core.enums import I64
+from spaceodyssey.core.enums import F64, I64, ChargePricing
 from tests.core.helpers import one_world
 from tests.core.program_helpers import SCRIPT_ROWS, ScriptedPrograms
 
@@ -52,7 +52,16 @@ class ScriptedCommitments(ScriptedPrograms):
         return dataclasses.replace(eff, start_tick=start, disruptive=flag), ps, u
 
 
-def commitment_study(script, plans, *, freeze=HORIZON, activations=1.0, **overrides):
+def commitment_study(
+    script,
+    plans,
+    *,
+    freeze=HORIZON,
+    activations=1.0,
+    n_programs=1,
+    refunds=False,
+    **overrides,
+):
     """The toy study with commitments on, a horizon on asset 0 and the scripted policy.
 
     Asset 0 holds `activations` of resource column `DISRUPTIVE_COL` beyond what its
@@ -60,7 +69,9 @@ def commitment_study(script, plans, *, freeze=HORIZON, activations=1.0, **overri
     """
     from spaceodyssey.studies import toy
 
-    caps = Capacities(n_effects=3, n_commitments=4)
+    caps = Capacities(
+        n_effects=3, n_commitments=4, n_programs=n_programs, refunds=refunds
+    )
     study = toy.survey_1(
         caps=caps,
         policies=(ScriptedCommitments(script=script, plan=plans),),
@@ -72,6 +83,28 @@ def commitment_study(script, plans, *, freeze=HORIZON, activations=1.0, **overri
         disruptive_resource=jnp.asarray([DISRUPTIVE_COL, -1], I64),
     )
     return dataclasses.replace(study, assets=assets)
+
+
+def priced(study, pricing, charge, surcharge, balance=100.0):
+    """The study with channel 10 priced `pricing` and every balance row at `balance`.
+
+    Every study carries the pricing and surcharge columns, so one program serves all
+    four pricing modes; the other channels keep a plain occupancy price.
+    """
+    ch = study.channels
+    n_channels, n_resources = ch.cost.shape
+    table = jnp.full((n_channels, n_resources), ChargePricing.OCCUPANCY, I64)
+    channels = dataclasses.replace(
+        ch,
+        charge=ch.cost.at[0].set(jnp.asarray(charge, F64)),
+        pricing=table.at[0].set(pricing),
+        surcharge=jnp.zeros((n_channels, n_resources), F64)
+        .at[0]
+        .set(jnp.asarray(surcharge, F64)),
+    )
+    return dataclasses.replace(
+        study, channels=channels, budget=jnp.full_like(study.budget, balance)
+    )
 
 
 def run(study, n_steps=200):
