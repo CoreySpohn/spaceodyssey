@@ -29,9 +29,13 @@ against unlifted, leaf by leaf (dtype, shape, weak type and raw bytes), on both
 executors, for every study listed above in its default and varied forms: no leaf
 differs.
 
-A lift never changes a value. A marked field that its dtype cannot hold exactly, such as
-`1.5` or an integer out of int64 range in an integer field, is refused with a `ValueError`
-that names the field. Every compiled entry point that takes a policy, process or observer
+A lift never changes a value. Lifting converts only what it can prove exact: a Python
+int, bool or float, or a flat tuple or list of them, each number checked on its own.
+Everything else passes through unchanged, as it did before lifting existed: arrays,
+NumPy scalars, Fractions, Decimals, nested sequences, a float in an integer field (`1.5`)
+and an integer outside int64. The `ScriptedRecords` fields normalize at construction to
+a tuple of Python numbers, so a NumPy or object array gives the same script as a tuple.
+Every compiled entry point that takes a policy, process or observer
 (the executors, the replay and conformance replays, the masked refit and the service
 commit) lifts through `lifting_jit`, so a value variant reuses the program there too.
 
@@ -91,8 +95,8 @@ on the branch that carries the program-size reduction, and
 ## Tests
 
 `tests/core/test_compile_sharing.py` compares the bucketed run with the default scan leaf
-by leaf on two hand studies and a scripted study at 12, 40 and 45 steps, checks that
-varied values, scripts, step counts within a bucket and kind names add no program, that
-the lowering check still refuses mismatched kind names, that a bad `bucket` is refused,
-and that lifting leaves the history of the threshold, stochastic and scripted studies
-unchanged.
+by leaf, checks that varied values, scripts, step counts within a bucket and kind names
+add no program, that the lowering check still refuses mismatched kind names, that a bad
+`bucket` is refused, that each lifted class of input (bool, int, large exact int,
+integral float, float subclass, sequences) gives the history recorded on the base commit,
+and that arrays in a script read as the tuples they hold.
