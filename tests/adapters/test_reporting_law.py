@@ -156,7 +156,6 @@ def test_record_kind_passes_kp5_against_the_profile_table():
 # -- Sampling against likelihood (B2) --------------------------------------------
 
 
-@pytest.mark.slow  # A 20,000-draw Monte Carlo panel (the tier the spec assigns).
 @pytest.mark.parametrize("corr", [0.0, 0.5])
 def test_sampling_and_likelihood_agree(corr):
     """Fails if draws and the likelihood disagree beyond Monte Carlo error.
@@ -203,7 +202,6 @@ def test_sampling_and_likelihood_agree(corr):
             assert abs(detected.mean() - doubled) > 3 * se
 
 
-@pytest.mark.slow  # The correlated-error control of the 20,000-draw panel.
 def test_position_whitening_control_fails_on_the_correlated_case():
     """Fails if the chi-square check cannot see a correlation sign error.
 

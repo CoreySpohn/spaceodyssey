@@ -299,7 +299,6 @@ def _every_nonempty_row(effects, mask, act):
     return live & mixed
 
 
-@pytest.mark.slow  # compiles a copy of admission, 2 s cold alone
 def test_mutant_admission_that_never_refuses_fails_the_mixed_checks():
     """A refusal that selects no rows lets the sibling debit through, and the rebuilt
     fingerprint then differs from the one the request carries.
@@ -319,7 +318,6 @@ def test_mutant_admission_that_never_refuses_fails_the_mixed_checks():
     )
 
 
-@pytest.mark.slow
 def test_mutant_admission_that_refuses_without_the_flag_fails_the_off_check():
     """A refusal that ignores `snapshot_balances` changes every older study."""
     admit = _mutant_admit(_refuses_mixed=lambda caps: True)
@@ -327,7 +325,6 @@ def test_mutant_admission_that_refuses_without_the_flag_fails_the_off_check():
         _off_keeps_the_old_behavior(admit)
 
 
-@pytest.mark.slow
 def test_mutant_admission_that_counts_every_row_fails_the_effects_check():
     """A refusal that counts a forbidden row as an effect overrides its own code."""
     admit = _mutant_admit(_query_mixed_rows=_every_nonempty_row)
