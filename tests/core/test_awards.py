@@ -543,7 +543,7 @@ def test_opposite_budgets_do_not_offset_in_the_range_bound(quantum):
 
     Rows hold +B and -B of the program resource (B is 2**53 quanta), so their sum is
     zero while the positive row already sits at the limit: an award of 8 quanta on it
-    would pass 2**53 quanta. Small budgets of the same signs are the control.
+    would pass 2**53 quanta. A negative budget is refused whatever its size.
     """
 
     def codes(big):
@@ -566,7 +566,39 @@ def test_opposite_budgets_do_not_offset_in_the_range_bound(quantum):
     refused, run = codes(top)
     assert refused == [AdmissionCode.UNSUPPORTED]
     assert float(np.asarray(run.carry.ledger.granted).sum()) == 0.0
-    assert codes(100.0 * quantum)[0] == [OK]
+    small, _ = codes(100.0 * quantum)
+    assert small == [AdmissionCode.UNSUPPORTED], "any negative budget is refused"
+
+
+@pytest.mark.parametrize("quantum", [1.0, 0.125, 10.0])
+def test_a_negative_reallocation_cannot_create_headroom(quantum):
+    """Fails if a negative balance reallocated twice lets an award pass 2**53 quanta.
+
+    Rows start at B - 8q and -8q (B is 2**53 quanta); the negative row is moved to the
+    other and back, which lowered the signed `granted` sum and admitted 16q on the
+    positive row. Negative budgets are refused, so no award is admitted at all, and the
+    positive row stays below B.
+    """
+    top = 2.0**53 * quantum
+    study = award_study(
+        (wait(0, 10), wait(1, 10), wait(2, 10), end(5)),
+        (
+            award(0, 2, P1, 0, 10, 0, RemainderRule.REALLOCATE, P0),
+            award(1, 2, P0, 10, 20, 0, RemainderRule.REALLOCATE, P1),
+            award(2, 2, P0, 20, 100, 16 * quantum),
+        ),
+        caps_extra={"snapshot_balances": True, "balance_quantum": quantum},
+    )
+    budget = np.zeros(np.asarray(study.budget).shape)
+    budget[P0, PROGRAM_COL] = top - 8 * quantum
+    budget[P1, PROGRAM_COL] = -8 * quantum
+    study = dataclasses.replace(study, budget=jnp.asarray(budget))
+    run = _host(study, n_steps=80)
+    t = run.trace
+    allocs = _handled(run)[:, None] & (np.asarray(t.eff_kind) == EffectKind.ALLOCATE)
+    codes = np.asarray(t.admit_code)[allocs].tolist()
+    assert all(code == AdmissionCode.UNSUPPORTED for code in codes)
+    assert float(np.asarray(run.carry.ledger.balance)[P0, PROGRAM_COL]) < top
 
 
 def test_a_large_award_without_snapshot_balances_is_admitted():

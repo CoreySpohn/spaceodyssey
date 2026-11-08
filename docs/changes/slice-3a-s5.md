@@ -4,7 +4,8 @@ orphan: true
 
 # Slice 3a S5: awards, windows and remainder rules
 
-Round 4 is on top of round 3, which is rebuilt on `main` 10a9b06. Round 2 added the award generation of the drawn row,
+Round 5 refuses a negative budget entry (UNSUPPORTED, with balances in the snapshot) and
+sums `granted` by absolute value in the range bound. Round 4 is on top of round 3, which is rebuilt on `main` 10a9b06. Round 2 added the award generation of the drawn row,
 an independent expiry replay, and the amount-shape and range refusals; round 3 makes the
 replay cover refunds and queued settlements, keeps one generation per payer slot, bounds
 the range by supply, and fixes the program-row crash; round 4 resolves a receipt's origin from its identity
@@ -82,10 +83,11 @@ this change.
   table (a `(n,)` or `(n, 1)` vector would broadcast into every resource) is refused as
   UNSUPPORTED, statically at trace time, together with every other Allocate of the decision.
 - **Representable range.** With `caps.snapshot_balances`, an Allocate is admitted only if
-  the resource's supply, the absolute budget over all rows (a negative row cannot
-  offset a positive one) plus everything granted so far (a
-  reallocation counts again, which only refuses early), stays within `2**53` times the
-  balance quantum (S4's exact bound). Balances never go negative and a debit, refund, lapse
+  the resource's supply, the budget over all rows plus everything granted so far (summed
+  by absolute value; a reallocation counts again, which only refuses early), stays within `2**53` times the
+  balance quantum (S4's exact bound). A study with any negative budget entry has every Allocate refused (UNSUPPORTED), since
+  a negative row could be reallocated to open headroom the sums do not see. Balances
+  never go negative and a debit, refund, lapse
   and REALLOCATE move quantity without adding any, so supply bounds every row at every
   time, through refunds and reallocation targets alike. S4's QUERY_MIXED guard still
   covers Allocate.

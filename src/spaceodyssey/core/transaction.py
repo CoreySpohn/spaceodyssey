@@ -353,16 +353,18 @@ def _commit_allocate(c, eff, e, want, study):
     )
     if caps.snapshot_balances:
         # The balance view counts `balance_quantum` units exactly up to 2**53 (the bound
-        # `Study` holds the budget to). Rows never go negative, and a debit, a refund,
-        # a lapse and a REALLOCATE all move quantity without adding any; only the
-        # budget and the awards add. So a resource's budget over all rows plus
-        # everything granted so far (a reallocation counts again, which only refuses
-        # early) bounds every row at every time, whichever refund or reallocation
-        # lands where. The award is admitted only if that supply stays within bound.
-        # a negative budget row counts as its absolute value, so it cannot offset a
-        # positive one (each row is bounded on its own)
-        supply = jnp.abs(jnp.asarray(study.budget)).sum(axis=0)
-        supply = supply + c.ledger.granted.sum(axis=0)
+        # `Study` holds the budget to). With every budget entry non-negative, rows never
+        # go negative, and a debit, a refund, a lapse and a REALLOCATE all move quantity
+        # without adding any; only the budget and the awards add. So a resource's budget
+        # over all rows plus everything granted so far (a reallocation counts again,
+        # which only refuses early) bounds every row at every time, whichever refund or
+        # reallocation lands where. A study with a negative budget entry is refused
+        # (UNSUPPORTED) rather than bounded: a negative row could be reallocated to
+        # create headroom the sums do not see. `granted` is summed by absolute value
+        # all the same, so a signed transfer can never lower the supply.
+        budget = jnp.asarray(study.budget)
+        supply = jnp.abs(budget).sum(axis=0) + jnp.abs(c.ledger.granted).sum(axis=0)
+        fine = fine & jnp.all(budget >= 0.0)
         fine = fine & jnp.all((supply + amount) / caps.balance_quantum <= _EXACT_QUANTA)
     open_ = c.ledger.win_state[r] == WindowState.WINDOWED
     room = (~c.ev.valid).any() & (c.next_sid < caps.max_sid)
