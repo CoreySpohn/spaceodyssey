@@ -298,11 +298,11 @@ class RecordLog(eqx.Module):
     nonrefundable: jax.Array | None  # F64[L, R]
     refund_index: jax.Array | None
     award_gen: jax.Array | None
+    award_gens: jax.Array | None  # I64[L, R], present only with awards
     # Pedigree of a product row, I64[L, product_width]: audience, refit status, row
     # count and the revision set as (channel, acquisition index, revision) triples. It
     # is not a `Record` field: only a refresh writes it; every other row holds zeros.
     product: jax.Array
-    award_gens: jax.Array | None = None  # I64[L, R], present only with awards
 
 
 def log_records(log, **replace):

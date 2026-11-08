@@ -210,36 +210,68 @@ def _log_program(log, i):
     return 0 if log.program is None else int(np.asarray(log.program)[i])
 
 
-def _refund_credit(log, i, valid, credited):
-    """The credit a receipt row is allowed, and the origin row it lands on.
+def _is_receipt(study, log, i):
+    """Whether row `i` is a failure receipt, by the rule the handler applies.
 
-    A receipt (`refund_of` set) names its origin by acquisition id. Its credit is the
-    refundable remainder of the origin, `charged` less the `nonrefundable` part, and
-    only the first receipt for an origin earns it. The receipt's own `charged` column
-    is not read, so a handler that over-credits is caught by the ledger's counters.
+    A receipt is a record of a declared failure kind written on a channel other than
+    the one it names (its `source`); an acquisition of the failure kind is not one.
+    """
+    kinds = study.channels.failure_kind
+    if kinds is None or log.refund_index is None:
+        return False
+    kind, channel = int(np.asarray(log.kind)[i]), int(np.asarray(log.channel)[i])
+    return kind in np.asarray(kinds).tolist() and channel != int(
+        np.asarray(log.source)[i]
+    )
+
+
+def _refund_credit(study, log, i, valid, credited):
+    """The origin of applied receipt `i`, its credit, and whether `refund_of` agrees.
+
+    The origin is resolved from the receipt's semantic identity alone (its `subject`,
+    the channel it names in `source` and the origin's acquisition index in
+    `refund_index`), the way the handler picks it, not from the `refund_of` the handler
+    wrote; `agrees` says whether that column names the same acquisition. The credit is
+    the refundable remainder of the origin, `charged` less the `nonrefundable` part,
+    and only the first receipt for an origin earns it. The receipt's own `charged`
+    column is not read, so a handler that over-credits is caught by the ledger's
+    counters.
     """
     ids, refs = np.asarray(log.acquisition_id), np.asarray(log.refund_of)
-    origin = int(refs[i])
-    hits = [j for j in valid if int(ids[j]) == origin and int(refs[j]) < 0]
-    if not hits or origin in credited:
-        return None, 0.0
-    credited.add(origin)
+    subject, channel = np.asarray(log.subject), np.asarray(log.channel)
+    index = np.asarray(log.acquisition_index)
+    want = (
+        int(subject[i]),
+        int(np.asarray(log.source)[i]),
+        int(np.asarray(log.refund_index)[i]),
+    )
+    hits = [
+        j
+        for j in valid
+        if j != i and (int(subject[j]), int(channel[j]), int(index[j])) == want
+    ]
+    if not hits:
+        return None, 0.0, False
     j = hits[0]
+    agrees = int(refs[i]) == int(ids[j])
+    if int(ids[j]) in credited:
+        return None, 0.0, agrees
+    credited.add(int(ids[j]))
     charged = np.asarray(log.charged)[j]
     fixed = 0.0 if log.nonrefundable is None else np.asarray(log.nonrefundable)[j]
-    return j, np.maximum(charged - fixed, 0.0)
+    return j, np.maximum(charged - fixed, 0.0), agrees
 
 
 def _receipt_mismatches(run):
-    """Receipt rows whose own `charged` is not the negative of the credit they earn."""
+    """Applied receipts whose `charged` is not the negative of the credit they earn."""
     log, bad = run.carry.log, []
     valid, credited = _valid_rows(run), set()
     refs, charged = np.asarray(log.refund_of), np.asarray(log.charged)
     for i in valid:
         if int(refs[i]) < 0:
             continue
-        _, credit = _refund_credit(log, i, valid, credited)
-        if np.any(np.abs(charged[i] + credit) > ATOL):
+        _, credit, agrees = _refund_credit(run.study, log, i, valid, credited)
+        if not agrees or np.any(np.abs(charged[i] + credit) > ATOL):
             bad.append(int(i))
     return bad
 
@@ -255,7 +287,7 @@ def _retained_net_spend(run):
     credited = set()
     for i in valid:
         if int(refs[i]) >= 0:
-            j, credit = _refund_credit(log, i, valid, credited)
+            j, credit, _ = _refund_credit(run.study, log, i, valid, credited)
             if j is None:
                 continue
             rows = _balance_rows(
@@ -307,9 +339,11 @@ def _award_timeline(run):
     Each entry is `(tick, stage, seq, kind, data)`. Stage 1 holds the credit of an
     applied receipt (at its `released_tick`), stage 2 the expiries the trace handled,
     stage 3 everything a decision does: grants, admission debits (a settled or
-    cancelled record gives its tick as `start_tick` less the lane's transition, a queued
-    settlement as its due tick less occupancy and transition) and a cancellation's
-    credit (at its `end_tick`). Nothing here reads the ledger's balances or counters.
+    cancelled record gives its tick as `start_tick` less the lane's transition, a
+    queued settlement as its due tick less occupancy and transition) and a
+    cancellation's credit (at its `end_tick`). Nothing here reads the ledger's
+    balances or counters. The second result lists the problems found on the way: an
+    applied receipt whose `refund_of` disagrees with the origin its identity names.
     """
     study, c, t = run.study, run.carry, run.trace
     log, assets, ch = c.log, study.assets, study.channels
@@ -339,15 +373,23 @@ def _award_timeline(run):
     valid, credited = _valid_rows(run), set()
     refs, status = np.asarray(log.refund_of), np.asarray(log.status)
     charged, lane = np.asarray(log.charged), np.asarray(log.lane)
+    problems = []
     for i in valid:
         if int(refs[i]) >= 0:
-            j, credit = _refund_credit(log, i, valid, credited)
+            j, credit, agrees = _refund_credit(study, log, i, valid, credited)
+            if not agrees:
+                problems.append(
+                    f"receipt row {int(i)} names acquisition {int(refs[i])}, not the "
+                    "origin its subject, channel and index identify"
+                )
             if j is not None:
                 rows = _balance_rows(study, int(lane[j]), _log_program(log, j))
                 when = int(np.asarray(log.released_tick)[i])
                 out.append((when, 1, seq, "credit", (rows, credit, None)))
                 seq += 1
             continue
+        if _is_receipt(study, log, i):
+            continue  # ignored, unmatched or held: it moves no money
         index = int(np.asarray(log.channel_index)[i])
         rows = _balance_rows(study, int(lane[i]), _log_program(log, i))
         start = int(np.asarray(log.start_tick)[i]) - int(transition[int(lane[i])])
@@ -370,7 +412,7 @@ def _award_timeline(run):
         start -= int(transition[int(ev.lane[i])])
         out.append((start, 3, seq, "debit", (rows, totals[index], None)))
         seq += 1
-    return sorted(out, key=lambda x: x[:3])
+    return sorted(out, key=lambda x: x[:3]), problems
 
 
 def _replay_awards(run):
@@ -388,8 +430,8 @@ def _replay_awards(run):
     budget = np.asarray(run.study.budget)
     balance, granted = budget.astype(np.float64).copy(), np.zeros_like(budget)
     lapsed, gen = np.zeros_like(budget), np.zeros(budget.shape[0], np.int64)
-    opened, problems = [], []
-    timeline = _award_timeline(run)
+    opened = []
+    timeline, problems = _award_timeline(run)
     by_group = {}
     for entry in timeline:
         by_group.setdefault(entry[:2], []).append(entry)
