@@ -440,25 +440,33 @@ def _group_code(c, eff, member, study):
     caps, channels = study.caps, study.channels
     n = caps.n_effects
     t = c.tick
-    lanes = [channels.lane[eff.channel_index[f]] for f in range(n)]
-    programs = [_program_of(eff, f, caps) for f in range(n)]
-    rows = [_resource_rows(study, lanes[f], programs[f]) for f in range(n)]
-    cost = [charge_parts(study, eff.channel_index[f])[0] for f in range(n)]
-    n_members = sum(member[f].astype(I64) for f in range(n))
+    idx = jnp.arange(n)
+
+    def inputs(f):
+        lane = channels.lane[eff.channel_index[f]]
+        program = _program_of(eff, f, caps)
+        rows = _resource_rows(study, lane, program)
+        cost = charge_parts(study, eff.channel_index[f])[0]
+        return lane, program, rows, cost
+
+    lanes, programs, rows, cost = jax.vmap(inputs)(idx)
+    n_members = member.astype(I64).sum()
     room = ((~c.ev.valid).sum() >= n_members) & (c.next_sid + n_members <= caps.max_sid)
     cols = jnp.arange(caps.n_resources)
-    codes = []
-    for f in range(n):
+
+    def code_of(f):
         ci = eff.channel_index[f]
         done_t = (
             t + study.assets.transition_ticks[lanes[f]] + channels.occupancy_ticks[ci]
         )
-        clash = jnp.asarray(False)
-        for g in range(f):
-            clash = clash | (member[g] & (lanes[g] == lanes[f]))
-        demand = jnp.zeros(caps.n_resources)
-        for g in range(n):
-            demand = demand + jnp.where(member[g] & (rows[g] == rows[f]), cost[g], 0.0)
+        clash = jnp.any(member & (idx < f) & (lanes == lanes[f]))
+
+        def add(g, demand):
+            return demand + jnp.where(member[g] & (rows[g] == rows[f]), cost[g], 0.0)
+
+        # rows are added in index order, one at a time, as the floating-point
+        # result depends on the order
+        demand = lax.fori_loop(0, n, add, jnp.zeros(caps.n_resources))
         funds = jnp.all(c.ledger.balance[rows[f], cols] >= demand)
         closed = c.ledger.lane_closed[lanes[f]] | c.draining
         if caps.n_programs > 1:
@@ -492,11 +500,13 @@ def _group_code(c, eff, member, study):
             conds.insert(3, outside)
             codes_.insert(3, AdmissionCode.OUTSIDE_VALIDITY)
         code = jnp.select(conds, codes_, AdmissionCode.OK).astype(I64)
-        codes.append(jnp.where(member[f], code, AdmissionCode.OK))
-    first = jnp.asarray(AdmissionCode.OK, I64)
-    for f in reversed(range(n)):
-        first = jnp.where(codes[f] != AdmissionCode.OK, codes[f], first)
-    return first
+        return jnp.where(member[f], code, AdmissionCode.OK)
+
+    codes = jax.vmap(code_of)(idx)
+    refused = codes != AdmissionCode.OK
+    return jnp.where(
+        refused.any(), codes[jnp.argmax(refused)], AdmissionCode.OK
+    ).astype(I64)
 
 
 class _AdmissionInputs(eqx.Module):
@@ -516,32 +526,35 @@ def _admit_rows(c, eff, mask, study, fp):
     caps = study.caps
     first_sid = c.next_sid
     n = caps.n_effects
-    out = [jnp.asarray(AdmissionCode.NONE, I64)] * n
+    out = jnp.full(n, AdmissionCode.NONE, I64)
     decided = jnp.zeros(n, jnp.bool_)
-    for e in range(n):
+    idx = jnp.arange(n)
+
+    def row(e, state):
+        c, out, decided = state
         act = active(c)
         kind = eff.kind[e]
         allowed = _permitted(mask, kind)
         obs = act & (kind == EffectKind.OBSERVE) & allowed
         # the first undecided row of a group admits every row of that group
         start = obs & ~decided[e]
-        member = jnp.stack(
-            [
-                start
-                & (f >= e)
-                & (eff.kind[f] == EffectKind.OBSERVE)
-                & _permitted(mask, eff.kind[f])
-                & (eff.group[f] == eff.group[e])
-                for f in range(n)
-            ]
+        member = (
+            start
+            & (idx >= e)
+            & (eff.kind == EffectKind.OBSERVE)
+            & _permitted(mask, eff.kind)
+            & (eff.group == eff.group[e])
         )
         gcode = eqx.filter_jit(_group_code)(c, eff, member, study)
         ok = gcode == AdmissionCode.OK
-        for f in range(n):
-            c = eqx.filter_jit(_commit_observe)(
-                c, eff, jnp.asarray(f, I64), member[f] & ok, study
+
+        def commit(f, c):
+            return eqx.filter_jit(_commit_observe)(
+                c, eff, f.astype(I64), member[f] & ok, study
             )
-            out[f] = jnp.where(member[f], gcode, out[f])
+
+        c = lax.fori_loop(0, n, commit, c)
+        out = jnp.where(member, gcode, out)
         decided = decided | member
         t = c.tick
         w = eff.tick[e]
@@ -607,7 +620,7 @@ def _admit_rows(c, eff, mask, study, fp):
             c, alloc_code = _commit_allocate(
                 c, eff, e, act & allowed & (kind == EffectKind.ALLOCATE), study
             )
-        out[e] = jnp.select(
+        code_e = jnp.select(
             [
                 ~act | (kind == EffectKind.NONE),
                 ~allowed,
@@ -624,6 +637,9 @@ def _admit_rows(c, eff, mask, study, fp):
             ],
             AdmissionCode.OK,
         ).astype(I64)
+        return c, out.at[e].set(code_e), decided
+
+    c, out, decided = lax.fori_loop(0, n, row, (c, out, decided))
     # A question is answered before any sibling event at this position runs,
     # including siblings listed before the Query in the effect table.
     ev = c.ev
@@ -636,7 +652,7 @@ def _admit_rows(c, eff, mask, study, fp):
         & (ev.stage == c.stage)
     )
     c = _tree_set(c, **{"ev.micro": ev.micro + jnp.where(asks.any() & siblings, 2, 0)})
-    return c, jnp.stack(out)
+    return c, out
 
 
 def _refuses_mixed(caps):
