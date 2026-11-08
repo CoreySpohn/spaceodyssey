@@ -720,6 +720,38 @@ def h_stop(c, ev, study, truth, root):
         cancel,
         (c1, jnp.asarray(0, I64), jnp.asarray(0, I64), record_none(caps)),
     )
+    if caps.commitments:
+
+        def cancel_pending(s, state):
+            carry, n_total, slot, rec = state
+            led = carry.ledger
+            live = (
+                abort & (led.cm_state[s] == CommitState.PENDING) & reach[led.cm_lane[s]]
+            )
+            if by_program is not None:
+                live = live & (~by_program | (led.cm_program[s] == ev.program))
+            carry, n, sl, r = eqx.filter_jit(_cancel_lane)(
+                carry,
+                study,
+                truth,
+                root,
+                led.cm_lane[s],
+                live,
+                jnp.asarray(RecordStatus.PARTIAL, I64),
+                jnp.asarray(True),
+                slot=jnp.asarray(s, I64),
+            )
+            return (
+                carry,
+                n_total + n,
+                jnp.where(n > 0, sl, slot),
+                where_tree(n > 0, r, rec),
+            )
+
+        # a pending commitment has started nothing, so an abort cancels it as well
+        c1, n_total, slot, rec = lax.fori_loop(
+            0, caps.n_commitments, cancel_pending, (c1, n_total, slot, rec)
+        )
     c2 = _tree_set(c1, done=c1.done | (campaign & abort))
     return c2, _emit(n_total, slot), rec
 
@@ -772,12 +804,33 @@ def h_commit_start(c, ev, study, truth, root):
 
     The lane's generation moves here, so the settlement carries the generation of the
     occupancy the commitment becomes. An executing commitment is not an insertion and
-    meets no freeze check; one cancelled meanwhile has no queued start.
+    meets no freeze check; one cancelled meanwhile has no queued start. A start on a
+    lane that has been closed, or for a program that has, is refused: the commitment is
+    cancelled as a Cancel would, the record at fraction 0 and the credit its pricing
+    allows.
     """
     caps, channels = study.caps, study.channels
-    led = c.ledger
     mark = jnp.clip(ev.slot, 0, caps.n_commitments - 1)
-    ok = (ev.slot >= 0) & (led.cm_state[mark] == CommitState.PENDING)
+    pending = (ev.slot >= 0) & (c.ledger.cm_state[mark] == CommitState.PENDING)
+    shut = c.ledger.lane_closed[ev.lane]
+    if caps.n_programs > 1:
+        shut = shut | c.ledger.program_closed[ev.program]
+    refused = pending & shut
+    ok = pending & ~shut
+    # the pop freed the start's row; put it back so the cancel finds it
+    c = requeue(c, ev, refused)
+    c, n, slot, rec = eqx.filter_jit(_cancel_lane)(
+        c,
+        study,
+        truth,
+        root,
+        ev.lane,
+        refused,
+        jnp.asarray(RecordStatus.PARTIAL, I64),
+        jnp.asarray(True),
+        slot=ev.slot,
+    )
+    led = c.ledger
     done_t = (
         ev.tick
         + study.assets.transition_ticks[ev.lane]
@@ -815,7 +868,7 @@ def h_commit_start(c, ev, study, truth, root):
         program=0 if ev.program is None else ev.program,
         caps=caps,
     )
-    return c2, _emit(0, 0), record_none(caps)
+    return c2, _emit(n, slot), rec
 
 
 @lifting_jit
