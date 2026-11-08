@@ -276,8 +276,12 @@ def _receipt_mismatches(run):
     return bad
 
 
-def _retained_net_spend(run):
-    """Net charge of the retained records plus full cost of each live occupancy."""
+def _retained_net_spend(run, refunds=None):
+    """Net charge of the retained records plus full cost of each live occupancy.
+
+    With awards on, `refunds` is the replay's per-row credit (a refund may lapse or move
+    to another row), and the receipts are not credited here.
+    """
     study, c = run.study, run.carry
     spent = np.zeros(np.asarray(study.budget).shape)
     log, cost = c.log, _charge_totals(study)
@@ -287,6 +291,8 @@ def _retained_net_spend(run):
     credited = set()
     for i in valid:
         if int(refs[i]) >= 0:
+            if refunds is not None:
+                continue
             j, credit, _ = _refund_credit(run.study, log, i, valid, credited)
             if j is None:
                 continue
@@ -305,6 +311,8 @@ def _retained_net_spend(run):
         rows = _balance_rows(study, int(ev.lane[i]), program)
         for r, row in enumerate(rows):
             spent[row, r] += float(cost[int(ev.channel_index[i]), r])
+    if refunds is not None:
+        spent -= refunds
     return spent
 
 
@@ -385,7 +393,11 @@ def _award_timeline(run):
             if j is not None:
                 rows = _balance_rows(study, int(lane[j]), _log_program(log, j))
                 when = int(np.asarray(log.released_tick)[i])
-                out.append((when, 1, seq, "credit", (rows, credit, None)))
+                captured = tuple(
+                    None if col is None else np.asarray(col)[j]
+                    for col in (log.award_gens, log.award_rules, log.award_tos)
+                )
+                out.append((when, 1, seq, "refund", (rows, credit, captured)))
                 seq += 1
             continue
         if _is_receipt(study, log, i):
@@ -393,7 +405,10 @@ def _award_timeline(run):
         index = int(np.asarray(log.channel_index)[i])
         rows = _balance_rows(study, int(lane[i]), _log_program(log, i))
         start = int(np.asarray(log.start_tick)[i]) - int(transition[int(lane[i])])
-        gens = None if log.award_gens is None else np.asarray(log.award_gens)[i]
+        gens = tuple(
+            None if col is None else np.asarray(col)[i]
+            for col in (log.award_gens, log.award_rules, log.award_tos)
+        )
         cancelled = int(status[i]) in (RecordStatus.PARTIAL, RecordStatus.CANCELLED)
         debit = totals[index] if cancelled else charged[i]
         out.append((start, 3, seq, "debit", (rows, debit, gens)))
@@ -418,25 +433,36 @@ def _award_timeline(run):
 def _replay_awards(run):
     """Replay every credit, debit, grant and expiry; return what the ledger must hold.
 
-    The result is `(balance, granted, lapsed, win_gen, problems)`. An expiry finds the
-    award that opened its window (same row and expiry tick, earlier in the trace) and
-    applies that award's remainder rule to what the replayed row holds at that moment:
-    FORFEIT lapses it, REALLOCATE lapses it and grants it to the declared row, NONE and
-    CARRY_OVER move nothing. A record's `award_gens`, one generation per payer slot,
-    must be the replayed generation of the row that paid at its debit (a grant on that
-    row in the same tick may come before or after the debit, so either is accepted).
-    Late refunds are credited to the origin's rows as the handlers do today.
+    The result is `(balance, granted, lapsed, gen, problems, refunded)`. An expiry finds
+    the award that opened its window (same row and expiry tick, earlier in the trace)
+    and applies that award's remainder rule to what the replayed row holds then: FORFEIT
+    lapses it, REALLOCATE lapses it and grants it to the declared row, NONE and
+    CARRY_OVER move nothing. A record's `award_gens`, `award_rules` and `award_tos`, one
+    entry per payer slot, must be the generation, rule and destination of the window the
+    paying row held at its debit (a grant on that row in the same tick may come before
+    or after the debit, so either is accepted; outside a window the rule is NONE).
+    A refund is disposed from the origin's captured identity against the replayed row:
+    it credits the row when the generation is unchanged, or when the rule is NONE or
+    CARRY_OVER and no window is open on the row; it credits the captured destination
+    under REALLOCATE; any other credit lapses (refunded and lapsed both rise, the
+    balance does not move).
     """
     budget = np.asarray(run.study.budget)
     balance, granted = budget.astype(np.float64).copy(), np.zeros_like(budget)
     lapsed, gen = np.zeros_like(budget), np.zeros(budget.shape[0], np.int64)
+    refunded = np.zeros_like(budget)
     opened = []
     timeline, problems = _award_timeline(run)
     by_group = {}
     for entry in timeline:
         by_group.setdefault(entry[:2], []).append(entry)
+
+    def holds(row):
+        return {w[0]: (w[2], w[3]) for w in opened}.get(row, (RemainderRule.NONE, 0))
+
     for (now, _), group in by_group.items():
         before = gen.copy()
+        windows = {row: holds(row) for row in range(budget.shape[0])}
         for _, _, _, what, data in group:
             if what == "grant":
                 row, amount, until, rule, to = data
@@ -444,11 +470,29 @@ def _replay_awards(run):
                 balance[row] += amount
                 granted[row] += amount
                 gen[row] += 1
+                opened = [w for w in opened if w[0] != row]
                 opened.append((row, int(until), int(rule), int(to)))
             elif what == "credit":
                 rows, amount, _ = data
                 for r, row in enumerate(rows):
                     balance[row, r] += float(amount[r])
+            elif what == "refund":
+                rows, amount, (gens, rules, tos) = data
+                for r, row in enumerate(rows):
+                    credit = float(amount[r])
+                    rule = int(rules[r])
+                    open_now = any(w[0] == row for w in opened)
+                    same = int(gens[r]) == int(gen[row])
+                    keeps = rule in (RemainderRule.NONE, RemainderRule.CARRY_OVER)
+                    if same or (keeps and not open_now):
+                        balance[row, r] += credit
+                        refunded[row, r] += credit
+                    elif rule == RemainderRule.REALLOCATE:
+                        balance[int(tos[r]), r] += credit
+                        refunded[int(tos[r]), r] += credit
+                    else:
+                        refunded[row, r] += credit
+                        lapsed[row, r] += credit
             elif what == "debit":
                 rows, amount, _ = data
                 for r, row in enumerate(rows):
@@ -469,18 +513,26 @@ def _replay_awards(run):
                         balance[to] += held
                         granted[to] += held
         for _, _, _, what, data in group:
-            if what != "debit" or data[2] is None:
+            if what != "debit" or data[2] is None or data[2][0] is None:
                 continue
-            rows, _, seen = data
+            rows, _, (seen, rules, tos) = data
+            after = {row: holds(row) for row in range(budget.shape[0])}
             for r, row in enumerate(rows):
                 if int(seen[r]) not in (int(before[row]), int(gen[row])):
                     problems.append(
                         f"a record names generation {int(seen[r])} for row {row}"
                     )
-    return balance, granted, lapsed, gen, problems
+                named = (int(rules[r]), int(tos[r]))
+                if named not in (windows[row], after[row]):
+                    problems.append(
+                        f"a record names rule {named[0]} and destination "
+                        f"{named[1]} for row {row}, which held {windows[row]} "
+                        "at its debit"
+                    )
+    return balance, granted, lapsed, gen, problems, refunded
 
 
-def _award_mismatches(run):
+def _award_mismatches(run, replay=None):
     """What the ledger's award counters and balances hold that the replay does not.
 
     Skipped only when the log overflowed: a debit or credit may then have no record to
@@ -489,12 +541,13 @@ def _award_mismatches(run):
     c = run.carry
     if int(c.overflow_mask) & Capacity.LOG_ROWS:
         return []
-    balance, granted, lapsed, gen, bad = _replay_awards(run)
+    balance, granted, lapsed, gen, bad, refunded = replay or _replay_awards(run)
     led = c.ledger
     for name, want, have in (
         ("balance", balance, led.balance),
         ("granted", granted, led.granted),
         ("lapsed", lapsed, led.lapsed),
+        ("refunded", refunded, led.refunded),
     ):
         diff = np.abs(np.asarray(have) - want)
         if np.any(diff > ATOL):
@@ -537,7 +590,8 @@ def balance_conserved(run):
             f"plus awards less the ledger's net debits is "
             f"{budget[row, res] + awarded[row, res] - net[row, res]}"
         )
-    kept = _retained_net_spend(run)
+    replay = None if c.ledger.granted is None else _replay_awards(run)
+    kept = _retained_net_spend(run, None if replay is None else replay[5])
     overflowed = bool(int(c.overflow_mask) & Capacity.LOG_ROWS)
     lost = _refused_completions(run) if overflowed else np.zeros_like(kept)
     residual = np.abs(net - kept - lost)
@@ -551,7 +605,7 @@ def balance_conserved(run):
     for i in _receipt_mismatches(run):
         failures.append(f"receipt row {i} does not carry the credit it is owed")
     if c.ledger.granted is not None:
-        failures.extend(_award_mismatches(run))
+        failures.extend(_award_mismatches(run, replay))
     return make_result(
         "balance_conserved",
         failures,

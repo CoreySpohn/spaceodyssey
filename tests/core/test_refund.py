@@ -1,4 +1,4 @@
-"""Failure receipts and refunds, without windows.
+"""Failure receipts and refunds, then the windowed part (late refunds and awards).
 
 A failure receipt is a process-written record of a kind a channel declares as a failure
 cause. It names its target by semantic identity (subject, channel, acquisition index)
@@ -8,7 +8,9 @@ control or a mutant of the rule it guards. The runs share one compiled executor.
 """
 
 import dataclasses
+from types import SimpleNamespace
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -23,12 +25,14 @@ from spaceodyssey.core import (
     snapshot_fingerprint,
     snapshot_view,
 )
-from spaceodyssey.core.enums import I64, ChargePricing
+from spaceodyssey.core.conformance.invariants import balance_conserved
+from spaceodyssey.core.enums import I64, ChargePricing, RemainderRule
 from spaceodyssey.core.preflight import FindingCode, preflight
 from spaceodyssey.core.records import masked_record, record_none
 from spaceodyssey.studies import toy
+from tests.core import award_helpers
 from tests.core.helpers import one_world
-from tests.core.program_helpers import cancel, observe, wait
+from tests.core.program_helpers import cancel, end, observe, wait
 from tests.core.refund_helpers import mutate, receipt, refund_study
 
 pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
@@ -355,3 +359,165 @@ def test_mutant_a_refund_on_any_release_leaks_an_observer_only_receipt(monkeypat
         np.testing.assert_allclose(_held(_run(study)), 98.0)  # not 93
     finally:
         jax.clear_caches()
+
+
+# ---- refunds across award windows -------------------------------------------------
+
+# Program 0's row is balance row 2 and program 1's is 3; the program-scoped resource is
+# column 1. Decision 0 awards at tick 0, decision 1 observes at tick 40 (the debit of
+# 10 under that award), decision 2 (woken by the release at 170) only waits, and
+# decision 3 acts at tick 310, after the first window ends at 300. The failure receipt
+# for that observation is released at tick 350.
+P0, P1, COL = 2, 3, 1
+FIRST = award_helpers.award(0, 2, P0, 0, 300, 5, RemainderRule.FORFEIT)
+WIN_SCRIPT = (
+    wait(0, 40),
+    observe(1, 0, 10, 0),
+    wait(1, 270),
+    wait(2, 140),
+    wait(3, 100),
+    end(5),
+)
+
+
+LATE = (receipt(350),)
+
+
+def _windowed(awards, receipts=LATE):
+    study = award_helpers.award_refund_study(WIN_SCRIPT, awards, receipts, pricing=None)
+    truth, root = one_world(caps=study.caps)
+    result = HostExecutor().run(study, truth, root, 80)
+    return SimpleNamespace(study=study, carry=result.carry, trace=result.trace)
+
+
+def _with(rule, to=0, first=FIRST):
+    """The first award as `first`, then a second award on the same row after it."""
+    again = award_helpers.award(3, 2, P0, 310, 360, 7, rule, to)
+    return (first, again)
+
+
+def _cell(run, name, row=P0):
+    return float(np.asarray(getattr(run.carry.ledger, name))[row, COL])
+
+
+def _change(awards, name, row=P0):
+    """What the receipt changed in a ledger counter: the run with it less without."""
+    return _cell(_windowed(awards), name, row) - _cell(
+        _windowed(awards, receipts=()), name, row
+    )
+
+
+@pytest.mark.parametrize(
+    "rule", [RemainderRule.NONE, RemainderRule.CARRY_OVER, RemainderRule.FORFEIT]
+)
+def test_a_refund_of_a_forfeited_award_lapses_whatever_the_row_holds_now(rule):
+    """Fails if a refund to an expired FORFEIT award lands on a newer award or state.
+
+    The first award forfeits at 300; a second award (any rule) is open at the receipt.
+    The refund of 10 lapses: the new award keeps its 7 and conservation holds.
+    """
+    awards = _with(rule)
+    run = _windowed(awards)
+    assert _change(awards, "balance") == 0.0
+    assert _change(awards, "refunded") == 10.0
+    assert _change(awards, "lapsed") == 10.0
+    assert balance_conserved(run).passed
+
+
+def test_a_refund_of_a_forfeited_award_lapses_when_the_row_ends_always():
+    """Fails if a row left ALWAYS by a later award's expiry takes an old refund.
+
+    Award A forfeits at 300; award B (carry over) ends at 340, leaving the row ALWAYS
+    holding B's balance; the refund of 10 at tick 350 belongs to A and lapses.
+    """
+    again = award_helpers.award(3, 2, P0, 310, 340, 20, RemainderRule.CARRY_OVER)
+    awards = (FIRST, again)
+    run = _windowed(awards)
+    assert _change(awards, "balance") == 0.0
+    assert _change(awards, "lapsed") == 10.0
+    assert balance_conserved(run).passed
+
+
+def test_a_refund_to_an_idle_row_without_a_newer_award_credits_it():
+    """Fails if an IDLE row is treated as a closed award whose credit is dropped.
+
+    A NONE award ends at 300 (the row goes IDLE with a new generation); nothing else
+    holds the row, so the refund of 10 credits it.
+    """
+    awards = (award_helpers.award(0, 2, P0, 0, 300, 5, RemainderRule.NONE),)
+    run = _windowed(awards)
+    assert _change(awards, "balance") == 10.0
+    assert _change(awards, "lapsed") == 0.0
+    assert balance_conserved(run).passed
+
+
+def test_a_refund_of_a_none_award_lapses_under_a_newer_award():
+    """Fails if an old NONE award's refund raises a newer award's balance."""
+    first = award_helpers.award(0, 2, P0, 0, 300, 5, RemainderRule.NONE)
+    awards = _with(RemainderRule.NONE, first=first)
+    run = _windowed(awards)
+    assert _change(awards, "balance") == 0.0
+    assert _change(awards, "lapsed") == 10.0
+    assert balance_conserved(run).passed
+
+
+def test_a_refund_of_a_reallocated_award_credits_the_original_target():
+    """Fails if a late refund of a REALLOCATE award stays on the expired row."""
+    first = award_helpers.award(0, 2, P0, 0, 300, 5, RemainderRule.REALLOCATE, P1)
+    awards = (first,)
+    run = _windowed(awards)
+    assert _change(awards, "balance", P0) == 0.0
+    assert _change(awards, "balance", P1) == 10.0
+    assert _change(awards, "refunded", P1) == 10.0
+    assert balance_conserved(run).passed
+
+
+def test_a_refund_inside_the_window_still_credits_the_row():
+    """Control: the receipt released while the award is open credits the row."""
+    awards = (award_helpers.award(0, 2, P0, 0, 600, 5, RemainderRule.FORFEIT),)
+    run = _windowed(awards, (receipt(250),))
+    assert _cell(run, "refunded") == 10.0
+    assert balance_conserved(run).passed
+
+
+@pytest.mark.slow  # a mutant of the disposition, outside the quick tier
+def test_crediting_an_old_awards_refund_to_the_newer_award_is_caught():
+    """Mutant: the refund raises the row's newer award from 7 to 8 units, unlapsed.
+
+    The ledger moves the credit from `lapsed` to the row's balance with the record's
+    own generation untouched, so only the replay of the disposition can refuse it.
+    """
+    run = _windowed(_with(RemainderRule.CARRY_OVER))
+    ledger = run.carry.ledger
+    bump = jnp.zeros_like(ledger.balance).at[P0, COL].set(10.0)
+    new = eqx.tree_at(
+        lambda lg: (lg.balance, lg.lapsed),
+        ledger,
+        (ledger.balance + bump, ledger.lapsed - bump),
+    )
+    forged = SimpleNamespace(
+        study=run.study,
+        carry=eqx.tree_at(lambda c: c.ledger, run.carry, new),
+        trace=run.trace,
+    )
+    assert not balance_conserved(forged).passed
+
+
+@pytest.mark.slow  # a mutant of the disposition, outside the quick tier
+def test_a_refund_to_the_wrong_row_after_expiry_is_caught():
+    """Mutant: a REALLOCATE award's late refund credited to the expired row."""
+    first = award_helpers.award(0, 2, P0, 0, 300, 5, RemainderRule.REALLOCATE, P1)
+    run = _windowed((first,))
+    ledger = run.carry.ledger
+    move = jnp.zeros_like(ledger.balance).at[P0, COL].set(10.0).at[P1, COL].set(-10.0)
+    new = eqx.tree_at(
+        lambda lg: (lg.balance, lg.refunded),
+        ledger,
+        (ledger.balance + move, ledger.refunded + move),
+    )
+    forged = SimpleNamespace(
+        study=run.study,
+        carry=eqx.tree_at(lambda c: c.ledger, run.carry, new),
+        trace=run.trace,
+    )
+    assert not balance_conserved(forged).passed

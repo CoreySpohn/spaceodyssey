@@ -15,9 +15,10 @@ import pytest
 
 from spaceodyssey.core import HostExecutor, handlers
 from spaceodyssey.core.conformance.invariants import balance_conserved
-from spaceodyssey.core.enums import ChargePricing
+from spaceodyssey.core.enums import ChargePricing, RemainderRule
+from tests.core import award_helpers
 from tests.core.helpers import one_world
-from tests.core.program_helpers import cancel, observe, wait
+from tests.core.program_helpers import cancel, end, observe, wait
 from tests.core.refund_helpers import mutate, receipt, refund_study
 
 pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
@@ -222,6 +223,50 @@ def test_mutant_a_second_receipt_credit_fails_conservation(monkeypatch, program)
         )
         run = _run(study)
         assert int(run.carry.n_log) == 3  # the acquisition and two receipts
+        assert not balance_conserved(run).passed
+    finally:
+        jax.clear_caches()
+
+
+WINDOWED_SCRIPT = (
+    wait(0, 40),
+    observe(1, 0, 10, 0),
+    wait(1, 270),
+    wait(2, 140),
+    wait(3, 100),
+    end(5),
+)
+
+
+def _re_awarded(receipts):
+    """Award A forfeits at 300, B (carry over) opens at 310; the refund is at 350."""
+    first = award_helpers.award(0, 2, 2, 0, 300, 5, RemainderRule.FORFEIT)
+    again = award_helpers.award(3, 2, 2, 310, 360, 7, RemainderRule.CARRY_OVER)
+    study = award_helpers.award_refund_study(
+        WINDOWED_SCRIPT, (first, again), receipts, pricing=None
+    )
+    return _run(study)
+
+
+def test_a_refund_across_an_expiry_and_a_re_award_conserves():
+    """Control: the late refund lapses, and the per-row account and the replay agree."""
+    run = _re_awarded((receipt(350),))
+    ledger = run.carry.ledger
+    assert float(np.asarray(ledger.refunded)[2, 1]) == 10.0
+    assert float(np.asarray(ledger.lapsed)[2, 1]) >= 10.0
+    assert balance_conserved(run).passed
+
+
+@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
+def test_mutant_crediting_an_old_awards_refund_to_the_newer_award_fails(monkeypatch):
+    """Mutant: the refund always credits the row, so a closed award raises the new one.
+
+    The ledger counters and the record agree with the credit; only the independent
+    replay of the disposition refuses it.
+    """
+    _mutant(monkeypatch, "same = led.win_gen[rows] == gens", "same = rows >= 0")
+    try:
+        run = _re_awarded((receipt(350),))
         assert not balance_conserved(run).passed
     finally:
         jax.clear_caches()

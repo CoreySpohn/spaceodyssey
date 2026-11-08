@@ -80,6 +80,16 @@ def _release_row(c, written, rec, slot, audience, study):
     )
 
 
+def _with_award_capture(base, ledger, lane):
+    """`base` carrying the award identity a lane's live occupancy was debited under."""
+    return dataclasses.replace(
+        base,
+        award_gens=ledger.lane_award_gens[lane],
+        award_rules=ledger.lane_award_rules[lane],
+        award_tos=ledger.lane_award_tos[lane],
+    )
+
+
 def _realize_rec(c, study, truth, root, base, fraction):
     """Fill a record's measurement.
 
@@ -154,7 +164,7 @@ def h_done(c, ev, study, truth, root):
         charge, fixed, _ = charge_parts(study, channel_index)
         base = dataclasses.replace(base, charged=charge, nonrefundable=fixed)
     if caps.awards:
-        base = dataclasses.replace(base, award_gens=c.ledger.lane_award_gens[ev.lane])
+        base = _with_award_capture(base, c.ledger, ev.lane)
     rec = eqx.filter_jit(_realize_rec)(
         c, study, truth, root, base, jnp.asarray(1.0, F64)
     )
@@ -323,11 +333,37 @@ def _apply_refund(c, rec, slot, first, study):
         jnp.maximum(log.charged[origin] - log.nonrefundable[origin], 0.0),
         0.0,
     )
+    led = c.ledger
+    balance = led.balance.at[rows, cols].add(credit)
+    refunded = led.refunded.at[rows, cols].add(credit)
+    extra = {}
+    if caps.awards:
+        # A refund reaches the row directly only while nothing has opened or closed
+        # on it since the debit. Otherwise it is disposed under the rule captured at
+        # the debit: FORFEIT lapses it, NONE and CARRY_OVER credit the row unless a
+        # newer award holds it (then it lapses), REALLOCATE credits the destination row.
+        gens = log.award_gens[origin]
+        rules, tos = log.award_rules[origin], log.award_tos[origin]
+        same = led.win_gen[rows] == gens
+        newer = led.win_state[rows] == WindowState.WINDOWED
+        keeps = (rules == RemainderRule.NONE) | (rules == RemainderRule.CARRY_OVER)
+        moves = ~same & (rules == RemainderRule.REALLOCATE)
+        direct = same | (keeps & ~newer)
+        land = jnp.where(moves, tos, rows)
+        balance = led.balance.at[land, cols].add(jnp.where(direct | moves, credit, 0.0))
+        refunded = led.refunded.at[land, cols].add(credit)
+        lapse = ~direct & ~moves
+        extra = {
+            "ledger.lapsed": led.lapsed.at[rows, cols].add(
+                jnp.where(lapse, credit, 0.0)
+            )
+        }
     return _tree_set(
         c,
         **{
-            "ledger.balance": c.ledger.balance.at[rows, cols].add(credit),
-            "ledger.refunded": c.ledger.refunded.at[rows, cols].add(credit),
+            "ledger.balance": balance,
+            "ledger.refunded": refunded,
+            **extra,
             "ledger.refund_ignored": c.ledger.refund_ignored
             + (attempt & ~applies).astype(I64),
             "log.refund_of": log.refund_of.at[slot].set(
@@ -516,7 +552,7 @@ def _cancel_lane(
         kept = (charge - fixed) * part + fixed
         base = dataclasses.replace(base, charged=kept, nonrefundable=fixed)
     if caps.awards:
-        base = dataclasses.replace(base, award_gens=c.ledger.lane_award_gens[lane])
+        base = _with_award_capture(base, c.ledger, lane)
     rec = eqx.filter_jit(_realize_rec)(c, study, truth, root, base, frac)
     owner = 0 if c.ev.program is None else c.ev.program[i]
     rows = _resource_rows(study, lane, owner)
