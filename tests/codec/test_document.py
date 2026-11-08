@@ -96,6 +96,9 @@ def assert_same_pytree(a, b):
         if isinstance(x, jax.Array):
             assert (x.dtype, x.shape, x.weak_type) == (y.dtype, y.shape, y.weak_type)
             assert np.asarray(x).tobytes() == np.asarray(y).tobytes()
+        elif isinstance(x, np.ndarray):
+            assert (x.dtype, x.shape) == (y.dtype, y.shape)
+            assert x.tobytes() == y.tobytes()
         else:
             assert x == y
 
