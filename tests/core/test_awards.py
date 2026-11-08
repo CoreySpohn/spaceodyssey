@@ -649,13 +649,19 @@ def test_a_refund_after_the_expiry_is_replayed_and_conserves():
 
 
 def test_a_refund_before_the_expiry_is_replayed_and_conserves():
-    """Control: a refund that lands inside the window raises what the expiry takes."""
+    """Control: a refund inside the window raises what the expiry forfeits.
+
+    The same refund after the expiry lapses at once, so either way the row ends with
+    the same lapsed total and balance.
+    """
     run = _refund_run(250)
     assert balance_conserved(run).passed
     late = _refund_run(350)
-    assert float(np.asarray(run.carry.ledger.lapsed)[P0, PROGRAM_COL]) == (
-        float(np.asarray(late.carry.ledger.lapsed)[P0, PROGRAM_COL]) + 10.0
-    )
+    ledger, late_ledger = run.carry.ledger, late.carry.ledger
+    for name in ("lapsed", "balance", "refunded"):
+        assert np.allclose(
+            np.asarray(getattr(ledger, name)), np.asarray(getattr(late_ledger, name))
+        ), name
 
 
 @pytest.mark.parametrize("tick", [250, 350])

@@ -239,6 +239,10 @@ class Record(eqx.Module):
     # Under awards: the window generation, at debit, of the row that paid each resource
     # (one entry per payer slot: asset, program, shared), I64[R].
     award_gens: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    # and the remainder rule and reallocation destination of that row's window at the
+    # debit (the rule is NONE for a debit made outside a window), I64[R] each.
+    award_rules: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    award_tos: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
 
 
 def record_none(caps):
@@ -247,6 +251,8 @@ def record_none(caps):
     return Record(
         **{n: z for n in RECORD_INT_FIELDS if n != "refund_of"},
         award_gens=jnp.zeros(caps.n_resources, I64) if caps.awards else None,
+        award_rules=jnp.zeros(caps.n_resources, I64) if caps.awards else None,
+        award_tos=jnp.zeros(caps.n_resources, I64) if caps.awards else None,
         refund_of=jnp.asarray(-1, I64),
         cost=jnp.zeros(caps.n_resources, F64),
         charged=jnp.zeros(caps.n_resources, F64),
@@ -299,6 +305,8 @@ class RecordLog(eqx.Module):
     refund_index: jax.Array | None
     award_gen: jax.Array | None
     award_gens: jax.Array | None  # I64[L, R], present only with awards
+    award_rules: jax.Array | None  # I64[L, R], present only with awards
+    award_tos: jax.Array | None  # I64[L, R], present only with awards
     # Pedigree of a product row, I64[L, product_width]: audience, refit status, row
     # count and the revision set as (channel, acquisition index, revision) triples. It
     # is not a `Record` field: only a refresh writes it; every other row holds zeros.
@@ -321,7 +329,7 @@ def log_columns(log):
 
 
 REFUND_COLUMNS = ("nonrefundable", "refund_index", "award_gen")
-AWARD_COLUMNS = ("award_gens",)
+AWARD_COLUMNS = ("award_gens", "award_rules", "award_tos")
 
 
 def empty_log(caps):
@@ -342,6 +350,12 @@ def empty_log(caps):
         award_gen=z if caps.refunds else None,
         product=jnp.zeros((caps.n_log, caps.product_width), I64),
         award_gens=jnp.zeros((caps.n_log, caps.n_resources), I64)
+        if caps.awards
+        else None,
+        award_rules=jnp.zeros((caps.n_log, caps.n_resources), I64)
+        if caps.awards
+        else None,
+        award_tos=jnp.zeros((caps.n_log, caps.n_resources), I64)
         if caps.awards
         else None,
     )
