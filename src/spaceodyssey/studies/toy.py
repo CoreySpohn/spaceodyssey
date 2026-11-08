@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 
-from spaceodyssey.core.capacities import Capacities
+from spaceodyssey.core.capacities import PLAIN_VALUE, Capacities
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import (
     ALL_EFFECTS,
@@ -644,7 +644,9 @@ class ThresholdStopPolicy(AbstractPolicy):
     the campaign once any subject's snr exceeds `stop_snr`.
     """
 
-    stop_snr: float = eqx.field(default=3.0)
+    stop_snr: jax.Array = eqx.field(
+        default=3.0, converter=lambda x: jnp.asarray(x, F64), metadata=PLAIN_VALUE
+    )
 
     def decide(self, pstate, view, study, key):
         """Observe until a subject exceeds the threshold."""
@@ -684,8 +686,10 @@ class StochasticPolicy(AbstractPolicy):
     """
 
     theta: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, F64))
-    n_obs: int = eqx.field(default=5)
-    wait_ticks: int = eqx.field(default=10)
+    n_obs: jax.Array = eqx.field(default=5, converter=_as_i64, metadata=PLAIN_VALUE)
+    wait_ticks: jax.Array = eqx.field(
+        default=10, converter=_as_i64, metadata=PLAIN_VALUE
+    )
 
     def decide(self, pstate, view, study, key):
         """Choose an observation or wait using the policy key."""

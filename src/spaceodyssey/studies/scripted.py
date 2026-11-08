@@ -3,6 +3,7 @@
 import dataclasses
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 
 from spaceodyssey.core import (
@@ -12,6 +13,7 @@ from spaceodyssey.core import (
     enqueue,
     record_none,
 )
+from spaceodyssey.core.capacities import PLAIN_VALUE
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, I64, PUBLIC, Capacity, RecordStatus
 from spaceodyssey.studies import toy
@@ -20,6 +22,14 @@ from spaceodyssey.studies import toy
 # of the toy studies (10 to 13), a refresh product channel (90, 91) nor a service
 # channel.
 SCRIPTED_CHANNEL = 50
+
+
+def _i64_row(x):
+    return jnp.asarray(x, I64).reshape(-1)
+
+
+def _f64_row(x):
+    return jnp.asarray(x, F64).reshape(-1)
 
 
 class ScriptedRecords(AbstractProcess):
@@ -36,20 +46,24 @@ class ScriptedRecords(AbstractProcess):
     `(channel, subject, acquisition index, revision)`.
     """
 
-    ticks: tuple[int, ...] = eqx.field(static=True)
-    values: tuple[float, ...] = eqx.field(static=True)
-    ids: tuple[int, ...] = eqx.field(static=True)
-    revisions: tuple[int, ...] = eqx.field(static=True)
-    statuses: tuple[int, ...] = eqx.field(static=True)
+    # The values are arrays, so scripts that differ only in numbers share one compiled
+    # program; the number of fires is the array length and stays static. A document
+    # writes each as the tuple it was built from.
+    ticks: jax.Array = eqx.field(converter=_i64_row, metadata=PLAIN_VALUE)
+    values: jax.Array = eqx.field(converter=_f64_row, metadata=PLAIN_VALUE)
+    ids: jax.Array = eqx.field(converter=_i64_row, metadata=PLAIN_VALUE)
+    revisions: jax.Array = eqx.field(converter=_i64_row, metadata=PLAIN_VALUE)
+    statuses: jax.Array = eqx.field(converter=_i64_row, metadata=PLAIN_VALUE)
     audience: int = eqx.field(default=PUBLIC)
     channel: int = eqx.field(default=SCRIPTED_CHANNEL, static=True)
     # the kind of each fire's record; empty means every record is a measurement
-    kinds: tuple[int, ...] = eqx.field(default=(), static=True)
+    kinds: jax.Array = eqx.field(default=(), converter=_i64_row, metadata=PLAIN_VALUE)
 
     def __check_init__(self):
         """Refuse two fires that name one (scripted id, revision) pair."""
         seen = set()
-        for pair in zip(self.ids, self.revisions, strict=True):
+        pairs = zip(self.ids.tolist(), self.revisions.tolist(), strict=True)
+        for pair in pairs:
             if pair in seen:
                 raise ValueError(
                     f"scripted records repeat (id, revision) = {pair}; a correction "
@@ -63,12 +77,12 @@ class ScriptedRecords(AbstractProcess):
 
     def seed(self, carry, caps):
         """Queue one process event per scripted record."""
-        for i, tick in enumerate(self.ticks):
+        for i in range(self.ticks.shape[0]):
             carry = enqueue(
                 carry,
                 True,
                 kind=EventKind.PROCESS,
-                tick=tick,
+                tick=self.ticks[i],
                 stage=Stage.RELEASE,
                 group=i,
                 audience=self.audience,
@@ -109,7 +123,7 @@ class ScriptedRecords(AbstractProcess):
             base,
             kind=(
                 pick(self.kinds, I64)
-                if self.kinds
+                if self.kinds.size
                 else jnp.asarray(toy.RECORD_MEASUREMENT, I64)
             ),
             channel=jnp.asarray(self.channel, I64),

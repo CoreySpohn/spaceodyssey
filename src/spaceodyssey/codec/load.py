@@ -252,6 +252,8 @@ def _build(cls, node, path, table, version, migrated, fields):
             if cls is Agenda and field.name == "phase_until":
                 item = _lowered_no_switch(item, where)
             value = decode(item, where, table)
+            if field.metadata.get("plain_value"):
+                value = _from_plain(field, value, where)
             _check_field(cls, field, value, where)
             if is_optional_field(field) and at_default(field, value, cls):
                 raise DocumentError(
@@ -322,6 +324,19 @@ def _migrated(node, ref, stored, path, table):
 
 # What a validation hook raises for a bad value; anything else propagates.
 _CHECK_ERRORS = (ValueError, TypeError, AttributeError, IndexError, KeyError)
+
+
+def _from_plain(field, value, path):
+    """The array a `PLAIN_VALUE` field holds, made from its plain stored form."""
+    if isinstance(value, (jax.Array, np.ndarray, np.generic)):
+        raise DocumentError(
+            f"field {field.name!r} is stored as a plain number or tuple, not an array",
+            pointer(path),
+        )
+    try:
+        return field.metadata["converter"](value)
+    except _CHECK_ERRORS as err:
+        raise DocumentError(f"field {field.name!r}: {err}", pointer(path)) from err
 
 
 def _check_field(cls, field, value, path):
