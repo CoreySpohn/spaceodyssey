@@ -15,6 +15,7 @@ from spaceodyssey.core.enums import (
     TIE_NEUTRAL,
     AdmissionCode,
     Audience,
+    CommitState,
     EffectKind,
     EventKind,
     RemainderRule,
@@ -36,6 +37,7 @@ from spaceodyssey.core.snapshot import (
     award_columns,
     snapshot_fingerprint,
     snapshot_view,
+    start_columns,
 )
 from spaceodyssey.core.study import _EXACT_QUANTA
 
@@ -245,6 +247,13 @@ def _with_award_columns(effects, caps):
     return dataclasses.replace(effects, **out)
 
 
+def _with_start_column(effects, caps):
+    """The effect table with a start-tick column, zero (immediate) if none was given."""
+    if effects.start_tick is not None:
+        return effects
+    return dataclasses.replace(effects, **start_columns(caps))
+
+
 def _check_rows(effects, caps, source=""):
     """Refuse an effect table whose row count is not `caps.n_effects`.
 
@@ -262,6 +271,7 @@ def _check_rows(effects, caps, source=""):
         ("disposition", effects.disposition),
         ("disruptive", effects.disruptive),
         ("program", effects.program),
+        ("start_tick", effects.start_tick),
     )
     for name, column in columns:
         if column is None:
@@ -302,21 +312,76 @@ def _program_of(eff, e, caps):
     return jnp.asarray(0, I64)
 
 
+def _start_of(eff, e, caps, t):
+    """The tick effect row e starts at: its start tick, never before the decision's."""
+    if not caps.commitments:
+        return t
+    return jnp.maximum(eff.start_tick[e], t)
+
+
+def _frozen(c, study, lane, start, disruptive, owed=None):
+    """Whether a start on `lane` is a frozen insertion and whether the row may break it.
+
+    An asset with a horizon freezes every start within `freeze_ticks` of now. A row
+    breaks the freeze when it is disruptive and the asset's disruptive resource (a
+    resource column of the asset's own balance row) holds an activation beyond what the
+    row's own charge takes from that cell (`owed`, the row's charge per resource, when
+    the row charges the asset row).
+    """
+    assets = study.assets
+    asset = assets.lane_asset[lane]
+    horizon = assets.freeze_ticks[asset]
+    inserts = (horizon > 0) & (start - c.tick < horizon)
+    resource = assets.disruptive_resource[asset]
+    column = jnp.clip(resource, 0, study.caps.n_resources - 1)
+    held = c.ledger.balance[asset, column]
+    if owed is not None:
+        held = held - jnp.where(owed[1][column] == asset, owed[0][column], 0.0)
+    return inserts, disruptive & (resource >= 0) & (held >= 1.0)
+
+
+def _debit_activation(c, study, lane, spend):
+    """Debit one disruptive activation of the lane's asset, where `spend`."""
+    assets = study.assets
+    asset = assets.lane_asset[lane]
+    resource = jnp.clip(
+        assets.disruptive_resource[asset], 0, study.caps.n_resources - 1
+    )
+    one = jnp.where(spend, 1.0, 0.0)
+    return _tree_set(
+        c,
+        **{
+            "ledger.balance": c.ledger.balance.at[asset, resource].add(-one),
+            "ledger.debited": c.ledger.debited.at[asset, resource].add(one),
+            "ledger.disruptive_used": c.ledger.disruptive_used.at[asset].add(
+                spend.astype(I64)
+            ),
+        },
+    )
+
+
 def _commit_observe(c, eff, e, ok, study):
-    """Debit, occupy the lane and queue the settlement of effect row e where `ok`."""
+    """Debit, occupy the lane and queue the settlement of effect row e where `ok`.
+
+    A row that starts later reserves the lane instead: it takes a commitment slot and
+    queues the event that starts it.
+    """
     caps, channels = study.caps, study.channels
     t = c.tick
     channel_index = eff.channel_index[e]
     lane = channels.lane[channel_index]
+    start = _start_of(eff, e, caps, t)
     done_t = (
-        t
+        start
         + study.assets.transition_ticks[lane]
         + channels.occupancy_ticks[channel_index]
     )
+    future = ok & (start > t) if caps.commitments else jnp.asarray(False)
+    ok_now = ok & ~future if caps.commitments else ok
     program = _program_of(eff, e, caps)
     rows = _resource_rows(study, lane, program)
     cols = jnp.arange(caps.n_resources)
-    gen = c.ledger.lane_gen[lane] + ok.astype(I64)
+    gen = c.ledger.lane_gen[lane] + ok_now.astype(I64)
     subject = eff.subject[e]
     acquisition_index = c.acquisition_counts[subject]
     c1 = _tree_set(
@@ -329,12 +394,55 @@ def _commit_observe(c, eff, e, ok, study):
                 jnp.where(ok, charge_parts(study, channel_index)[0], 0.0)
             ),
             "ledger.lane_busy_until": c.ledger.lane_busy_until.at[lane].set(
-                jnp.where(ok, done_t, c.ledger.lane_busy_until[lane])
+                jnp.where(ok_now, done_t, c.ledger.lane_busy_until[lane])
             ),
             "ledger.lane_gen": c.ledger.lane_gen.at[lane].set(gen),
             "acquisition_counts": c.acquisition_counts.at[subject].add(ok.astype(I64)),
         },
     )
+    if caps.commitments:
+        inserts, _ = _frozen(c, study, lane, start, eff.disruptive[e])
+        c1 = _debit_activation(c1, study, lane, ok & inserts)
+        led = c1.ledger
+        slot = jnp.argmax(led.cm_state == CommitState.NONE)
+
+        def put(column, value):
+            return column.at[slot].set(jnp.where(future, value, column[slot]))
+
+        c1 = _tree_set(
+            c1,
+            **{
+                "ledger.cm_state": put(led.cm_state, CommitState.PENDING),
+                "ledger.cm_lane": put(led.cm_lane, lane),
+                "ledger.cm_program": put(led.cm_program, program),
+                "ledger.cm_start": put(led.cm_start, start),
+                "ledger.cm_end": put(led.cm_end, done_t),
+                "ledger.cm_index": put(led.cm_index, led.cm_count[program, lane]),
+                "ledger.cm_count": led.cm_count.at[program, lane].add(
+                    future.astype(I64)
+                ),
+            },
+        )
+        c1 = enqueue(
+            c1,
+            future,
+            kind=EventKind.COMMIT_START,
+            tick=start,
+            stage=Stage.RELEASE,
+            tie=TIE_NEUTRAL,
+            lane=lane,
+            channel_index=channel_index,
+            channel=channels.id[channel_index],
+            subject=subject,
+            acquisition_index=acquisition_index,
+            group=eff.group[e],
+            audience=channels.audience[channel_index],
+            slot=slot,
+            scope=c.phase,
+            acquisition_id=c.next_sid,
+            program=program,
+            caps=caps,
+        )
     if caps.awards:
         # the generation, at debit, of each row that pays one resource of the charge,
         # with the rule and destination of its window; a debit outside a window has
@@ -364,7 +472,7 @@ def _commit_observe(c, eff, e, ok, study):
         )
     return enqueue(
         c1,
-        ok,
+        ok_now,
         kind=EventKind.DONE,
         tick=done_t,
         stage=Stage.SETTLE,
@@ -499,12 +607,18 @@ def _group_code(c, eff, member, study):
     lanes, programs, rows, cost = jax.vmap(inputs)(idx)
     n_members = member.astype(I64).sum()
     room = ((~c.ev.valid).sum() >= n_members) & (c.next_sid + n_members <= caps.max_sid)
+    if caps.commitments:
+        later = member & (jax.vmap(lambda f: _start_of(eff, f, caps, t))(idx) > t)
+        room = room & ((c.ledger.cm_state == CommitState.NONE).sum() >= later.sum())
     cols = jnp.arange(caps.n_resources)
 
     def code_of(f):
         ci = eff.channel_index[f]
+        start = _start_of(eff, f, caps, t)
         done_t = (
-            t + study.assets.transition_ticks[lanes[f]] + channels.occupancy_ticks[ci]
+            start
+            + study.assets.transition_ticks[lanes[f]]
+            + channels.occupancy_ticks[ci]
         )
         clash = jnp.any(member & (idx < f) & (lanes == lanes[f]))
 
@@ -521,7 +635,7 @@ def _group_code(c, eff, member, study):
             closed = closed | c.ledger.program_closed[programs[f]]
         conds = [
             closed,
-            (c.ledger.lane_busy_until[lanes[f]] > t) | clash,
+            (c.ledger.lane_busy_until[lanes[f]] > start) | clash,
             done_t > study.horizon_tick,
             ~funds,
             ~room,
@@ -533,6 +647,20 @@ def _group_code(c, eff, member, study):
             AdmissionCode.NO_FUNDS,
             AdmissionCode.NO_SLOT,
         ]
+        if caps.commitments:
+            # a start may not overlap a reservation of the lane
+            led = c.ledger
+            conds[1] = conds[1] | jnp.any(
+                (led.cm_state == CommitState.PENDING)
+                & (led.cm_lane == lanes[f])
+                & (led.cm_start < done_t)
+                & (led.cm_end > start)
+            )
+            inserts, may_break = _frozen(
+                c, study, lanes[f], start, eff.disruptive[f], (cost[f], rows[f])
+            )
+            conds.insert(3, inserts & ~may_break)
+            codes_.insert(3, AdmissionCode.FROZEN_HORIZON)
         if caps.awards:
             # a payer row that is not ALWAYS admits only inside its window
             payer = rows[f]
@@ -629,9 +757,33 @@ def _admit_rows(c, eff, mask, study, fp):
             program=_program_of(eff, e, caps),
             caps=caps,
         )
+        cancels = act & allowed & (kind == EffectKind.CANCEL)
+        cancel_extra = {}
+        cancel_code = AdmissionCode.OK
+        if caps.commitments:
+            # a Cancel that starts after now names the pending commitment of its lane
+            # that starts then; inside the horizon it is refused like an insertion
+            named = eff.start_tick[e] > t
+            hit = (
+                (c.ledger.cm_state == CommitState.PENDING)
+                & (c.ledger.cm_lane == eff.lane[e])
+                & (c.ledger.cm_start == eff.start_tick[e])
+            )
+            slot = jnp.argmax(hit)
+            inserts, may_break = _frozen(
+                c, study, eff.lane[e], eff.start_tick[e], eff.disruptive[e]
+            )
+            cancel_code = jnp.select(
+                [named & ~hit.any(), named & inserts & ~may_break],
+                [AdmissionCode.UNSUPPORTED, AdmissionCode.FROZEN_HORIZON],
+                AdmissionCode.OK,
+            ).astype(I64)
+            cancels = cancels & (cancel_code == AdmissionCode.OK)
+            c = _debit_activation(c, study, eff.lane[e], cancels & named & inserts)
+            cancel_extra = {"slot": jnp.where(named, slot, -1)}
         c = enqueue(
             c,
-            act & allowed & (kind == EffectKind.CANCEL),
+            cancels,
             kind=EventKind.CANCEL,
             tick=t,
             stage=Stage.ADMIT,
@@ -639,6 +791,7 @@ def _admit_rows(c, eff, mask, study, fp):
             gen=c.ledger.lane_gen[eff.lane[e]] + eff.tick[e],
             group=eff.group[e],
             audience=PUBLIC,
+            **cancel_extra,
             caps=caps,
         )
         asked = act & allowed & (kind == EffectKind.QUERY)
@@ -667,23 +820,24 @@ def _admit_rows(c, eff, mask, study, fp):
             c, alloc_code = _commit_allocate(
                 c, eff, e, act & allowed & (kind == EffectKind.ALLOCATE), study
             )
-        code_e = jnp.select(
-            [
-                ~act | (kind == EffectKind.NONE),
-                ~allowed,
-                obs,
-                kind == EffectKind.ALLOCATE,
-                (kind == EffectKind.QUERY) & ~room,
-            ],
-            [
-                AdmissionCode.NONE,
-                AdmissionCode.FORBIDDEN,
-                out[e],
-                alloc_code,
-                AdmissionCode.NO_SLOT,
-            ],
-            AdmissionCode.OK,
-        ).astype(I64)
+        conds = [
+            ~act | (kind == EffectKind.NONE),
+            ~allowed,
+            obs,
+            kind == EffectKind.ALLOCATE,
+            (kind == EffectKind.QUERY) & ~room,
+        ]
+        codes = [
+            AdmissionCode.NONE,
+            AdmissionCode.FORBIDDEN,
+            out[e],
+            alloc_code,
+            AdmissionCode.NO_SLOT,
+        ]
+        if caps.commitments:
+            conds.append(kind == EffectKind.CANCEL)
+            codes.append(cancel_code)
+        code_e = jnp.select(conds, codes, AdmissionCode.OK).astype(I64)
         return c, out.at[e].set(code_e), decided
 
     c, out, decided = lax.fori_loop(0, n, row, (c, out, decided))
@@ -754,6 +908,8 @@ def admit(carry, effects, study, snapshot_fp=None):
     if study.caps.awards:
         effects = _with_award_columns(effects, study.caps)
         supported = supported | (effects.kind == EffectKind.ALLOCATE)
+    if study.caps.commitments:
+        effects = _with_start_column(effects, study.caps)
     phase = phase_at(carry, study)
     mask = _phase_mask(_tree_set(carry, phase=phase), study)
     mixed = None

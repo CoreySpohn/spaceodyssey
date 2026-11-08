@@ -53,8 +53,12 @@ def _switch_sizes(jaxpr):
     return sizes
 
 
-def _switch_branches(awards):
-    caps = Capacities(n_programs=2, awards=True) if awards else Capacities()
+def _switch_branches(awards, commitments=False):
+    caps = Capacities(
+        n_programs=2 if awards else 1,
+        awards=awards,
+        n_commitments=2 if commitments else 0,
+    )
     study = toy.survey_1(caps=caps)
     truth, root = one_world(caps=caps)
     carry = eqx.filter_jit(core.init_carry)(study, truth)
@@ -63,11 +67,15 @@ def _switch_branches(awards):
     return _switch_sizes(jaxpr.jaxpr)
 
 
-@pytest.mark.parametrize("awards", (False, True))
-def test_step_holds_each_distinct_handler_body_once(awards):
-    # eleven kinds, twelve with awards; RESULT and FAULT share a body with RELEASE
-    # and CANCEL
-    assert _switch_branches(awards) == [10 if awards else 9]
+@pytest.mark.parametrize(
+    ("awards", "commitments", "branches"),
+    ((False, False, 9), (True, False, 10), (False, True, 10), (True, True, 11)),
+)
+def test_step_holds_each_distinct_handler_body_once(awards, commitments, branches):
+    # eleven kinds, twelve with awards, thirteen with commitments; RESULT and FAULT
+    # share a body with RELEASE and CANCEL, and the window kind is inert (the body of
+    # NONE) where only commitments are on
+    assert _switch_branches(awards, commitments) == [branches]
 
 
 SHARED = (
