@@ -30,7 +30,6 @@ from spaceodyssey.codec.kinds import (
 )
 from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.study import Agenda, Study
-from spaceodyssey.plain import NO_WIRE
 
 # Element types the document stores; complex and object arrays are refused.
 ARRAY_DTYPES = frozenset(
@@ -142,16 +141,9 @@ def _encode_kind(value, path, table):
         if is_version_field(cls, field.name):
             continue
         item = getattr(value, field.name)
-        plain = field.metadata.get("plain_value")
-        if plain and isinstance(item, (jax.Array, np.ndarray)):
-            item = _plain_value(item)
         if is_optional_field(field) and at_default(field, item, cls):
             continue
-        if (
-            not plain
-            and field.type is jax.Array
-            and not isinstance(item, (jax.Array, np.ndarray))
-        ):
+        if field.type is jax.Array and not isinstance(item, (jax.Array, np.ndarray)):
             raise DocumentError(
                 f"field {field.name!r} is annotated as an array but holds a "
                 f"{type(item).__name__}",
@@ -161,18 +153,6 @@ def _encode_kind(value, path, table):
         if cls is Agenda and field.name == "phase_until":
             out[field.name] = _tag_no_switch(out[field.name])
     return out
-
-
-def _plain_value(arr):
-    """A `PLAIN_VALUE` array as the value it was built from, else as its numbers."""
-    if getattr(arr, "wire", NO_WIRE) is not NO_WIRE:
-        return arr.wire
-    data = np.asarray(arr).tolist()
-
-    def tup(x):
-        return tuple(map(tup, x)) if type(x) is list else x
-
-    return tup(data)
 
 
 def _tag_no_switch(node):
