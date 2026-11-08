@@ -50,6 +50,7 @@ from spaceodyssey.core.snapshot import EffectTable
 from spaceodyssey.core.transaction import mask_effects
 from spaceodyssey.studies import toy
 from tests.core.award_helpers import (
+    ScriptedAwards,
     award,
     award_refund_study,
     award_study,
@@ -110,6 +111,11 @@ SCENARIOS = {
     "adjacent": (
         (wait(0, 60), wait(1, 100), end(2)),
         (award(0, 2, P0, 0, 60, 5, FORFEIT), award(1, 2, P0, 60, 120, 3, FORFEIT)),
+    ),
+    # an observation at the very tick the window ends (the window is [0, 60))
+    "at_expiry": (
+        (wait(0, 60), observe(1, 0, 10, 0), end(5)),
+        (award(0, 2, P0, 0, 60, 5),),
     ),
     # a completion at the very tick the window ends (channel 12 from tick 10 ends at 65)
     "same_tick": (
@@ -227,6 +233,29 @@ def test_an_observation_outside_the_window_is_refused():
     late = _codes(_run("late"), EventKind.WAIT)[1][0]
     assert int(early) == AdmissionCode.OUTSIDE_VALIDITY
     assert int(late) == AdmissionCode.OUTSIDE_VALIDITY
+
+
+def test_an_observation_at_the_tick_the_window_ends_is_refused():
+    """Fails if the window still admits at its end tick (it is `[from, until)`)."""
+    run = _run("at_expiry")
+    t = run.trace
+    obs = _handled(run)[:, None] & (np.asarray(t.eff_kind) == EffectKind.OBSERVE)
+    assert np.asarray(t.tick)[obs.any(axis=1)].tolist() == [60]
+    assert np.asarray(t.admit_code)[obs].tolist() == [AdmissionCode.OUTSIDE_VALIDITY]
+
+
+def test_the_window_refuses_without_balances_in_the_snapshot():
+    """Fails if the window rule is tied to `snapshot_balances`.
+
+    The shared study keeps balances in the snapshot; this control runs the same early
+    and late scenarios on the default capacities, one extra compile for both.
+    """
+    for name in ("early", "late"):
+        script, awards = SCENARIOS[name]
+        run = _host(award_study(script, awards))
+        assert not run.study.caps.snapshot_balances
+        code = _codes(run, EventKind.WAIT)[1][0]
+        assert int(code) == AdmissionCode.OUTSIDE_VALIDITY
 
 
 def test_an_acquisition_that_completes_after_expiry_still_settles():
@@ -544,6 +573,31 @@ def test_a_malformed_amount_shape_is_refused_as_unsupported(shape):
     assert codes == [AdmissionCode.UNSUPPORTED]
     assert float(np.asarray(carry.ledger.granted).sum()) == 0.0
     assert float(np.asarray(carry.ledger.balance)[P0, PROGRAM_COL]) == 0.0
+
+
+class _Reshaped(ScriptedAwards):
+    """The scripted awards, with the amount column collapsed to a vector."""
+
+    def decide(self, pstate, view, study, key):
+        eff, ps, u = super().decide(pstate, view, study, key)
+        return dataclasses.replace(eff, amount=eff.amount.sum(axis=1)), ps, u
+
+
+def test_a_malformed_producer_is_refused_as_unsupported_through_the_policy():
+    """Fails if the executor reshapes a policy's malformed amount into a credit.
+
+    A policy that hands the award (0, 2, P0, 0, 200, 5) with a vector amount runs the
+    full compiled loop (one extra compile); its only Allocate is refused UNSUPPORTED.
+    """
+    study = award_study(
+        (wait(0, 10), end(5)), (award(0, 2, P0, 0, 200, 5),), policy_cls=_Reshaped
+    )
+    run = _host(study)
+    t = run.trace
+    allocs = _handled(run)[:, None] & (np.asarray(t.eff_kind) == EffectKind.ALLOCATE)
+    assert np.asarray(t.admit_code)[allocs].tolist() == [AdmissionCode.UNSUPPORTED]
+    assert float(np.asarray(run.carry.ledger.granted).sum()) == 0.0
+    assert float(np.asarray(run.carry.ledger.balance)[P0, PROGRAM_COL]) == 0.0
 
 
 def test_an_award_past_the_representable_balance_range_is_refused():
