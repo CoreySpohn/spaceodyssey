@@ -46,7 +46,11 @@ def _pending_settlements(run):
     lane_gen = np.asarray(ledger.lane_gen)
     # only a DONE row names a lane; a WINDOW_END names a balance row in the same column
     lane = np.clip(np.asarray(ev.lane), 0, lane_gen.shape[0] - 1)
-    return np.flatnonzero(done & (np.asarray(ev.gen) == lane_gen[lane]))
+    live = done & (np.asarray(ev.gen) == lane_gen[lane])
+    # a commitment not yet started is debited and settles later, and it stays queued
+    # only while pending (a cancel removes its start)
+    pending = np.asarray(ev.valid) & (np.asarray(ev.kind) == EventKind.COMMIT_START)
+    return np.flatnonzero(live | pending)
 
 
 def order_keys_monotone(run):
@@ -311,6 +315,11 @@ def _retained_net_spend(run, refunds=None):
         rows = _balance_rows(study, int(ev.lane[i]), program)
         for r, row in enumerate(rows):
             spent[row, r] += float(cost[int(ev.channel_index[i]), r])
+    # a disruptive activation is debited from the asset's own row and has no record
+    assets = study.assets
+    used = np.asarray(c.ledger.disruptive_used)
+    for a in np.flatnonzero(used):
+        spent[a, int(np.asarray(assets.disruptive_resource)[a])] += float(used[a])
     if refunds is not None:
         spent -= refunds
     return spent

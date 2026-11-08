@@ -12,6 +12,7 @@ from spaceodyssey.core.enums import (
     I64,
     Audience,
     ChargePricing,
+    CommitState,
     Disposition,
     EventKind,
     Purpose,
@@ -493,6 +494,7 @@ def _cancel_lane(
     refund,
     program=None,
     by_program=False,
+    slot=None,
 ):
     """Cancel a live occupancy and refund its unused cost.
 
@@ -500,10 +502,21 @@ def _cancel_lane(
     at the elapsed fraction, refund the unused cost, free the lane. With `refund` false
     the record is charged in full and nothing comes back (a fault). With programs
     the credit goes to the row of the program that admitted the occupancy, and where
-    `by_program` is set only an occupancy of `program` is cancelled.
+    `by_program` is set only an occupancy of `program` is cancelled. With commitments, a
+    `slot` of 0 or more names a pending commitment instead: its start event is the row
+    cancelled, the record is the partial one at fraction 0 and the lane is left alone.
     """
     caps, channels = study.caps, study.channels
     pend = c.ev.valid & (c.ev.kind == EventKind.DONE) & (c.ev.lane == lane)
+    # a cancel of a pending commitment, where commitments are on; else always False
+    named = caps.commitments and slot is not None
+    reserved = slot >= 0 if named else None
+    if named:
+        pend = jnp.where(
+            reserved,
+            c.ev.valid & (c.ev.kind == EventKind.COMMIT_START) & (c.ev.slot == slot),
+            pend,
+        )
     if c.ev.program is not None and program is not None:
         pend = pend & (~by_program | (c.ev.program == program))
     has = enable & pend.any()
@@ -514,6 +527,8 @@ def _cancel_lane(
         channels.latency_ticks[channel_index],
     )
     start_tick = c.ev.tick[i] - dur
+    if named:
+        start_tick = jnp.where(reserved, c.tick, start_tick)
     frac = jnp.clip((c.tick - start_tick).astype(F64) / dur.astype(F64), 0.0, 1.0)
     spent = jnp.where(refund, frac, jnp.asarray(1.0, F64))
     base = dataclasses.replace(
@@ -560,6 +575,8 @@ def _cancel_lane(
         credit = jnp.where(has, charge - kept, 0.0)
     else:
         credit = jnp.where(has, channels.cost[channel_index] * (1.0 - spent), 0.0)
+    # the lane is freed only by cancelling what occupies it
+    occupied = has & ~reserved if named else has
     c1 = _tree_set(
         c,
         **{
@@ -575,13 +592,25 @@ def _cancel_lane(
                 rows, jnp.arange(caps.n_resources)
             ].add(credit),
             "ledger.lane_busy_until": c.ledger.lane_busy_until.at[lane].set(
-                jnp.where(has, c.tick, c.ledger.lane_busy_until[lane])
+                jnp.where(occupied, c.tick, c.ledger.lane_busy_until[lane])
             ),
             # a cancel retires the lane's generation: any completion still carrying
             # the old one is stale and settles nothing
-            "ledger.lane_gen": c.ledger.lane_gen.at[lane].add(has.astype(I64)),
+            "ledger.lane_gen": c.ledger.lane_gen.at[lane].add(occupied.astype(I64)),
         },
     )
+    if named:
+        mark = jnp.clip(slot, 0, caps.n_commitments - 1)
+        c1 = _tree_set(
+            c1,
+            **{
+                "ledger.cm_state": c1.ledger.cm_state.at[mark].set(
+                    jnp.where(
+                        has & reserved, CommitState.CANCELLED, c1.ledger.cm_state[mark]
+                    )
+                )
+            },
+        )
     c2, slot = write_log(c1, rec, caps)
     written = c2.n_log > c1.n_log
     c3 = _release_row(c2, written, rec, slot, channels.audience[channel_index], study)
@@ -597,8 +626,15 @@ def h_cancel(c, ev, study, truth, root):
     live = ev.gen == c.ledger.lane_gen[ev.lane]
     fault = ev.kind == EventKind.FAULT
     status = jnp.where(fault, RecordStatus.FAILED, RecordStatus.PARTIAL).astype(I64)
+    extra = {}
+    if study.caps.commitments:
+        # a Cancel that names a commitment acts while that commitment is pending
+        named = ev.slot >= 0
+        pending = c.ledger.cm_state[jnp.clip(ev.slot, 0, None)] == CommitState.PENDING
+        live = jnp.where(named, pending, live)
+        extra = {"slot": ev.slot}
     c1, n, slot, rec = eqx.filter_jit(_cancel_lane)(
-        c, study, truth, root, ev.lane, live, status, ~fault
+        c, study, truth, root, ev.lane, live, status, ~fault, **extra
     )
     return c1, _emit(n, slot), rec
 
@@ -730,13 +766,71 @@ def h_window_end(c, ev, study, truth, root):
 
 
 @eqx.filter_jit
+def h_commit_start(c, ev, study, truth, root):
+    """Start a commitment still pending: occupy its lane and queue the settlement.
+
+    The lane's generation moves here, so the settlement carries the generation of the
+    occupancy the commitment becomes. An executing commitment is not an insertion and
+    meets no freeze check; one cancelled meanwhile has no queued start.
+    """
+    caps, channels = study.caps, study.channels
+    led = c.ledger
+    mark = jnp.clip(ev.slot, 0, caps.n_commitments - 1)
+    ok = (ev.slot >= 0) & (led.cm_state[mark] == CommitState.PENDING)
+    done_t = (
+        ev.tick
+        + study.assets.transition_ticks[ev.lane]
+        + channels.occupancy_ticks[ev.channel_index]
+    )
+    gen = led.lane_gen[ev.lane] + ok.astype(I64)
+    c1 = _tree_set(
+        c,
+        **{
+            "ledger.cm_state": led.cm_state.at[mark].set(
+                jnp.where(ok, CommitState.STARTED, led.cm_state[mark])
+            ),
+            "ledger.lane_busy_until": led.lane_busy_until.at[ev.lane].set(
+                jnp.where(ok, done_t, led.lane_busy_until[ev.lane])
+            ),
+            "ledger.lane_gen": led.lane_gen.at[ev.lane].set(gen),
+        },
+    )
+    c2 = enqueue(
+        c1,
+        ok,
+        kind=EventKind.DONE,
+        tick=done_t,
+        stage=Stage.SETTLE,
+        lane=ev.lane,
+        channel_index=ev.channel_index,
+        channel=ev.channel,
+        subject=ev.subject,
+        acquisition_index=ev.acquisition_index,
+        gen=gen,
+        group=ev.group,
+        audience=ev.audience,
+        scope=ev.scope,
+        acquisition_id=ev.acquisition_id,
+        program=0 if ev.program is None else ev.program,
+        caps=caps,
+    )
+    return c2, _emit(0, 0), record_none(caps)
+
+
+@eqx.filter_jit
 def step(carry, ev, study, truth, root):
     """The transition for one event: lax.switch over `HANDLERS` by event kind.
 
-    The window handler is part of the table only while awards are on, so a study
-    without them lowers the table it always had.
+    The window handler is part of the table only while awards are on and the commitment
+    handler only while commitments are on, so a study without them lowers the table it
+    always had. With commitments the window kind is an inert row.
     """
-    table = HANDLERS if study.caps.awards else HANDLERS[:-1]
+    caps = study.caps
+    table = HANDLERS[:11]
+    if caps.awards or caps.commitments:
+        table = (*table, h_window_end if caps.awards else h_none)
+    if caps.commitments:
+        table = (*table, h_commit_start)
     # A handler that is another's body under a different kind is traced once: the
     # switch holds the distinct bodies and a table maps each kind to its body.
     bodies = [_SAME_BODY.get(h, h) for h in table]
@@ -760,6 +854,7 @@ HANDLERS = (
     h_request,
     h_refresh,
     h_window_end,
+    h_commit_start,
 )
 PUBLIC = Audience.OBSERVER | Audience.POLICY
 
