@@ -245,6 +245,12 @@ class AllocationPolicy(AbstractPolicy):
     def decide(self, pstate, view, study, key):
         """Emit the effects of this decision from the masked view alone."""
         caps = study.caps
+        if caps.n_effects < N_EFFECTS:
+            raise ValueError(
+                f"the allocation policy emits {N_EFFECTS} effect rows, but "
+                f"Capacities.n_effects is {caps.n_effects}"
+            )
+        wide, caps = caps, dataclasses.replace(caps, n_effects=N_EFFECTS)
         n_q = len(QUERY_TICKS)
         qt = jnp.asarray((*QUERY_TICKS, FINISH_TICK), I64)
         asked, done = pstate[0].astype(I64), pstate[1].astype(I64)
@@ -309,6 +315,12 @@ class AllocationPolicy(AbstractPolicy):
             remainder=jnp.where(
                 kind == EffectKind.ALLOCATE, int(RemainderRule.FORFEIT), 0
             ).astype(I64),
+        )
+        # rows beyond the policy's own are empty
+        extra = wide.n_effects - N_EFFECTS
+        eff = jax.tree_util.tree_map(
+            lambda a: jnp.concatenate([a, jnp.zeros((extra, *a.shape[1:]), a.dtype)]),
+            eff,
         )
         new = jnp.zeros_like(pstate).at[0].set(asked + ask).at[1].set(done + spend)
         return eff, new, jax.random.uniform(key, dtype=F64)
