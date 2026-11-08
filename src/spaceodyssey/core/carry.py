@@ -191,6 +191,8 @@ class Trace(eqx.Module):
     alloc_from: jax.Array | None = None  # I64[E]
     alloc_until: jax.Array | None = None  # I64[E]
     alloc_recipient: jax.Array | None = None  # I64[E]
+    alloc_remainder: jax.Array | None = None  # I64[E]: the `RemainderRule`
+    alloc_to: jax.Array | None = None  # I64[E]: a REALLOCATE's destination row
 
 
 def absent(trace, name):
@@ -205,6 +207,8 @@ def absent(trace, name):
         or (name == "alloc_from" and trace.alloc_from is None)
         or (name == "alloc_until" and trace.alloc_until is None)
         or (name == "alloc_recipient" and trace.alloc_recipient is None)
+        or (name == "alloc_remainder" and trace.alloc_remainder is None)
+        or (name == "alloc_to" and trace.alloc_to is None)
     )
 
 
@@ -252,6 +256,8 @@ def empty_trace(caps):
         alloc_from=jnp.zeros(caps.n_effects, I64) if caps.awards else None,
         alloc_until=jnp.zeros(caps.n_effects, I64) if caps.awards else None,
         alloc_recipient=jnp.zeros(caps.n_effects, I64) if caps.awards else None,
+        alloc_remainder=jnp.zeros(caps.n_effects, I64) if caps.awards else None,
+        alloc_to=jnp.zeros(caps.n_effects, I64) if caps.awards else None,
     )
 
 

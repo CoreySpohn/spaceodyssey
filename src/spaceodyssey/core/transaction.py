@@ -36,6 +36,7 @@ from spaceodyssey.core.snapshot import (
     snapshot_fingerprint,
     snapshot_view,
 )
+from spaceodyssey.core.study import _EXACT_QUANTA
 
 
 def active(c):
@@ -204,7 +205,13 @@ def decision_fingerprint(carry, study):
 
 
 def _with_award_columns(effects, caps):
-    """The effect table with its Allocate columns, zeroed where a producer left none."""
+    """The effect table with its Allocate columns, zeroed where a producer left none.
+
+    A column of the wrong shape (an amount that is not one entry per effect row and
+    resource would broadcast into every resource) is replaced by zeros and the
+    recipient of every row by -1, so each Allocate of the decision is refused as
+    unsupported. The shapes are static, so the check costs nothing at run time.
+    """
     held = {
         "amount": effects.amount,
         "window_from": effects.window_from,
@@ -214,9 +221,11 @@ def _with_award_columns(effects, caps):
         "realloc_to": effects.realloc_to,
     }
     cols = award_columns(caps)
-    return dataclasses.replace(
-        effects, **{k: v for k, v in cols.items() if held[k] is None}
-    )
+    bad = {k: v is not None and jnp.shape(v) != cols[k].shape for k, v in held.items()}
+    out = {k: v for k, v in cols.items() if held[k] is None or bad[k]}
+    if any(bad.values()):
+        out["recipient"] = jnp.full(caps.n_effects, -1, I64)
+    return dataclasses.replace(effects, **out)
 
 
 def mask_effects(effects, wake):
@@ -244,6 +253,21 @@ def _program_of(eff, e, caps):
     if caps.n_programs > 1 and eff.program is not None:
         return eff.program[e]
     return jnp.asarray(0, I64)
+
+
+def _award_generation(c, rows, study, channel_index):
+    """Window generation, at debit, of the payer row whose award pays the charge.
+
+    A charge draws one resource from each of the asset, program and shared rows. The
+    award it spends is the open window (WINDOWED) of the first of those rows, in that
+    order, that is charged anything; with no open window the first payer row's
+    generation stands, since a refund to a row that nothing has opened or closed since
+    needs no disposition.
+    """
+    cost = charge_parts(study, channel_index)[0]
+    open_ = (c.ledger.win_state[rows] == WindowState.WINDOWED) & (cost > 0.0)
+    paying = jnp.where(open_.any(), rows[jnp.argmax(open_)], rows[0])
+    return c.ledger.win_gen[paying]
 
 
 def _commit_observe(c, eff, e, ok, study):
@@ -296,9 +320,11 @@ def _commit_observe(c, eff, e, ok, study):
         scope=c.phase,
         acquisition_id=c.next_sid,
         program=program,
-        # the window generation of the first payer row at debit; read back into the
-        # record's `award_gen` (a Done row has no disposition of its own)
-        disposition=c.ledger.win_gen[rows[0]] if caps.awards and caps.refunds else 0,
+        # the window generation of the row whose award pays at debit; read back into
+        # the record's `award_gen` (a Done row has no disposition of its own)
+        disposition=_award_generation(c, rows, study, channel_index)
+        if caps.awards and caps.refunds
+        else 0,
         caps=caps,
     )
 
@@ -310,7 +336,8 @@ def _commit_allocate(c, eff, e, want, study):
     recipient or reallocation row is out of range, its amount is negative or not
     finite, its window is empty, already over or past the last tick, or its rule is
     unknown; an award onto a row that already holds a window is FORBIDDEN (one window
-    per row), and a full queue is NO_SLOT.
+    per row), and a full queue is NO_SLOT. While the balance view is on, an award that
+    would take a resource's total over all rows past 2**53 quanta is unsupported too.
     """
     caps = study.caps
     rows = caps.n_balance_rows
@@ -331,6 +358,14 @@ def _commit_allocate(c, eff, e, want, study):
         & (rule <= RemainderRule.REALLOCATE)
         & ((rule != RemainderRule.REALLOCATE) | ((to >= 0) & (to < rows) & (to != r)))
     )
+    if caps.snapshot_balances:
+        # The balance view counts `balance_quantum` units exactly up to 2**53 (the bound
+        # `Study` holds the budget to). Debits only fall and a refund restores at most
+        # what was debited, so only an award can raise a balance; keeping each
+        # resource's total over all rows within the bound keeps every row within it,
+        # whichever row a REALLOCATE moves a remainder to.
+        total = c.ledger.balance.sum(axis=0)
+        fine = fine & jnp.all((total + amount) / caps.balance_quantum <= _EXACT_QUANTA)
     open_ = c.ledger.win_state[r] == WindowState.WINDOWED
     room = (~c.ev.valid).any() & (c.next_sid < caps.max_sid)
     code = jnp.select(
@@ -695,6 +730,8 @@ def finish_trace(trace, effects, codes, u, wake, carry, study, snapshot_fp=0):
             "alloc_from": jnp.where(ask, effects.window_from, 0),
             "alloc_until": jnp.where(ask, effects.window_until, 0),
             "alloc_recipient": jnp.where(ask, effects.recipient, 0),
+            "alloc_remainder": jnp.where(ask, effects.remainder, 0),
+            "alloc_to": jnp.where(ask, effects.realloc_to, 0),
         }
     return dataclasses.replace(
         trace,
