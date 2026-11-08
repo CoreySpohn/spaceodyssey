@@ -805,14 +805,14 @@ def h_commit_start(c, ev, study, truth, root):
     The lane's generation moves here, so the settlement carries the generation of the
     occupancy the commitment becomes. An executing commitment is not an insertion and
     meets no freeze check; one cancelled meanwhile has no queued start. A start on a
-    lane that has been closed, or for a program that has, is refused: the commitment is
-    cancelled as a Cancel would, the record at fraction 0 and the credit its pricing
-    allows.
+    lane that has been closed, for a program that has, or in a draining campaign is
+    refused: the commitment is cancelled as a Cancel would, the record at fraction 0 and
+    the credit its pricing allows.
     """
     caps, channels = study.caps, study.channels
     mark = jnp.clip(ev.slot, 0, caps.n_commitments - 1)
     pending = (ev.slot >= 0) & (c.ledger.cm_state[mark] == CommitState.PENDING)
-    shut = c.ledger.lane_closed[ev.lane]
+    shut = c.ledger.lane_closed[ev.lane] | c.draining
     if caps.n_programs > 1:
         shut = shut | c.ledger.program_closed[ev.program]
     refused = pending & shut
