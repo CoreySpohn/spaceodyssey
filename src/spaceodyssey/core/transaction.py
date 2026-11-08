@@ -237,6 +237,35 @@ def _with_award_columns(effects, caps):
     return dataclasses.replace(effects, **out)
 
 
+def _check_rows(effects, caps, source=""):
+    """Refuse an effect table whose row count is not `caps.n_effects`.
+
+    The shapes are static, so the check costs nothing at run time. `source` names the
+    producer, when the caller knows it.
+    """
+    for name in (
+        "kind",
+        "subject",
+        "channel_index",
+        "group",
+        "tick",
+        "lane",
+        "scope",
+        "disposition",
+        "disruptive",
+    ):
+        column = getattr(effects, name)
+        if column is None:
+            continue
+        rows = jnp.shape(column)
+        if rows != (caps.n_effects,):
+            raise ValueError(
+                f"effect table column {name!r} has shape {rows}, but "
+                f"Capacities.n_effects is {caps.n_effects}{source}: a policy must "
+                "emit exactly n_effects rows"
+            )
+
+
 def mask_effects(effects, wake):
     """Disable effect rows for an unwoken decision."""
     return dataclasses.replace(
@@ -704,6 +733,7 @@ def admit(carry, effects, study, snapshot_fp=None):
     holds the balances, which the debits of a sibling row would move before the host
     answers. With the flag off the check does not exist.
     """
+    _check_rows(effects, study.caps)
     fp = decision_fingerprint(carry, study) if snapshot_fp is None else snapshot_fp
     supported = (
         (effects.kind == EffectKind.OBSERVE)
@@ -799,6 +829,8 @@ def transition(carry, i, root, study, truth, *, wake_fn=wake_by_audience):
     c, trace, wake = advance(carry, root, study, truth, wake_fn=wake_fn)
     view = _policy_view(c, study)
     eff, pstate, u = decide(c, root, study, view)
+    names = ", ".join(type(p).__name__ for p in study.agenda.policies)
+    _check_rows(eff, study.caps, f" (policies: {names})")
     eff = mask_effects(eff, wake)
     fp = decision_fingerprint(c, study, view)
     c, codes = admit(c, eff, study, fp)
