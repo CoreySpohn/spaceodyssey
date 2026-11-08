@@ -350,7 +350,7 @@ def test_a_saved_run_document_states_the_scope_in_words():
     assert run.refit["host"].model_hash == refit.model_hash
 
 
-@pytest.mark.medium
+@pytest.mark.medium(reason="a real OFTI fit of noiseless physical rows")
 def test_one_real_fit_reproduces_the_orbit_and_equals_ofti_on_the_t4d_table():
     """A real OFTI fit of noiseless physical rows, with a null and a no-science row.
 
@@ -415,7 +415,9 @@ def plan_rows():
     return context, rows
 
 
-@pytest.mark.slow  # five OFTI fits of up to five epochs, 64 particles (about 100 s)
+@pytest.mark.slow(
+    reason="five OFTI fits of up to five epochs, 64 particles (about 100 s)"
+)
 def test_survey_posterior_contraction_over_five_scripted_visits():
     """The predictive sky position contracts as the five visits arrive.
 
@@ -506,7 +508,7 @@ def check_executor_parity(context, rows, refit, n_steps, observer=None):
     return host, compiled
 
 
-@pytest.mark.slow  # both executors compile the study around one real fit
+@pytest.mark.slow(reason="both executors compile the study around one real fit")
 def test_executor_parity_on_one_certified_visit():
     """One certified visit, four particles: both executors install the same fit.
 
@@ -525,7 +527,7 @@ def test_executor_parity_on_one_certified_visit():
     )
 
 
-@pytest.mark.slow  # ten OFTI fits and two cold study compiles (about 90 s)
+@pytest.mark.slow(reason="ten OFTI fits and two cold study compiles (about 90 s)")
 def test_five_refreshes_install_particles_on_both_executors():
     """Each visit's refresh installs particles, and the executors agree.
 

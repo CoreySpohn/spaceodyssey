@@ -31,7 +31,7 @@ from spaceodyssey.studies import oracle, scripted, toy
 from tests.codec.test_document import TOY_KINDS
 from tests.core.prior_helpers import refit_study
 
-pytestmark = pytest.mark.medium  # Each case compiles a scan.
+pytestmark = pytest.mark.medium(reason="each case compiles a scan")
 
 N_STEPS = 24  # the length of the recorded base histories
 CUT = 6  # past the first bucket boundary, with the study still running (idle from 10)

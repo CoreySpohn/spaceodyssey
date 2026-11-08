@@ -19,7 +19,7 @@ class ToyKnownSignal(ToyPhotometry):
 
 
 # The distinct one-lane known-signal host/compiled parity program runs nightly.
-@pytest.mark.slow
+@pytest.mark.slow(reason="one study per executor, host and compiled")
 def test_survey_1_hand_count_and_executor_parity():
     caps = Capacities(n_assets=1, n_lanes=1, n_channels=1, n_subjects=2, n_an=2)
     study = survey_1(caps=caps, channel_model=ToyKnownSignal(noise=jnp.array([0.5])))

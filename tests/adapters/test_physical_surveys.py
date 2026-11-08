@@ -22,7 +22,9 @@ from spaceodyssey.adapters.skyscapes import (
 )
 
 # Loads the 2D response package and samples years of keepout.
-pytestmark = pytest.mark.slow
+pytestmark = pytest.mark.slow(
+    reason="small physical surveys on the real response package"
+)
 
 PROFILE = load_profile()
 UMA = SceneSpec.from_profile(PROFILE, 0)

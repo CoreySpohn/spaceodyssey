@@ -232,7 +232,7 @@ def replayed(scenario="normal", carry=None):
     return replay_run(study(), ROOT, carry, trace, refit=KeyedBoundary())
 
 
-@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
+@pytest.mark.medium(reason="over 3 s cold here, about 5 s on the runner")
 def test_replay_of_the_hand_log_reproduces_the_run():
     """Fails if a hold, install, product row or final belief of the hand log differs."""
     out = replayed()

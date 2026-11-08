@@ -284,7 +284,7 @@ def test_identity_is_namespace_producer_subject_and_index_never_revision():
 # ---- runs ------------------------------------------------------------------------
 
 
-@pytest.mark.medium  # one compile per executor of the import study
+@pytest.mark.medium(reason="one compile per executor of the import study")
 def test_import_rows_are_stamped_folded_once_and_seen_by_the_one_first_decision():
     """B1 on both executors. Fails if a row is delivered unstamped, folded twice or
     by the wrong audience, if the first decision fires before the last import or more
@@ -348,7 +348,7 @@ def _decisions_at_zero(study, carry, truth, root):
 
 
 # the seed unit test guards the kickoff retargeting at merge time (K6)
-@pytest.mark.slow  # compiles the shared transition for two studies
+@pytest.mark.slow(reason="compiles the shared transition for two studies")
 def test_one_initial_decision_with_and_without_a_public_zero_information_import():
     """Fails if a public import of a row nobody folds adds a decision at tick 0, or
     changes the stateful plan policy's state, the decision count or the within-tick
@@ -391,7 +391,7 @@ def _policy_rows(carry, study):
     return written(view.log, n), view
 
 
-@pytest.mark.slow  # one compiled program, three tables of one shape, 19 s cold
+@pytest.mark.slow(reason="one compiled program, three tables of one shape, 19 s cold")
 def test_an_observer_only_row_moves_no_public_identity_and_order_moves_none():
     """Fails if inserting an observer-only source changes a public row's identity or
     fold key, a policy snapshot fingerprint, a decision or the final policy view; or
@@ -505,7 +505,7 @@ def _imported(study):
         c = handlers[int(ev.kind)](nxt, ev, study, truth, root)[0]
 
 
-@pytest.mark.medium  # imports handled eagerly, event by event: over 5 s cold
+@pytest.mark.medium(reason="imports handled eagerly, event by event: over 5 s cold")
 def test_the_battery_matches_split_rows_by_audience_and_refuses_collisions():
     """Fails if the battery's record index drops one copy of a split prior (both
     share subject, index, channel, revision and status), if a policy view is not
@@ -698,7 +698,9 @@ def _policy_view(study, c):
     return written(view.log, int(view.n_rows)), int(snapshot_fingerprint(view, layout))
 
 
-@pytest.mark.medium  # two imports handled eagerly, event by event: about 6 s cold
+@pytest.mark.medium(
+    reason="two imports handled eagerly, event by event: about 6 s cold"
+)
 def test_overlap_observer_only_row_does_not_move_policy():
     """K3, B2 (d). Fails if an observer-only raw row named by a public prior changes
     the policy's weights, summary, released rows or snapshot fingerprint, or if it

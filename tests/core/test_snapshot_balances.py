@@ -227,7 +227,7 @@ def test_the_policy_view_lists_every_balance_row_in_quanta():
     assert program_1 == 3 and int(view.balance_q[program_1, 1]) == 15
 
 
-@pytest.mark.medium  # admission compiles twice, 4.9 s cold alone
+@pytest.mark.medium(reason="admission compiles twice, 4.9 s cold alone")
 def test_an_admitted_debit_moves_the_fingerprint_only_with_balances_on():
     """Fails if the balance is not in the policy digest: the reason a Query cannot
     share a decision with an Observe.
@@ -252,7 +252,7 @@ def test_a_balance_quantum_that_is_not_a_positive_finite_float_is_refused(quantu
 # ---- the hosted path ------------------------------------------------------------
 
 
-@pytest.mark.slow  # one study on both executors, 38 to 55 s cold
+@pytest.mark.slow(reason="one study on both executors, 38 to 55 s cold")
 def test_a_hosted_run_with_balances_on_answers_its_query_on_both_executors():
     """Fails if the rebuilt snapshot fingerprint differs from the request's, or the
     two executors disagree on a fingerprint that now holds the balance.
@@ -299,7 +299,7 @@ def _every_nonempty_row(effects, mask, act):
     return live & mixed
 
 
-@pytest.mark.slow  # compiles a copy of admission, 2 s cold alone
+@pytest.mark.slow(reason="compiles a copy of admission, 2 s cold alone")
 def test_mutant_admission_that_never_refuses_fails_the_mixed_checks():
     """A refusal that selects no rows lets the sibling debit through, and the rebuilt
     fingerprint then differs from the one the request carries.
@@ -319,7 +319,7 @@ def test_mutant_admission_that_never_refuses_fails_the_mixed_checks():
     )
 
 
-@pytest.mark.slow
+@pytest.mark.slow(reason="compiles a copy of admission")
 def test_mutant_admission_that_refuses_without_the_flag_fails_the_off_check():
     """A refusal that ignores `snapshot_balances` changes every older study."""
     admit = _mutant_admit(_refuses_mixed=lambda caps: True)
@@ -327,7 +327,7 @@ def test_mutant_admission_that_refuses_without_the_flag_fails_the_off_check():
         _off_keeps_the_old_behavior(admit)
 
 
-@pytest.mark.slow
+@pytest.mark.slow(reason="compiles a copy of admission")
 def test_mutant_admission_that_counts_every_row_fails_the_effects_check():
     """A refusal that counts a forbidden row as an effect overrides its own code."""
     admit = _mutant_admit(_query_mixed_rows=_every_nonempty_row)
@@ -666,7 +666,7 @@ def _refund_run(on, n_requests, n_stale, quantum=1.0):
     return host_service, host
 
 
-@pytest.mark.slow  # one study on both executors, 38 to 55 s cold
+@pytest.mark.slow(reason="one study on both executors, 38 to 55 s cold")
 def test_a_query_made_stale_by_a_queued_refund_is_refused_and_asked_again():
     """Fails with 'the snapshot changed between the request and its answer' if the
     stale request is held, or if it is answered on a state the policy did not read.
@@ -681,7 +681,7 @@ def test_a_query_made_stale_by_a_queued_refund_is_refused_and_asked_again():
     assert asked.snapshot_fp == decisions[3]
 
 
-@pytest.mark.slow  # the balances-off control: two more compiles, 12 s cold alone
+@pytest.mark.slow(reason="the balances-off control: two more compiles, 12 s cold alone")
 def test_with_balances_off_the_same_refund_study_refuses_nothing():
     """The control: nothing is refused, the first Query is answered and the policy,
     which has no refusal to read, stops.
@@ -689,7 +689,7 @@ def test_with_balances_off_the_same_refund_study_refuses_nothing():
     _refund_run(False, n_requests=1, n_stale=0)
 
 
-@pytest.mark.slow  # two more compiles, 10 s cold alone
+@pytest.mark.slow(reason="two more compiles, 10 s cold alone")
 def test_a_refund_inside_one_quantum_is_not_stale_because_the_view_cannot_show_it():
     """Fails if the host could read a balance the fingerprint does not hash: with a
     quantum of 10 the refund takes the balance from 9 to 10, one count either way, so
@@ -858,7 +858,7 @@ class _ReceiptLearner(_Script):
         return jnp.minimum(view.n_dec, 4)
 
 
-@pytest.mark.slow  # one study on both executors, 38 to 55 s cold
+@pytest.mark.slow(reason="one study on both executors, 38 to 55 s cold")
 def test_a_receipt_released_between_a_decision_and_its_request_refuses_the_query():
     """Fails if a refund credited by a receipt released ahead of the request is
     answered on a state the policy did not read: the request is stale, refused once, and

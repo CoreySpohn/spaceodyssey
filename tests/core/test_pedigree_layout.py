@@ -208,7 +208,7 @@ def test_a_derived_row_never_supersedes_a_source_row():
     assert int(_superseded_in_view(source, vis, caps)[0]) == 1
 
 
-@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
+@pytest.mark.medium(reason="over 3 s cold here, about 5 s on the runner")
 def test_committed_pedigrees_are_exact_per_audience():
     """Gather, boundary and commit on a hand log: the product column per audience."""
     from spaceodyssey.core import init_carry

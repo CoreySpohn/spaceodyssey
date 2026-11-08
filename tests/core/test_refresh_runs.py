@@ -210,7 +210,7 @@ def _mutation_pair():
     return host, comp
 
 
-@pytest.mark.medium  # The two-program refresh pair compiles the executor cold.
+@pytest.mark.medium(reason="the two-program refresh pair compiles the executor cold")
 @pytest.mark.parametrize("field", sorted(REFRESH_ONLY))
 def test_refresh_leaf_mutation_fails_parity(field):
     """Each conditional refresh leaf is compared; a compiled-only change is caught."""

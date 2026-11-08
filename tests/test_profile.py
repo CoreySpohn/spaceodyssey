@@ -18,7 +18,9 @@ from spaceodyssey import Claim, Edge, Profile, profiles
 REFERENCE = profiles.EXOEARTH_CANDIDATE
 
 
-@pytest.mark.medium  # Two fresh interpreters import the package (JAX), near 5 s cold.
+@pytest.mark.medium(
+    reason="two fresh interpreters import the package (JAX), near 5 s cold"
+)
 def test_hash_stable_across_processes():
     code = (
         "from spaceodyssey.profiles import EXOEARTH_CANDIDATE; "

@@ -29,7 +29,7 @@ def _decisions_at(trace, tick):
     )
 
 
-@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
+@pytest.mark.medium(reason="over 3 s cold here, about 5 s on the runner")
 def test_two_releases_one_tick_one_decision():
     study = CORPUS_BY_NAME["bundle"].make_study()
     h, views, trace = _run(HostExecutor(), study)
@@ -41,7 +41,9 @@ def test_two_releases_one_tick_one_decision():
     assert int(view.n_rows) == 3
 
 
-@pytest.mark.medium  # the per-wake mutant executor compiles its own run, about 7 s cold
+@pytest.mark.medium(
+    reason="the per-wake mutant executor compiles its own run, about 7 s cold"
+)
 def test_per_wake_rule_would_decide_twice_and_the_first_misses_a_record():
     study = CORPUS_BY_NAME["bundle"].make_study()
     h, views, trace = _run(PerWakeHostExecutor(), study)

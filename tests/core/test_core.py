@@ -150,7 +150,7 @@ def test_admission_is_cumulative_across_groups_of_a_decision():
     assert int(c.acquisition_counts[0]) == 1 and int(c.acquisition_counts[1]) == 0
 
 
-@pytest.mark.medium  # Cold compilation of the transition exceeds the unit budget.
+@pytest.mark.medium(reason="cold compilation of the transition exceeds the unit budget")
 def test_gain_enters_measurement():
     def realize_once(gain):
         study = kinds.survey_1(design=kinds.ToyDesign(gain=gain))
@@ -338,7 +338,9 @@ def test_drain_does_not_wake_the_policy(bundle_state):
     assert int(c.n_dec) == n
 
 
-@pytest.mark.medium  # All hand histories compile one-world and two-world programs.
+@pytest.mark.medium(
+    reason="all hand histories compile one-world and two-world programs"
+)
 def test_every_hand_study_reproduces_its_history():
     for name in HAND_STUDIES:
         if name not in HAND_HISTORIES:
@@ -561,7 +563,7 @@ def test_abort_partial_is_never_released_or_folded(bundle_state):
 
 
 # The distinct adaptive-policy program and six-world drain check run nightly.
-@pytest.mark.slow
+@pytest.mark.slow(reason="one study per executor")
 def test_threshold_stop_policy_drains_after_threshold():
     study = kinds.survey_1(policies=(kinds.ThresholdStopPolicy(stop_snr=3.0),))
     cs, ts = CompiledExecutor().run(study, *worlds(6), 80)

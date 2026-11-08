@@ -65,20 +65,20 @@ def stated(**declared):
     return survey(policy)
 
 
-@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
+@pytest.mark.medium(reason="over 3 s cold here, about 5 s on the runner")
 def test_the_plan_declares_the_stop_it_emits(inputs):
     result = run(survey(), inputs)
     assert result, result.diagnostic
     assert result.detail["declared_not_emitted"] == {0: []}
 
 
-@pytest.mark.medium  # a second study compiles the host program: over 5 s cold
+@pytest.mark.medium(reason="a second study compiles the host program: over 5 s cold")
 def test_a_special_stop_is_declared_and_emitted(inputs):
     result = run(CORPUS_BY_NAME["stop_lane_close"].make_study(), inputs)
     assert result, result.diagnostic
 
 
-@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
+@pytest.mark.medium(reason="over 3 s cold here, about 5 s on the runner")
 def test_needs_that_the_run_meets_pass(inputs):
     result = run(stated(stops=(DRAIN,), needs=(Need(10, 10, 130),)), inputs)
     assert result, result.diagnostic

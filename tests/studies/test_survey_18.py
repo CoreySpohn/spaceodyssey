@@ -268,7 +268,7 @@ def _precursor(world):
     return int(log.released_tick[rows[0]]), int(log.accepted_tick[rows[0]])
 
 
-@pytest.mark.slow  # one cold program per executor
+@pytest.mark.slow(reason="one cold program per executor")
 def test_the_precursor_changes_the_plan_only_when_released_to_the_policy():
     """B7 row 18 (a), (c) and (e) on both executors. Fails if a withheld precursor's
     payload, or an observer-only precursor, moves any decision or acquisition in any
@@ -310,7 +310,7 @@ def test_the_precursor_changes_the_plan_only_when_released_to_the_policy():
     assert plans["host"] == plans["compiled"]
 
 
-@pytest.mark.slow  # shares the guard's program; the guard covers the claim (K6)
+@pytest.mark.slow(reason="shares the guard's program; the guard covers the claim")
 def test_decisions_before_a_delayed_release_are_the_withheld_runs():
     """B7 row 18 (b), both executors. Fails if a precursor released at tick `DELAY`
     moves a decision or acquisition before that tick in any world, or moves nothing
@@ -325,7 +325,7 @@ def test_decisions_before_a_delayed_release_are_the_withheld_runs():
             assert decisions, "no decision before the delayed release"
 
 
-@pytest.mark.slow  # shares the guard's program (K6)
+@pytest.mark.slow(reason="shares the guard's program")
 def test_a_swapped_group_latent_moves_the_plan_only_after_a_differing_release():
     """B7 row 18 (d), both executors. Fails if swapping the stars' levels between the
     worlds moves the plan before the first released row whose payload differs, or at
@@ -344,7 +344,7 @@ def test_a_swapped_group_latent_moves_the_plan_only_after_a_differing_release():
     assert result, result.diagnostic
 
 
-@pytest.mark.slow  # the epoch wrapper compiles its own program per executor (K6)
+@pytest.mark.slow(reason="the epoch wrapper compiles its own program per executor")
 def test_the_epoch_relation_holds_with_released_and_delayed_precursors():
     """B6 on survey 18. Fails if shifting the epoch origin moves any decision, record
     or belief other than by the shift, for a precursor released at tick 0 and one
@@ -397,7 +397,7 @@ class TruthReadingRunner(Runner):
         return self.runs[key]
 
 
-@pytest.mark.slow  # another policy type and one world per run (K6)
+@pytest.mark.slow(reason="another policy type and one world per run")
 def test_a_policy_reading_the_truth_latent_fails_rows_a_to_e():
     """B7 row 18 (f), control, both executors. Fails if a policy that chooses its
     plan by the target star's true level passes any of (a) to (e) on either executor:
@@ -415,7 +415,7 @@ def test_a_policy_reading_the_truth_latent_fails_rows_a_to_e():
         assert released_check(runner), executor
 
 
-@pytest.mark.slow  # every variant on both executors (K6)
+@pytest.mark.slow(reason="every variant on both executors")
 def test_every_variant_passes_preflight_and_agrees_between_executors():
     """B7 executors. Fails if a variant of the survey (withheld, delayed, observer
     only, released with either payload, uncoupled) fails pre-flight, or if the two

@@ -59,7 +59,7 @@ from tests.core.helpers import one_world, worlds
 from tests.core.program_helpers import cancel, end, observe, wait
 from tests.core.refund_helpers import mutate, receipt
 
-pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
+pytestmark = pytest.mark.medium(reason="A cold host run compiles the executor")
 
 N_STEPS = 200
 SNAPSHOT = {
@@ -425,7 +425,7 @@ def test_the_effect_table_without_awards_holds_no_award_column():
             assert getattr(table, f.name) is None
 
 
-@pytest.mark.slow
+@pytest.mark.slow(reason="its own awards study on both executors")
 def test_the_host_and_compiled_executors_make_the_same_history():
     """Fails if the compiled scan and the host loop disagree on an award's run."""
     script, awards = SCENARIOS["realloc"]

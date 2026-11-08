@@ -154,7 +154,7 @@ def test_manifest_pins_every_consumed_library_and_the_response():
     assert datasets.yip_info(response["package"])["md5"] == response["digest"]
 
 
-@pytest.mark.medium  # hashes the 78 MB package; downloads it on a cold cache
+@pytest.mark.medium(reason="hashes the 78 MB package; downloads it on a cold cache")
 def test_loader_digest_and_header_equal_the_pins():
     """Fails if the fetched package's digest or header differs from the profile.
 

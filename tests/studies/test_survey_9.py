@@ -154,7 +154,7 @@ def alternate():
     return study, _run(study)
 
 
-@pytest.mark.slow  # the two-program study compiles the executor, 15 s cold
+@pytest.mark.slow(reason="the two-program study compiles the executor, 15 s cold")
 def test_alternating_programs_keep_independent_balances_and_a_stop_spares_the_other(
     alternate,
 ):
@@ -192,7 +192,7 @@ def test_alternating_programs_keep_independent_balances_and_a_stop_spares_the_ot
     assert result.passed, result
 
 
-@pytest.mark.slow  # a second host run of the same shapes (K6)
+@pytest.mark.slow(reason="a second host run of the same shapes")
 def test_control_one_pool_would_have_charged_one_row():
     """Control for (b). With every request in program 0 the program-1 row is untouched
     and program 0 alone pays, for the four admissions before its stop, so the split
@@ -224,7 +224,7 @@ class _PlanScript(ScriptedPrograms):
         return eff, new_ps, jr.uniform(key, dtype=F64)
 
 
-@pytest.mark.slow  # two more compiled programs (K6)
+@pytest.mark.slow(reason="two more compiled programs")
 def test_a_one_program_study_has_the_history_of_survey_1():
     """B7 row 9 (a). The plan of `survey_1` written as a script, with one program and
     no awards, makes the same history: ints exact, floats in the go band, with no leaf
@@ -265,7 +265,7 @@ def _funded_starts(run):
     return tuple(int(t) for t in rec["start_tick"][rec["channel"] == FUNDED])
 
 
-@pytest.mark.slow  # four host runs of one compiled study (K6)
+@pytest.mark.slow(reason="four host runs of one compiled study")
 def test_a_credit_free_program_runs_only_on_an_idle_lane_and_delays_no_funded_start(
     credit_runs,
 ):
@@ -296,7 +296,7 @@ def test_a_credit_free_program_runs_only_on_an_idle_lane_and_delays_no_funded_st
     assert gap == pytest.approx(0.0, abs=1e-9)
 
 
-@pytest.mark.slow  # shares the credit runs (K6)
+@pytest.mark.slow(reason="shares the credit runs")
 def test_controls_a_misplaced_credit_free_start_delays_funded_work_and_credit_is_needed(
     credit_runs,
 ):
@@ -317,7 +317,7 @@ def test_controls_a_misplaced_credit_free_start_delays_funded_work_and_credit_is
     assert (_records(priced, channel=0)["channel"] == FREE).sum() == 0
 
 
-@pytest.mark.slow  # the compiled executor, one more program per study (K6)
+@pytest.mark.slow(reason="the compiled executor, one more program per study")
 def test_both_executors_make_the_same_history_for_the_interleaved_studies(
     alternate, credit_runs
 ):

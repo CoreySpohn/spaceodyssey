@@ -272,7 +272,7 @@ def stopped():
     return study, _run(study)
 
 
-@pytest.mark.slow  # the dry-asset study compiles the executor, 33 s cold
+@pytest.mark.slow(reason="the dry-asset study compiles the executor, 33 s cold")
 def test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected(stopped):
     """Rows (a) to (d). Fails if the policy does not stop the dry asset or stops
     it before it is dry, if the refusal code does not change across the Stop, if the
@@ -341,7 +341,7 @@ def test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected(stopped)
     assert (everything["status"][on_lane0] == RecordStatus.COMPLETED).all()
 
 
-@pytest.mark.slow  # one more host run of the same compiled shapes
+@pytest.mark.slow(reason="one more host run of the same compiled shapes")
 def test_control_without_the_policy_stop_every_refusal_is_no_funds_and_row_b_fails():
     """Control for (a) and (b). The same study with the Stop removed refuses every
     request on the dry asset `NO_FUNDS`, no Stop effect is emitted, no lane is closed,
@@ -360,7 +360,7 @@ def test_control_without_the_policy_stop_every_refusal_is_no_funds_and_row_b_fai
         _assert_a_and_b(world, study)
 
 
-@pytest.mark.slow  # the compiled executor compiles every program again
+@pytest.mark.slow(reason="the compiled executor compiles every program again")
 def test_both_executors_make_the_same_history_for_the_dry_asset_study(stopped):
     """Parity for (a) to (d): ints exact, floats in the go band, on both executors."""
     study, host = stopped

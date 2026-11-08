@@ -36,7 +36,7 @@ from tests.core.refund_helpers import (
     refund_study,
 )
 
-pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
+pytestmark = pytest.mark.medium(reason="A cold host run compiles the executor")
 
 N_STEPS = 80
 CANCELLED = (observe(0, 0, 10, 0), wait(0, 60), cancel(1, 0))  # half spent at tick 60

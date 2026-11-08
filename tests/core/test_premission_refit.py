@@ -133,7 +133,9 @@ def _contract_failures(boundary, study, req):
     return failures, out
 
 
-@pytest.mark.medium  # five boundary programs and the eager import, about 8 s cold
+@pytest.mark.medium(
+    reason="five boundary programs and the eager import, about 8 s cold"
+)
 def test_the_audience_prior_boundary_meets_its_contract():
     """B3 contract. With identical masked rows and keys for both audiences of
     subject 0 (the core shares the entry) but different installed priors, fails if
@@ -340,7 +342,7 @@ def _belief_failures(result, priors=PRIORS, dropped_index=1):
     return failures
 
 
-@pytest.mark.slow  # the refresh study on the host executor, and two controls
+@pytest.mark.slow(reason="the refresh study on the host executor, and two controls")
 def test_a_refit_observer_keeps_its_prior_across_a_refresh():
     """B3. Fails if, after several checkpoints, either audience's belief is not its
     own prior plus the rows it received (computed from the log), if the run does not
@@ -368,7 +370,7 @@ def test_a_refit_observer_keeps_its_prior_across_a_refresh():
 
 
 # the host run is replayed by the guard above at merge time (K6)
-@pytest.mark.slow  # the refresh study on the compiled executor, replayed
+@pytest.mark.slow(reason="the refresh study on the compiled executor, replayed")
 def test_replay_reproduces_prior_run():
     """Named interface check (T4c). Fails if the compiled executor's run of the prior
     study does not hold each audience's prior plus its rows, or if keyed replay from
@@ -388,7 +390,7 @@ def _products(result):
     return np.sum(np.asarray(log.valid & (log.kind == PRODUCT_INDEX)), axis=-1)
 
 
-@pytest.mark.slow  # the alike study on the host executor with both boundaries (K6)
+@pytest.mark.slow(reason="the alike study on the host executor with both boundaries")
 def test_equal_resolutions_refit_alike_on_both_boundaries():
     """D010 as amended 2026-11-07. Fails if, with both audiences resolving to the same
     priors, the observer-init boundary's run does not hold each audience's prior plus
@@ -411,7 +413,7 @@ def test_equal_resolutions_refit_alike_on_both_boundaries():
     assert any("audience 2" in f for f in _belief_failures(differ))
 
 
-@pytest.mark.slow  # the refresh study on the host executor, replayed
+@pytest.mark.slow(reason="the refresh study on the host executor, replayed")
 def test_two_subjects_sharing_a_local_index_fold_refit_and_replay_apart():
     """D006 per channel and subject. Fails if pre-flight refuses two subjects whose
     raw rows share local index 0 on channel 60, if the prior that drops subject 1's

@@ -287,7 +287,7 @@ def shown(run, w):
     return [int(t) for t in np.asarray(trace.tick)[keep] if t >= first]
 
 
-@pytest.mark.slow  # one real upstream run and the survey on both executors (K6)
+@pytest.mark.slow(reason="one real upstream run and the survey on both executors")
 def test_the_precursor_raises_the_value_by_its_known_amount():
     """B7 row 4 (a), with pre-flight and executor agreement. Fails if, with the same
     truths and seeds, the value with the precursor less the value without it is not
@@ -333,7 +333,7 @@ def _least_known(log):
     return min(int(np.sum(subjects == t)) for t in TARGETS)
 
 
-@pytest.mark.slow  # shares the runs of the value test (K6)
+@pytest.mark.slow(reason="shares the runs of the value test")
 def test_the_precursor_moves_only_decisions_that_saw_it():
     """B7 row 4 (b) and (c), both executors. Fails if the projection of decisions and
     non-imported records differs from the run without the precursor before the first
@@ -380,7 +380,7 @@ def test_the_precursor_moves_only_decisions_that_saw_it():
             assert int(np.sum(hidden_n)) == int(np.sum(bare_n)) + 2
 
 
-@pytest.mark.slow  # the epoch wrapper compiles its own program per executor (K6)
+@pytest.mark.slow(reason="the epoch wrapper compiles its own program per executor")
 def test_the_epoch_relation_holds_with_an_exported_precursor():
     """B6 on survey 4. Fails if shifting the epoch origin moves any decision, record
     or belief other than by the shift, on either executor, for the survey importing

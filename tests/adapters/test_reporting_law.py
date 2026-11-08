@@ -156,7 +156,7 @@ def test_record_kind_passes_kp5_against_the_profile_table():
 # -- Sampling against likelihood (B2) --------------------------------------------
 
 
-@pytest.mark.slow  # A 20,000-draw Monte Carlo panel (the tier the spec assigns).
+@pytest.mark.slow(reason="A 20,000-draw Monte Carlo panel (the tier the spec assigns)")
 @pytest.mark.parametrize("corr", [0.0, 0.5])
 def test_sampling_and_likelihood_agree(corr):
     """Fails if draws and the likelihood disagree beyond Monte Carlo error.
@@ -203,7 +203,7 @@ def test_sampling_and_likelihood_agree(corr):
             assert abs(detected.mean() - doubled) > 3 * se
 
 
-@pytest.mark.slow  # The correlated-error control of the 20,000-draw panel.
+@pytest.mark.slow(reason="the correlated-error control of the 20,000-draw panel")
 def test_position_whitening_control_fails_on_the_correlated_case():
     """Fails if the chi-square check cannot see a correlation sign error.
 
@@ -335,7 +335,7 @@ def test_payload_carries_observables_only():
     assert 0 < n_detected < 64
 
 
-@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
+@pytest.mark.medium(reason="over 3 s cold here, about 5 s on the runner")
 def test_null_and_no_science_rows():
     """Fails if a null or an empty interval publishes position or counts.
 
@@ -577,7 +577,7 @@ def test_calibration_id_digests_every_declaration(observatory):
     assert len(set(ids.values())) == len(ids)
 
 
-@pytest.mark.medium  # One predicted budget per mutated report (21 evaluations).
+@pytest.mark.medium(reason="one predicted budget per mutated report (21 evaluations)")
 def test_every_digested_report_field_moves_the_predicted_budget(observatory):
     """Fails if a report field the id digests does not change a predicted budget.
 
@@ -948,7 +948,9 @@ def run_survey(n_worlds=N_WORLDS, kappas=(1.0, 2.0)):
     )
 
 
-@pytest.mark.slow  # 200 worlds over the planned visits on the real response (~40 s).
+@pytest.mark.slow(
+    reason="200 worlds over the planned visits on the real response (~40 s)"
+)
 def test_survey_detection_and_null_sequence_over_planned_visits():
     """Fails if the survey's detections, nulls or sensitivities break the law.
 

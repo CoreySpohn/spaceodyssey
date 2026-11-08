@@ -42,7 +42,7 @@ def test_d2_statistic_shape(seed):
     assert r["all_done"]
 
 
-@pytest.mark.slow
+@pytest.mark.slow(reason="REINFORCE at full size, 32768 worlds per seed set")
 @pytest.mark.parametrize("seed", [0, 1], ids=["root-0", "root-1"])
 def test_d2_reinforce_is_unbiased_at_full_size(seed):
     # 32768 worlds per seed set; the estimate must sit within 3 paired standard

@@ -56,7 +56,7 @@ def likelihood_quantities(budget, record, lod_arcsec):
     return np.array([float(budget.planet), float(log_p), float(p_null)])
 
 
-@pytest.mark.slow  # Compiles the budget at five node counts on the real response.
+@pytest.mark.slow(reason="compiles the budget at five node counts on the real response")
 def test_b4_time_refinement_of_the_likelihood_quantities(yip_report):
     """Fails if counts, log p(f, pos | theta) or P(null | theta) do not converge.
 

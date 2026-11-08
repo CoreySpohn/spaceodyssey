@@ -28,7 +28,7 @@ N_DECISIONS = 4  # the wait, two observations and the drain
 AGES = tuple(AGE * 2**k for k in range(4))  # each one twice the one before
 
 
-@pytest.mark.slow  # one cold program per executor
+@pytest.mark.slow(reason="one cold program per executor")
 def test_the_epoch_relation_holds_for_three_shifts_on_both_executors():
     """B7 row 6 (a), and B6 on survey 6. Fails if a shift of the epoch origin, one of
     them larger than the oldest prior age, moves any decision, record, belief or
@@ -50,7 +50,7 @@ def test_the_epoch_relation_holds_for_three_shifts_on_both_executors():
             assert result.detail["n_views"] == 2 * N_DECISIONS, where
 
 
-@pytest.mark.slow  # a control; shares the relation's program (K6)
+@pytest.mark.slow(reason="a control; shares the relation's program")
 def test_a_value_reading_an_absolute_end_tick_fails_the_epoch_relation():
     """B7 row 6 (c), control. A policy that takes the prior's age as minus its end
     tick (as if the run started at tick 0) waits for another tick once the origin
@@ -77,7 +77,7 @@ def _first_values(executor, decay, truths, roots):
     return np.asarray(out)
 
 
-@pytest.mark.slow  # the plain study, one more program per executor (K6)
+@pytest.mark.slow(reason="the plain study, one more program per executor")
 def test_doubling_the_prior_age_moves_the_value_monotonically():
     """B7 row 6 (b). Fails if, over four ages each twice the one before, the value
     `base * decay ** age` of the first decision does not strictly decrease for a decay

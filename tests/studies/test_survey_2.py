@@ -66,7 +66,7 @@ def adaptive_on(batch):
     )
 
 
-@pytest.mark.slow  # survey 2 runs cold on the host executor
+@pytest.mark.slow(reason="survey 2 runs cold on the host executor")
 def test_a_belief_ignoring_revisit_policy_with_no_refresh_is_survey_1(
     batch, survey_1_run
 ):
@@ -80,7 +80,7 @@ def test_a_belief_ignoring_revisit_policy_with_no_refresh_is_survey_1(
         assert same_histories(run, survey_1_run.result, N_WORLDS)
 
 
-@pytest.mark.slow  # one cold run per executor
+@pytest.mark.slow(reason="one cold run per executor")
 @pytest.mark.parametrize("executor", ["host", "compiled"])
 def test_with_refresh_the_actions_are_survey_1s_though_the_history_is_not(
     executor, batch, survey_1_run
@@ -102,7 +102,7 @@ def test_with_refresh_the_actions_are_survey_1s_though_the_history_is_not(
     assert not same_histories(run.result, survey_1_run.result, N_WORLDS)
 
 
-@pytest.mark.slow  # a cold adaptive host run
+@pytest.mark.slow(reason="a cold adaptive host run")
 def test_the_adaptive_policy_acts_on_its_belief(batch, survey_1_run, adaptive_off):
     """Fails if the adaptive policy takes survey 1's plan, which would make the two
     reductions above vacuous: some world must choose a different subject sequence.
@@ -115,7 +115,7 @@ def test_the_adaptive_policy_acts_on_its_belief(batch, survey_1_run, adaptive_of
     assert any(s != (0, 1, 0, 1, 0) for s in subjects)
 
 
-@pytest.mark.slow
+@pytest.mark.slow(reason="cold adaptive host runs with and without refit checkpoints")
 def test_a_refresh_does_not_change_the_adaptive_actions(adaptive_off, adaptive_on):
     """Fails if refit checkpoints change the adaptive policy's decisions, subjects
     or payloads.
@@ -124,7 +124,7 @@ def test_a_refresh_does_not_change_the_adaptive_actions(adaptive_off, adaptive_o
     assert not same_histories(adaptive_on.result, adaptive_off.result, N_WORLDS)
 
 
-@pytest.mark.medium
+@pytest.mark.medium(reason="one cold adaptive host run compiles the executor")
 def test_the_adaptive_rule_matches_an_eager_reference(batch):
     """Fails if a recorded choice differs from the rule recomputed eagerly (NumPy,
     no JAX) from the belief the policy was shown: an unseen subject first, else the
@@ -169,7 +169,7 @@ def test_the_adaptive_rule_matches_an_eager_reference(batch):
     assert "observe" in kinds_seen
 
 
-@pytest.mark.slow
+@pytest.mark.slow(reason="the adaptive study with refresh on both executors")
 def test_survey_2_agrees_between_executors_with_refresh(adaptive_on, batch):
     """Fails if the compiled executor differs from the host on the adaptive study
     with a refresh grid.
@@ -185,8 +185,11 @@ def test_survey_2_agrees_between_executors_with_refresh(adaptive_on, batch):
 @pytest.mark.parametrize(
     "every",
     [
-        pytest.param(0, marks=pytest.mark.medium),
-        pytest.param(EVERY, marks=pytest.mark.slow),
+        pytest.param(0, marks=pytest.mark.medium(reason="round trip of one cold run")),
+        pytest.param(
+            EVERY,
+            marks=pytest.mark.slow(reason="round trip with a refresh at every step"),
+        ),
     ],
 )
 def test_the_run_document_round_trips(every, batch):
@@ -210,7 +213,7 @@ def test_the_run_document_round_trips(every, batch):
     assert changed.content_hash != doc.content_hash
 
 
-@pytest.mark.slow
+@pytest.mark.slow(reason="keyed replay of the adaptive run on each executor")
 @pytest.mark.parametrize("executor", ["host", "compiled"])
 def test_replay_of_the_adaptive_run(executor, batch):
     """Fails if keyed replay loses an adaptive belief, summary, checkpoint or product,

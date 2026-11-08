@@ -49,7 +49,7 @@ def switched(batch):
     return study, {"host": run_on("host", study, truths, roots, N_STEPS)}
 
 
-@pytest.mark.slow
+@pytest.mark.slow(reason="cold runs of the two-phase study on each executor")
 @pytest.mark.parametrize("executor", ["host", "compiled"])
 def test_a_threshold_that_never_switches_reduces_to_survey_1(executor, never, baseline):
     """Fails if a second phase that cannot start changes any step, record or belief
@@ -64,7 +64,7 @@ def test_a_threshold_that_never_switches_reduces_to_survey_1(executor, never, ba
     assert np.all(np.asarray(log.phase)[valid] == 0)
 
 
-@pytest.mark.slow
+@pytest.mark.slow(reason="negative control that shares the run store")
 def test_a_finite_switch_is_not_survey_1_and_hands_over_at_its_tick(switched, baseline):
     """Negative control for the reduction: a switch at tick 300 changes the history,
     so equality with survey 1 is not vacuous. Decisions before the tick follow the
@@ -87,7 +87,7 @@ def test_a_finite_switch_is_not_survey_1_and_hands_over_at_its_tick(switched, ba
         assert int((phases == 1).sum()) == len(SECOND_PHASE_PLAN)
 
 
-@pytest.mark.slow
+@pytest.mark.slow(reason="negative control that shares the run store")
 def test_an_early_switch_also_changes_the_history(batch, baseline):
     """Negative control at the other extreme: a switch at tick 1 hands every decision
     after the first to the second plan."""
@@ -96,7 +96,7 @@ def test_an_early_switch_also_changes_the_history(batch, baseline):
     assert not same_histories(run, baseline, N_WORLDS)
 
 
-@pytest.mark.slow
+@pytest.mark.slow(reason="run document round trip of the shared runs")
 @pytest.mark.parametrize("executor", ["host", "compiled"])
 def test_the_run_document_round_trip_keeps_history_and_hash(
     executor, never, switched, batch

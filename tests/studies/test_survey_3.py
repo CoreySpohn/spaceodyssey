@@ -172,7 +172,7 @@ def prior_rows(carry, subject=TARGET):
 # ---- (a) to (c): the prior and the overlap rules -------------------------------------
 
 
-@pytest.mark.slow  # the run store of every variant (K6)
+@pytest.mark.slow(reason="the run store of every variant")
 def test_a_disjoint_external_prior_changes_both_beliefs(runs):
     """B7 row 3 (a). Fails if a prior whose pedigree is entirely external leaves the
     observer belief or the policy summary of its subject equal to the run without
@@ -197,7 +197,7 @@ def test_a_disjoint_external_prior_changes_both_beliefs(runs):
             assert float(carry.pbelief.weight[TARGET]) == PRIOR_3[2]
 
 
-@pytest.mark.slow  # the run store of every variant (K6)
+@pytest.mark.slow(reason="the run store of every variant")
 def test_exclude_prior_with_an_imported_source_equals_the_raw_only_run(runs):
     """B7 row 3 (b). Fails if a prior whose pedigree names an imported raw row
     released to both audiences is installed by either audience under `EXCLUDE_PRIOR`:
@@ -216,7 +216,7 @@ def test_exclude_prior_with_an_imported_source_equals_the_raw_only_run(runs):
             assert int(carry.belief.n[1]) >= 1 and int(carry.pbelief.n[1]) >= 1
 
 
-@pytest.mark.slow  # its own compiled program per executor (static rule; K6)
+@pytest.mark.slow(reason="its own compiled program per executor (static rule)")
 def test_exclude_rows_matches_independent_sufficient_statistics():
     """B7 row 3 (c). Fails if, under `EXCLUDE_ROWS`, either audience's belief is not
     its retained priors plus the rows it received less the raw row a retained prior
@@ -318,7 +318,7 @@ def replay_failures(store, roots, names):
     return failures
 
 
-@pytest.mark.slow  # two variants, one cold program per executor
+@pytest.mark.slow(reason="two variants, one cold program per executor")
 def test_an_observer_only_source_moves_no_policy_view_or_decision():
     """B7 row 3 (d), the hidden-row check of D5 and K3 over a whole run, with replay
     (D2). Fails if a public prior whose pedigree names an observer-only raw row
@@ -350,7 +350,7 @@ def test_an_observer_only_source_moves_no_policy_view_or_decision():
         ), name
 
 
-@pytest.mark.slow  # the run store of every variant (K6)
+@pytest.mark.slow(reason="the run store of every variant")
 def test_permuting_the_table_changes_no_decision_or_written_row(runs):
     """B7 row 3 (d), permutation. Fails if permuting the table's rows changes a
     decision or its effects, any written row (identity, audience, payload), or a
@@ -432,7 +432,7 @@ def chosen_start(run, w):
     return int(ticks[1]), int(np.asarray(first.tick)[1])
 
 
-@pytest.mark.slow  # the run store of every variant (K6)
+@pytest.mark.slow(reason="the run store of every variant")
 def test_the_policy_starts_in_the_window_or_at_the_fallback(runs):
     """B7 row 3 (f). Fails if, with the prior retained for the policy, the policy does
     not start in the prior's window (counted from the row's release); or if, with the
@@ -459,7 +459,7 @@ def test_the_policy_starts_in_the_window_or_at_the_fallback(runs):
 # ---- replay, executors and pre-flight ------------------------------------------------
 
 
-@pytest.mark.slow  # the run store of every variant (K6)
+@pytest.mark.slow(reason="the run store of every variant")
 def test_every_variant_passes_preflight_and_agrees_between_executors(runs):
     """B7 on both executors. Fails if pre-flight refuses a table variant of the
     survey, or the host and compiled executors disagree on any of them.
@@ -475,7 +475,7 @@ def test_every_variant_passes_preflight_and_agrees_between_executors(runs):
 # ---- B6: the epoch relation ----------------------------------------------------------
 
 
-@pytest.mark.slow  # one program per executor, shared by every shift and table (K6)
+@pytest.mark.slow(reason="one program per executor, shared by every shift and table")
 def test_the_epoch_relation_holds_with_windows_and_hidden_rows():
     """B6 on survey 3. Fails if a shift of the epoch origin, one of them larger than
     the oldest imported time, moves anything but the ticks on either executor, with a
@@ -527,7 +527,7 @@ def _control_run(observer_cls, name, truths, roots):
     return run_on("compiled", study, truths, roots, N_STEPS)
 
 
-@pytest.mark.slow  # two observer types: two more compiled programs
+@pytest.mark.slow(reason="two observer types: two more compiled programs")
 def test_the_controls_fail_their_checks():
     """B7 row 3 (g). Fails if an observer with the rule off does not double count
     (it installs the prior that summarizes raw row 1 and folds the row: (b) must

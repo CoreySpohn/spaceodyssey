@@ -335,7 +335,7 @@ def _pending_row(run):
     return row
 
 
-@pytest.mark.slow  # one host run of the study: the compile dominates
+@pytest.mark.slow(reason="one host run of the study: the compile dominates")
 def test_the_committee_answers_the_policy_on_the_host():
     run, service, result = _run("host")
     assert result.history(0).status == RunStatus.COMPLETE
@@ -428,7 +428,7 @@ def _flip_admission(run):
     return dataclasses.replace(run, trace=eqx.tree_at(lambda x: x.admit_code, t, code))
 
 
-@pytest.mark.slow  # edits of the host run
+@pytest.mark.slow(reason="edits of the host run")
 def test_replay_fails_when_the_run_is_altered():
     run, _, _ = _run("host")
     study = _study()
@@ -466,7 +466,9 @@ def test_replay_fails_when_the_run_is_altered():
     assert not al.replay_allocation(study, run, al.CarryCommittee()).ok
 
 
-@pytest.mark.slow  # the compiled executor: a second program and the capture callback
+@pytest.mark.slow(
+    reason="the compiled executor: a second program and the capture callback"
+)
 def test_the_committee_answers_on_both_executors():
     host, hs, hr = _run("host")
     comp, cs, cr = _run("compiled")
@@ -509,7 +511,7 @@ def _viewed_requests(run):
     return seen
 
 
-@pytest.mark.slow  # four more host runs of one study shape, each its own compile
+@pytest.mark.slow(reason="four more host runs of one study shape, each its own compile")
 def test_the_committee_reads_only_released_records():
     base, svc, _ = _run("host")
     ref = _awards(base)
@@ -539,7 +541,9 @@ def test_the_committee_reads_only_released_records():
     assert _awards(moved)[0, 3:5].tolist() != ref[0, 3:5].tolist()
 
 
-@pytest.mark.slow  # the control: the same perturbations, a carry-reading committee
+@pytest.mark.slow(
+    reason="the control: the same perturbations, a carry-reading committee"
+)
 def test_a_committee_that_reads_unreleased_records_fails_the_perturbation(monkeypatch):
     base, _, _ = _run("host", committee="carry", monkeypatch=monkeypatch)
     ref = _awards(base)

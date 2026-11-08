@@ -85,7 +85,9 @@ SHARED = (
 )
 
 
-@pytest.mark.medium
+@pytest.mark.medium(
+    reason="one jitted program runs the shared branches against their handlers"
+)
 def test_shared_branch_matches_the_handler_of_its_own_kind():
     study, carry = after_decision_1_bundle()
     truth, root = one_world()
@@ -117,7 +119,7 @@ def test_shared_branch_matches_the_handler_of_its_own_kind():
         assert report["max_int_diff"] == 0 and report["max_abs"] == 0.0
 
 
-@pytest.mark.medium
+@pytest.mark.medium(reason="one compiled run per effect table width")
 @pytest.mark.parametrize("n_effects", (3, 4, 5))
 def test_toy_study_runs_with_a_wider_effect_table(n_effects):
     caps = Capacities(n_effects=n_effects)

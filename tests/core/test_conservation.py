@@ -25,7 +25,7 @@ from tests.core.refund_helpers import (
     refund_study,
 )
 
-pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
+pytestmark = pytest.mark.medium(reason="A cold host run compiles the executor")
 
 # Every study here shares one compiled executor: two programs, and a log of three rows,
 # which is the most a case with two receipts fills and the least that still overflows.

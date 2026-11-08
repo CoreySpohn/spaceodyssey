@@ -102,7 +102,7 @@ def replays(study):
     return results
 
 
-@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
+@pytest.mark.medium(reason="over 3 s cold here, about 5 s on the runner")
 def test_b7_sequences_utilities_and_admitted_starts(replays):
     inputs = FIXTURE["inputs"]
     for (study, compiled, host), sequence, utility, policies in zip(

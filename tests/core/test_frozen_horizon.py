@@ -43,7 +43,7 @@ from tests.core.commitment_helpers import (
 from tests.core.helpers import one_world, worlds
 from tests.core.program_helpers import cancel, end, observe, row, stop, wait
 
-pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
+pytestmark = pytest.mark.medium(reason="A cold host run compiles the executor")
 
 OK = int(AdmissionCode.OK)
 FROZEN = int(AdmissionCode.FROZEN_HORIZON)
@@ -559,7 +559,7 @@ def test_a_program_abort_cancels_only_that_programs_pending_commitment():
     assert _sound(run)
 
 
-@pytest.mark.slow
+@pytest.mark.slow(reason="one study per case on both executors")
 @pytest.mark.parametrize(
     "name",
     [

@@ -206,7 +206,9 @@ def test_a_program_stop_names_its_program_for_p001():
 # ---- a program Stop closes only its program -----------------------------------------
 
 
-@pytest.mark.medium  # A cold host run compiles the executor, over the 5 s unit budget.
+@pytest.mark.medium(
+    reason="A cold host run compiles the executor, over the 5 s unit budget"
+)
 def test_a_program_stop_closes_only_its_program_and_the_lane_stays_open(stop_one):
     """Fails if the Stop closes a lane, or a program other than the one it names."""
     _study, run = stop_one
@@ -225,7 +227,9 @@ def test_a_program_stop_closes_only_its_program_and_the_lane_stays_open(stop_one
 # ---- drain and abort act only on the program's live occupancies ---------------------
 
 
-@pytest.mark.medium  # A cold host run compiles the executor, over the 5 s unit budget.
+@pytest.mark.medium(
+    reason="A cold host run compiles the executor, over the 5 s unit budget"
+)
 def test_an_abort_cancels_only_the_live_occupancy_of_its_program(abort_one):
     """Fails if the abort touches the other program's occupancy or refunds wrongly."""
     study, run = abort_one
@@ -241,7 +245,9 @@ def test_an_abort_cancels_only_the_live_occupancy_of_its_program(abort_one):
     assert list(np.asarray(c.ledger.program_closed)) == [True, False]
 
 
-@pytest.mark.medium  # A cold host run compiles the executor, over the 5 s unit budget.
+@pytest.mark.medium(
+    reason="A cold host run compiles the executor, over the 5 s unit budget"
+)
 def test_a_drain_leaves_the_programs_occupancy_to_finish_and_refunds_nothing(drain_one):
     """Fails if a program drain cancels, refunds, or closes the other program."""
     study, run = drain_one
@@ -256,7 +262,9 @@ def test_a_drain_leaves_the_programs_occupancy_to_finish_and_refunds_nothing(dra
 # ---- every charge has an owner ------------------------------------------------------
 
 
-@pytest.mark.medium  # A cold host run compiles the executor, over the 5 s unit budget.
+@pytest.mark.medium(
+    reason="A cold host run compiles the executor, over the 5 s unit budget"
+)
 def test_completion_and_cancel_charge_the_row_of_the_admitted_program(
     stop_one, cancelled
 ):
@@ -288,7 +296,9 @@ def _fingerprints(study, run):
     return out
 
 
-@pytest.mark.medium  # A cold host run compiles the executor, over the 5 s unit budget.
+@pytest.mark.medium(
+    reason="A cold host run compiles the executor, over the 5 s unit budget"
+)
 def test_the_policy_sees_program_ids_and_the_observer_sees_none(stop_one):
     """Fails if the observer view shows a program id, or the policy view hides one."""
     study, run = stop_one
@@ -310,7 +320,7 @@ def relabelled():
     return _run(*RELABEL), _run(*SWAPPED)
 
 
-@pytest.mark.medium  # The two relabelled runs are shared with the leak control.
+@pytest.mark.medium(reason="the two relabelled runs are shared with the leak control")
 def test_relabelling_programs_moves_the_policy_fingerprint_and_not_the_observer_s(
     relabelled,
 ):
@@ -321,7 +331,9 @@ def test_relabelling_programs_moves_the_policy_fingerprint_and_not_the_observer_
     assert fa[Audience.OBSERVER][1] == fb[Audience.OBSERVER][1]
 
 
-@pytest.mark.medium  # The two relabelled runs are shared with the relabelling check.
+@pytest.mark.medium(
+    reason="the two relabelled runs are shared with the relabelling check"
+)
 def test_control_an_observer_view_that_shows_the_label_moves_its_fingerprint(
     relabelled,
 ):
@@ -337,7 +349,9 @@ def test_control_an_observer_view_that_shows_the_label_moves_its_fingerprint(
     assert leaked[0] != leaked[1]
 
 
-@pytest.mark.medium  # A cold host run compiles the executor, over the 5 s unit budget.
+@pytest.mark.medium(
+    reason="A cold host run compiles the executor, over the 5 s unit budget"
+)
 def test_a_producer_that_names_no_program_charges_program_zero():
     """Fails if a study that never sets `program` cannot run with several programs.
 
@@ -447,7 +461,7 @@ def _resumed(handler, study, run):
     return carry, np.asarray(carry.log.program)[:n].tolist()
 
 
-@pytest.mark.medium  # The shared run's compile is paid in its setup.
+@pytest.mark.medium(reason="the shared run's compile is paid in its setup")
 def test_mutant_a_stop_that_closes_every_lane_is_caught(stop_one):
     """Mutant: with programs, a program Stop closes all lanes. The check must fail.
 
@@ -471,7 +485,7 @@ def test_mutant_a_stop_that_closes_every_lane_is_caught(stop_one):
     assert programs == [0]
 
 
-@pytest.mark.medium  # The shared run's compile is paid in its setup.
+@pytest.mark.medium(reason="the shared run's compile is paid in its setup")
 def test_mutant_a_stop_that_never_sets_the_flag_admits_the_closed_program(stop_one):
     """Mutant: the flag is not set, so the closed program is admitted again.
 
@@ -495,7 +509,7 @@ def test_mutant_a_stop_that_never_sets_the_flag_admits_the_closed_program(stop_o
     assert programs == [0, 0]
 
 
-@pytest.mark.medium  # The shared run's compile is paid in its setup.
+@pytest.mark.medium(reason="the shared run's compile is paid in its setup")
 def test_mutant_an_abort_that_ignores_the_program_cancels_both(abort_one, monkeypatch):
     """Mutant: the abort drops its program filter, so it cancels every live lane."""
     study, run = abort_one
@@ -518,7 +532,7 @@ def test_mutant_an_abort_that_ignores_the_program_cancels_both(abort_one, monkey
     assert cancelled_programs() == [0, 1]
 
 
-@pytest.mark.medium  # The shared run's compile is paid in its setup.
+@pytest.mark.medium(reason="the shared run's compile is paid in its setup")
 def test_mutant_a_refund_to_the_first_program_row_is_caught(cancelled, monkeypatch):
     """Mutant: the cancel credits program 0 whoever owns the occupancy."""
     study, run = cancelled

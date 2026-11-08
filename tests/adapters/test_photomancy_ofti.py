@@ -249,7 +249,7 @@ def test_an_unrelated_error_is_not_a_status(monkeypatch):
         refit()._fit(stub_study(), entry_of(astrometry_table(), KEY))
 
 
-@pytest.mark.medium
+@pytest.mark.medium(reason="an OFTI fit on a cold study compile")
 def test_a_column_one_audience_cannot_read_is_no_support_for_that_audience():
     """An observer-only RA gives the policy NO_SUPPORT and the observer a fit.
 
@@ -272,7 +272,7 @@ def test_a_column_one_audience_cannot_read_is_no_support_for_that_audience():
     assert not np.asarray(done.refresh_dirty).any()
 
 
-@pytest.mark.medium  # two real OFTI fits, one compile
+@pytest.mark.medium(reason="two real OFTI fits, one compile")
 def test_the_same_rows_and_key_give_the_same_particles_and_a_new_set_a_new_key():
     """The fit is a pure function of rows and key; a revision moves the key.
 
@@ -330,7 +330,7 @@ def test_a_model_hash_is_stable_and_a_mismatch_between_executors_is_refused():
     assert err.value.code == "D003"
 
 
-@pytest.mark.medium
+@pytest.mark.medium(reason="an OFTI checkpoint fit and its replay")
 def test_a_checkpoint_fit_installs_for_both_audiences_and_replays(held):
     """One checkpoint installs the OFTI particles; re-answering reproduces them.
 
@@ -356,7 +356,7 @@ def test_a_checkpoint_fit_installs_for_both_audiences_and_replays(held):
     assert np.asarray(again.slices[0][0, 0, 0]).tobytes() == samples.tobytes()
 
 
-@pytest.mark.medium
+@pytest.mark.medium(reason="an exhausted-batch OFTI checkpoint on one compile")
 def test_exhausted_batches_leave_the_belief_unchanged(held):
     """A starved sampler records NO_SUPPORT on the checkpoint and installs nothing.
 
@@ -373,7 +373,9 @@ def test_exhausted_batches_leave_the_belief_unchanged(held):
     assert not np.asarray(done.refresh_dirty).any()
 
 
-@pytest.mark.slow  # two cold study compiles and two OFTI scorers on both executors
+@pytest.mark.slow(
+    reason="two cold study compiles and two OFTI scorers on both executors"
+)
 def test_a_reloaded_run_document_reproduces_the_host_and_compiled_histories():
     """A document naming the OFTI boundary reloads to the same run on both executors.
 
@@ -403,7 +405,7 @@ def test_a_reloaded_run_document_reproduces_the_host_and_compiled_histories():
         assert histories_equal(mine.history(), again.history(0)).ok, executor
 
 
-@pytest.mark.slow  # a cold study compile and the OFTI scorer
+@pytest.mark.slow(reason="a cold study compile and the OFTI scorer")
 def test_replay_of_an_ofti_run_reproduces_the_checkpoint_and_the_particles():
     """Replaying a run bound to the OFTI boundary reproduces its installed particles.
 

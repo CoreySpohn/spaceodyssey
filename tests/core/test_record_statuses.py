@@ -48,7 +48,7 @@ def scripted_run():
     return study, carry, trace, truths, roots
 
 
-@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
+@pytest.mark.medium(reason="over 3 s cold here, about 5 s on the runner")
 def test_every_status_is_logged_and_only_completed_values_are_folded(scripted_run):
     _study, carry, _, _, _ = scripted_run
     log = carry.log
@@ -81,7 +81,9 @@ def test_null_is_released_like_any_completed_row(scripted_run):
     assert int(RecordStatus.NULL) in np.asarray(view.log.status)[: int(view.n_rows)]
 
 
-@pytest.mark.medium  # Cold host, compiled and replay programs exceed the unit budget.
+@pytest.mark.medium(
+    reason="cold host, compiled and replay programs exceed the unit budget"
+)
 def test_statuses_agree_between_executors_and_replay(scripted_run):
     study, carry, trace, truths, roots = scripted_run
     cs, _ = CompiledExecutor().run(study, truths, roots, N_STEPS_CORPUS)
@@ -92,7 +94,7 @@ def test_statuses_agree_between_executors_and_replay(scripted_run):
     assert np.array_equal(np.asarray(replayed.mean), np.asarray(carry.belief.mean))
 
 
-@pytest.mark.medium  # a cold host run compiles the executor: over 5 s
+@pytest.mark.medium(reason="a cold host run compiles the executor: over 5 s")
 def test_identities_and_provenance_of_a_settled_record():
     study, run, _ = baseline_host_run()
     carry, trace = run

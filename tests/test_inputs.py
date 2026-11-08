@@ -93,7 +93,7 @@ def test_byte_vectors(value, node_hex, expected):
 
 
 @pytest.mark.parametrize("seed", ["1", "98765"])
-@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
+@pytest.mark.medium(reason="over 3 s cold here, about 5 s on the runner")
 def test_container_digests_across_processes(seed, containers):
     expected = [
         "3958cf1b00ad1c966aad1e0bfe64ac0f3396af02a82966d8300cc36b4ebc93bf",

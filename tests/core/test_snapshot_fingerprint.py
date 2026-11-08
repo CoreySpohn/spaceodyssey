@@ -49,7 +49,7 @@ def _fp(carry, study, audience=Audience.POLICY):
     return int(fingerprint_j(view, study.observer.layout(study.caps)))
 
 
-@pytest.mark.medium  # one compiled run, about 7 s cold
+@pytest.mark.medium(reason="one compiled run, about 7 s cold")
 def test_snapshot_fingerprint_recorded():
     study, baseline, views = baseline_host_run()
     carry, trace = baseline
@@ -71,7 +71,9 @@ def test_snapshot_fingerprint_recorded():
     assert np.array_equal(run.history(0).ints["snapshot_fp"], h.ints["snapshot_fp"])
 
 
-@pytest.mark.medium  # Cold catalog execution and fingerprint compilation exceed 5 s.
+@pytest.mark.medium(
+    reason="cold catalog execution and fingerprint compilation exceed 5 s"
+)
 def test_the_fingerprint_hashes_the_masked_view_not_the_raw_log():
     study, carry, _ = _catalog()
     obs_rows = np.flatnonzero(

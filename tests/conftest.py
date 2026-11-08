@@ -214,62 +214,52 @@ def save_viz_png():
     return save
 
 
-# Files that exercise expensive program variants. Use one pytest process per file
-# when enforcing the memory budget; `-m "not slow"` excludes them. The default
-# collection keeps every check.
-SLOW_FILES = frozenset(
-    {
-        "test_slice1_gate.py",
-        # the Slice 2b gate reruns the golden histories and reads the commit history
-        "test_slice2b_gate.py",
-        # observer kit on runs: one executor compile alone exceeds the unit budget
-        "test_observer_kit_runs.py",
-        # refresh runs compile the chunked driver and the masked kernel per executor
-        "test_refresh_runs.py",
-        # replay of refresh runs on both executors: the refresh runs' compiles
-        "test_replay_refresh.py",
-        "test_observer_kit_statistics.py",
-        # correction checks on scripted refresh runs: one executor compile per study
-        "test_observer_kit_corrections.py",
-        # a reloaded run executes on both executors: compiles the chunked driver and
-        # the masked kernel, like the refresh runs
-        "test_run_document_runs.py",
-        "test_corpus_invariants.py",
-        "test_parity_corpus.py",
-        "test_corpus.py",
-        "test_scorer_columns.py",
-        "test_acquisition_index.py",
-        "test_query_ordering.py",
-        "test_executors.py",
-        "test_revisions.py",
-        # runs: pedigree rows, producer-local indices and an index mutant on the host
-        "test_pedigree.py",
-        # runs on both executors and the release handler with derived kinds
-        "test_derived_corrections.py",
-        "test_metamorphic.py",
-        "test_host_service.py",
-        "test_draws.py",
-        "test_replay_log.py",
-        "test_visible_relations.py",
-        "test_battery_guards.py",
-        "test_invariant_mutants.py",
-        "test_run_status.py",
-        "test_conformance_guards.py",
-        "test_gradients.py",
-        "test_fork.py",
-        "test_latency_shift.py",
-        "test_truth_swap.py",
-        "test_null_reference.py",
-        "test_contracts.py",
-        "test_audience_firewall.py",
-        "test_admission_rules.py",
-        "test_leak.py",
-        "test_second_kind.py",
-        "test_canonical_fields.py",
-        "test_golden_histories.py",
-        "test_survey_25.py",
-    }
-)
+# Files that exercise expensive program variants, with the reason each is slow. Use one
+# pytest process per file when enforcing the memory budget; `-m "not slow"` excludes
+# them. The default collection keeps every check.
+GATE = "gate or corpus file"
+SLOW_FILES = {
+    "test_slice1_gate.py": GATE,
+    "test_slice2b_gate.py": "reruns the golden histories, reads the commit history",
+    "test_observer_kit_runs.py": "observer kit on runs, one executor compile alone",
+    "test_refresh_runs.py": "refresh runs compile the chunked driver per executor",
+    "test_replay_refresh.py": "replay of refresh runs repeats the refresh compiles",
+    "test_observer_kit_statistics.py": GATE,
+    "test_observer_kit_corrections.py": "scripted refresh runs, one compile per study",
+    "test_run_document_runs.py": "a reloaded run executes on both executors",
+    "test_corpus_invariants.py": GATE,
+    "test_parity_corpus.py": GATE,
+    "test_corpus.py": GATE,
+    "test_scorer_columns.py": GATE,
+    "test_acquisition_index.py": GATE,
+    "test_query_ordering.py": GATE,
+    "test_executors.py": GATE,
+    "test_revisions.py": GATE,
+    "test_pedigree.py": "pedigree rows and an index mutant run on the host",
+    "test_derived_corrections.py": "runs on both executors with derived kinds",
+    "test_metamorphic.py": GATE,
+    "test_host_service.py": GATE,
+    "test_draws.py": GATE,
+    "test_replay_log.py": GATE,
+    "test_visible_relations.py": GATE,
+    "test_battery_guards.py": GATE,
+    "test_invariant_mutants.py": GATE,
+    "test_run_status.py": GATE,
+    "test_conformance_guards.py": GATE,
+    "test_gradients.py": GATE,
+    "test_fork.py": GATE,
+    "test_latency_shift.py": GATE,
+    "test_truth_swap.py": GATE,
+    "test_null_reference.py": GATE,
+    "test_contracts.py": GATE,
+    "test_audience_firewall.py": GATE,
+    "test_admission_rules.py": GATE,
+    "test_leak.py": GATE,
+    "test_second_kind.py": GATE,
+    "test_canonical_fields.py": GATE,
+    "test_golden_histories.py": GATE,
+    "test_survey_25.py": GATE,
+}
 
 
 def _tier(item):
@@ -283,7 +273,8 @@ def pytest_collection_modifyitems(config, items):
     budget = load_config(config.rootpath)
     for item in items:
         if item.path.name in SLOW_FILES:
-            item.add_marker(pytest.mark.slow)
+            reason = f"whole file in SLOW_FILES: {SLOW_FILES[item.path.name]}"
+            item.add_marker(pytest.mark.slow(reason=reason))
         tier = _tier(item)
         # the junit file carries the tier, so the CI summary counts medium tests
         item.user_properties.append(("tier", tier))

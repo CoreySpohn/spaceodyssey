@@ -78,7 +78,7 @@ def away_au(spec, t_jd):
     return np.asarray(r_au[0, 2])
 
 
-@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
+@pytest.mark.medium(reason="over 3 s cold here, about 5 s on the runner")
 def test_signed_conjunctions_and_node():
     """Fails on a phase supplement, a flipped away axis or an approaching node.
 
