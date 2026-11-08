@@ -84,6 +84,7 @@ from spaceodyssey.core.enums import (
 from spaceodyssey.core.events import empty_event_row, where_tree
 from spaceodyssey.core.executors.base import GO_TOLERANCE, index_world
 from spaceodyssey.core.keys import fold_keys, refit_key
+from spaceodyssey.core.lift import lifting_jit
 from spaceodyssey.core.records import (
     derived_rows,
     log_records,
@@ -287,7 +288,7 @@ def double_fold_failures(carry):
     return []
 
 
-@eqx.filter_jit
+@lifting_jit
 def _deliver_again(carry, study, truth, root, slot):
     """Handle a second release of log row `slot` through the transaction's step."""
     ev = dataclasses.replace(
@@ -433,7 +434,7 @@ def _fold_path(rows, root, study, audience, step, start):
     return lax.scan(body, start, (seen, keys))
 
 
-@eqx.filter_jit
+@lifting_jit
 def _replay(observer, study, logs, own, policy, roots):
     caps = study.caps
 
@@ -522,7 +523,7 @@ def _refit_subject(observer, study, log, root, seed, subject):
     )
 
 
-@eqx.filter_jit
+@lifting_jit
 def _promotions(
     observer, study, logs, orders, counts, accepted, released, roots, seeds
 ):
@@ -861,7 +862,7 @@ def check_promotion_parity(study, run, roots, *, observer=None):
     return make_result("promotion_parity", failures, **detail)
 
 
-@eqx.filter_jit
+@lifting_jit
 def _refit_all(observer, study, beliefs, logs, roots, seed):
     """Every subject of each world refit from `refit_rows`, installed, analyzed."""
 
@@ -1005,7 +1006,7 @@ def _corrected_slots(log, caps, subject, exclude=()):
     )
 
 
-@eqx.filter_jit
+@lifting_jit
 def _flat_prior_refit(observer, study, log, root, order, count, subject):
     """The subject's leaves of a flat-prior refit of the log rows `order[:count]`.
 

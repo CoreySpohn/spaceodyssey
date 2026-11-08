@@ -16,6 +16,7 @@ from spaceodyssey.core.executors.base import (
     belief_leaves,
 )
 from spaceodyssey.core.keys import fold_key
+from spaceodyssey.core.lift import lifting_jit
 from spaceodyssey.core.records import (
     AWARD_COLUMNS,
     LOG_INT_FIELDS,
@@ -27,7 +28,7 @@ from spaceodyssey.core.refresh import refresh_enabled
 from spaceodyssey.core.snapshot import named_leaves
 
 
-@eqx.filter_jit
+@lifting_jit
 def _fold(study, belief, rec, key=None):
     return study.observer.analyze(study.observer.fold(belief, rec, study.caps, key=key))
 
@@ -168,7 +169,7 @@ class Replayed(eqx.Module):
     overflow_mask: int = eqx.field(static=True, default=0)
 
 
-@eqx.filter_jit
+@lifting_jit
 def _fold_summary(study, pbelief, rec, key):
     return study.observer.fold_summary(pbelief, rec, study.caps, key=key)
 

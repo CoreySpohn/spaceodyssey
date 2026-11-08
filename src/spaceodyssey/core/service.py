@@ -10,7 +10,6 @@ else: no truth, no queue.
 
 import dataclasses
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -18,6 +17,7 @@ import numpy as np
 from spaceodyssey.core.carry import _tree_set
 from spaceodyssey.core.enums import F64, I64, Audience, EventKind, RecordStatus
 from spaceodyssey.core.events import empty_event_row, enqueue
+from spaceodyssey.core.lift import lifting_jit
 from spaceodyssey.core.records import record_none, write_log
 from spaceodyssey.core.snapshot import snapshot_fingerprint, snapshot_view
 
@@ -135,7 +135,7 @@ def commit_result(carry, payload, kind, study):
     return _tree_set(c2, request=empty_event_row(caps))
 
 
-@eqx.filter_jit
+@lifting_jit
 def _snapshot_for(carry, audience, decision, study):
     caps = study.caps
     view = snapshot_view(carry, audience, caps)
@@ -143,7 +143,7 @@ def _snapshot_for(carry, audience, decision, study):
     return view, snapshot_fingerprint(view, study.observer.layout(caps))
 
 
-_commit = eqx.filter_jit(commit_result)
+_commit = lifting_jit(commit_result)
 
 
 def answer_pending(carry, study, service):

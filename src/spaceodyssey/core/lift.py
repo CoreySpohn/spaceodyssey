@@ -10,13 +10,47 @@ caller holds is never changed.
 
 import copy
 import dataclasses
+import functools
 
+import equinox as eqx
 import jax.numpy as jnp
+import numpy as np
 
 
 def traced(dtype):
     """Field metadata marking a number, or a tuple of numbers, to lift to `dtype`."""
     return {"traced": dtype}
+
+
+def _exact(field, value, dtype):
+    """`value` as an array of `dtype`, refusing any conversion that changes it."""
+    if getattr(value, "weak_type", None) is not None and value.dtype == dtype:
+        return value  # already a JAX array of the dtype, or a tracer of one
+    try:
+        wanted = np.asarray(value)
+        got = wanted.astype(dtype)
+        same = wanted.dtype != object and np.array_equal(wanted, got, equal_nan=True)
+    except (TypeError, ValueError, OverflowError):
+        same = False
+    if not same:
+        raise ValueError(
+            f"field {field!r} is {value!r}, which {np.dtype(dtype).name} "
+            "cannot hold exactly"
+        )
+    return jnp.asarray(got)
+
+
+def lifting_jit(fn):
+    """`eqx.filter_jit(fn)` that lifts marked fields in every argument first."""
+    jitted = eqx.filter_jit(fn)
+
+    @functools.wraps(fn)
+    def call(*args, **kwargs):
+        args = tuple(lift_traced(a) for a in args)
+        kwargs = {k: lift_traced(v) for k, v in kwargs.items()}
+        return jitted(*args, **kwargs)
+
+    return call
 
 
 def lift_traced(node):
@@ -35,7 +69,7 @@ def lift_traced(node):
     for field in dataclasses.fields(node):
         value = getattr(node, field.name)
         dtype = field.metadata.get("traced")
-        new = lift_traced(value) if dtype is None else jnp.asarray(value, dtype)
+        new = lift_traced(value) if dtype is None else _exact(field.name, value, dtype)
         if new is not value:
             changes[field.name] = new
     if not changes:

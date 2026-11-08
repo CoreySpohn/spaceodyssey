@@ -42,6 +42,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.events import blank_row, enqueue, where_tree
 from spaceodyssey.core.keys import fold_keys, refit_key
+from spaceodyssey.core.lift import lifting_jit
 from spaceodyssey.core.records import (
     PayloadColumn,
     Record,
@@ -493,10 +494,10 @@ def commit_refresh(carry, request, result, study):
     return where_tree(live, done, carry)
 
 
-_gather = eqx.filter_jit(gather_refit_rows)
-_commit = eqx.filter_jit(commit_refresh)
-_gather_worlds = eqx.filter_jit(jax.vmap(gather_refit_rows, in_axes=(0, 0, None)))
-_commit_worlds = eqx.filter_jit(jax.vmap(commit_refresh, in_axes=(0, 0, 0, None)))
+_gather = lifting_jit(gather_refit_rows)
+_commit = lifting_jit(commit_refresh)
+_gather_worlds = lifting_jit(jax.vmap(gather_refit_rows, in_axes=(0, 0, None)))
+_commit_worlds = lifting_jit(jax.vmap(commit_refresh, in_axes=(0, 0, 0, None)))
 
 
 def drop_hold(carry):
@@ -657,7 +658,7 @@ def _masked_lane(kernel, study, n_diag, request):
     )
 
 
-@eqx.filter_jit
+@lifting_jit
 def _masked_call(kernel, study, n_diag, requests):
     return lax.map(lambda r: _masked_lane(kernel, study, n_diag, r), requests)
 
