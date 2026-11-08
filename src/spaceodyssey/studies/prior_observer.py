@@ -51,6 +51,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.events import where_tree
 from spaceodyssey.core.kinds import AbstractObserver, ObserverCapabilities
+from spaceodyssey.core.lift import lifting_jit
 from spaceodyssey.core.preflight import Finding, FindingCode, Severity
 from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
 from spaceodyssey.core.refresh import (
@@ -481,7 +482,7 @@ def _audience_lane(boundary, study, request):
     )
 
 
-@eqx.filter_jit
+@lifting_jit
 def _audience_call(boundary, study, requests):
     return jax.vmap(lambda r: _audience_lane(boundary, study, r))(requests)
 
