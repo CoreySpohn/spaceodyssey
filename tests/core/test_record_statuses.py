@@ -92,6 +92,7 @@ def test_statuses_agree_between_executors_and_replay(scripted_run):
     assert np.array_equal(np.asarray(replayed.mean), np.asarray(carry.belief.mean))
 
 
+@pytest.mark.medium  # a cold host run compiles the executor: over 5 s
 def test_identities_and_provenance_of_a_settled_record():
     study, run, _ = baseline_host_run()
     carry, trace = run

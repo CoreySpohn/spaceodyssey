@@ -505,6 +505,7 @@ def _imported(study):
         c = handlers[int(ev.kind)](nxt, ev, study, truth, root)[0]
 
 
+@pytest.mark.medium  # imports handled eagerly, event by event: over 5 s cold
 def test_the_battery_matches_split_rows_by_audience_and_refuses_collisions():
     """Fails if the battery's record index drops one copy of a split prior (both
     share subject, index, channel, revision and status), if a policy view is not

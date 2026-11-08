@@ -125,6 +125,7 @@ def perturbed(study, name):
     )
 
 
+@pytest.mark.medium
 @pytest.mark.parametrize(
     "name",
     [

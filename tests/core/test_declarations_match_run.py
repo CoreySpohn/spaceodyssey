@@ -72,6 +72,7 @@ def test_the_plan_declares_the_stop_it_emits(inputs):
     assert result.detail["declared_not_emitted"] == {0: []}
 
 
+@pytest.mark.medium  # a second study compiles the host program: over 5 s cold
 def test_a_special_stop_is_declared_and_emitted(inputs):
     result = run(CORPUS_BY_NAME["stop_lane_close"].make_study(), inputs)
     assert result, result.diagnostic
