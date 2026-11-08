@@ -24,6 +24,7 @@ from spaceodyssey.core.enums import (
 from spaceodyssey.core.events import empty_event_row, enqueue, requeue, where_tree
 from spaceodyssey.core.keys import asset_coordinate, draw_key, fold_key
 from spaceodyssey.core.ledger import _resource_rows, charge_parts
+from spaceodyssey.core.lift import lifting_jit
 from spaceodyssey.core.records import (
     AWARD_COLUMNS,
     REFUND_COLUMNS,
@@ -729,7 +730,7 @@ def h_window_end(c, ev, study, truth, root):
     return c1, _emit(0, 0), record_none(study.caps)
 
 
-@eqx.filter_jit
+@lifting_jit
 def step(carry, ev, study, truth, root):
     """The transition for one event: lax.switch over `HANDLERS` by event kind.
 

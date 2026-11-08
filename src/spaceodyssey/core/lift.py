@@ -22,22 +22,63 @@ def traced(dtype):
     return {"traced": dtype}
 
 
-def _exact(field, value, dtype):
-    """`value` as an array of `dtype`, refusing any conversion that changes it."""
-    if getattr(value, "weak_type", None) is not None and value.dtype == dtype:
-        return value  # already a JAX array of the dtype, or a tracer of one
+def _refuse(field, value, dtype):
+    return ValueError(
+        f"field {field!r} is {value!r}, which {np.dtype(dtype).name} "
+        "cannot hold exactly"
+    )
+
+
+def _items(value):
+    """Nested lists of Python scalars from a tuple, list, array or scalar."""
+    if isinstance(value, tuple | list):
+        return [_items(v) for v in value]
+    return value.tolist() if hasattr(value, "tolist") else value
+
+
+def _element(v, want):
+    """One Python number as `want` holds it, or None when that would change it."""
+    if isinstance(v, list):
+        out = [_element(x, want) for x in v]
+        return None if any(x is None for x in out) else out
+    if isinstance(v, bool | int):
+        n = int(v)
+    elif isinstance(v, float):
+        if np.issubdtype(want, np.integer):
+            if not v.is_integer():
+                return None
+            n = int(v)
+        else:
+            return v
+    else:
+        return None
+    if np.issubdtype(want, np.integer):
+        info = np.iinfo(want)
+        return n if info.min <= n <= info.max else None
     try:
-        wanted = np.asarray(value)
-        got = wanted.astype(dtype)
-        same = wanted.dtype != object and np.array_equal(wanted, got, equal_nan=True)
-    except (TypeError, ValueError, OverflowError):
-        same = False
-    if not same:
-        raise ValueError(
-            f"field {field!r} is {value!r}, which {np.dtype(dtype).name} "
-            "cannot hold exactly"
-        )
-    return jnp.asarray(got)
+        return float(n) if int(float(n)) == n else None
+    except OverflowError:
+        return None
+
+
+def _exact(field, value, dtype):
+    """`value` as an array of `dtype`, refusing any conversion that changes it.
+
+    Each element is checked as a Python number before NumPy sees it, so a large
+    integer is never rounded through a float and an out-of-range one is never clamped.
+    A JAX array or tracer is converted only by a safe cast.
+    """
+    want = np.dtype(dtype)
+    if getattr(value, "weak_type", None) is not None:
+        if value.dtype == want:
+            return value  # already a JAX array of the dtype, or a tracer of one
+        if jnp.can_cast(value.dtype, want, casting="safe"):
+            return value.astype(want)
+        raise _refuse(field, value, dtype)
+    out = _element(_items(value), want)
+    if out is None:
+        raise _refuse(field, value, dtype)
+    return jnp.asarray(np.array(out, dtype=want))
 
 
 def lifting_jit(fn):

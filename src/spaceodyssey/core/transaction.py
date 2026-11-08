@@ -31,6 +31,7 @@ from spaceodyssey.core.ledger import (
     _resource_rows,
     charge_parts,
 )
+from spaceodyssey.core.lift import lifting_jit
 from spaceodyssey.core.snapshot import (
     award_columns,
     snapshot_fingerprint,
@@ -217,7 +218,7 @@ def decision_fingerprint(carry, study, view=None):
     `view` is the policy-audience view of `carry` when the caller already built it.
     """
     view = _policy_view(carry, study) if view is None else view
-    return eqx.filter_jit(_policy_fingerprint)(view, study)
+    return lifting_jit(_policy_fingerprint)(view, study)
 
 
 def _with_award_columns(effects, caps):
