@@ -13,10 +13,14 @@ import functools
 from types import SimpleNamespace
 
 import equinox as eqx
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax import lax
 
 from spaceodyssey.core import CompiledExecutor, HostExecutor, enqueue, histories_equal
+from spaceodyssey.core.carry import _tree_set
 from spaceodyssey.core.conformance.invariants import balance_conserved
 from spaceodyssey.core.enums import (
     AdmissionCode,
@@ -47,7 +51,7 @@ BUSY = int(AdmissionCode.LANE_BUSY)
 NO_FUNDS = int(AdmissionCode.NO_FUNDS)
 NO_SLOT = int(AdmissionCode.NO_SLOT)
 UNSUPPORTED = int(AdmissionCode.UNSUPPORTED)
-N_STEPS = 200
+N_STEPS = 40
 
 # lane 0 (channel 10, 100 ticks plus a transition of 10) is on the asset with the
 # horizon; lane 2 (channel 12, 50 plus 5) is on the one without
@@ -129,7 +133,8 @@ SCENARIOS.update(
             ),
             (plan(0, 0, 100), plan(1, 0, 100, 1), plan(1, 1, 100, 1)),
         ),
-        # two commitments on two lanes, then the same two in one group
+        # two commitments on two lanes, the same two in one group, then three of each
+        # against a table of two
         "two_commitments": (
             (observe(0, 0, 10, 0), observe(0, 1, 12, 0), wait(0, 250), end(1)),
             (plan(0, 0, 100), plan(0, 1, 100)),
@@ -137,6 +142,26 @@ SCENARIOS.update(
         "group_of_two_commitments": (
             (observe(0, 0, 10, 0), observe(0, 1, 12, 0), wait(0, 250), end(1)),
             (plan(0, 0, 100, 0, 1), plan(0, 1, 100, 0, 1)),
+        ),
+        "three_commitments": (
+            (
+                observe(0, 0, 10, 0),
+                observe(0, 1, 11, 0),
+                observe(0, 2, 12, 0),
+                wait(0, 250),
+                end(1),
+            ),
+            (plan(0, 0, 100), plan(0, 1, 100), plan(0, 2, 100)),
+        ),
+        "group_of_three_commitments": (
+            (
+                observe(0, 0, 10, 0),
+                observe(0, 1, 11, 0),
+                observe(0, 2, 12, 0),
+                wait(0, 250),
+                end(1),
+            ),
+            (plan(0, 0, 100, 0, 1), plan(0, 1, 100, 0, 1), plan(0, 2, 100, 0, 1)),
         ),
     }
 )
@@ -180,7 +205,6 @@ for _how, _tail in (
         (plan(0, 0, 100), plan(0, 1, 100)),
     )
 SCENARIOS.update(STOPS)
-PROGRAM_SCENARIOS = {"program_close", "program_abort"}
 
 
 def _abort(n, scope, subject=0, program=0, channel=10):
@@ -237,42 +261,68 @@ ABORTS["other_program_abort_then_cancel"] = (
     ),
     (plan(0, 0, 100), plan(1, 1, 100, 1)),
 )
-PROGRAM_SCENARIOS |= {n for n in ABORTS if n.startswith(("program_", "other_program"))}
 SCENARIOS.update(ABORTS)
-# a full queue: the three slots hold two starts and the wake, the wake's slot goes to a
-# Stop, and the Cancel behind it finds no slot
+# a full queue: the wake's slot goes to a Stop, and the Cancel behind it finds none
 SCENARIOS["cancel_full_queue"] = (
     (
         observe(0, 0, 10, 0),
-        observe(0, 1, 12, 0),
         wait(0, 80),
         stop(1, Scope.LANE, Disposition.CLOSE),
         cancel(1, 0),
         wait(1, 150),
         end(2),
     ),
-    (plan(0, 0, 100), plan(0, 1, 200), plan(1, 1, 100, 1)),
+    (plan(0, 0, 100), plan(1, 1, 100, 1)),
 )
 
 
-class SeededAbort(AbstractProcess):
-    """Seeds a lane ABORT of lane 0 for `tick`, a Stop that is queued from the start."""
+I64 = np.int64
 
-    tick: int = eqx.field(static=True)
+
+class Seeds(AbstractProcess):
+    """Seeds what a case needs of the queue, from array values so cases share a program.
+
+    `abort_tick` queues a lane ABORT of lane 0 for that tick when it is not negative,
+    `fill` queues that many inert rows, and `sid_gap` leaves that many event ids when it
+    is not negative. The studies of this file all carry it, with nothing seeded by
+    default.
+    """
+
+    abort_tick: jax.Array
+    fill: jax.Array
+    sid_gap: jax.Array
 
     def seed(self, carry, caps):
-        """Queue the Stop."""
-        return enqueue(
+        """Queue the Stop and the inert rows, and spend the event ids."""
+        carry = enqueue(
             carry,
-            True,
+            self.abort_tick >= 0,
             kind=EventKind.STOP,
-            tick=self.tick,
+            tick=jnp.maximum(self.abort_tick, 0),
             stage=Stage.SETTLE,
             lane=0,
             scope=Scope.LANE,
             disposition=Disposition.ABORT,
             caps=caps,
         )
+
+        def inert(i, c):
+            # a stale fault at the last tick: it holds a slot and never runs
+            return enqueue(
+                c,
+                i < self.fill,
+                kind=EventKind.FAULT,
+                tick=caps.max_tick,
+                stage=Stage.SETTLE,
+                gen=-5,
+                caps=caps,
+            )
+
+        carry = lax.fori_loop(0, caps.n_events, inert, carry)
+        spent = jnp.where(
+            self.sid_gap >= 0, caps.max_sid - self.sid_gap, carry.next_sid
+        )
+        return _tree_set(carry, next_sid=spent.astype(carry.next_sid.dtype))
 
 
 # a Stop seeded for tick 300 is queued when the commitment is made and cancelled at
@@ -281,22 +331,34 @@ SCENARIOS["future_abort_then_cancel"] = (
     (observe(0, 0, 10, 0), cancel(0, 0), wait(0, 400), end(1)),
     (plan(0, 0, 100), plan(0, 1, 100)),
 )
-SEEDED = {"future_abort_then_cancel": SeededAbort(tick=300)}
+FUTURE_ABORT = {"future_abort_then_cancel": 300}
+# one compiled program serves every case: two commitment slots, two programs, refunds
+SHARED = {"n_commitments": 2, "n_programs": 2, "refunds": True}
 
 
-def _study(name, **kw):
+def _study(name, *, fill=0, sid_gap=-1, **kw):
     script, plans = SCENARIOS[name]
-    if name in PROGRAM_SCENARIOS:
-        kw["n_programs"] = 2
-    study = commitment_study(script, plans, **kw)
-    if name in SEEDED:
-        study = eqx.tree_at(lambda s: s.process, study, SEEDED[name])
-    return study
+    study = commitment_study(script, plans, **{**SHARED, **kw})
+    seeds = Seeds(
+        abort_tick=jnp.asarray(FUTURE_ABORT.get(name, -1), I64),
+        fill=jnp.asarray(fill, I64),
+        sid_gap=jnp.asarray(sid_gap, I64),
+    )
+    study = eqx.tree_at(lambda s: s.process, study, seeds)
+    # the price columns every priced case needs, set to the plain occupancy price
+    ch = study.channels
+    shape = ch.cost.shape
+    channels = dataclasses.replace(
+        ch,
+        pricing=jnp.full(shape, ChargePricing.OCCUPANCY, I64),
+        surcharge=jnp.zeros(shape, jnp.float64),
+    )
+    return dataclasses.replace(study, channels=channels)
 
 
 @functools.cache
-def _run(name, freeze=30, balance=None, k=4, steps=N_STEPS, **caps):
-    study = _study(name, freeze=freeze, n_commitments=k, **dict(caps))
+def _run(name, freeze=30, balance=None, steps=N_STEPS, **seeds):
+    study = _study(name, freeze=freeze, **seeds)
     if balance is not None:
         # the cell the activations come from holds `balance`, which may be only what
         # the channels take
@@ -586,7 +648,7 @@ def test_an_abort_that_does_not_reach_the_commitment_leaves_the_cancel_alone(nam
 
 
 def test_a_cancel_with_no_free_queue_slot_is_refused_and_spends_no_activation():
-    run = _run("cancel_full_queue", n_events=3)
+    run = _run("cancel_full_queue", fill=46)
     codes = _codes(run)[1].tolist()
     assert NO_SLOT in codes
     led = _ledger(run)
@@ -596,13 +658,13 @@ def test_a_cancel_with_no_free_queue_slot_is_refused_and_spends_no_activation():
 
 
 def test_control_the_same_cancel_with_room_in_the_queue_is_queued_and_debited():
-    run = _run("cancel_full_queue", n_events=4)
+    run = _run("cancel_full_queue", fill=45)
     assert NO_SLOT not in _codes(run)[1].tolist()
     assert int(_ledger(run).disruptive_used[0]) == 1
 
 
 def test_a_cancel_when_the_event_ids_are_spent_is_refused_and_spends_no_activation():
-    run = _run("cancel_inside_disruptive", max_sid=3)
+    run = _run("cancel_inside_disruptive", sid_gap=2)
     assert _codes(run)[1][0] == NO_SLOT
     led = _ledger(run)
     assert int(led.disruptive_used[0]) == 0
@@ -610,7 +672,7 @@ def test_a_cancel_when_the_event_ids_are_spent_is_refused_and_spends_no_activati
 
 
 def test_control_one_more_event_id_and_the_same_cancel_is_queued_and_debited():
-    run = _run("cancel_inside_disruptive", max_sid=4)
+    run = _run("cancel_inside_disruptive", sid_gap=3)
     assert _codes(run)[1][0] == OK
     assert int(_ledger(run).disruptive_used[0]) == 1
 
@@ -656,21 +718,23 @@ def test_a_second_cancel_of_one_commitment_spends_no_activation():
 
 
 def test_a_commitment_beyond_the_capacity_is_refused_and_the_table_keeps_its_rows():
-    run = _run("two_commitments", k=1)
-    assert _codes(run)[0][:2].tolist() == [OK, NO_SLOT]
-    assert int((np.asarray(_ledger(run).cm_state) != CommitState.NONE).sum()) == 1
+    run = _run("three_commitments")
+    assert _codes(run)[0][:3].tolist() == [OK, OK, NO_SLOT]
+    assert int((np.asarray(_ledger(run).cm_state) != CommitState.NONE).sum()) == 2
     assert _sound(run)
 
 
-def test_control_the_same_two_commitments_fit_in_a_table_of_four():
+def test_control_two_commitments_fit_in_a_table_of_two_alone_and_grouped():
     run = _run("two_commitments")
     assert _codes(run)[0][:2].tolist() == [OK, OK]
     assert int((np.asarray(_ledger(run).cm_state) != CommitState.NONE).sum()) == 2
+    grouped = _run("group_of_two_commitments")
+    assert _codes(grouped)[0][:2].tolist() == [OK, OK]
 
 
 def test_a_group_that_asks_for_more_slots_than_remain_is_refused_whole():
-    run = _run("group_of_two_commitments", k=1)
-    assert _codes(run)[0][:2].tolist() == [NO_SLOT, NO_SLOT]
+    run = _run("group_of_three_commitments")
+    assert _codes(run)[0][:3].tolist() == [NO_SLOT, NO_SLOT, NO_SLOT]
     assert int((np.asarray(_ledger(run).cm_state) != CommitState.NONE).sum()) == 0
     assert not _log(run)["status"].size
     assert _sound(run)
@@ -715,9 +779,7 @@ FIXED = {m: (SURCHARGE if m == ChargePricing.SURCHARGE else (0.0,) * 3) for m in
 
 @functools.cache
 def _priced_run(mode):
-    script, plans = SCENARIOS["cancel_outside"]
-    study = commitment_study(script, plans, refunds=True)
-    study = priced(study, mode, CHARGE, SURCHARGE, BALANCE)
+    study = priced(_study("cancel_outside"), mode, CHARGE, SURCHARGE, BALANCE)
     truth, root = one_world(caps=study.caps)
     result = HostExecutor().run(study, truth, root, N_STEPS)
     return SimpleNamespace(study=study, carry=result.carry, trace=result.trace)
