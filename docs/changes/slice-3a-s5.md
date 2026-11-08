@@ -4,6 +4,10 @@ orphan: true
 
 # Slice 3a S5: awards, windows and remainder rules
 
+Round 2 (review of c4bb47e) is rebuilt on `main` c7add43 (S4): the award generation of the
+drawn row, an independent expiry replay, and the amount-shape and range refusals. No new
+`CORE_KINDS`, so no entry-point change.
+
 S5 lets a policy grant a balance row an amount for a window with an Allocate effect, closes
 the window with a `WINDOW_END` event, and applies the remainder rule the award declared. It is
 tier 2 (core handlers, ledger, admission, snapshot, pre-flight and conformance). With
@@ -40,13 +44,34 @@ this change.
   and is admitted.
 - **Counters.** `ledger.granted` and `ledger.lapsed` (per row and resource) record every grant
   and lapse; `ledger.win_state`, `win_gen` and `realloc_row` hold the window. `balance_conserved`
-  adds granted less lapsed to its three-way account and checks the counters against the trace:
-  a row's granted is at least what the trace allocated to it, any excess is a reallocation
-  that lapses the same amount at its source, and nothing lapses that was never given.
-- **Trace.** The Allocate rows of a decision keep their amount, window and recipient in
-  `trace.alloc_amount`, `alloc_from`, `alloc_until` and `alloc_recipient`.
+  adds granted less lapsed to its three-way account and checks the counters against an
+  independent replay of the trace (see Expiry reconciliation).
+- **Trace.** The Allocate rows of a decision keep their amount, window, recipient, remainder
+  rule and reallocation target in `trace.alloc_amount`, `alloc_from`, `alloc_until`,
+  `alloc_recipient`, `alloc_remainder` and `alloc_to`.
+- **Expiry reconciliation.** `balance_conserved` replays the handled trace rows in order.
+  Each admitted Allocate grants its amount; each handled WINDOW_END finds the award that
+  opened that window (same row and expiry tick), and what must lapse is the row's initial
+  balance plus what was granted to it, less what lapsed from it, less what the retained
+  records debited before the expiry tick (FORFEIT lapses it, REALLOCATE lapses it and grants
+  it to the declared row, NONE and CARRY_OVER move nothing). The counters `granted` and
+  `lapsed` must equal the replay, so restoring a forfeited balance while erasing its lapse
+  (the paired mutant) fails. The replay is skipped, and the three-way account still binds,
+  when the log overflowed or the run holds refund receipts, because a debit or credit then
+  has no timed record.
+- **Award generation.** A DONE or cancel row records the `win_gen` of the row the debit
+  drew from: the first payer row of the charge that is WINDOWED and charged, else the
+  first payer row. Several awarded payers record the first, in the order asset, program,
+  shared.
+- **Amount shape.** An Allocate whose `amount` is not the full `(n_effects, n_resources)`
+  table (a `(n,)` or `(n, 1)` vector would broadcast into every resource) is refused as
+  UNSUPPORTED, statically at trace time, together with every other Allocate of the decision.
+- **Representable range.** With `caps.snapshot_balances`, an Allocate that would take a
+  resource column above `2**53` times the balance quantum (S4's exact bound) is refused as
+  UNSUPPORTED, so S4's balance view never clamps a granted balance. S4's QUERY_MIXED guard
+  still covers Allocate.
 - **Conditional leaves.** With awards on: `ledger.win_state`, `win_gen`, `realloc_row`,
-  `granted`, `lapsed`, the four `trace.alloc_*` leaves and the six effect columns. They are
+  `granted`, `lapsed`, the six `trace.alloc_*` leaves and the six effect columns. They are
   `None` otherwise, listed in `CANONICAL_FIELDS` and gated by `awards_on` in
   `CONDITIONAL_FIELDS`. `step` slices the handler table (`HANDLERS[:-1]`) when awards are off,
   so a study without awards lowers the table it always had.
@@ -89,7 +114,7 @@ None. `tests/core/golden_histories.json` and every pin file are unchanged.
 
 | File | Tier | Control or mutant |
 |---|---|---|
-| `tests/core/test_awards.py` | medium; one slow parity run | first allocation, each remainder rule's balance, OUTSIDE_VALIDITY before and after, an overlap refused with the carry unchanged, adjacent windows, completion after expiry, same-tick ordering, a stale expiry (with a live control), trace retention, conservation per scenario, forged granted, lapsed and balance counters, awards off holds no award leaf or event, host and compiled parity |
+| `tests/core/test_awards.py` | medium; one slow parity run | first allocation, each remainder rule's balance, OUTSIDE_VALIDITY before and after, an overlap refused with the carry unchanged, adjacent windows, completion after expiry, same-tick ordering, a stale expiry (with a live control), trace retention, conservation per scenario, forged granted, lapsed and balance counters, the paired forged expiry (forfeit and reallocation), the award generation of the drawn row, malformed amount shapes, the range refusal, Allocate mixed with a Query, awards off holds no award leaf or event, host and compiled parity |
 | `tests/codec/test_optional_fields.py` | unit | the six effect columns: omitted at default, old document loads, null refused, populated round trip |
 | `tests/core/test_preflight.py`, `tests/codec/test_preflight_json.py` | unit | W001 seeded cases and pointers, X001 with and without awards |
 | `tests/core/test_refresh_runs.py` | medium | the mutation pair holds and mutates every award leaf |
@@ -98,7 +123,8 @@ None. `tests/core/golden_histories.json` and every pin file are unchanged.
 
 1. FORBIDDEN is the code for an award onto a row with an open window; the spec names no code.
 2. UNSUPPORTED is the code for a malformed Allocate row.
-3. `award_gen` takes the generation of the first payer row of the charge.
+3. `award_gen` takes the generation of the first WINDOWED, charged payer row, else the
+   first payer row.
 4. `disposition` carries that generation on the DONE row (the column was otherwise unused
    there), so no new event field was needed.
 5. No X002 window field existed to lift: X002 flags channel refund declarations, which S3a

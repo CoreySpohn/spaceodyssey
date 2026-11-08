@@ -78,13 +78,24 @@ class ScriptedAwards(ScriptedPrograms):
         return eff, ps, u
 
 
-def award_study(script, awards, *, program_credit=0.0, refunds=False, **overrides):
+def award_study(
+    script,
+    awards,
+    *,
+    program_credit=0.0,
+    refunds=False,
+    policy_cls=None,
+    caps_extra=None,
+    **overrides,
+):
     """The toy study with two programs and awards on; the program rows hold
     `program_credit` of the program-scoped resource, so awards are what pay."""
     from spaceodyssey.studies import toy
 
-    caps = Capacities(n_programs=2, n_effects=3, awards=True, refunds=refunds)
-    policy = ScriptedAwards(script=script, awards=awards)
+    caps = Capacities(
+        n_programs=2, n_effects=3, awards=True, refunds=refunds, **(caps_extra or {})
+    )
+    policy = (policy_cls or ScriptedAwards)(script=script, awards=awards)
     study = toy.survey_1(caps=caps, policies=(policy,), **overrides)
     budget = study.budget
     for p in range(caps.n_programs):

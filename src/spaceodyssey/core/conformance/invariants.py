@@ -27,6 +27,7 @@ from spaceodyssey.core.enums import (
     EffectKind,
     EventKind,
     RecordStatus,
+    RemainderRule,
 )
 from spaceodyssey.core.records import pedigree_of
 from spaceodyssey.core.snapshot import snapshot_view
@@ -301,38 +302,94 @@ def _refused_completions(run):
     return lost
 
 
-def _awarded(run):
-    """What the trace says admitted Allocate rows granted, per row and resource."""
-    t, study = run.trace, run.study
+def _debits_before(run, tick):
+    """What the retained records debited each row and resource before `tick`."""
+    study, log = run.study, run.carry.log
     out = np.zeros(np.asarray(study.budget).shape)
-    admitted = (
-        np.asarray(t.handled)[:, None]
-        & (np.asarray(t.eff_kind) == EffectKind.ALLOCATE)
-        & (np.asarray(t.admit_code) == AdmissionCode.OK)
-    )
-    for i, e in zip(*np.nonzero(admitted), strict=True):
-        row = int(np.asarray(t.alloc_recipient)[i, e])
-        out[row] += np.asarray(t.alloc_amount)[i, e]
+    refs, start = np.asarray(log.refund_of), np.asarray(log.start_tick)
+    for i in _valid_rows(run):
+        if int(refs[i]) >= 0 or int(start[i]) >= tick:
+            continue
+        rows = _balance_rows(study, int(np.asarray(log.lane)[i]), _log_program(log, i))
+        for r, row in enumerate(rows):
+            out[row, r] += float(np.asarray(log.charged)[i, r])
     return out
 
 
-def _award_mismatches(run):
-    """Award counters the trace does not support.
+def _expire(run, opened, i, granted, lapsed):
+    """Apply the expiry the handled trace row `i` names, to the replayed counters."""
+    t = run.trace
+    row, now = int(np.asarray(t.lane)[i]), int(np.asarray(t.tick)[i])
+    hit = [w for w in opened if w[0] == row and w[1] == now]
+    if not hit:
+        return
+    _, _, rule, to = hit[-1]
+    opened.remove(hit[-1])
+    if rule not in (RemainderRule.FORFEIT, RemainderRule.REALLOCATE):
+        return
+    held = np.asarray(run.study.budget)[row] + granted[row] - lapsed[row]
+    held = held - _debits_before(run, now)[row]
+    lapsed[row] += held
+    if rule == RemainderRule.REALLOCATE:
+        granted[to] += held
 
-    Every admitted Allocate grants its amount to its recipient, so a row's `granted`
-    is at least what the trace shows it was allocated; any excess is a reallocation,
-    which lapses the same amount at its source, so the total excess cannot exceed the
-    total lapsed. Nothing lapses that was not granted or held to begin with.
+
+def _expected_awards(run):
+    """Replay the trace's grants and expiries; what `granted` and `lapsed` must be.
+
+    Walks the handled trace rows in order. A handled WINDOW_END names its row; the award
+    that opened that window (same row, same expiry tick, earlier in the trace) gives the
+    remainder rule, and what the row held then is its initial balance, plus what was
+    granted to it, less what lapsed from it, less what the records debited before the
+    expiry tick. FORFEIT lapses all of it; REALLOCATE lapses it and grants it to the
+    declared row; NONE and CARRY_OVER move nothing. The step of an expiry may also hold
+    the decision it woke, so the expiry is applied first. An admitted Allocate grants
+    its amount to its recipient. Nothing here reads the ledger's counters or balances.
     """
-    c, study = run.carry, run.study
-    granted, lapsed = np.asarray(c.ledger.granted), np.asarray(c.ledger.lapsed)
-    bad, allocated = [], _awarded(run)
-    if np.any(granted < allocated - ATOL):
-        bad.append("a row's granted counter is below what the trace allocated to it")
-    if np.any((granted.sum(0) - allocated.sum(0)) > lapsed.sum(0) + ATOL):
-        bad.append("more was reallocated than lapsed")
-    if np.any(lapsed > granted + np.asarray(study.budget) + ATOL):
-        bad.append("a row lapsed more than it was ever given")
+    t, study = run.trace, run.study
+    budget = np.asarray(study.budget)
+    granted, lapsed = np.zeros_like(budget), np.zeros_like(budget)
+    handled = np.asarray(t.handled)
+    kind = np.asarray(t.kind)
+    eff = np.asarray(t.eff_kind)
+    ok = np.asarray(t.admit_code) == AdmissionCode.OK
+    opened = []  # (recipient, until, remainder, to) of each admitted award, in order
+    for i in np.flatnonzero(handled):
+        if int(kind[i]) == EventKind.WINDOW_END:
+            _expire(run, opened, i, granted, lapsed)
+        for e in np.flatnonzero((eff[i] == EffectKind.ALLOCATE) & ok[i]):
+            row = int(np.asarray(t.alloc_recipient)[i, e])
+            granted[row] += np.asarray(t.alloc_amount)[i, e]
+            opened.append(
+                (
+                    row,
+                    int(np.asarray(t.alloc_until)[i, e]),
+                    int(np.asarray(t.alloc_remainder)[i, e]),
+                    int(np.asarray(t.alloc_to)[i, e]),
+                )
+            )
+    return granted, lapsed
+
+
+def _award_mismatches(run):
+    """Award counters that differ from the independent replay of the trace.
+
+    Skipped when the log overflowed (a debit may have no record) or the run holds
+    refund receipts (a credit lands at a time the record does not carry); the final
+    balance gap in `balance_conserved` still binds then.
+    """
+    c = run.carry
+    if int(c.overflow_mask) & Capacity.LOG_ROWS:
+        return []
+    refs = np.asarray(c.log.refund_of)
+    if np.any(refs[_valid_rows(run)] >= 0):
+        return []
+    want_granted, want_lapsed = _expected_awards(run)
+    bad = []
+    if np.any(np.abs(np.asarray(c.ledger.granted) - want_granted) > ATOL):
+        bad.append("a row's granted counter differs from the replay of the trace")
+    if np.any(np.abs(np.asarray(c.ledger.lapsed) - want_lapsed) > ATOL):
+        bad.append("a row's lapsed counter differs from the replay of the trace")
     return bad
 
 

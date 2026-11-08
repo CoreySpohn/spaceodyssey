@@ -205,6 +205,8 @@ CANONICAL_FIELDS = {
         "alloc_from",
         "alloc_until",
         "alloc_recipient",
+        "alloc_remainder",
+        "alloc_to",
     ),
 }
 
@@ -269,6 +271,8 @@ CONDITIONAL_FIELDS = {
     "trace.alloc_from": awards_on,
     "trace.alloc_until": awards_on,
     "trace.alloc_recipient": awards_on,
+    "trace.alloc_remainder": awards_on,
+    "trace.alloc_to": awards_on,
 }
 REFRESH_GROUPS = tuple(CONDITIONAL_GROUPS)
 REFRESH_FIELDS = tuple(CONDITIONAL_FIELDS)
