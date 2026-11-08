@@ -70,16 +70,17 @@ N_EFFECTS = 5  # two awards, two observations and a wait
 SERVICE = 0  # the channel index a `Query` names
 OBSERVE_CHANNELS = (10, 11)  # the channel ids the two programs observe on
 
-# (tick, program, request, audience): what each program asks for, and who sees it.
-# The proposal at 120 reaches the observer only, and the one at 700 comes after the last
-# query, so neither may move an award.
+# (write tick, program, request, audience, release tick): what each program asks for,
+# and who sees it, when. The proposal at 120 reaches the observer only; the one written
+# at 150 sits in the log unreleased until 700, after both queries. Neither may move an
+# award.
 DEFAULT_PROPOSALS = (
-    (50, 0, 6.0, Audience.POLICY),
-    (80, 1, 3.0, Audience.POLICY),
-    (120, 0, 40.0, Audience.OBSERVER),
-    (300, 1, 5.0, Audience.POLICY),
-    (400, 0, 2.0, Audience.POLICY),
-    (700, 1, 90.0, Audience.POLICY),
+    (50, 0, 6.0, Audience.POLICY, 50),
+    (80, 1, 3.0, Audience.POLICY, 80),
+    (120, 0, 40.0, Audience.OBSERVER, 120),
+    (150, 1, 90.0, Audience.POLICY, 700),
+    (300, 1, 5.0, Audience.POLICY, 300),
+    (400, 0, 2.0, Audience.POLICY, 400),
 )
 
 
@@ -136,12 +137,13 @@ class ToyCommittee(AbstractHostService):
         return np.asarray([done, tick, tick + WINDOW, *amounts], dtype=np.float64)
 
 
-class OmniscientCommittee(ToyCommittee):
-    """The negative control: it reads every proposal of the script, released or not.
+class CarryCommittee(ToyCommittee):
+    """The negative control: it reads every proposal already written, released or not.
 
-    It takes the proposals from the study's own table instead of the snapshot, so a
-    proposal that was never released to the policy, or reached the observer only, moves
-    its awards.
+    It totals the proposals the study's script has written by the query tick, whatever
+    their audience and release tick, as a committee holding the carry would. A proposal
+    that is still unreleased to the policy, or that reached the observer only, moves its
+    awards.
     """
 
     def __init__(self, proposals=DEFAULT_PROPOSALS, kind=AWARD_KIND_INDEX):
@@ -150,9 +152,13 @@ class OmniscientCommittee(ToyCommittee):
         self.proposals = tuple(proposals)
 
     def requested(self, view):
-        """The total request of each program over the whole script, seen or not."""
+        """The total request of each program among the proposals written by now."""
+        tick = int(view.tick)
         return np.asarray(
-            [sum(r for _, p, r, _ in self.proposals if p == q) for q in PROGRAMS],
+            [
+                sum(r for t, p, r, _, _ in self.proposals if p == q and t <= tick)
+                for q in PROGRAMS
+            ],
             dtype=np.float64,
         )
 
@@ -160,12 +166,14 @@ class OmniscientCommittee(ToyCommittee):
 class ProposalRecords(scripted.ScriptedRecords):
     """Scripted proposal records, each released to its own audience.
 
-    Fire i writes a proposal of `requests[i]` for program `programs[i]` at `ticks[i]`;
-    the record reaches the audience in `audiences[i]` only.
+    Fire i writes a proposal of `values[i]` for program `programs[i]` at `ticks[i]`; the
+    record reaches the audience in `audiences[i]` only, at `releases[i]`. Until then it
+    is in the log and in no snapshot.
     """
 
     programs: tuple[int, ...] = eqx.field(default=(), static=True)
     audiences: tuple[int, ...] = eqx.field(default=(), static=True)
+    releases: tuple[int, ...] = eqx.field(default=(), static=True)
 
     def seed(self, carry, caps):
         """Queue one process event per proposal, with its own audience."""
@@ -186,7 +194,10 @@ class ProposalRecords(scripted.ScriptedRecords):
         """Write the proposal of this fire: its request and its program."""
         carry, rec = super().handle(carry, ev, study)
         program = jnp.asarray(self.programs, F64)[ev.group]
-        return carry, dataclasses.replace(rec, payload=rec.payload.at[1].set(program))
+        release = jnp.asarray(self.releases, I64)[ev.group]
+        return carry, dataclasses.replace(
+            rec, payload=rec.payload.at[1].set(program), available_tick=release
+        )
 
 
 def _proposal_process(proposals):
@@ -200,6 +211,7 @@ def _proposal_process(proposals):
         kinds=(PROPOSAL_KIND_INDEX,) * n,
         programs=tuple(int(p[1]) for p in proposals),
         audiences=tuple(int(p[3]) for p in proposals),
+        releases=tuple(int(p[4]) for p in proposals),
     )
 
 
@@ -370,40 +382,147 @@ EFFECT_COLUMNS = (
 )
 
 
-def _recorded_proposals(carry, tick):
-    """Payloads of the proposal records released to the policy by `tick`."""
-    log = carry.log
+def release_steps(trace, n_log):
+    """The executor step at which each log row was released to the policy, else -1.
+
+    A release or a result row handled with the policy audience names the log slot it
+    releases; the first such step wins. A step's decision sees what the step released.
+    """
+    out = np.full(n_log, -1, dtype=np.int64)
+    kind, audience = np.asarray(trace.kind), np.asarray(trace.audience)
+    slot = np.asarray(trace.log_slot)
+    released = (
+        np.asarray(trace.handled)
+        & ((kind == EventKind.RELEASE) | (kind == EventKind.RESULT))
+        & ((audience & int(Audience.POLICY)) != 0)
+        & (slot >= 0)
+    )
+    for step in np.flatnonzero(released):
+        if out[slot[step]] < 0:
+            out[slot[step]] = step
+    return out
+
+
+def released_rows(log, kind, step, tick, width, released_step):
+    """Sorted payloads (first `width` columns) of the `kind` rows released by `step`.
+
+    A row counts when it is valid, addressed to the policy, stamped released by `tick`,
+    and released at a step no later than `step` (`released_step`, per log row).
+    """
+    audience = np.asarray(log.audience)
+    stamp = np.asarray(log.released_tick)
+    at = np.asarray(released_step)
     keep = (
         np.asarray(log.valid)
-        & (np.asarray(log.kind) == PROPOSAL_KIND_INDEX)
-        & ((np.asarray(log.audience) & int(Audience.POLICY)) != 0)
-        & (np.asarray(log.released_tick) >= 0)
-        & (np.asarray(log.released_tick) <= tick)
+        & (np.asarray(log.kind) == kind)
+        & ((audience & int(Audience.POLICY)) != 0)
+        & (stamp >= 0)
+        & (stamp <= tick)
+        & (at >= 0)
+        & (at <= step)
     )
-    pay = np.asarray(log.payload)[keep][:, :2]
-    return sorted(map(tuple, pay.tolist()))
+    return sorted(map(tuple, np.asarray(log.payload)[keep][:, :width].tolist()))
 
 
-def _viewed_proposals(view):
+def viewed_rows(view, kind, width):
+    """Sorted payloads (first `width` columns) of the `kind` rows a view shows."""
     n = int(view.n_rows)
-    keep = np.asarray(view.log.valid)[:n] & (
-        np.asarray(view.log.kind)[:n] == PROPOSAL_KIND_INDEX
-    )
-    pay = np.asarray(view.log.payload)[:n][keep][:, :2]
+    keep = np.asarray(view.log.valid)[:n] & (np.asarray(view.log.kind)[:n] == kind)
+    pay = np.asarray(view.log.payload)[:n][keep][:, :width]
     return sorted(map(tuple, pay.tolist()))
+
+
+ROW_KINDS = ((PROPOSAL_KIND_INDEX, 2, "proposals"), (AWARD_KIND_INDEX, 5, "awards"))
+
+
+def visibility_failures(view, log, step, tick, released_step):
+    """How a decision view differs from the records released to the policy by `step`.
+
+    The proposals and the awards in the view must be exactly those the log shows as
+    released to the policy audience by that executor step (see `released_rows`).
+    """
+    return [
+        f"the view's {name} are not the released ones"
+        for kind, width, name in ROW_KINDS
+        if viewed_rows(view, kind, width)
+        != released_rows(log, kind, step, tick, width, released_step)
+    ]
+
+
+def award_failures(committee, asked, recorded, layout=None):
+    """How the committee's answers differ from the recorded award rows.
+
+    `asked` is `(request, view)` for each query in order; `recorded` is
+    `(payload row, start tick)` for each award record in order.
+    """
+    fails = []
+    for k, (request, view) in enumerate(asked):
+        if k >= len(recorded):
+            fails.append(f"query {k}: no recorded award")
+            continue
+        row, start = recorded[k]
+        given = np.asarray(committee.answer(request, view, layout), np.float64)
+        payload = np.zeros(len(row))
+        payload[: len(given)] = given
+        if not np.array_equal(payload, np.asarray(row)):
+            fails.append(f"query {k}: the award row differs")
+        if int(start) != int(request.tick):
+            fails.append(f"query {k}: the award row is at another tick")
+    if len(recorded) > len(asked):
+        fails.append(f"{len(recorded)} recorded awards for {len(asked)} queries")
+    return fails
+
+
+def allocation_failures(n_assets, n_resources, awards, allocates):
+    """How the recorded `Allocate` effects differ from what the awards call for.
+
+    `awards` are the award payload rows in order. Each funded program of each award must
+    be allocated exactly: its amount in the program resource, the award's two window
+    bounds, the program's balance row, the program and the `FORFEIT` rule. `allocates`
+    is `(amount, from, until, recipient, program, remainder)` for each recorded
+    `Allocate` effect, in order.
+    """
+    want = []
+    for row in awards:
+        for p in PROGRAMS:
+            if row[3 + p] > 0.0:
+                amount = np.zeros(n_resources)
+                amount[PROGRAM_COLUMN] = row[3 + p]
+                want.append(
+                    (
+                        amount.tolist(),
+                        int(row[1]),
+                        int(row[2]),
+                        n_assets + p,
+                        p,
+                        int(RemainderRule.FORFEIT),
+                    )
+                )
+    have = [
+        (np.asarray(a).tolist(), int(f), int(u), int(r), int(p), int(m))
+        for a, f, u, r, p, m in allocates
+    ]
+    if len(have) != len(want):
+        return [f"{len(have)} Allocate effects for {len(want)} funded awards"]
+    return [
+        f"Allocate {i} does not follow its award"
+        for i, (h, w) in enumerate(zip(have, want, strict=True))
+        if h != w
+    ]
 
 
 def replay_allocation(study, run, committee=None):
     """Replay the committee and the policy on the run's own decision views.
 
-    For each executed decision it reruns the policy on the recorded view, with the key
-    of that decision, and compares its effects, its draw and its retained `Allocate`
-    rows with the run; for each `Query` it reruns the committee on the view that asked
-    and compares its answer with the award record in the log, after checking that the
-    proposals in the view are the recorded proposals released by then. Each replayed
-    `Allocate` is also given the admission code the window rule implies (one open window
-    per row) and the ledger's granted totals are checked against the admitted ones.
-    Returns a `ReplayReport`; it never raises on a mismatch.
+    For each executed decision it checks that the proposals and awards in the view are
+    the records released to the policy by then, reruns the policy on the view with the
+    key of that decision, and compares its effects, its draw and its retained `Allocate`
+    rows with the run. Each replayed `Allocate` is given the admission code the window
+    rule implies (one open window per row) and compared with the trace. For each `Query`
+    it reruns the committee on the view that asked. After the walk it compares those
+    answers with the award records in the log, checks that each recorded `Allocate`
+    follows its award, and checks the ledger's granted totals against the admitted
+    awards. Returns a `ReplayReport`; it never raises on a mismatch.
     """
     committee = ToyCommittee() if committee is None else committee
     caps = study.caps
@@ -411,93 +530,93 @@ def replay_allocation(study, run, committee=None):
     (policy,) = study.agenda.policies
     carry, trace = run.carry, run.trace
     steps = np.flatnonzero(np.asarray(trace.handled) & np.asarray(trace.wake))
-    fails = []
     if len(steps) != len(run.decisions):
-        return ReplayReport(
-            (f"{len(run.decisions)} views for {len(steps)} decisions",), 0, 0, 0
-        )
+        message = f"{len(run.decisions)} views for {len(steps)} decisions"
+        return ReplayReport((message,), 0, 0, 0)
     log = carry.log
-    recorded = np.flatnonzero(
+    rows = np.flatnonzero(
         np.asarray(log.valid) & (np.asarray(log.kind) == committee.kind)
     )
+    recorded = [(np.asarray(log.payload)[r], int(log.start_tick[r])) for r in rows]
+    released = release_steps(trace, len(np.asarray(log.kind)))
+    fails, asked, allocates = [], [], []
     pstate = jnp.zeros(caps.n_pstate, F64)
     open_until = {}
     granted = np.zeros((caps.n_assets + caps.n_programs + 1, caps.n_resources))
-    answers = n_alloc = 0
     previous, ordinal = None, 0
-    for d, (step, (view, recorded_eff)) in enumerate(
-        zip(steps, run.decisions, strict=True)
-    ):
+    for d, (step, (view, taken)) in enumerate(zip(steps, run.decisions, strict=True)):
         tick = int(trace.tick[step])
         ordinal = ordinal + 1 if previous == tick else 0
         previous = tick
+        fails += [
+            f"decision {d}: {m}"
+            for m in visibility_failures(view, carry.log, step, tick, released)
+        ]
         phase = int((tick >= np.asarray(study.agenda.phase_until[:-1])).sum())
         key = policy_key(run.root, phase, tick, ordinal)
         eff, pstate, u = policy.decide(pstate, view, study, key)
         for name in EFFECT_COLUMNS:
-            want, have = getattr(eff, name), getattr(recorded_eff, name)
-            if not np.array_equal(np.asarray(want), np.asarray(have)):
+            if not np.array_equal(
+                np.asarray(getattr(eff, name)), np.asarray(getattr(taken, name))
+            ):
                 fails.append(f"decision {d}: effect column {name} differs")
         if float(u) != float(trace.pol_u[step]):
             fails.append(f"decision {d}: the policy draw differs")
-        kinds = np.asarray(recorded_eff.kind)
-        # the retained Allocate rows say what the admission saw
+        kinds = np.asarray(taken.kind)
+        for slot in np.flatnonzero(kinds == EffectKind.ALLOCATE):
+            allocates.append(
+                (
+                    np.asarray(taken.amount[slot]),
+                    taken.window_from[slot],
+                    taken.window_until[slot],
+                    taken.recipient[slot],
+                    taken.program[slot],
+                    taken.remainder[slot],
+                )
+            )
         for slot in np.flatnonzero(np.asarray(eff.kind) == EffectKind.ALLOCATE):
-            n_alloc += 1
             row = int(eff.recipient[slot])
             start, until = int(eff.window_from[slot]), int(eff.window_until[slot])
             kept = (
-                np.asarray(trace.alloc_amount[step, slot]),
                 int(trace.alloc_from[step, slot]),
                 int(trace.alloc_until[step, slot]),
                 int(trace.alloc_recipient[step, slot]),
             )
             if not (
-                np.array_equal(kept[0], np.asarray(eff.amount[slot]))
-                and kept[1:] == (start, until, row)
+                np.array_equal(
+                    np.asarray(trace.alloc_amount[step, slot]),
+                    np.asarray(eff.amount[slot]),
+                )
+                and kept == (start, until, row)
             ):
                 fails.append(f"decision {d} slot {slot}: the trace row differs")
             opened = open_until.get(row, -1) > tick
-            want_code = AdmissionCode.FORBIDDEN if opened else AdmissionCode.OK
-            if int(trace.admit_code[step, slot]) != int(want_code):
+            want = AdmissionCode.FORBIDDEN if opened else AdmissionCode.OK
+            if int(trace.admit_code[step, slot]) != int(want):
                 fails.append(f"decision {d} slot {slot}: the admission code differs")
             if not opened:
                 open_until[row] = until
                 granted[row] += np.asarray(eff.amount[slot])
         if (kinds == EffectKind.QUERY).any():
+            q = int(np.argmax(kinds == EffectKind.QUERY))
             request = Request(
                 tick=tick,
-                service=int(
-                    recorded_eff.channel_index[np.argmax(kinds == EffectKind.QUERY)]
-                ),
-                subject=int(recorded_eff.subject[np.argmax(kinds == EffectKind.QUERY)]),
+                service=int(taken.channel_index[q]),
+                subject=int(taken.subject[q]),
                 audience=int(Audience.POLICY),
                 snapshot_fp=int(trace.snapshot_fp[step]),
                 release_version=int(view.release_version),
                 decision=int(view.n_dec),
-                group=int(recorded_eff.group[np.argmax(kinds == EffectKind.QUERY)]),
+                group=int(taken.group[q]),
             )
-            if _viewed_proposals(view) != _recorded_proposals(carry, tick):
-                fails.append(
-                    f"decision {d}: the view's proposals are not the released ones"
-                )
-            payload = np.zeros(caps.payload_width)
-            given = np.asarray(committee.answer(request, view, layout), np.float64)
-            payload[: len(given)] = given
-            if answers >= len(recorded):
-                fails.append(f"decision {d}: no recorded award for this query")
-            else:
-                slot = recorded[answers]
-                if not np.array_equal(payload, np.asarray(log.payload)[slot]):
-                    fails.append(f"decision {d}: the award row differs")
-                if int(log.start_tick[slot]) != tick:
-                    fails.append(f"decision {d}: the award row is at another tick")
-            answers += 1
-    if answers != len(recorded):
-        fails.append(f"{len(recorded)} recorded awards for {answers} queries")
+            asked.append((request, view))
+    fails += award_failures(committee, asked, recorded, layout)
+    fails += allocation_failures(
+        caps.n_assets, caps.n_resources, [r for r, _ in recorded], allocates
+    )
     if not np.allclose(np.asarray(carry.ledger.granted), granted):
         fails.append("the ledger's granted totals differ from the admitted awards")
-    return ReplayReport(tuple(fails), len(steps), answers, n_alloc)
+    return ReplayReport(tuple(fails), len(steps), len(asked), len(allocates))
 
 
 __all__ = [
@@ -506,11 +625,17 @@ __all__ = [
     "PROPOSAL_KIND",
     "AllocationPolicy",
     "AllocatorRun",
-    "OmniscientCommittee",
+    "CarryCommittee",
     "ProposalRecords",
     "ReplayReport",
     "ToyCommittee",
+    "allocation_failures",
     "allocator_registry",
     "allocator_study",
+    "award_failures",
+    "release_steps",
+    "released_rows",
     "replay_allocation",
+    "viewed_rows",
+    "visibility_failures",
 ]
