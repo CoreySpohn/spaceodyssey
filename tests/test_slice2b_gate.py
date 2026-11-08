@@ -48,6 +48,8 @@ from tests.core import test_lints as lints
 from tests.core import test_premission as premission_tests
 from tests.core import test_premission_refit as refit_tests
 
+pytestmark = pytest.mark.clear_caches_between_tests
+
 REPO = Path(__file__).resolve().parents[1]
 GOLDEN_PIN = REPO / "tests/core/golden_pin.json"
 HASH_PIN = REPO / "tests/codec/hash_pin.json"
