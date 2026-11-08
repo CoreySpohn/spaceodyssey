@@ -57,6 +57,7 @@ from spaceodyssey.core.snapshot import (
     project_mean,
 )
 from spaceodyssey.core.study import Agenda, Clock, Study
+from spaceodyssey.plain import plain_array
 
 RECORD_NONE, RECORD_MEASUREMENT, RECORD_AUXILIARY = range(3)
 
@@ -298,6 +299,14 @@ class ToySampleObserver(ToyRunningMean):
 
 def _as_i64(x):
     return jnp.asarray(x, I64)
+
+
+def _plain_i64(x):
+    return plain_array(I64, x)
+
+
+def _plain_f64(x):
+    return plain_array(F64, x)
 
 
 PLAN_ROWS = 8
@@ -639,7 +648,7 @@ class ThresholdStopPolicy(AbstractPolicy):
     """
 
     stop_snr: jax.Array = eqx.field(
-        default=3.0, converter=lambda x: jnp.asarray(x, F64), metadata=PLAIN_VALUE
+        default=3.0, converter=_plain_f64, metadata=PLAIN_VALUE
     )
 
     def decide(self, pstate, view, study, key):
@@ -680,9 +689,9 @@ class StochasticPolicy(AbstractPolicy):
     """
 
     theta: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, F64))
-    n_obs: jax.Array = eqx.field(default=5, converter=_as_i64, metadata=PLAIN_VALUE)
+    n_obs: jax.Array = eqx.field(default=5, converter=_plain_i64, metadata=PLAIN_VALUE)
     wait_ticks: jax.Array = eqx.field(
-        default=10, converter=_as_i64, metadata=PLAIN_VALUE
+        default=10, converter=_plain_i64, metadata=PLAIN_VALUE
     )
 
     def decide(self, pstate, view, study, key):

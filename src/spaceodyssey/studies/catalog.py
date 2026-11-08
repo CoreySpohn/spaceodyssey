@@ -13,6 +13,7 @@ import jax.numpy as jnp
 from spaceodyssey.core.capacities import PLAIN_VALUE, Capacities
 from spaceodyssey.core.enums import I64, Audience
 from spaceodyssey.core.snapshot import MeanBelief
+from spaceodyssey.plain import plain_array
 from spaceodyssey.studies import toy
 
 CATALOG_CHANNEL_ID = 13
@@ -35,7 +36,7 @@ def register_catalog(registry):
 
 
 def _as_i64(x):
-    return jnp.asarray(x, I64)
+    return plain_array(I64, x)
 
 
 class CatalogObserver(toy.ToyRunningMean):

@@ -16,6 +16,7 @@ from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, I64, Audience, EffectKind
 from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.service import AbstractHostService
+from spaceodyssey.plain import plain_array
 from spaceodyssey.studies import toy
 
 ANSWER_KIND = toy.RecordKind(
@@ -57,7 +58,7 @@ class ToyOracleService(AbstractHostService):
 
 
 def _as_i64(x):
-    return jnp.asarray(x, I64)
+    return plain_array(I64, x)
 
 
 class QueryPolicy(AbstractPolicy):
