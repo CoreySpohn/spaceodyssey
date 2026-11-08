@@ -30,7 +30,11 @@ The compiled program itself (StableHLO) changes by design, so its hash changes.
 
 Admission now refuses an effect table whose row count is not `Capacities.n_effects`.
 `transition` and `admit` raise a `ValueError` at trace time that names the column, both
-numbers and, from `transition`, the policies of the study.
+numbers. `decide` checks the table of each policy before the switch over policies, so
+the error names the policy that emitted it. The `program` column is checked with the
+others; the award columns keep their existing contract (a wrong shape is refused as
+unsupported). The allocation policy fills its table to `n_effects` with empty rows and
+refuses a capacity below its own five rows.
 
 Before this change a table of the wrong width was read through clamped indices, and a
 one-row table broadcast into every row. The built-in toy policies emit two rows
