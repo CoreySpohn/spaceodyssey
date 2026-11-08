@@ -8,7 +8,10 @@ compared with the default scan bit for bit, and the objects and documents are un
 """
 
 import dataclasses
+import hashlib
 import math
+from decimal import Decimal
+from fractions import Fraction
 
 import jax
 import jax.numpy as jnp
@@ -21,7 +24,7 @@ from spaceodyssey.core.conformance.corpus import make_worlds
 from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.executors.compiled import CompiledExecutor, _scan_worlds
 from spaceodyssey.core.executors.host import HostExecutor
-from spaceodyssey.core.lift import lift_traced, lifting_jit
+from spaceodyssey.core.lift import _lifted, lift_traced, lifting_jit
 from spaceodyssey.core.transaction import wake_by_audience
 from spaceodyssey.studies import oracle, scripted, toy
 from tests.codec.test_document import TOY_KINDS
@@ -281,84 +284,174 @@ def test_masked_refit_shares_one_program_across_values(monkeypatch):
     assert seen == [1, 1, 1]
 
 
+class _FloatSubclass(float):
+    pass
+
+
+_I64 = jnp.int64
+_F64 = jnp.float64
+
+# What lifting does with each input: a number it can prove exact becomes an array of the
+# dtype; every other value comes back as the very object it was, as it was handed on
+# before lifting existed.
+_LIFTED = [
+    (_I64, True, 1),
+    (_I64, 2, 2),
+    (_I64, 2**63 - 1, 2**63 - 1),
+    (_I64, (2, 3), [2, 3]),
+    (_I64, [2, 3], [2, 3]),
+    (_I64, (2**53 + 1, 2), [2**53 + 1, 2]),
+    (_I64, (), []),
+    (_F64, 2.5, 2.5),
+    (_F64, 2, 2.0),
+    (_F64, True, 1.0),
+    (_F64, 2**53, 2.0**53),
+    (_F64, (2, 3.5), [2.0, 3.5]),
+    (_F64, _FloatSubclass(2.0), 2.0),
+]
+_PASSED_THROUGH = [
+    (_I64, 2**63),
+    (_I64, -(2**63) - 1),
+    (_I64, 2.0),
+    (_I64, 1.5),
+    (_I64, math.nan),
+    (_I64, np.int64(2)),
+    (_I64, np.uint64(2)),
+    (_I64, np.float32(2)),
+    (_I64, Fraction(2)),
+    (_I64, Decimal("2")),
+    (_I64, ((1, 2), (3, 4))),
+    (_I64, [[1], [2, 3]]),
+    (_I64, (2, 3.0)),
+    (_I64, (2**53 + 1, 2.0, "x")),
+    (_I64, np.empty((0, 3))),
+    (_I64, np.array([1, 2], object)),
+    (_I64, np.array([2**63, 2], np.uint64)),
+    (_I64, np.array([1.5, 2], np.float32)),
+    (_I64, jnp.asarray(2, jnp.int32)),
+    (_I64, jnp.asarray(2.0, jnp.float32)),
+    (_F64, 2**53 + 1),
+    (_F64, 10**400),
+    (_F64, 2**63),
+    (_F64, np.float32(1.5)),
+    (_F64, Fraction(3, 2)),
+    (_F64, Decimal("1.5")),
+    (_F64, ((1, 2), (3.0, 4))),
+    (_F64, (2**53 + 1, 2.0)),
+    (_F64, np.array([np.float16(2), np.float32(3)], object)),
+    (_F64, np.empty((2, 0, 3))),
+    (_F64, jnp.asarray(2**53 + 1, jnp.int64)),
+    (_F64, jnp.asarray(2.0, jnp.float32)),
+]
+
+
+@pytest.mark.parametrize(("dtype", "value", "expected"), _LIFTED)
+def test_lifting_converts_a_number_it_can_prove_exact(dtype, value, expected):
+    out = _lifted(value, dtype, isinstance(value, tuple | list))
+    assert isinstance(out, jax.Array) and out.dtype == dtype
+    assert out.tolist() == expected
+
+
+@pytest.mark.parametrize(("dtype", "value"), _PASSED_THROUGH)
+def test_lifting_hands_on_anything_else_untouched(dtype, value):
+    assert _lifted(value, dtype, isinstance(value, tuple | list)) is value
+
+
 @pytest.mark.parametrize(
-    ("make", "field", "bad"),
-    [
-        (lambda v: oracle.oracle_study(query_at=v)[0], "query_at", 1.5),
-        (
-            lambda v: toy.survey_1(
-                policies=(toy.StochasticPolicy(theta=10.0, n_obs=v),)
-            ),
-            "n_obs",
-            5.5,
-        ),
-        (lambda v: oracle.oracle_study(query_at=v)[0], "query_at", 2**70),
-    ],
+    ("value", "sequence"), [((2, 3), False), ([2, 3], False), (2, True), (2.5, True)]
 )
-def test_lifting_refuses_a_value_the_dtype_cannot_hold(make, field, bad):
-    study = make(bad)
+def test_a_number_field_takes_no_sequence_and_a_sequence_field_no_number(
+    value, sequence
+):
+    assert _lifted(value, _I64, sequence) is value
+
+
+def test_a_lifted_array_or_tracer_of_the_dtype_is_kept():
+    exact = jnp.asarray([2**53 + 1, 2], jnp.int64)
+    assert _lifted(exact, _I64) is exact
+    seen = jax.jit(lambda q: _lifted(q, _I64))(jnp.asarray(2, jnp.int32))
+    assert (
+        seen.dtype == jnp.int32
+    )  # another dtype is not touched; it is a tracer already
+
+
+# The history of each lifted input equals the one the same study gave before lifting
+# existed (recorded on the base commit; each digest is the sha256 prefix of every
+# carry and trace leaf with its dtype and shape).
+_BASE_DIGEST = {
+    "stop_snr/bool/compiled": "4ae2dc0d9b4946a5",
+    "stop_snr/bool/host": "7e928ada7413cada",
+    "stop_snr/int/compiled": "fa3501a248069127",
+    "stop_snr/int/host": "3c44f99fb468fbfe",
+    "stop_snr/int_large_exact/compiled": "69482bb9835e4514",
+    "stop_snr/int_large_exact/host": "a3e146106b2eea73",
+    "stop_snr/integral/compiled": "fa3501a248069127",
+    "stop_snr/integral/host": "3c44f99fb468fbfe",
+    "stop_snr/float_sub/compiled": "fa3501a248069127",
+    "stop_snr/float_sub/host": "3c44f99fb468fbfe",
+    "query_at/bool/compiled": "a6ea3940a101f1a6",
+    "query_at/bool/host": "ee391845288a8003",
+    "query_at/int/compiled": "68e0ad22293d90ca",
+    "query_at/int/host": "ff680283f820bb5c",
+    "query_at/int_large_exact/compiled": "37a0e2ffbd98782f",
+    "query_at/int_large_exact/host": "f6781172491b172a",
+    "values/seq_int/compiled": "90a351073f0941af",
+    "values/seq_int/host": "6755ddefb06f6cad",
+    "values/seq_mixed/compiled": "90a351073f0941af",
+    "values/seq_mixed/host": "6755ddefb06f6cad",
+    "values/seq_list/compiled": "90a351073f0941af",
+    "values/seq_list/host": "6755ddefb06f6cad",
+    "ticks/seq_int/compiled": "2b3598674cbcc5b1",
+    "ticks/seq_int/host": "7de904b3749c4cee",
+    "ticks/seq_list/compiled": "2b3598674cbcc5b1",
+    "ticks/seq_list/host": "7de904b3749c4cee",
+}
+
+
+def _digest(res):
+    h = hashlib.sha256()
+    for x in jax.tree_util.tree_leaves((res.carry, res.trace)):
+        a = np.asarray(x)
+        h.update(f"{a.dtype}{a.shape}".encode())
+        h.update(a.tobytes())
+    return h.hexdigest()[:16]
+
+
+def _case_study(field, x):
+    if field == "stop_snr":
+        return _threshold(x), None
+    if field == "query_at":
+        return oracle.oracle_study(query_at=x)
+    if field == "values":
+        return scripted.scripted_study(
+            ticks=(100, 200), values=x, ids=(7001, 7002)
+        ), None
+    return scripted.scripted_study(ticks=x, values=(2.0, 9.0), ids=(7001, 7002)), None
+
+
+_CASE_INPUTS = {
+    "bool": True,
+    "int": 2,
+    "int_large_exact": 2**53,
+    "integral": 2.0,
+    "seq_int": (2, 3),
+    "seq_mixed": (2, 3.0),
+    "seq_list": [2, 3],
+    "float_sub": _FloatSubclass(2.0),
+}
+
+
+@pytest.mark.parametrize("key", sorted(_BASE_DIGEST))
+def test_lifted_histories_equal_the_ones_before_lifting(key):
+    field, name, which = key.split("/")
+    study, service = _case_study(field, _CASE_INPUTS[name])
     truths, roots = make_worlds(study, 1)
-    with pytest.raises(ValueError, match=field):
-        CompiledExecutor().run(study, truths, roots, 10)
-    with pytest.raises(ValueError, match=field):
-        HostExecutor().run(study, index_world(truths, 0), roots[0], 10)
-
-
-def _stochastic(n_obs):
-    return toy.survey_1(policies=(toy.StochasticPolicy(theta=10.0, n_obs=n_obs),))
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("ticks", (2**63, 2)),
-        ("ticks", (-(2**63) - 1, 2)),
-        ("ticks", (1.5, 2)),
-        ("ticks", (math.nan, 2)),
-        ("values", (2**53 + 1, 1.0)),
-        ("values", (10**400, 1.0)),
-    ],
-)
-def test_lifting_checks_each_number_exactly(field, value):
-    study = scripted.scripted_study(
-        ticks=(100, 200), values=(2.0, 9.0), ids=(7001, 7001), revisions=(0, 1)
-    )
-    study = dataclasses.replace(
-        study, process=dataclasses.replace(study.process, **{field: value})
-    )
-    with pytest.raises(ValueError, match=field):
-        lift_traced(study)
-
-
-def test_lifting_keeps_exact_large_numbers():
-    study = scripted.scripted_study(
-        ticks=(2**53 + 1, 2**62), values=(2**53, 9.0), ids=(7001, 7002)
-    )
-    lifted = lift_traced(study).process
-    assert [int(t) for t in lifted.ticks] == [2**53 + 1, 2**62]
-    mixed = dataclasses.replace(study.process, ticks=(2**53 + 1, 2.0))
-    assert [int(t) for t in lift_traced(mixed).ticks] == [2**53 + 1, 2]
-    assert lifted.ticks.dtype == jnp.int64 and lifted.values.dtype == jnp.float64
-    assert float(lifted.values[0]) == 2.0**53
-
-
-def _query_at_dtype(query_at):
-    policy = oracle.QueryPolicy(
-        inner=toy.FixedPlanPolicy(plan=oracle.DEFAULT_PLAN),
-        query_at=query_at,
-        subject=0,
-    )
-    return lift_traced(policy).query_at.dtype
-
-
-def test_a_narrower_integer_tracer_widens_under_jit_and_vmap():
-    one = jnp.asarray(1, jnp.int32)
-    assert jax.jit(lambda q: jnp.zeros((), _query_at_dtype(q)))(one).dtype == jnp.int64
-    many = jnp.asarray([1, 2], jnp.int32)
-    out = jax.vmap(lambda q: jnp.zeros((), _query_at_dtype(q)))(many)
-    assert out.dtype == jnp.int64
-    with pytest.raises(ValueError, match="query_at"):
-        jax.jit(lambda q: jnp.zeros((), _query_at_dtype(q)))(jnp.asarray(1.5))
+    kw = {} if service is None else {"service": service}
+    if which == "compiled":
+        res = CompiledExecutor().run(study, truths, roots, 24, **kw)
+    else:
+        res = HostExecutor().run(study, index_world(truths, 0), roots[0], 24, **kw)
+    assert _digest(res) == _BASE_DIGEST[key]
 
 
 def test_step_and_decision_fingerprint_share_one_program_across_values(monkeypatch):
