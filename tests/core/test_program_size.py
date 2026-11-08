@@ -8,9 +8,10 @@ import pytest
 from spaceodyssey import core
 from spaceodyssey.core import handlers
 from spaceodyssey.core.capacities import Capacities
-from spaceodyssey.core.enums import EventKind, Stage
+from spaceodyssey.core.enums import EffectKind, EventKind, Stage
+from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.studies import toy
-from tests.core.helpers import after_decision_1_bundle, one_world
+from tests.core.helpers import after_decision_1_bundle, one_world, worlds
 
 
 def _equations(jaxpr):
@@ -104,3 +105,38 @@ def test_shared_branch_matches_the_handler_of_its_own_kind():
     for via_step, direct in both(carry):
         report = core.tree_equal_report(via_step, direct)
         assert report["max_int_diff"] == 0 and report["max_abs"] == 0.0
+
+
+@pytest.mark.medium
+@pytest.mark.parametrize("n_effects", (3, 4, 5))
+def test_toy_study_runs_with_a_wider_effect_table(n_effects):
+    caps = Capacities(n_effects=n_effects)
+    study = toy.survey_1(caps=caps)
+    truths, roots = worlds(1, caps)
+    result = CompiledExecutor().run(study, truths, roots, 12)
+    assert bool(jnp.all(result.trace.eff_kind[..., 2:] == EffectKind.NONE))
+    assert bool(jnp.any(result.trace.eff_kind[..., 0] == EffectKind.OBSERVE))
+
+
+@pytest.mark.parametrize("rows", (1, 2, 4))
+def test_admit_refuses_a_table_of_the_wrong_width(rows):
+    study = toy.survey_1(caps=Capacities(n_effects=3))
+    truth, _ = one_world(caps=study.caps)
+    carry = eqx.filter_jit(core.init_carry)(study, truth)
+    wrong = core.effects_none(Capacities(n_effects=rows))
+    with pytest.raises(ValueError, match=r"n_effects is 3.*exactly n_effects rows"):
+        core.admit(carry, wrong, study)
+
+
+class _OneRow(toy.FixedPlanPolicy):
+    def decide(self, pstate, view, study, key):
+        eff, ps, u = super().decide(pstate, view, study, key)
+        return jax.tree_util.tree_map(lambda a: a[:1], eff), ps, u
+
+
+def test_transition_names_the_policy_that_emits_a_short_table():
+    caps = Capacities(n_effects=3)
+    study = toy.survey_1(caps=caps, policies=(_OneRow(plan=((0, 10),)),))
+    truths, roots = worlds(1, caps)
+    with pytest.raises(ValueError, match=r"n_effects is 3.*policies: _OneRow"):
+        CompiledExecutor().run(study, truths, roots, 4)

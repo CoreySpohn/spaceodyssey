@@ -87,10 +87,7 @@ def changed_view_transition(content):
     )
     changed = _clone(
         transaction.transition,
-        decide=_clone(transaction.decide, snapshot_view=view),
-        decision_fingerprint=_clone(
-            transaction.decision_fingerprint, snapshot_view=view
-        ),
+        _policy_view=_clone(transaction._policy_view, snapshot_view=view),
     )
     changed.__kwdefaults__ = transaction.transition.__kwdefaults__
     return changed

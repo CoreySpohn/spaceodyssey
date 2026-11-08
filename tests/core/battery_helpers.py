@@ -321,7 +321,7 @@ def epoch_study(*, absolute=False, rule="relative"):
 # ---- broken executors ---------------------------------------------------------------
 
 
-def _compiled_with(realize=None, decide=None):
+def _compiled_with(realize=None, decide=None, policy_view=None):
     """A compiled executor whose settlement or decision stage has been broken."""
     table = handlers.HANDLERS
     if realize is not None:
@@ -345,6 +345,8 @@ def _compiled_with(realize=None, decide=None):
     swaps = {"advance": advance}
     if decide is not None:
         swaps["decide"] = decide
+    if policy_view is not None:
+        swaps["_policy_view"] = policy_view
     moved = _clone(transaction.transition, **swaps)
 
     class Broken(CompiledExecutor):
@@ -404,7 +406,9 @@ def unreleased_view_executor():
         return log.valid & (log.status != RecordStatus.UNRELEASED)
 
     leaky_view = _clone(snapshot.snapshot_view, visible_rows=leaky_rows)
-    return _compiled_with(decide=_clone(transaction.decide, snapshot_view=leaky_view))
+    return _compiled_with(
+        policy_view=_clone(transaction._policy_view, snapshot_view=leaky_view)
+    )
 
 
 def blind_record_key(root, rec, purpose, **kw):
