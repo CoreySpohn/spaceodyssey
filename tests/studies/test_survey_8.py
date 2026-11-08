@@ -272,7 +272,7 @@ def stopped():
     return study, _run(study)
 
 
-@pytest.mark.medium  # merge-time guard: the study and its reference, host executor
+@pytest.mark.slow  # the dry-asset study compiles the executor, 33 s cold
 def test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected(stopped):
     """Rows (a) to (d). Fails if the policy does not stop the dry asset or stops
     it before it is dry, if the refusal code does not change across the Stop, if the

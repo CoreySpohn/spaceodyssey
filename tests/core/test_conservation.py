@@ -39,19 +39,33 @@ def _run(study, n_steps=80):
     return SimpleNamespace(study=study, carry=result.carry, trace=result.trace)
 
 
+class _Runs(dict):
+    """The runs by case, each made on first use."""
+
+    def __missing__(self, name):
+        self[name] = _run(refund_study(CANCELLED, **CASES[name]))
+        return self[name]
+
+
 @pytest.fixture(scope="module")
 def runs():
-    return {n: _run(refund_study(CANCELLED, **kw)) for n, kw in CASES.items()}
+    return _Runs()
 
 
-@pytest.mark.parametrize("name", CASES)
+# the plain study has no surcharge, so it compiles the executor again, 14 s cold
+QUICK_CASES = [
+    pytest.param(n, marks=pytest.mark.slow) if n == "plain" else n for n in CASES
+]
+
+
+@pytest.mark.parametrize("name", QUICK_CASES)
 def test_every_account_agrees_after_pricing_cancels_and_refunds(runs, name):
     """Fails if a charge component or a credit moves the balance without the ledger."""
     result = balance_conserved(runs[name])
     assert result.passed, result
 
 
-@pytest.mark.parametrize("name", CASES)
+@pytest.mark.parametrize("name", QUICK_CASES)
 def test_each_row_nets_debits_and_refunds(runs, name):
     """Final balance is initial minus debited plus refunded, in every row."""
     run = runs[name]
@@ -116,6 +130,7 @@ def test_a_receipt_row_that_loses_its_negative_charge_is_caught(runs):
     assert not balance_conserved(forged).passed
 
 
+@pytest.mark.slow  # a one-row log is static: each study compiles, 17 s cold
 def test_the_check_still_holds_when_the_log_overflows():
     """A one-row log refuses the receipt; the trace accounts the lost completion."""
     study = refund_study(
@@ -125,6 +140,7 @@ def test_the_check_still_holds_when_the_log_overflows():
     assert result.passed, result
 
 
+@pytest.mark.slow  # a one-row log is static: each study compiles, 17 s cold
 def test_a_lost_completion_is_charged_to_the_program_that_paid_it():
     """Two programs, a one-row log: the refused completion belongs to program 1."""
     script = (observe(0, 0, 10, 1), wait(1, 200), observe(2, 0, 10, 1))
@@ -139,6 +155,7 @@ def test_a_lost_completion_is_charged_to_the_program_that_paid_it():
     assert result.passed, result
 
 
+@pytest.mark.slow  # a one-row log is static: each study compiles, 17 s cold
 def test_a_debit_moved_to_the_wrong_program_is_caught_after_an_overflow():
     """Fails if the lost completion's program is read from the counters it checks."""
     script = (observe(0, 0, 10, 1), wait(1, 200), observe(2, 0, 10, 1))

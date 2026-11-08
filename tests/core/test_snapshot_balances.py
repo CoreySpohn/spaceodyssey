@@ -252,7 +252,7 @@ def test_a_balance_quantum_that_is_not_a_positive_finite_float_is_refused(quantu
 # ---- the hosted path ------------------------------------------------------------
 
 
-@pytest.mark.medium  # one study, both executors, 13 s cold alone
+@pytest.mark.slow  # one study on both executors, 38 to 55 s cold
 def test_a_hosted_run_with_balances_on_answers_its_query_on_both_executors():
     """Fails if the rebuilt snapshot fingerprint differs from the request's, or the
     two executors disagree on a fingerprint that now holds the balance.
@@ -666,7 +666,7 @@ def _refund_run(on, n_requests, n_stale, quantum=1.0):
     return host_service, host
 
 
-@pytest.mark.medium  # two compiles, both executors, 10 s cold alone
+@pytest.mark.slow  # one study on both executors, 38 to 55 s cold
 def test_a_query_made_stale_by_a_queued_refund_is_refused_and_asked_again():
     """Fails with 'the snapshot changed between the request and its answer' if the
     stale request is held, or if it is answered on a state the policy did not read.
@@ -858,7 +858,7 @@ class _ReceiptLearner(_Script):
         return jnp.minimum(view.n_dec, 4)
 
 
-@pytest.mark.medium  # two compiles, both executors
+@pytest.mark.slow  # one study on both executors, 38 to 55 s cold
 def test_a_receipt_released_between_a_decision_and_its_request_refuses_the_query():
     """Fails if a refund credited by a receipt released ahead of the request is
     answered on a state the policy did not read: the request is stale, refused once, and

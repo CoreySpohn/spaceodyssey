@@ -43,16 +43,31 @@ def _run(study):
     return HostExecutor().run(study, truth, root, 80)
 
 
+class _Runs(dict):
+    """The runs by pricing mode, each made on first use."""
+
+    def __missing__(self, name):
+        self[name] = _run(refund_study(CANCELLED, **MATRIX[name][0]))
+        return self[name]
+
+
 @pytest.fixture(scope="module")
 def runs():
-    return {n: _run(refund_study(CANCELLED, **kw)) for n, (kw, *_) in MATRIX.items()}
+    return _Runs()
 
 
 def _balance(run):
     return float(np.asarray(run.carry.ledger.balance)[0, 0])
 
 
-@pytest.mark.parametrize("name", MATRIX)
+@pytest.mark.parametrize(
+    "name",
+    [
+        # the occupancy study is the default one, so it shares the compile below
+        n if n == "occupancy" else pytest.param(n, marks=pytest.mark.slow)
+        for n in MATRIX
+    ],
+)
 def test_a_halfway_cancel_retains_what_the_pricing_mode_spends(runs, name):
     """Occupancy and statistical keep half, flat keeps all, a surcharge stays fixed."""
     _, balance, retained, fixed = MATRIX[name]
@@ -63,6 +78,7 @@ def test_a_halfway_cancel_retains_what_the_pricing_mode_spends(runs, name):
     assert float(log.nonrefundable[0, 0]) == pytest.approx(fixed)
 
 
+@pytest.mark.slow  # the refunds-off study compiles the executor on its own, 18 s cold
 def test_without_refunds_the_cost_is_debited_and_no_column_exists():
     """The default path: charge is not read, the refund columns are absent."""
     study = refund_study(CANCELLED, charge=3.0, refunds=False, failure=None)

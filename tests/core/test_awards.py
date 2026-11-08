@@ -157,6 +157,7 @@ def test_an_allocate_grants_the_amount_and_opens_the_window():
     assert int(_codes(run, EventKind.WAIT)[1][0]) == OK
 
 
+@pytest.mark.slow  # the awards-off control compiles a study, 12 s cold
 def test_a_window_end_event_exists_only_once_an_award_is_issued():
     """Fails if a study without awards queues an expiry, or one with them lacks it."""
     ends = _window_ends(_run("forfeit"))
@@ -430,6 +431,7 @@ def _record_award_gens(run):
     return np.asarray(log.award_gens)[np.asarray(log.valid)].tolist()
 
 
+@pytest.mark.slow  # its own refund study compiles the executor, 20 s cold
 def test_a_completion_records_the_generation_of_every_row_it_drew_from():
     """Fails if the record keeps one generation instead of one per payer slot.
 
@@ -446,6 +448,7 @@ def test_a_completion_records_the_generation_of_every_row_it_drew_from():
     assert _record_award_gens(run) == [[0, 1, 0]]
 
 
+@pytest.mark.slow  # its own refund study compiles the executor, 20 s cold
 def test_two_awarded_payers_each_keep_their_own_generation():
     """Fails if the generation of a second awarded payer row is lost.
 
@@ -487,6 +490,7 @@ def _reshaped(shape):
     return Shaped
 
 
+@pytest.mark.slow  # each reshaped policy compiles the executor, 35 s cold each
 @pytest.mark.parametrize("shape", [(3,), (3, 1)])
 def test_a_malformed_amount_shape_is_refused_as_unsupported(shape):
     """Fails if a vector that broadcasts into every resource is credited."""
@@ -503,6 +507,7 @@ def test_a_malformed_amount_shape_is_refused_as_unsupported(shape):
     assert float(np.asarray(run.carry.ledger.balance)[P0, PROGRAM_COL]) == 0.0
 
 
+@pytest.mark.slow  # static balance capacities: each variant compiles, 25 s cold
 def test_an_award_past_the_representable_balance_range_is_refused():
     """Fails if an Allocate can take a row above S4's exact range (2**53 quanta).
 
@@ -537,6 +542,7 @@ def test_an_award_past_the_representable_balance_range_is_refused():
     assert np.asarray(srun.trace.admit_code)[sa].tolist() == [OK]
 
 
+@pytest.mark.slow  # static balance capacities: each variant compiles, 25 s cold
 @pytest.mark.parametrize("quantum", [1.0, 0.125, 10.0])
 def test_opposite_budgets_do_not_offset_in_the_range_bound(quantum):
     """Fails if a negative budget row lowers the supply the range bound measures.
@@ -570,6 +576,7 @@ def test_opposite_budgets_do_not_offset_in_the_range_bound(quantum):
     assert small == [AdmissionCode.UNSUPPORTED], "any negative budget is refused"
 
 
+@pytest.mark.slow  # static balance capacities: each variant compiles, 25 s cold
 @pytest.mark.parametrize("quantum", [1.0, 0.125, 10.0])
 def test_a_negative_reallocation_cannot_create_headroom(quantum):
     """Fails if a negative balance reallocated twice lets an award pass 2**53 quanta.
@@ -601,6 +608,7 @@ def test_a_negative_reallocation_cannot_create_headroom(quantum):
     assert float(np.asarray(run.carry.ledger.balance)[P0, PROGRAM_COL]) < top
 
 
+@pytest.mark.slow  # a study with a large award compiles the executor, 21 s cold
 def test_a_large_award_without_snapshot_balances_is_admitted():
     """Control: the range rule binds only when balances are in the snapshot."""
     study = award_study((wait(0, 10), end(5)), (award(0, 2, P0, 0, 200, 1e20),))
@@ -610,6 +618,7 @@ def test_a_large_award_without_snapshot_balances_is_admitted():
     assert np.asarray(t.admit_code)[allocs].tolist() == [OK]
 
 
+@pytest.mark.slow  # compiles admission with balances in the snapshot, 15 s cold
 def test_an_allocate_mixed_with_a_query_is_refused_whole():
     """Fails if S4's mixed-Query guard stops covering Allocate when awards are on."""
     from spaceodyssey import core
@@ -640,6 +649,7 @@ def _refund_run(receipt_tick):
     return _host(study, n_steps=60)
 
 
+@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 def test_a_refund_after_the_expiry_is_replayed_and_conserves():
     """Control: the replay credits the late refund and agrees with the ledger."""
     run = _refund_run(350)
@@ -648,6 +658,7 @@ def test_a_refund_after_the_expiry_is_replayed_and_conserves():
     assert balance_conserved(run).passed
 
 
+@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 def test_a_refund_before_the_expiry_is_replayed_and_conserves():
     """Control: a refund that lands inside the window raises what the expiry takes."""
     run = _refund_run(250)
@@ -658,6 +669,7 @@ def test_a_refund_before_the_expiry_is_replayed_and_conserves():
     )
 
 
+@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 @pytest.mark.parametrize("tick", [250, 350])
 def test_a_paired_forged_expiry_is_caught_when_the_run_holds_a_refund(tick):
     """Fails if a receipt in the log switches the expiry reconciliation off."""
@@ -669,6 +681,7 @@ def test_a_paired_forged_expiry_is_caught_when_the_run_holds_a_refund(tick):
     assert not balance_conserved(forged).passed
 
 
+@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 def test_a_refund_credited_to_another_programs_row_is_caught():
     """Fails if a refund that lands on the wrong program's row conserves."""
     run = _refund_run(350)
@@ -711,6 +724,7 @@ def _two_program_run():
     return _host(study, n_steps=60)
 
 
+@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 def test_a_refund_routed_to_another_acquisition_in_both_places_is_caught():
     """Fails if the replay trusts the handler's `refund_of` to find the origin.
 
@@ -746,6 +760,7 @@ def test_a_refund_routed_to_another_acquisition_in_both_places_is_caught():
     assert not balance_conserved(forged).passed
 
 
+@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 @pytest.mark.parametrize(
     "receipts",
     [
@@ -766,6 +781,7 @@ def test_receipts_that_apply_nothing_do_not_fail_conservation(receipts):
     assert (kinds == 50).any(), "the receipt reached the log"
 
 
+@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 def test_a_record_naming_a_newer_award_generation_is_caught():
     """Fails if the replay accepts a record whose payer generation is not the row's.
 
@@ -786,6 +802,7 @@ def test_a_record_naming_a_newer_award_generation_is_caught():
     assert not balance_conserved(forged).passed
 
 
+@pytest.mark.slow  # stops a scenario run early, which compiles again, 20 s cold
 def test_a_pending_acquisition_at_the_expiry_is_replayed_without_its_record():
     """Fails if an admission debit with no record yet is missing from the replay.
 
@@ -821,6 +838,7 @@ def test_an_award_to_a_program_row_does_not_crash_the_conservation_check():
     assert balance_conserved(run).passed
 
 
+@pytest.mark.slow  # static balance capacities: each variant compiles, 25 s cold
 def test_an_allocate_after_a_debit_cannot_pass_the_representable_supply():
     """Fails if refunds or reallocations can carry a row past 2**53 quanta.
 

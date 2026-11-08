@@ -154,7 +154,7 @@ def alternate():
     return study, _run(study)
 
 
-@pytest.mark.medium  # the merge-time guard: one study, one host run
+@pytest.mark.slow  # the two-program study compiles the executor, 15 s cold
 def test_alternating_programs_keep_independent_balances_and_a_stop_spares_the_other(
     alternate,
 ):

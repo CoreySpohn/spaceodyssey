@@ -391,7 +391,7 @@ def _policy_rows(carry, study):
     return written(view.log, n), view
 
 
-@pytest.mark.medium  # one compiled program, three tables of one shape
+@pytest.mark.slow  # one compiled program, three tables of one shape, 19 s cold
 def test_an_observer_only_row_moves_no_public_identity_and_order_moves_none():
     """Fails if inserting an observer-only source changes a public row's identity or
     fold key, a policy snapshot fingerprint, a decision or the final policy view; or
