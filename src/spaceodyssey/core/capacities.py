@@ -14,12 +14,6 @@ from spaceodyssey.core.events import _order_key_py
 # hash.
 OPTIONAL = {"optional": True}
 
-# Field metadata for a number held as an array so that its value is traced (a new value
-# reuses the compiled program) but written in a document as the plain number or tuple
-# the field took before it was an array, so every earlier document keeps its hash. The
-# field's converter makes the array back when a document loads.
-PLAIN_VALUE = {"plain_value": True}
-
 PEDIGREE_HEAD = 3  # audience, refit status, row count
 PEDIGREE_TRIPLE = 3  # channel, acquisition index, revision
 

@@ -9,6 +9,7 @@ from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.carry import empty_trace, init_carry
 from spaceodyssey.core.enums import Audience
 from spaceodyssey.core.executors.base import AbstractExecutor, RunResult, index_world
+from spaceodyssey.core.lift import lift_traced
 from spaceodyssey.core.refresh import answer_refresh
 from spaceodyssey.core.service import answer_pending
 from spaceodyssey.core.snapshot import effects_none, snapshot_view
@@ -39,11 +40,11 @@ class HostExecutor(AbstractExecutor):
 
     def advance(self, carry, root, study, truth, *, wake_fn=wake_by_audience):
         """Advance one event with the shared handler table."""
-        return _adv(carry, root, study, truth, wake_fn=wake_fn)
+        return _adv(carry, root, lift_traced(study), truth, wake_fn=wake_fn)
 
     def decide(self, carry, root, study):
         """Run the policy of the current phase."""
-        return _dec(carry, root, study)
+        return _dec(carry, root, lift_traced(study))
 
     def run(
         self,
@@ -70,6 +71,7 @@ class HostExecutor(AbstractExecutor):
         `AbstractRefitBoundary`), in the iteration that held it.
         """
         require_x64()
+        study = lift_traced(study)
         adv = lambda c, r, s, t: self.advance(c, r, s, t, wake_fn=wake_fn)  # noqa: E731
         dec, adm, close, fin = self.decide, _adm, _close, _fin
         carry = _init(study, truths)

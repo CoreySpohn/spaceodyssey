@@ -11,6 +11,7 @@ from spaceodyssey.core.carry import empty_trace, init_carry
 from spaceodyssey.core.enums import I64
 from spaceodyssey.core.events import where_tree
 from spaceodyssey.core.executors.base import AbstractExecutor, RunResult, index_world
+from spaceodyssey.core.lift import lift_traced
 from spaceodyssey.core.refresh import answer_refreshes
 from spaceodyssey.core.service import answer_pending
 from spaceodyssey.core.transaction import transition, wake_by_audience
@@ -133,6 +134,7 @@ class CompiledExecutor(AbstractExecutor):
         default (`bucket=None`) is the unchanged scan.
         """
         require_x64()
+        study = lift_traced(study)
         if bucket is not None and (
             isinstance(bucket, bool) or not isinstance(bucket, int) or bucket <= 0
         ):
