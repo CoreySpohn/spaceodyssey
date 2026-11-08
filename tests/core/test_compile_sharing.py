@@ -302,3 +302,103 @@ def test_lifting_refuses_a_value_the_dtype_cannot_hold(make, field, bad):
         CompiledExecutor().run(study, truths, roots, 10)
     with pytest.raises(ValueError, match=field):
         HostExecutor().run(study, index_world(truths, 0), roots[0], 10)
+
+
+def _stochastic(n_obs):
+    return toy.survey_1(policies=(toy.StochasticPolicy(theta=10.0, n_obs=n_obs),))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("ticks", (2**63, 2)),
+        ("ticks", (-(2**63) - 1, 2)),
+        ("ticks", (1.5, 2)),
+        ("ticks", (math.nan, 2)),
+        ("values", (2**53 + 1, 1.0)),
+        ("values", (10**400, 1.0)),
+    ],
+)
+def test_lifting_checks_each_number_exactly(field, value):
+    study = scripted.scripted_study(
+        ticks=(100, 200), values=(2.0, 9.0), ids=(7001, 7001), revisions=(0, 1)
+    )
+    study = dataclasses.replace(
+        study, process=dataclasses.replace(study.process, **{field: value})
+    )
+    with pytest.raises(ValueError, match=field):
+        lift_traced(study)
+
+
+def test_lifting_keeps_exact_large_numbers():
+    study = scripted.scripted_study(
+        ticks=(2**53 + 1, 2**62), values=(2**53, 9.0), ids=(7001, 7002)
+    )
+    lifted = lift_traced(study).process
+    assert [int(t) for t in lifted.ticks] == [2**53 + 1, 2**62]
+    mixed = dataclasses.replace(study.process, ticks=(2**53 + 1, 2.0))
+    assert [int(t) for t in lift_traced(mixed).ticks] == [2**53 + 1, 2]
+    assert lifted.ticks.dtype == jnp.int64 and lifted.values.dtype == jnp.float64
+    assert float(lifted.values[0]) == 2.0**53
+
+
+def _query_at_dtype(query_at):
+    policy = oracle.QueryPolicy(
+        inner=toy.FixedPlanPolicy(plan=oracle.DEFAULT_PLAN),
+        query_at=query_at,
+        subject=0,
+    )
+    return lift_traced(policy).query_at.dtype
+
+
+def test_a_narrower_integer_tracer_widens_under_jit_and_vmap():
+    one = jnp.asarray(1, jnp.int32)
+    assert jax.jit(lambda q: jnp.zeros((), _query_at_dtype(q)))(one).dtype == jnp.int64
+    many = jnp.asarray([1, 2], jnp.int32)
+    out = jax.vmap(lambda q: jnp.zeros((), _query_at_dtype(q)))(many)
+    assert out.dtype == jnp.int64
+    with pytest.raises(ValueError, match="query_at"):
+        jax.jit(lambda q: jnp.zeros((), _query_at_dtype(q)))(jnp.asarray(1.5))
+
+
+def test_step_and_decision_fingerprint_share_one_program_across_values(monkeypatch):
+    import equinox as eqx
+
+    from spaceodyssey import core
+    from spaceodyssey.core import handlers, transaction
+
+    jax.clear_caches()  # a program cached by an earlier test would hide the count
+    study = _threshold(3.0)
+    truths, roots = make_worlds(study, 1)
+    truth = core.index_world(truths, 0)
+    carry = eqx.filter_jit(core.init_carry)(study, truth)
+    carry, ev, _ = core.select_next(carry, study.caps)
+    values = (3.0, 4.0, 5.0)
+
+    original = handlers.HANDLERS[0]
+    count = {"n": 0}
+
+    def counted(*args, **kw):
+        count["n"] += 1
+        return original(*args, **kw)
+
+    monkeypatch.setattr(handlers, "HANDLERS", (counted, *handlers.HANDLERS[1:]))
+    seen = []
+    for x in values:
+        core.step(carry, ev, _threshold(x), truth, roots[0])
+        seen.append(count["n"])
+    assert seen == [1, 1, 1]
+
+    original_fp = transaction._policy_fingerprint
+    fp = {"n": 0}
+
+    def counted_fp(*args, **kw):
+        fp["n"] += 1
+        return original_fp(*args, **kw)
+
+    monkeypatch.setattr(transaction, "_policy_fingerprint", counted_fp)
+    seen = []
+    for x in values:
+        core.decision_fingerprint(carry, _threshold(x))
+        seen.append(fp["n"])
+    assert seen == [1, 1, 1]
