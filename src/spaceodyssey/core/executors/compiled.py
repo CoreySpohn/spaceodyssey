@@ -32,6 +32,32 @@ def _scan_worlds(executor, study, truths, roots, wake_fn, n_steps):
 
 
 @eqx.filter_jit
+def _scan_bucket(executor, study, truths, roots, wake_fn, budget, n_rows):
+    """The default scan with `n_rows` fixed and the step count a traced `budget`.
+
+    Rows after the first `budget` take no step and emit an empty trace row, so one
+    program serves every step count up to `n_rows`. The initial carry is built inside
+    the program, as in `_scan_worlds`: a program that takes the carry as an input
+    compiles the same arithmetic to different last bits.
+    """
+
+    def one(truth, root):
+        def body(state, i):
+            c, left = state
+            go = left > 0
+            c2, tr = executor.transition(c, i, root, study, truth, wake_fn=wake_fn)
+            tr = where_tree(go, tr, empty_trace(study.caps))
+            return (where_tree(go, c2, c), left - go.astype(I64)), tr
+
+        (c, _), trace = lax.scan(
+            body, (init_carry(study, truth), budget), jnp.arange(n_rows)
+        )
+        return c, trace
+
+    return jax.vmap(one)(truths, roots)
+
+
+@eqx.filter_jit
 def _init_worlds(study, truths):
     return jax.vmap(init_carry, in_axes=(None, 0))(study, truths)
 
@@ -82,6 +108,7 @@ class CompiledExecutor(AbstractExecutor):
         service=None,
         refit=None,
         chunk=32,
+        bucket=None,
     ):
         """Run a batch of worlds for a fixed number of steps.
 
@@ -97,12 +124,26 @@ class CompiledExecutor(AbstractExecutor):
         `AbstractRefitBoundary`), then the scan resumes. With a checkpointing study and
         no `refit`, each world stops at its first checkpoint and reports
         `RunStatus.AWAITING`.
+
+        With `bucket` (an int) and neither of those, `n_steps` is rounded up to a
+        multiple of `bucket` for the compiled scan and the step count is passed as an
+        array, so every `n_steps` in the same bucket reuses one program instead of
+        compiling its own. Steps past `n_steps` are not taken and the trace is cut to
+        `n_steps` rows: the carry and trace are the default path's, bit for bit. The
+        default (`bucket=None`) is the unchanged scan.
         """
         require_x64()
         if service is not None or int(study.refresh.every_ticks) > 0:
             return self._run_hosted(
                 study, truths, roots, n_steps, wake_fn, service, refit, chunk
             )
+        if bucket is not None and n_steps > 0:
+            rows = -(-n_steps // bucket) * bucket
+            carry, trace = _scan_bucket(
+                self, study, truths, roots, wake_fn, jnp.asarray(n_steps, I64), rows
+            )
+            trace = jax.tree_util.tree_map(lambda x: x[:, :n_steps], trace)
+            return RunResult(carry, trace, study.observer.layout(study.caps), roots)
         carry, trace = _scan_worlds(self, study, truths, roots, wake_fn, n_steps)
         return RunResult(carry, trace, study.observer.layout(study.caps), roots)
 
