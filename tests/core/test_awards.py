@@ -37,7 +37,7 @@ from spaceodyssey.core.enums import (
 from spaceodyssey.core.events import empty_event_row
 from spaceodyssey.core.snapshot import EffectTable
 from spaceodyssey.studies import toy
-from tests.core.award_helpers import award, award_study
+from tests.core.award_helpers import ScriptedAwards, award, award_study
 from tests.core.helpers import one_world, worlds
 from tests.core.program_helpers import end, observe, wait
 
@@ -381,3 +381,175 @@ def test_the_host_and_compiled_executors_make_the_same_history():
     for w in range(2):
         report = histories_equal(compiled.history(w), host.history(w))
         assert report, report
+
+
+# ---- review round 1: generation capture, expiry replay, shapes, range ---------------
+
+
+def test_a_paired_forged_expiry_is_caught():
+    """Fails if restoring a forfeited balance and erasing its lapse passes unnoticed.
+
+    The pair keeps balance, granted and lapsed mutually consistent, so only a replay of
+    the award, its window and the debits inside it can tell the lapse was owed.
+    """
+    run = _run("forfeit")
+    ledger = run.carry.ledger
+    assert float(np.asarray(ledger.lapsed)[P0, PROGRAM_COL]) > 0.0
+    lapsed = np.asarray(ledger.lapsed)[P0, PROGRAM_COL]
+    bump = jnp.zeros_like(ledger.balance).at[P0, PROGRAM_COL].set(lapsed)
+    assert balance_conserved(run).passed
+    forged = _forged(run, balance=ledger.balance + bump, lapsed=ledger.lapsed - bump)
+    assert not balance_conserved(forged).passed
+
+
+def test_the_paired_forged_expiry_is_caught_for_a_reallocation():
+    """Fails if moving a reallocated balance back and un-granting it passes."""
+    run = _run("realloc")
+    ledger = run.carry.ledger
+    moved = float(np.asarray(ledger.granted)[P1, PROGRAM_COL])
+    assert moved > 0.0
+    bump = jnp.zeros_like(ledger.balance).at[P0, PROGRAM_COL].set(moved)
+    drop = jnp.zeros_like(ledger.balance).at[P1, PROGRAM_COL].set(moved)
+    forged = _forged(
+        run,
+        balance=ledger.balance + bump - drop,
+        lapsed=ledger.lapsed - bump,
+        granted=ledger.granted - drop,
+    )
+    assert not balance_conserved(forged).passed
+
+
+def _record_award_gens(run):
+    log = run.carry.log
+    return np.asarray(log.award_gen)[np.asarray(log.valid)].tolist()
+
+
+def test_a_completion_records_the_generation_of_the_row_it_drew_from():
+    """Fails if the award generation is the asset row's instead of the program's.
+
+    Row 2 is awarded for [0, 200), so its generation is 1 at the debit; the asset row
+    never held a window and stays at 0. The record must hold 1.
+    """
+    study = award_study(
+        (wait(0, 10), observe(1, 0, 10, 0), end(5)),
+        (award(0, 2, P0, 0, 200, 5),),
+        refunds=True,
+    )
+    run = _host(study)
+    assert np.asarray(run.carry.ledger.win_gen)[0] == 0
+    assert _record_award_gens(run) == [1]
+
+
+def test_the_captured_generation_differs_from_the_asset_rows():
+    """Fails if the repro cannot tell the drawn row from the asset row.
+
+    Run until the award is open (before its expiry): the helper must return the
+    program row's generation, which a mutant capturing the asset row would not.
+    """
+    from spaceodyssey.core import transaction
+
+    study = award_study(
+        (wait(0, 10), observe(1, 0, 10, 0), end(5)),
+        (award(0, 2, P0, 0, 200, 5),),
+        refunds=True,
+    )
+    run = _host(study, n_steps=3)
+    c = run.carry
+    rows = jnp.asarray([0, P0, study.caps.n_balance_rows - 1])
+    drawn = int(transaction._award_generation(c, rows, study, 0))
+    asset = int(c.ledger.win_gen[0])
+    assert (drawn, asset) == (1, 0)
+
+
+class _Reshaped(ScriptedAwards):
+    """The scripted awards, with the amount column reshaped to `shape`."""
+
+    shape: tuple = eqx.field(static=True, default=(3,))
+
+    def decide(self, pstate, view, study, key):
+        eff, ps, u = super().decide(pstate, view, study, key)
+        flat = eff.amount.sum(axis=1) if len(self.shape) == 1 else eff.amount[:, :1]
+        return dataclasses.replace(eff, amount=flat), ps, u
+
+
+def _reshaped(shape):
+    class Shaped(_Reshaped):
+        pass
+
+    Shaped.__dataclass_fields__["shape"].default = shape
+    return Shaped
+
+
+@pytest.mark.parametrize("shape", [(3,), (3, 1)])
+def test_a_malformed_amount_shape_is_refused_as_unsupported(shape):
+    """Fails if a vector that broadcasts into every resource is credited."""
+    study = award_study(
+        (wait(0, 10), end(5)),
+        (award(0, 2, P0, 0, 200, 5),),
+        policy_cls=_reshaped(shape),
+    )
+    run = _host(study)
+    t = run.trace
+    allocs = _handled(run)[:, None] & (np.asarray(t.eff_kind) == EffectKind.ALLOCATE)
+    assert np.asarray(t.admit_code)[allocs].tolist() == [AdmissionCode.UNSUPPORTED]
+    assert float(np.asarray(run.carry.ledger.granted).sum()) == 0.0
+    assert float(np.asarray(run.carry.ledger.balance)[P0, PROGRAM_COL]) == 0.0
+
+
+def test_an_award_past_the_representable_balance_range_is_refused():
+    """Fails if an Allocate can take a row above S4's exact range (2**53 quanta).
+
+    With balances in the snapshot, both 1e20 and 1e21 would read as the same clamped
+    value. A small award is the control: it is admitted under the same capacities.
+    """
+    big = (
+        (wait(0, 10), wait(1, 20), wait(2, 30), end(5)),
+        (
+            award(0, 2, P0, 0, 200, 1e20),
+            award(1, 2, P0, 0, 200, 1e21),
+            award(2, 2, P0, 0, 200, 3.0),
+        ),
+    )
+    study = award_study(*big, caps_extra={"snapshot_balances": True})
+    run = _host(study)
+    t = run.trace
+    allocs = _handled(run)[:, None] & (np.asarray(t.eff_kind) == EffectKind.ALLOCATE)
+    codes = np.asarray(t.admit_code)[allocs].tolist()
+    assert codes[0] == AdmissionCode.UNSUPPORTED
+    assert codes[1] == AdmissionCode.UNSUPPORTED
+    assert float(np.asarray(run.carry.ledger.balance)[P0].max()) < 2.0**53
+    small = award_study(
+        (wait(0, 10), end(5)),
+        (award(0, 2, P0, 0, 200, 3.0),),
+        caps_extra={"snapshot_balances": True},
+    )
+    srun = _host(small)
+    sa = _handled(srun)[:, None] & (
+        np.asarray(srun.trace.eff_kind) == EffectKind.ALLOCATE
+    )
+    assert np.asarray(srun.trace.admit_code)[sa].tolist() == [OK]
+
+
+def test_a_large_award_without_snapshot_balances_is_admitted():
+    """Control: the range rule binds only when balances are in the snapshot."""
+    study = award_study((wait(0, 10), end(5)), (award(0, 2, P0, 0, 200, 1e20),))
+    run = _host(study)
+    t = run.trace
+    allocs = _handled(run)[:, None] & (np.asarray(t.eff_kind) == EffectKind.ALLOCATE)
+    assert np.asarray(t.admit_code)[allocs].tolist() == [OK]
+
+
+def test_an_allocate_mixed_with_a_query_is_refused_whole():
+    """Fails if S4's mixed-Query guard stops covering Allocate when awards are on."""
+    from spaceodyssey import core
+
+    study = award_study(
+        (end(0),), (), caps_extra={"snapshot_balances": True, "balance_quantum": 1.0}
+    )
+    truth, _ = one_world(0, study.caps)
+    c0 = eqx.filter_jit(core.init_carry)(study, truth)
+    base = core.effects_none(study.caps)
+    kind = jnp.asarray([EffectKind.ALLOCATE, EffectKind.QUERY, EffectKind.NONE])
+    eff = dataclasses.replace(base, kind=kind.astype(base.kind.dtype))
+    _, codes = eqx.filter_jit(core.admit)(c0, eff, study)
+    assert codes.tolist()[:2] == [AdmissionCode.QUERY_MIXED] * 2
