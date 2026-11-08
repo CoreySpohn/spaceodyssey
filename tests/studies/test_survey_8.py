@@ -35,7 +35,7 @@ from spaceodyssey.core.records import log_columns
 from spaceodyssey.studies import toy
 from tests.core.conformance_helpers import ScriptedFaults
 from tests.core.helpers import worlds
-from tests.core.program_helpers import ScriptedPrograms, end, observe, wait
+from tests.core.program_helpers import ScriptedPrograms, observe, wait
 from tests.studies.survey_helpers import run_on, same_histories
 
 N_STEPS = 200
@@ -47,6 +47,12 @@ NO_FUNDS, CLOSED, BUSY = (
 DRY, WET = 0, 1  # the asset that runs out of fuel, the asset that does not
 LANES = {10: 0, 11: 1, 12: 2}  # channel id to lane
 FUEL_DRY, FUEL_WET, FUEL_FULL = 2.0, 10.0, 10.0
+COST = (
+    1.0,
+    1.0,
+    2.0,
+)  # fuel per channel 10, 11, 12: asset 1's work costs twice asset 0's
+LEVEL = 1  # the policy level of the study: it reads arrays and may Stop
 N_EFFECTS = 5  # three scripted rows, the wait, and the slot the policy's Stop takes
 
 # Ticks of the script (a decision runs at each: the waits chain them).
@@ -70,7 +76,6 @@ SCRIPT = (
     observe(AFTER, 1, 11, 0),
     observe(AFTER, 2, 12, 0),
     wait(AFTER, FINISH - AFTER),
-    end(FINISH),
 )
 
 
@@ -126,15 +131,18 @@ class FuelWatch(ScriptedPrograms):
 def survey_study(*, fuel=FUEL_DRY, stops=True, faults=((FAULT_TICK, 2, 2, 2),)):
     """The toy study with two assets, fuel only, balances on, and the scripted faults.
 
-    Every channel costs one unit of fuel and nothing else, so the program and shared
-    rows never move. A fault row is `(tick, lane, channel index, generation)`.
+    Channels 10 and 11 cost one unit of fuel and channel 12 two, and nothing else is
+    charged, so the program and shared rows never move and a debit booked to the wrong
+    asset shows in the balances. The agenda is at level 1. A fault row is
+    `(tick, lane, channel index, generation)`.
     """
     caps = Capacities(n_effects=N_EFFECTS, snapshot_balances=True)
     study = toy.survey_1(caps=caps, policies=(FuelWatch(script=SCRIPT, stops=stops),))
-    cost = jnp.zeros_like(study.channels.cost).at[:, 0].set(1.0)
+    cost = jnp.zeros_like(study.channels.cost).at[:, 0].set(jnp.asarray(COST))
     channels = dataclasses.replace(study.channels, cost=cost, charge=cost)
     budget = study.budget.at[DRY, 0].set(fuel).at[WET, 0].set(FUEL_WET)
     study = dataclasses.replace(study, channels=channels, budget=budget)
+    study = eqx.tree_at(lambda s: s.agenda.levels, study, jnp.asarray([LEVEL]))
     process = ScriptedFaults(
         rows=faults,
         tie=int(fault_tie(study.channels, 0)),
@@ -174,13 +182,35 @@ def _outcomes(world):
     return out
 
 
-def _stop_ticks(world):
-    """Ticks of every Stop effect the run handled, in order."""
+def _stop_effects(world):
+    """Every Stop effect the run handled, in order: `[(tick, admission code)]`."""
     t = world.trace
-    steps = np.flatnonzero(
-        np.asarray(t.handled) & (np.asarray(t.eff_kind) == EffectKind.STOP).any(axis=1)
-    )
-    return [int(np.asarray(t.tick)[s]) for s in steps]
+    keep = np.asarray(t.handled)[:, None] & (np.asarray(t.eff_kind) == EffectKind.STOP)
+    steps, slots = np.nonzero(keep)
+    return [
+        (int(np.asarray(t.tick)[s]), int(np.asarray(t.admit_code)[s, e]))
+        for s, e in zip(steps, slots, strict=True)
+    ]
+
+
+def _stop_ticks(world):
+    """The tick of each Stop effect the run handled, in order."""
+    return [tick for tick, _ in _stop_effects(world)]
+
+
+def _reconciled(study, world):
+    """Each fuel row as its budget less what the retained records charged its lanes.
+
+    Reads the records and the budget, not the ledger's counters, so a debit booked to
+    the wrong asset shows as a gap. Returns the largest gap and the charges summed.
+    """
+    rows = _records(world, study)
+    expected = np.asarray(study.budget, float)[:, 0].copy()
+    asset_of = np.asarray(study.assets.lane_asset)
+    for lane, charged in zip(rows["lane"], rows["charged"][:, 0], strict=True):
+        expected[asset_of[lane]] -= charged
+    gap = np.abs(expected - np.asarray(world.carry.ledger.balance)[:, 0]).max()
+    return float(gap), len(rows["lane"])
 
 
 def _records(world, study, lane=None):
@@ -200,6 +230,11 @@ def _admit_ticks(study, rows):
     return rows["start_tick"] - np.asarray(study.assets.transition_ticks)[rows["lane"]]
 
 
+def _closed(world):
+    """The lane-closed flags at the end of the run."""
+    return [bool(x) for x in np.asarray(world.carry.ledger.lane_closed)]
+
+
 def _assert_a_and_b(world, study):
     """Rows (a) and (b): one policy Stop after the exhaustion tick, and the refusals
     change from `NO_FUNDS` to the closure code across it.
@@ -210,12 +245,16 @@ def _assert_a_and_b(world, study):
         np.isin(_records(world, study)["lane"], (0, 1))
     ]
     exhausted = int(np.sort(on_dry)[int(FUEL_DRY) - 1])  # the tick of the last fuel
-    stops = _stop_ticks(world)
-    asset_stops = [t for t in stops if t < FINISH]
-    # (a) the Stop effect exists, once, and comes after the exhaustion tick
+    stops = _stop_effects(world)
+    # (a) one Stop effect in the whole run, admitted, after the exhaustion tick; it
+    # closed the lanes of the dry asset (0 and 1) and no other lane, which is what an
+    # asset-scope Stop on that asset does and two lane Stops or another asset do not
     assert exhausted == SECOND
-    assert len(asset_stops) == 1
+    assert len(stops) == 1
+    assert stops[0][1] == AdmissionCode.OK
+    asset_stops = [stops[0][0]]
     assert asset_stops[0] > exhausted
+    assert _closed(world) == [True, True, False]
     # (b) before it the refusal is NO_FUNDS, after it the closure code
     before = [
         c for (t, _), c in out.items() if t <= asset_stops[0] and c != AdmissionCode.OK
@@ -235,12 +274,13 @@ def stopped():
 
 @pytest.mark.medium  # merge-time guard: the study and its reference, host executor
 def test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected(stopped):
-    """B7 row 8 (a) to (d). Fails if the policy does not stop the dry asset or stops
+    """Rows (a) to (d). Fails if the policy does not stop the dry asset or stops
     it before it is dry, if the refusal code does not change across the Stop, if the
     other asset's records or balances differ from a run with fuel, or if the fault on
     its lane does anything but fail the work on that lane.
     """
     study, host = stopped
+    assert study.agenda.levels.tolist() == [LEVEL]
     assert int(np.asarray(host.carry.n_log)[0]) == 6 > 0
     world = _first_world(host)
     _assert_a_and_b(world, study)
@@ -248,6 +288,12 @@ def test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected(stopped)
     assert sum(c == AdmissionCode.OK for c in out.values()) == 6
     assert sum(c == NO_FUNDS for c in out.values()) == 1
     assert sum(c == CLOSED for c in out.values()) == 2
+    # each fuel row is the budget less the charges of its own lanes' records: asset 0
+    # paid 1 for each of two records, asset 1 paid 2 for each of four
+    gap, n_charged = _reconciled(study, world)
+    assert n_charged == 6
+    assert gap == 0.0
+    assert np.asarray(world.carry.ledger.balance)[:2, 0].tolist() == [0.0, 2.0]
 
     # (c) asset 1 is admitted after the exhaustion tick and after the Stop, and its
     # records and balances are those of the run in which asset 0 never ran dry
@@ -255,7 +301,8 @@ def test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected(stopped)
     admitted = _admit_ticks(study, rows)
     assert admitted.tolist() == [0, 120, 140, 230]
     assert (admitted > SECOND).sum() == 2
-    ref_host = _run(survey_study(fuel=FUEL_FULL))
+    ref_study = survey_study(fuel=FUEL_FULL)
+    ref_host = _run(ref_study)
     ref_world = _first_world(ref_host)
     ref = _records(ref_world, study, lane=2)
     assert ref.keys() == rows.keys()
@@ -269,10 +316,16 @@ def test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected(stopped)
     )
     others = [i for i in range(balance.shape[0]) if i != DRY]
     assert np.array_equal(balance[others], ref_balance[others])
-    assert balance[WET, 0] == FUEL_WET - 4
-    assert (
-        balance[DRY, 0] == 0.0 and ref_balance[DRY, 0] == FUEL_FULL - 4
-    )  # the dry run really differed
+    assert balance[WET, 0] == FUEL_WET - 4 * COST[2]
+    # the dry run really differed
+    assert balance[DRY, 0] == 0.0 and ref_balance[DRY, 0] == FUEL_FULL - 4
+    # the fault closes nothing of the first asset: in the run with fuel, where no Stop
+    # closes anything, no lane is closed and lane 1 is still busy at tick 230
+    assert _closed(ref_world) == [False, False, False]
+    ref_out = _outcomes(ref_world)
+    assert ref_out[(AFTER, 11)] == BUSY
+    assert ref_out[(AFTER, 10)] == ref_out[(AFTER, 12)] == AdmissionCode.OK
+    assert _reconciled(ref_study, ref_world) == (0.0, 8)
 
     # (d) the fault failed the work on lane 2 at its tick, charged in full, and the
     # work on lane 0 and its later requests on lane 2 are not affected: FAULT cancels
@@ -282,23 +335,24 @@ def test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected(stopped)
     assert failed.sum() == 1
     assert everything["lane"][failed].tolist() == [2]
     assert everything["end_tick"][failed].tolist() == [FAULT_TICK]
-    assert everything["charged"][failed][0, 0] == 1.0
+    assert everything["charged"][failed][0, 0] == COST[2]
     on_lane0 = everything["lane"] == 0
     assert on_lane0.sum() == 2
     assert (everything["status"][on_lane0] == RecordStatus.COMPLETED).all()
 
 
-@pytest.mark.slow  # one more host run of the same compiled shapes (K6)
+@pytest.mark.slow  # one more host run of the same compiled shapes
 def test_control_without_the_policy_stop_every_refusal_is_no_funds_and_row_b_fails():
     """Control for (a) and (b). The same study with the Stop removed refuses every
-    request on the dry asset `NO_FUNDS`, no Stop effect is emitted before the campaign
-    ends, and the assertions that row (a) and row (b) make fail on it.
+    request on the dry asset `NO_FUNDS`, no Stop effect is emitted, no lane is closed,
+    and the assertions that row (a) and row (b) make fail on it.
     """
     study = survey_study(stops=False)
     host = _run(study)
     world = _first_world(host)
     out = _outcomes(world)
-    assert [t for t in _stop_ticks(world) if t < FINISH] == []
+    assert _stop_effects(world) == []
+    assert _closed(world) == [False, False, False]
     assert sum(c == NO_FUNDS for c in out.values()) == 3  # the three asked of asset 0
     assert sum(c == CLOSED for c in out.values()) == 0
     assert out[(AFTER, 10)] == out[(AFTER, 11)] == NO_FUNDS
@@ -306,7 +360,7 @@ def test_control_without_the_policy_stop_every_refusal_is_no_funds_and_row_b_fai
         _assert_a_and_b(world, study)
 
 
-@pytest.mark.slow  # the compiled executor compiles every program again (K6)
+@pytest.mark.slow  # the compiled executor compiles every program again
 def test_both_executors_make_the_same_history_for_the_dry_asset_study(stopped):
     """Parity for (a) to (d): ints exact, floats in the go band, on both executors."""
     study, host = stopped
