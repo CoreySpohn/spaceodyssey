@@ -17,67 +17,46 @@ import jax.numpy as jnp
 import numpy as np
 
 
-def traced(dtype):
-    """Field metadata marking a number, or a tuple of numbers, to lift to `dtype`."""
-    return {"traced": dtype}
+def traced(dtype, *, sequence=False):
+    """Field metadata marking a number, or with `sequence` a tuple of them, to lift."""
+    return {"traced": dtype, "sequence": sequence}
 
 
-def _refuse(field, value, dtype):
-    return ValueError(
-        f"field {field!r} is {value!r}, which {np.dtype(dtype).name} "
-        "cannot hold exactly"
-    )
+def _number(v, want):
+    """One Python number as `want` holds it exactly, or None when it cannot be told."""
+    if hasattr(v, "dtype") or not isinstance(v, bool | int | float):
+        return None  # arrays, NumPy scalars, Fraction, Decimal and the like
+    if isinstance(v, float) and np.issubdtype(want, np.integer):
+        return None  # a float stays what it is, as it was before lifting
+    if not isinstance(v, float) and not (
+        np.iinfo(np.int64).min <= int(v) <= np.iinfo(np.int64).max
+    ):
+        return None  # a Python int past int64 is not a number the program ever held
+    if np.issubdtype(want, np.integer) or isinstance(v, float):
+        return int(v) if np.issubdtype(want, np.integer) else v
+    return float(v) if int(float(v)) == int(v) else None
 
 
-def _items(value):
-    """Nested lists of Python scalars from a tuple, list, array or scalar."""
-    if isinstance(value, tuple | list):
-        return [_items(v) for v in value]
-    return value.tolist() if hasattr(value, "tolist") else value
+def _lifted(value, dtype, sequence=False):
+    """`value` as an array of `dtype` when that is provably exact, else `value` itself.
 
-
-def _element(v, want):
-    """One Python number as `want` holds it, or None when that would change it."""
-    if isinstance(v, list):
-        out = [_element(x, want) for x in v]
-        return None if any(x is None for x in out) else out
-    if isinstance(v, bool | int):
-        n = int(v)
-    elif isinstance(v, float):
-        if np.issubdtype(want, np.integer):
-            if not v.is_integer():
-                return None
-            n = int(v)
-        else:
-            return v
-    else:
-        return None
-    if np.issubdtype(want, np.integer):
-        info = np.iinfo(want)
-        return n if info.min <= n <= info.max else None
-    try:
-        return float(n) if int(float(n)) == n else None
-    except OverflowError:
-        return None
-
-
-def _exact(field, value, dtype):
-    """`value` as an array of `dtype`, refusing any conversion that changes it.
-
-    Each element is checked as a Python number before NumPy sees it, so a large
-    integer is never rounded through a float and an out-of-range one is never clamped.
-    A JAX array or tracer is converted only by a safe cast.
+    Lifted: a Python int, bool or float for a number field, or a flat tuple or list of
+    them for a `sequence` field, each number checked on its own. Everything else is
+    handed on untouched, exactly as it was before lifting existed: arrays and tracers
+    (which are already arrays), other dtypes, NumPy scalars, object arrays, Fractions,
+    Decimals, nested or ragged sequences. Such a value only costs a compile of its own.
     """
     want = np.dtype(dtype)
-    if getattr(value, "weak_type", None) is not None:
-        if value.dtype == want:
-            return value  # already a JAX array of the dtype, or a tracer of one
-        if jnp.can_cast(value.dtype, want, casting="safe"):
-            return value.astype(want)
-        raise _refuse(field, value, dtype)
-    out = _element(_items(value), want)
-    if out is None:
-        raise _refuse(field, value, dtype)
+    if sequence:
+        if not isinstance(value, tuple | list):
+            return value
+        out = [_number(v, want) for v in value]
+        if any(v is None for v in out):
+            return value
+    else:
+        out = _number(value, want)
+        if out is None:
+            return value
     return jnp.asarray(np.array(out, dtype=want))
 
 
@@ -110,7 +89,11 @@ def lift_traced(node):
     for field in dataclasses.fields(node):
         value = getattr(node, field.name)
         dtype = field.metadata.get("traced")
-        new = lift_traced(value) if dtype is None else _exact(field.name, value, dtype)
+        new = (
+            lift_traced(value)
+            if dtype is None
+            else _lifted(value, dtype, field.metadata.get("sequence", False))
+        )
         if new is not value:
             changes[field.name] = new
     if not changes:

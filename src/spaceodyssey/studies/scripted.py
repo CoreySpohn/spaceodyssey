@@ -39,15 +39,15 @@ class ScriptedRecords(AbstractProcess):
 
     # Not static: lifted to arrays where a study enters a compiled call, so scripts
     # that differ only in numbers share a program; the number of fires stays part of it.
-    ticks: tuple[int, ...] = eqx.field(metadata=traced(I64))
-    values: tuple[float, ...] = eqx.field(metadata=traced(F64))
-    ids: tuple[int, ...] = eqx.field(metadata=traced(I64))
-    revisions: tuple[int, ...] = eqx.field(metadata=traced(I64))
-    statuses: tuple[int, ...] = eqx.field(metadata=traced(I64))
+    ticks: tuple[int, ...] = eqx.field(metadata=traced(I64, sequence=True))
+    values: tuple[float, ...] = eqx.field(metadata=traced(F64, sequence=True))
+    ids: tuple[int, ...] = eqx.field(metadata=traced(I64, sequence=True))
+    revisions: tuple[int, ...] = eqx.field(metadata=traced(I64, sequence=True))
+    statuses: tuple[int, ...] = eqx.field(metadata=traced(I64, sequence=True))
     audience: int = eqx.field(default=PUBLIC)
     channel: int = eqx.field(default=SCRIPTED_CHANNEL, static=True)
     # the kind of each fire's record; empty means every record is a measurement
-    kinds: tuple[int, ...] = eqx.field(default=(), metadata=traced(I64))
+    kinds: tuple[int, ...] = eqx.field(default=(), metadata=traced(I64, sequence=True))
 
     def __check_init__(self):
         """Refuse two fires that name one (scripted id, revision) pair."""
