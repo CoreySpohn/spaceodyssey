@@ -33,7 +33,7 @@ from tests.core.commitment_helpers import (
     priced,
 )
 from tests.core.helpers import one_world, worlds
-from tests.core.program_helpers import cancel, end, observe, stop, wait
+from tests.core.program_helpers import cancel, end, observe, row, stop, wait
 
 pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
 
@@ -179,6 +179,78 @@ SCENARIOS.update(STOPS)
 PROGRAM_SCENARIOS = {"program_close", "program_abort"}
 
 
+def _abort(n, scope, subject=0, program=0, channel=10):
+    """An ABORT Stop of `scope`, of the lane of `subject` or of `program`."""
+    return row(
+        n,
+        EffectKind.STOP,
+        scope=scope,
+        disp=Disposition.ABORT,
+        subject=subject,
+        channel=channel,
+        program=program,
+    )
+
+
+# At tick 80 one decision emits an ABORT and a disruptive Cancel of the commitment that
+# starts at 100, in either order. The abort that comes first takes the commitment, so
+# the Cancel behind it has nothing to cancel and must spend no activation.
+_REACH = {"lane": Scope.LANE, "asset": Scope.ASSET, "campaign": Scope.CAMPAIGN}
+ABORTS = {}
+for _tag, _scope in (*_REACH.items(), ("program", Scope.PROGRAM)):
+    _owner = 1 if _tag == "program" else 0
+    _head = (observe(0, 0, 10, _owner), wait(0, 80))
+    _stop = _abort(1, _scope, program=_owner)
+    ABORTS[f"{_tag}_abort_then_cancel"] = (
+        (*_head, _stop, cancel(1, 0), wait(1, 150), end(2)),
+        (plan(0, 0, 100), plan(1, 1, 100, 1)),
+    )
+    _stop = _abort(1, _scope, program=_owner)
+    ABORTS[f"{_tag}_cancel_then_abort"] = (
+        (*_head, cancel(1, 0), _stop, wait(1, 150), end(2)),
+        (plan(0, 0, 100), plan(1, 0, 100, 1)),
+    )
+# an abort that does not reach the commitment: another lane, another program
+ABORTS["other_lane_abort_then_cancel"] = (
+    (
+        observe(0, 0, 10, 0),
+        wait(0, 80),
+        _abort(1, Scope.LANE, subject=1, channel=11),
+        cancel(1, 0),
+        wait(1, 150),
+        end(2),
+    ),
+    (plan(0, 0, 100), plan(1, 1, 100, 1)),
+)
+ABORTS["other_program_abort_then_cancel"] = (
+    (
+        observe(0, 0, 10, 1),
+        wait(0, 80),
+        _abort(1, Scope.PROGRAM, program=0),
+        cancel(1, 0),
+        wait(1, 150),
+        end(2),
+    ),
+    (plan(0, 0, 100), plan(1, 1, 100, 1)),
+)
+PROGRAM_SCENARIOS |= {n for n in ABORTS if n.startswith(("program_", "other_program"))}
+SCENARIOS.update(ABORTS)
+# a full queue: the three slots hold two starts and the wake, the wake's slot goes to a
+# Stop, and the Cancel behind it finds no slot
+SCENARIOS["cancel_full_queue"] = (
+    (
+        observe(0, 0, 10, 0),
+        observe(0, 1, 12, 0),
+        wait(0, 80),
+        stop(1, Scope.LANE, Disposition.CLOSE),
+        cancel(1, 0),
+        wait(1, 150),
+        end(2),
+    ),
+    (plan(0, 0, 100), plan(0, 1, 200), plan(1, 1, 100, 1)),
+)
+
+
 def _study(name, **kw):
     script, plans = SCENARIOS[name]
     if name in PROGRAM_SCENARIOS:
@@ -187,15 +259,15 @@ def _study(name, **kw):
 
 
 @functools.cache
-def _run(name, freeze=30, balance=None, k=4):
-    study = _study(name, freeze=freeze, n_commitments=k)
+def _run(name, freeze=30, balance=None, k=4, steps=N_STEPS, **caps):
+    study = _study(name, freeze=freeze, n_commitments=k, **dict(caps))
     if balance is not None:
         # the cell the activations come from holds `balance`, which may be only what
         # the channels take
         budget = study.budget.at[0, DISRUPTIVE_COL].set(balance)
         study = dataclasses.replace(study, budget=budget)
     truth, root = one_world(caps=study.caps)
-    result = HostExecutor().run(study, truth, root, N_STEPS)
+    result = HostExecutor().run(study, truth, root, steps)
     return SimpleNamespace(study=study, carry=result.carry, trace=result.trace)
 
 
@@ -400,6 +472,10 @@ def test_a_program_abort_cancels_only_that_programs_pending_commitment():
         "program_abort",
         "campaign_drain",
         "campaign_abort",
+        "lane_abort_then_cancel",
+        "asset_abort_then_cancel",
+        "program_abort_then_cancel",
+        "campaign_abort_then_cancel",
     ],
 )
 def test_the_executors_agree_on_a_stop_of_a_pending_commitment(name):
@@ -422,6 +498,81 @@ def test_a_campaign_drain_waits_for_a_pending_commitment_and_refuses_its_start()
 def test_a_campaign_abort_cancels_a_pending_commitment():
     log = _refused_at_its_start(_run("campaign_abort"))
     assert log["end"].tolist() == [10]
+
+
+# ---- a Cancel behind an abort of its commitment, or with no queue slot ---------------
+
+ABORT_REACH = ["lane", "asset", "program", "campaign"]
+
+
+@pytest.mark.parametrize("tag", ABORT_REACH)
+def test_a_cancel_behind_an_abort_that_took_its_commitment_spends_no_activation(tag):
+    run = _run(f"{tag}_abort_then_cancel")
+    assert _codes(run)[1][:2].tolist() == [OK, UNSUPPORTED]
+    led = _ledger(run)
+    assert int(led.cm_state[0]) == CommitState.CANCELLED
+    assert int(led.disruptive_used[0]) == 0
+    assert float(led.balance[0, DISRUPTIVE_COL]) == 10.0
+    assert _sound(run)
+
+
+@pytest.mark.parametrize("tag", ABORT_REACH)
+def test_control_a_cancel_ahead_of_the_abort_still_spends_its_activation(tag):
+    run = _run(f"{tag}_cancel_then_abort")
+    assert _codes(run)[1][:2].tolist() == [OK, OK]
+    led = _ledger(run)
+    assert int(led.cm_state[0]) == CommitState.CANCELLED
+    assert int(led.disruptive_used[0]) == 1
+    assert float(led.balance[0, DISRUPTIVE_COL]) == 9.0
+    assert _sound(run)
+
+
+@pytest.mark.parametrize("name", ["other_lane", "other_program"])
+def test_an_abort_that_does_not_reach_the_commitment_leaves_the_cancel_alone(name):
+    run = _run(f"{name}_abort_then_cancel")
+    assert _codes(run)[1][:2].tolist() == [OK, OK]
+    led = _ledger(run)
+    assert int(led.cm_state[0]) == CommitState.CANCELLED
+    assert int(led.disruptive_used[0]) == 1
+    assert float(led.balance[0, DISRUPTIVE_COL]) == 9.0
+    assert _sound(run)
+
+
+def test_a_cancel_with_no_free_queue_slot_is_refused_and_spends_no_activation():
+    run = _run("cancel_full_queue", n_events=3)
+    codes = _codes(run)[1].tolist()
+    assert NO_SLOT in codes
+    led = _ledger(run)
+    assert int(led.disruptive_used[0]) == 0
+    assert int(led.cm_state[0]) == CommitState.PENDING
+    assert _sound(run)
+
+
+def test_control_the_same_cancel_with_room_in_the_queue_is_queued_and_debited():
+    run = _run("cancel_full_queue", n_events=4)
+    assert NO_SLOT not in _codes(run)[1].tolist()
+    assert int(_ledger(run).disruptive_used[0]) == 1
+
+
+def test_a_cancel_when_the_event_ids_are_spent_is_refused_and_spends_no_activation():
+    run = _run("cancel_inside_disruptive", max_sid=3)
+    assert _codes(run)[1][0] == NO_SLOT
+    led = _ledger(run)
+    assert int(led.disruptive_used[0]) == 0
+    assert int(led.cm_state[0]) == CommitState.PENDING
+
+
+def test_control_one_more_event_id_and_the_same_cancel_is_queued_and_debited():
+    run = _run("cancel_inside_disruptive", max_sid=4)
+    assert _codes(run)[1][0] == OK
+    assert int(_ledger(run).disruptive_used[0]) == 1
+
+
+def test_a_pending_commitment_is_conserved_the_moment_it_is_admitted():
+    # one step: the decision has admitted the commitment and nothing has started
+    run = _run("plan", steps=1)
+    assert int((np.asarray(_ledger(run).cm_state) == CommitState.PENDING).sum()) == 1
+    assert balance_conserved(run).passed
 
 
 # ---- what a group, a cancel and the capacity may not overdraw ----------------------
