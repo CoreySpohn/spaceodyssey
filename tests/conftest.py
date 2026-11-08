@@ -179,9 +179,10 @@ def bound_resident_memory(request):
 def drop_shared_runs():
     """Release memoized runs, then clear compiled programs if memory is high.
 
-    The automatic clear happens only at a file boundary, after the module-scoped
-    fixtures of that file are torn down. Session-scoped fixtures survive it and
-    recompile on use.
+    In an unmarked file this is the only automatic clear: it runs at the file
+    boundary, after the module-scoped fixtures of that file are torn down. Files
+    marked clear_caches_between_tests also clear after each test. Session-scoped
+    fixtures survive either clear and recompile on use.
     """
     yield
     for name, module in tuple(sys.modules.items()):
