@@ -43,8 +43,6 @@ from tests.core.refresh_helpers import (
 )
 from tests.core.test_canonical_fields import REFRESH_ONLY, _perturb
 
-pytestmark = pytest.mark.clear_caches_between_tests
-
 
 @functools.cache
 def pair(chunk=7):
