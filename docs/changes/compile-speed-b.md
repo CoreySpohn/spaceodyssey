@@ -33,8 +33,9 @@ A lift never changes a value. Lifting converts only what it can prove exact: a P
 int, bool or float, or a flat tuple or list of them, each number checked on its own.
 Everything else passes through unchanged, as it did before lifting existed: arrays,
 NumPy scalars, Fractions, Decimals, nested sequences, a float in an integer field (`1.5`)
-and an integer outside int64. The `ScriptedRecords` fields normalize at construction to
-a tuple of Python numbers, so a NumPy or object array gives the same script as a tuple.
+and an integer outside int64. NumPy arrays in the `ScriptedRecords` tuple fields are not
+supported: the fields are typed as tuples, and the previous commit accepted such arrays only
+when its executor had not yet run a tuple script.
 Every compiled entry point that takes a policy, process or observer
 (the executors, the replay and conformance replays, the masked refit and the service
 commit) lifts through `lifting_jit`, so a value variant reuses the program there too.
@@ -99,4 +100,4 @@ by leaf, checks that varied values, scripts, step counts within a bucket and kin
 add no program, that the lowering check still refuses mismatched kind names, that a bad
 `bucket` is refused, that each lifted class of input (bool, int, large exact int,
 integral float, float subclass, sequences) gives the history recorded on the base commit,
-and that arrays in a script read as the tuples they hold.
+and that each compiled entry point keeps one program across value variants.
