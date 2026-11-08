@@ -289,6 +289,19 @@ def capability(study: Study, executor: str | None = None):
     """
     chosen = EXECUTORS if executor is None else frozenset({executor})
     out = []
+    if study.caps.commitments and study.caps.awards:
+        out.append(
+            Finding(
+                FindingCode.X001,
+                ERROR,
+                "caps",
+                "holds commitments and awards together, which no executor supports",
+                "turn one of them off; a commitment's debit and an award's window "
+                "are not yet accounted together",
+                subject="caps",
+                member="n_commitments",
+            )
+        )
     for path, component in _components(study):
         decl = declaration_of(component)
         slot, index = _slot(path)
@@ -394,17 +407,25 @@ def reserved(study: Study):
             if len(found):
                 entry = tuple(int(n) for n in found[0])
                 flag(f"channels.{name}", what, "channels", name, entry=entry)
-    for name, column, default, what in (
-        ("freeze_ticks", assets.freeze_ticks, 0, "a nonzero horizon"),
-        ("disruptive_resource", assets.disruptive_resource, -1, "a resource row"),
-    ):
-        found = np.argwhere(np.asarray(column) != default)
-        if len(found):
-            entry = tuple(int(n) for n in found[0])
-            flag(f"assets.{name}", what, "assets", name, entry=entry)
-    for i, policy in enumerate(study.agenda.policies):
-        if declaration_of(policy).disruptive:
-            flag(f"policy[{i}]", "a disruptive effect", "policy", "disruptive", index=i)
+    if not study.caps.commitments:
+        # the horizon and the disruptive resource are read only while commitments are on
+        for name, column, default, what in (
+            ("freeze_ticks", assets.freeze_ticks, 0, "a nonzero horizon"),
+            ("disruptive_resource", assets.disruptive_resource, -1, "a resource row"),
+        ):
+            found = np.argwhere(np.asarray(column) != default)
+            if len(found):
+                entry = tuple(int(n) for n in found[0])
+                flag(f"assets.{name}", what, "assets", name, entry=entry)
+        for i, policy in enumerate(study.agenda.policies):
+            if declaration_of(policy).disruptive:
+                flag(
+                    f"policy[{i}]",
+                    "a disruptive effect",
+                    "policy",
+                    "disruptive",
+                    index=i,
+                )
     return out
 
 

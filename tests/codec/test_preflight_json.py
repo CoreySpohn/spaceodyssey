@@ -638,6 +638,11 @@ def _variant_x001_awards(seed):
     return _doc(_with(study, caps=caps)), None
 
 
+def _variant_x001_commitments_with_awards(seed):
+    caps = Capacities(awards=True, n_commitments=2 if seed else 0)
+    return _doc(toy.survey_1(caps=caps)), None
+
+
 def _variant_x002_resource(seed):
     study = toy.survey_1()
     rows = jnp.asarray([-1, 0 if seed else -1], I64)
@@ -652,6 +657,32 @@ def _variant_x002_quantum(seed):
 
 def _variant_x002_policy(seed):
     return _policy_doc(disruptive=seed), None
+
+
+def _commitment_caps(seed):
+    """Commitments on exactly where the mistake is repaired (the fields are read)."""
+    return Capacities(n_commitments=0 if seed else 2)
+
+
+def _variant_x002_freeze_needs_commitments(seed):
+    study = toy.survey_1(caps=_commitment_caps(seed))
+    assets = dataclasses.replace(study.assets, freeze_ticks=jnp.asarray([5, 0], I64))
+    return _doc(_with(study, assets=assets)), None
+
+
+def _variant_x002_resource_needs_commitments(seed):
+    study = toy.survey_1(caps=_commitment_caps(seed))
+    assets = dataclasses.replace(
+        study.assets, disruptive_resource=jnp.asarray([-1, 0], I64)
+    )
+    return _doc(_with(study, assets=assets)), None
+
+
+def _variant_x002_policy_needs_commitments(seed):
+    study = toy.survey_1(
+        caps=_commitment_caps(seed), policies=(DocPolicy(disruptive=True),)
+    )
+    return _doc(study), None
 
 
 def _variant_t002_shape(seed):
@@ -718,6 +749,12 @@ VARIANTS = {
         "/study/agenda/policies/0/effects",
         _is([int(EffectKind.ALLOCATE)]),
     ),
+    "X001-commitments-with-awards": (
+        FindingCode.X001,
+        _variant_x001_commitments_with_awards,
+        "/study/caps/n_commitments",
+        _is(2),
+    ),
     "X002-resource": (
         FindingCode.X002,
         _variant_x002_resource,
@@ -733,6 +770,24 @@ VARIANTS = {
     "X002-policy": (
         FindingCode.X002,
         _variant_x002_policy,
+        "/study/agenda/policies/0/disruptive",
+        _is(True),
+    ),
+    "X002-freeze-needs-commitments": (
+        FindingCode.X002,
+        _variant_x002_freeze_needs_commitments,
+        "/study/assets/freeze_ticks/data/0",
+        _is(5),
+    ),
+    "X002-resource-needs-commitments": (
+        FindingCode.X002,
+        _variant_x002_resource_needs_commitments,
+        "/study/assets/disruptive_resource/data/1",
+        _is(0),
+    ),
+    "X002-policy-needs-commitments": (
+        FindingCode.X002,
+        _variant_x002_policy_needs_commitments,
         "/study/agenda/policies/0/disruptive",
         _is(True),
     ),

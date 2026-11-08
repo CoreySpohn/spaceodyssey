@@ -180,6 +180,13 @@ def _assets(**columns):
     return _replace(study, assets=dataclasses.replace(study.assets, **columns))
 
 
+def _commitment_study(policy=None, **columns):
+    """`survey_1` with commitments on, the given asset columns and a stated policy."""
+    study = toy.survey_1(caps=Capacities(n_commitments=2))
+    study = _replace(study, assets=dataclasses.replace(study.assets, **columns))
+    return study if policy is None else _with_policy(study, policy)
+
+
 def _channel_edit(**columns):
     study = toy.survey_1()
     return _replace(study, channels=dataclasses.replace(study.channels, **columns))
@@ -270,6 +277,11 @@ SEEDED = {
     "allocate": (
         C.X001,
         lambda: _policy(effects=frozenset({EffectKind.ALLOCATE})),
+        None,
+    ),
+    "commitments_with_awards": (
+        C.X001,
+        lambda: toy.survey_1(caps=Capacities(awards=True, n_commitments=2)),
         None,
     ),
     "gradients_on_host": (
@@ -405,6 +417,20 @@ CLEAN = {
     "balances_with_a_quantum": (
         lambda: toy.survey_1(
             caps=Capacities(snapshot_balances=True, balance_quantum=0.5)
+        ),
+        (),
+    ),
+    "frozen_horizon_with_commitments": (
+        lambda: _commitment_study(freeze_ticks=jnp.asarray([5, 0], I64)),
+        (),
+    ),
+    "disruptive_resource_with_commitments": (
+        lambda: _commitment_study(disruptive_resource=jnp.asarray([0, -1], I64)),
+        (),
+    ),
+    "disruptive_effect_with_commitments": (
+        lambda: _commitment_study(
+            policy=StatedPolicy(stated=Declaration(disruptive=True))
         ),
         (),
     ),
