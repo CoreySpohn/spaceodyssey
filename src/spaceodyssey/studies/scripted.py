@@ -1,8 +1,10 @@
 """A process that writes scripted measurement records, for revision studies."""
 
 import dataclasses
+import operator
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 
 from spaceodyssey.core import (
@@ -23,6 +25,30 @@ from spaceodyssey.studies import toy
 SCRIPTED_CHANNEL = 50
 
 
+def _integer(v):
+    """A Python int from an integer of any kind, truncating a float as the arrays do."""
+    return int(operator.index(v)) if hasattr(v, "__index__") else int(v)
+
+
+def _numbers(cast):
+    """Field converter: any 1-D iterable of numbers becomes a tuple of Python numbers.
+
+    A script is read element by element, so NumPy and object arrays, lists and tuples
+    all give the same record. A JAX array or tracer is left as it is.
+    """
+
+    def convert(xs):
+        if isinstance(xs, jax.Array):
+            return xs
+        return tuple(cast(x) for x in xs)
+
+    return convert
+
+
+_INTS = _numbers(_integer)
+_FLOATS = _numbers(float)
+
+
 class ScriptedRecords(AbstractProcess):
     """A process that writes one scripted measurement record per fire.
 
@@ -39,15 +65,27 @@ class ScriptedRecords(AbstractProcess):
 
     # Not static: lifted to arrays where a study enters a compiled call, so scripts
     # that differ only in numbers share a program; the number of fires stays part of it.
-    ticks: tuple[int, ...] = eqx.field(metadata=traced(I64, sequence=True))
-    values: tuple[float, ...] = eqx.field(metadata=traced(F64, sequence=True))
-    ids: tuple[int, ...] = eqx.field(metadata=traced(I64, sequence=True))
-    revisions: tuple[int, ...] = eqx.field(metadata=traced(I64, sequence=True))
-    statuses: tuple[int, ...] = eqx.field(metadata=traced(I64, sequence=True))
+    ticks: tuple[int, ...] = eqx.field(
+        converter=_INTS, metadata=traced(I64, sequence=True)
+    )
+    values: tuple[float, ...] = eqx.field(
+        converter=_FLOATS, metadata=traced(F64, sequence=True)
+    )
+    ids: tuple[int, ...] = eqx.field(
+        converter=_INTS, metadata=traced(I64, sequence=True)
+    )
+    revisions: tuple[int, ...] = eqx.field(
+        converter=_INTS, metadata=traced(I64, sequence=True)
+    )
+    statuses: tuple[int, ...] = eqx.field(
+        converter=_INTS, metadata=traced(I64, sequence=True)
+    )
     audience: int = eqx.field(default=PUBLIC)
     channel: int = eqx.field(default=SCRIPTED_CHANNEL, static=True)
     # the kind of each fire's record; empty means every record is a measurement
-    kinds: tuple[int, ...] = eqx.field(default=(), metadata=traced(I64, sequence=True))
+    kinds: tuple[int, ...] = eqx.field(
+        default=(), converter=_INTS, metadata=traced(I64, sequence=True)
+    )
 
     def __check_init__(self):
         """Refuse two fires that name one (scripted id, revision) pair."""
