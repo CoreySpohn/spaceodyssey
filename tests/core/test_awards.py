@@ -3,8 +3,11 @@
 An admitted Allocate adds its amount to the recipient row and opens a window
 `[from, until)`; the row is valid only inside it. A WINDOW_END event fires at `until`
 (stage ANALYZE, neutral tie) and applies the remainder rule the award declared. Each
-check has a control or a mutant of the rule it guards. The runs are host runs that
-share one compile.
+check has a control or a mutant of the rule it guards. The scenario runs are host runs
+that share one compile (balances in the snapshot, `SNAPSHOT`); the refund runs share a
+second, the awards-off control a third. The range and shape rules are admitted by hand
+on a carry (`_admit_awards`), and the mutants of the refund rule run eagerly on the
+carry before the receipt's release, so none compiles an executor of its own.
 """
 
 import dataclasses
@@ -12,7 +15,6 @@ import functools
 from types import SimpleNamespace
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -20,11 +22,17 @@ import pytest
 from spaceodyssey.core import (
     CompiledExecutor,
     HostExecutor,
+    admit,
+    effects_none,
     handlers,
     histories_equal,
+    init_carry,
 )
+from spaceodyssey.core.carry import _tree_set
 from spaceodyssey.core.conformance.invariants import balance_conserved
 from spaceodyssey.core.enums import (
+    F64,
+    I64,
     N_TIES,
     REFRESH_TIE,
     TIE_NEUTRAL,
@@ -36,10 +44,12 @@ from spaceodyssey.core.enums import (
     WindowState,
 )
 from spaceodyssey.core.events import empty_event_row
+from spaceodyssey.core.executors.host import _adm, _close, _fp
+from spaceodyssey.core.lift import lift_traced
 from spaceodyssey.core.snapshot import EffectTable
+from spaceodyssey.core.transaction import mask_effects
 from spaceodyssey.studies import toy
 from tests.core.award_helpers import (
-    ScriptedAwards,
     award,
     award_refund_study,
     award_study,
@@ -51,6 +61,9 @@ from tests.core.refund_helpers import mutate, receipt
 pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
 
 N_STEPS = 200
+SNAPSHOT = {
+    "snapshot_balances": True
+}  # the one capacity set every full run here shares
 P0, P1 = 2, 3  # the balance rows of programs 0 and 1 (two assets come first)
 PROGRAM_COL = 1  # the program-scoped resource; every acquisition costs 1 of each
 OK = int(AdmissionCode.OK)
@@ -106,6 +119,13 @@ SCENARIOS = {
 }
 
 
+def _study(script, awards, caps_extra=None, **kw):
+    """The award study on the shared capacities (balances in the snapshot)."""
+    return award_study(
+        script, awards, caps_extra={**SNAPSHOT, **(caps_extra or {})}, **kw
+    )
+
+
 def _host(study, n_steps=N_STEPS):
     truth, root = one_world(caps=study.caps)
     result = HostExecutor().run(study, truth, root, n_steps)
@@ -115,7 +135,7 @@ def _host(study, n_steps=N_STEPS):
 @functools.cache
 def _run(name):
     script, awards = SCENARIOS[name]
-    return _host(award_study(script, awards))
+    return _host(_study(script, awards))
 
 
 def _handled(run):
@@ -158,7 +178,6 @@ def test_an_allocate_grants_the_amount_and_opens_the_window():
     assert int(_codes(run, EventKind.WAIT)[1][0]) == OK
 
 
-@pytest.mark.slow  # the awards-off control compiles a study, 12 s cold
 def test_a_window_end_event_exists_only_once_an_award_is_issued():
     """Fails if a study without awards queues an expiry, or one with them lacks it."""
     ends = _window_ends(_run("forfeit"))
@@ -381,7 +400,7 @@ def test_the_effect_table_without_awards_holds_no_award_column():
 def test_the_host_and_compiled_executors_make_the_same_history():
     """Fails if the compiled scan and the host loop disagree on an award's run."""
     script, awards = SCENARIOS["realloc"]
-    study = award_study(script, awards)
+    study = _study(script, awards)
     truths, roots = worlds(2, study.caps)
     compiled = CompiledExecutor().run_worlds(study, truths, roots, 40)
     host = HostExecutor().run_worlds(study, truths, roots, 40)
@@ -432,39 +451,44 @@ def _record_award_gens(run):
     return np.asarray(log.award_gens)[np.asarray(log.valid)].tolist()
 
 
-@pytest.mark.slow  # its own refund study compiles the executor, 20 s cold
 def test_a_completion_records_the_generation_of_every_row_it_drew_from():
     """Fails if the record keeps one generation instead of one per payer slot.
 
     Row 2 (program 0) is awarded for [0, 200), so its generation is 1 at the debit; the
     asset row 0 and the shared row 4 never held a window and stay at 0. The record
     holds a generation for each of the three resources.
+
+    Before: a study of its own (refunds on, the cheap channel). After: the refund study
+    the other refund runs share, with no receipts; the debit is 10 instead of 1 and
+    draws on the same rows, so the record still names generations [0, 1, 0].
     """
-    study = award_study(
+    study = award_refund_study(
         (wait(0, 10), observe(1, 0, 10, 0), end(5)),
         (award(0, 2, P0, 0, 200, 5),),
-        refunds=True,
+        pricing=None,
     )
     run = _host(study)
     assert _record_award_gens(run) == [[0, 1, 0]]
 
 
-@pytest.mark.slow  # its own refund study compiles the executor, 20 s cold
 def test_two_awarded_payers_each_keep_their_own_generation():
     """Fails if the generation of a second awarded payer row is lost.
 
     The asset row 0 is awarded twice (generation 3 after its first window ends and a
     second opens) while program row 2 is awarded once (generation 1): the record keeps
     both, where a single number would drop one.
+
+    Before and after as in the test above: the refund study replaces the study of its
+    own, with no receipts, and the record keeps the same two generations.
     """
-    study = award_study(
+    study = award_refund_study(
         (wait(0, 5), wait(1, 100), wait(2, 40), observe(3, 0, 10, 0), end(5)),
         (
             award(0, 2, 0, 0, 20, 2, RemainderRule.NONE),
             award(0, 1, P0, 0, 300, 5),
             award(2, 2, 0, 100, 300, 2, RemainderRule.NONE),
         ),
-        refunds=True,
+        pricing=None,
     )
     run = _host(study)
     gens = _record_award_gens(run)
@@ -472,43 +496,56 @@ def test_two_awarded_payers_each_keep_their_own_generation():
     assert gens[0][0] == 3 and gens[0][1] == 1  # asset row 0 twice awarded; row 2 once
 
 
-class _Reshaped(ScriptedAwards):
-    """The scripted awards, with the amount column reshaped to `shape`."""
+def _admit_awards(study, *rows, amount=None):
+    """The admission codes of Allocate rows decided one by one, and the carry after.
 
-    shape: tuple = eqx.field(static=True, default=(3,))
+    Each row is `(tick, recipient, start, until, amount, rule, to)`, put in effect row 2
+    of a decision at that tick on the carry the rows before it left, as the scripted
+    policy does in a run. Only the admit rule is compiled, not the executor. `amount`
+    replaces the amount column (a malformed shape).
+    """
+    caps = study.caps
+    truth, _ = one_world(0, caps)
+    codes = []
+    carry = eqx.filter_jit(init_carry)(study, truth)
+    for at, recipient, start, until, value, rule, to in rows:
+        col = jnp.zeros(caps.n_effects, I64)
+        held = jnp.zeros((caps.n_effects, caps.n_resources), F64)
+        held = held.at[2, PROGRAM_COL].set(value)
+        eff = dataclasses.replace(
+            effects_none(caps),
+            kind=col.at[2].set(EffectKind.ALLOCATE),
+            amount=held if amount is None else amount,
+            window_from=col.at[2].set(start),
+            window_until=col.at[2].set(until),
+            recipient=col.at[2].set(recipient),
+            remainder=col.at[2].set(int(rule)),
+            realloc_to=col.at[2].set(to),
+        )
+        carry = _tree_set(carry, tick=jnp.asarray(at, I64))
+        carry, out = eqx.filter_jit(admit)(carry, eff, study)
+        codes.append(int(out[2]))
+    return codes, carry
 
-    def decide(self, pstate, view, study, key):
-        eff, ps, u = super().decide(pstate, view, study, key)
-        flat = eff.amount.sum(axis=1) if len(self.shape) == 1 else eff.amount[:, :1]
-        return dataclasses.replace(eff, amount=flat), ps, u
 
-
-def _reshaped(shape):
-    class Shaped(_Reshaped):
-        pass
-
-    Shaped.__dataclass_fields__["shape"].default = shape
-    return Shaped
-
-
-@pytest.mark.slow  # each reshaped policy compiles the executor, 35 s cold each
 @pytest.mark.parametrize("shape", [(3,), (3, 1)])
 def test_a_malformed_amount_shape_is_refused_as_unsupported(shape):
-    """Fails if a vector that broadcasts into every resource is credited."""
-    study = award_study(
-        (wait(0, 10), end(5)),
-        (award(0, 2, P0, 0, 200, 5),),
-        policy_cls=_reshaped(shape),
+    """Fails if a vector that broadcasts into every resource is credited.
+
+    Before: a reshaped scripted policy handed the award (0, 2, P0, 0, 200, 5) to the
+    full run and its only Allocate was refused UNSUPPORTED, nothing granted. After: the
+    same award with the amount column of `shape` is admitted by hand at tick 0.
+    """
+    study = _study((wait(0, 10), end(5)), (award(0, 2, P0, 0, 200, 5),))
+    wrong = jnp.full(shape, 5.0)
+    codes, carry = _admit_awards(
+        study, (0, P0, 0, 200, 5.0, RemainderRule.NONE, 0), amount=wrong
     )
-    run = _host(study)
-    t = run.trace
-    allocs = _handled(run)[:, None] & (np.asarray(t.eff_kind) == EffectKind.ALLOCATE)
-    assert np.asarray(t.admit_code)[allocs].tolist() == [AdmissionCode.UNSUPPORTED]
-    assert float(np.asarray(run.carry.ledger.granted).sum()) == 0.0
-    assert float(np.asarray(run.carry.ledger.balance)[P0, PROGRAM_COL]) == 0.0
+    assert codes == [AdmissionCode.UNSUPPORTED]
+    assert float(np.asarray(carry.ledger.granted).sum()) == 0.0
+    assert float(np.asarray(carry.ledger.balance)[P0, PROGRAM_COL]) == 0.0
 
 
-@pytest.mark.slow  # static balance capacities: each variant compiles, 25 s cold
 def test_an_award_past_the_representable_balance_range_is_refused():
     """Fails if an Allocate can take a row above S4's exact range (2**53 quanta).
 
@@ -523,7 +560,7 @@ def test_an_award_past_the_representable_balance_range_is_refused():
             award(2, 2, P0, 0, 200, 3.0),
         ),
     )
-    study = award_study(*big, caps_extra={"snapshot_balances": True})
+    study = _study(*big)
     run = _host(study)
     t = run.trace
     allocs = _handled(run)[:, None] & (np.asarray(t.eff_kind) == EffectKind.ALLOCATE)
@@ -543,7 +580,6 @@ def test_an_award_past_the_representable_balance_range_is_refused():
     assert np.asarray(srun.trace.admit_code)[sa].tolist() == [OK]
 
 
-@pytest.mark.slow  # static balance capacities: each variant compiles, 25 s cold
 @pytest.mark.parametrize("quantum", [1.0, 0.125, 10.0])
 def test_opposite_budgets_do_not_offset_in_the_range_bound(quantum):
     """Fails if a negative budget row lowers the supply the range bound measures.
@@ -551,33 +587,33 @@ def test_opposite_budgets_do_not_offset_in_the_range_bound(quantum):
     Rows hold +B and -B of the program resource (B is 2**53 quanta), so their sum is
     zero while the positive row already sits at the limit: an award of 8 quanta on it
     would pass 2**53 quanta. A negative budget is refused whatever its size.
+
+    Before: a full run per quantum (the quantum is a static capacity), one Allocate at
+    decision 0 refused UNSUPPORTED with nothing granted, for B and for 100 quanta.
+    After: the same studies and award admitted by hand at tick 0, the same codes.
     """
 
     def codes(big):
-        study = award_study(
+        study = _study(
             (wait(0, 10), end(5)),
             (award(0, 2, P0, 0, 200, 8.0 * quantum),),
-            caps_extra={"snapshot_balances": True, "balance_quantum": quantum},
+            caps_extra={"balance_quantum": quantum},
         )
         budget = np.asarray(study.budget).copy()
         budget[P0, PROGRAM_COL] = big
         budget[P1, PROGRAM_COL] = -big
         study = dataclasses.replace(study, budget=jnp.asarray(budget))
-        run = _host(study)
-        allocs = _handled(run)[:, None] & (
-            np.asarray(run.trace.eff_kind) == EffectKind.ALLOCATE
-        )
-        return np.asarray(run.trace.admit_code)[allocs].tolist(), run
+        row = (0, P0, 0, 200, 8.0 * quantum, RemainderRule.NONE, 0)
+        return _admit_awards(study, row)
 
     top = 2.0**53 * quantum
-    refused, run = codes(top)
+    refused, carry = codes(top)
     assert refused == [AdmissionCode.UNSUPPORTED]
-    assert float(np.asarray(run.carry.ledger.granted).sum()) == 0.0
+    assert float(np.asarray(carry.ledger.granted).sum()) == 0.0
     small, _ = codes(100.0 * quantum)
     assert small == [AdmissionCode.UNSUPPORTED], "any negative budget is refused"
 
 
-@pytest.mark.slow  # static balance capacities: each variant compiles, 25 s cold
 @pytest.mark.parametrize("quantum", [1.0, 0.125, 10.0])
 def test_a_negative_reallocation_cannot_create_headroom(quantum):
     """Fails if a negative balance reallocated twice lets an award pass 2**53 quanta.
@@ -586,40 +622,47 @@ def test_a_negative_reallocation_cannot_create_headroom(quantum):
     other and back, which lowered the signed `granted` sum and admitted 16q on the
     positive row. Negative budgets are refused, so no award is admitted at all, and the
     positive row stays below B.
+
+    Before: a full run per quantum, three Allocates at decisions 0, 1 and 2 (ticks 0, 10
+    and 20), all refused UNSUPPORTED. After: the same study and awards admitted by hand
+    one after another at those ticks, all refused, so the carry never changes.
     """
     top = 2.0**53 * quantum
-    study = award_study(
+    study = _study(
         (wait(0, 10), wait(1, 10), wait(2, 10), end(5)),
         (
             award(0, 2, P1, 0, 10, 0, RemainderRule.REALLOCATE, P0),
             award(1, 2, P0, 10, 20, 0, RemainderRule.REALLOCATE, P1),
             award(2, 2, P0, 20, 100, 16 * quantum),
         ),
-        caps_extra={"snapshot_balances": True, "balance_quantum": quantum},
+        caps_extra={"balance_quantum": quantum},
     )
     budget = np.zeros(np.asarray(study.budget).shape)
     budget[P0, PROGRAM_COL] = top - 8 * quantum
     budget[P1, PROGRAM_COL] = -8 * quantum
     study = dataclasses.replace(study, budget=jnp.asarray(budget))
-    run = _host(study, n_steps=80)
-    t = run.trace
-    allocs = _handled(run)[:, None] & (np.asarray(t.eff_kind) == EffectKind.ALLOCATE)
-    codes = np.asarray(t.admit_code)[allocs].tolist()
+    codes, carry = _admit_awards(
+        study,
+        (0, P1, 0, 10, 0.0, RemainderRule.REALLOCATE, P0),
+        (10, P0, 10, 20, 0.0, RemainderRule.REALLOCATE, P1),
+        (20, P0, 20, 100, 16 * quantum, RemainderRule.NONE, 0),
+    )
     assert all(code == AdmissionCode.UNSUPPORTED for code in codes)
-    assert float(np.asarray(run.carry.ledger.balance)[P0, PROGRAM_COL]) < top
+    assert float(np.asarray(carry.ledger.balance)[P0, PROGRAM_COL]) < top
 
 
-@pytest.mark.slow  # a study with a large award compiles the executor, 21 s cold
 def test_a_large_award_without_snapshot_balances_is_admitted():
-    """Control: the range rule binds only when balances are in the snapshot."""
+    """Control: the range rule binds only when balances are in the snapshot.
+
+    Before: a full run on a study without the balance view, one Allocate of 1e20 at
+    decision 0, admitted OK. After: the same study and award admitted by hand at tick 0.
+    """
     study = award_study((wait(0, 10), end(5)), (award(0, 2, P0, 0, 200, 1e20),))
-    run = _host(study)
-    t = run.trace
-    allocs = _handled(run)[:, None] & (np.asarray(t.eff_kind) == EffectKind.ALLOCATE)
-    assert np.asarray(t.admit_code)[allocs].tolist() == [OK]
+    assert not study.caps.snapshot_balances
+    codes, _ = _admit_awards(study, (0, P0, 0, 200, 1e20, RemainderRule.NONE, 0))
+    assert codes == [OK]
 
 
-@pytest.mark.slow  # compiles admission with balances in the snapshot, 15 s cold
 def test_an_allocate_mixed_with_a_query_is_refused_whole():
     """Fails if S4's mixed-Query guard stops covering Allocate when awards are on."""
     from spaceodyssey import core
@@ -650,7 +693,6 @@ def _refund_run(receipt_tick):
     return _host(study, n_steps=60)
 
 
-@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 def test_a_refund_after_the_expiry_is_replayed_and_conserves():
     """Control: the replay credits the late refund and agrees with the ledger."""
     run = _refund_run(350)
@@ -659,7 +701,6 @@ def test_a_refund_after_the_expiry_is_replayed_and_conserves():
     assert balance_conserved(run).passed
 
 
-@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 def test_a_refund_before_the_expiry_is_replayed_and_conserves():
     """Control: a refund inside the window raises what the expiry forfeits.
 
@@ -676,7 +717,6 @@ def test_a_refund_before_the_expiry_is_replayed_and_conserves():
         ), name
 
 
-@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 @pytest.mark.parametrize("tick", [250, 350])
 def test_a_paired_forged_expiry_is_caught_when_the_run_holds_a_refund(tick):
     """Fails if a receipt in the log switches the expiry reconciliation off."""
@@ -688,7 +728,6 @@ def test_a_paired_forged_expiry_is_caught_when_the_run_holds_a_refund(tick):
     assert not balance_conserved(forged).passed
 
 
-@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 def test_a_refund_credited_to_another_programs_row_is_caught():
     """Fails if a refund that lands on the wrong program's row conserves."""
     run = _refund_run(350)
@@ -731,7 +770,6 @@ def _two_program_run():
     return _host(study, n_steps=60)
 
 
-@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 def test_a_refund_routed_to_another_acquisition_in_both_places_is_caught():
     """Fails if the replay trusts the handler's `refund_of` to find the origin.
 
@@ -767,7 +805,6 @@ def test_a_refund_routed_to_another_acquisition_in_both_places_is_caught():
     assert not balance_conserved(forged).passed
 
 
-@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 @pytest.mark.parametrize(
     "receipts",
     [
@@ -788,7 +825,6 @@ def test_receipts_that_apply_nothing_do_not_fail_conservation(receipts):
     assert (kinds == 50).any(), "the receipt reached the log"
 
 
-@pytest.mark.slow  # award runs with refunds compile once, 23 s cold
 def test_a_record_naming_a_newer_award_generation_is_caught():
     """Fails if the replay accepts a record whose payer generation is not the row's.
 
@@ -809,7 +845,6 @@ def test_a_record_naming_a_newer_award_generation_is_caught():
     assert not balance_conserved(forged).passed
 
 
-@pytest.mark.slow  # stops a scenario run early, which compiles again, 20 s cold
 def test_a_pending_acquisition_at_the_expiry_is_replayed_without_its_record():
     """Fails if an admission debit with no record yet is missing from the replay.
 
@@ -817,7 +852,7 @@ def test_a_pending_acquisition_at_the_expiry_is_replayed_without_its_record():
     excludes the debited unit, and the replay finds it from the queued settlement.
     """
     script, awards = SCENARIOS["completes_late"]
-    study = award_study(script, awards)
+    study = _study(script, awards)
     full = _run("completes_late")
     stop = int(_window_ends(full)[0]) + 1  # just after the expiry, before the DONE
     run = _host(study, n_steps=stop)
@@ -829,7 +864,7 @@ def test_a_pending_acquisition_at_the_expiry_is_replayed_without_its_record():
 
 def test_an_award_to_a_program_row_does_not_crash_the_conservation_check():
     """Fails if a queued WINDOW_END's balance-row id is read as a lane number."""
-    study = award_study(
+    study = _study(
         (wait(0, 10), end(5)),
         (award(0, 2, P1, 0, 200, 5, FORFEIT),),
     )
@@ -845,7 +880,6 @@ def test_an_award_to_a_program_row_does_not_crash_the_conservation_check():
     assert balance_conserved(run).passed
 
 
-@pytest.mark.slow  # static balance capacities: each variant compiles, 25 s cold
 def test_an_allocate_after_a_debit_cannot_pass_the_representable_supply():
     """Fails if refunds or reallocations can carry a row past 2**53 quanta.
 
@@ -854,11 +888,10 @@ def test_an_allocate_after_a_debit_cannot_pass_the_representable_supply():
     unit. The rule is on supply (budget plus grants), so the award is refused.
     """
     top = 2.0**53
-    study = award_study(
+    study = _study(
         (wait(0, 10), observe(1, 0, 10, 0), wait(2, 10), end(5)),
         (award(2, 2, P1, 0, 200, 1.0),),
         program_credit=top,
-        caps_extra={"snapshot_balances": True},
     )
     run = _host(study)
     t = run.trace
@@ -1010,7 +1043,6 @@ def test_a_refund_of_five_to_a_row_left_always_keeps_its_balance(windowed):
     )
 
 
-@pytest.mark.slow  # a mutant of the disposition, outside the quick tier
 def test_crediting_an_old_awards_refund_to_the_newer_award_is_caught():
     """Mutant: the refund raises the row's newer award from 7 to 8 units, unlapsed.
 
@@ -1033,7 +1065,6 @@ def test_crediting_an_old_awards_refund_to_the_newer_award_is_caught():
     assert not balance_conserved(forged).passed
 
 
-@pytest.mark.slow  # a mutant of the disposition, outside the quick tier
 def test_a_refund_to_the_wrong_row_after_expiry_is_caught():
     """Mutant: a REALLOCATE award's late refund credited to the expired row."""
     run = _Windowed()["reallocated", True]
@@ -1121,23 +1152,74 @@ def test_a_refund_across_an_expiry_and_a_re_award_conserves(windowed):
     assert balance_conserved(run).passed
 
 
-def _mutant(monkeypatch, old, new):
-    monkeypatch.setattr(
-        handlers, "_apply_refund", mutate(handlers._apply_refund, old, new)
+def _before_release(run, tick):
+    """The run just before the release at `tick`, and the log row that release names."""
+    t = run.trace
+    pick = (
+        _handled(run)
+        & (np.asarray(t.kind) == EventKind.RELEASE)
+        & (np.asarray(t.tick) == tick)
     )
-    jax.clear_caches()  # the compiled step closed over the real handler
+    step = int(np.flatnonzero(pick)[0])
+    truth, root = one_world(caps=run.study.caps)
+    result = HostExecutor().run(run.study, truth, root, step)
+    carry = _tree_set(result.carry, tick=jnp.asarray(tick, I64))
+    before = SimpleNamespace(study=run.study, carry=carry, trace=result.trace)
+    return before, int(carry.n_log) - 1
 
 
-@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
-def test_mutant_crediting_an_old_awards_refund_to_the_newer_award_fails(monkeypatch):
+def _refunded(apply, before, slot):
+    """`before` after the refund rule `apply` runs by hand on the receipt row `slot`."""
+    carry = before.carry
+    rec = handlers._log_rec(carry.log, slot)
+    out = apply(carry, rec, jnp.asarray(slot, I64), jnp.asarray(True), before.study)
+    return SimpleNamespace(study=before.study, carry=out, trace=before.trace)
+
+
+def _after_release(run, tick, apply):
+    """The run to its end with the refund of the release at `tick` made by `apply`.
+
+    The ledger `apply` leaves on the carry before the release replaces the real
+    run's ledger after it, and the compiled advance, decision and admission carry
+    the rest of the run, so what the credit does to later steps is the real code's.
+    """
+    before, slot = _before_release(run, tick)
+    mutated = _refunded(apply, before, slot).carry.ledger
+    step = len(np.asarray(before.trace.tick))
+    truth, root = one_world(caps=run.study.caps)
+    ex = HostExecutor()
+    carry = ex.run(run.study, truth, root, step + 1).carry
+    real = _refunded(handlers._apply_refund, before, slot).carry.ledger
+    np.testing.assert_allclose(carry.ledger.balance, real.balance)
+    carry = _tree_set(carry, ledger=mutated)
+    lifted = lift_traced(run.study)
+    caps = run.study.caps
+    for _ in range(80 - step - 1):
+        carry, _trace, wake = ex.advance(carry, root, lifted, truth)
+        if bool(wake):
+            eff, pstate, _u = ex.decide(carry, root, lifted)
+        else:
+            eff, pstate = effects_none(caps), carry.pstate
+        eff = mask_effects(eff, wake)
+        fp = _fp(carry, lifted) if bool(wake) else jnp.asarray(0, I64)
+        carry, _codes = _adm(carry, eff, lifted, fp)
+        carry = _close(carry, eff, pstate, wake, lifted)
+    return SimpleNamespace(study=run.study, carry=carry, trace=run.trace)
+
+
+def test_mutant_crediting_an_old_awards_refund_to_the_newer_award_fails(windowed):
     """Mutant: the refund always credits the row, so a closed award raises the new one.
 
     The ledger counters and the record agree with the credit; only the independent
-    replay of the disposition refuses it.
+    replay of the disposition refuses it. The real and the changed `_apply_refund` run
+    eagerly on the carry just before the receipt's release at tick 350 of the shared
+    "forfeited_then_carry" run, and each result goes through the real compiled steps
+    to the end of the run, where the old test's check is made: the real run conserves,
+    the mutant's fails. No program is compiled for the mutant.
     """
-    _mutant(monkeypatch, "same = led.win_gen[rows] == gens", "same = rows >= 0")
-    try:
-        run = _Windowed()["forfeited_then_carry", True]
-        assert not balance_conserved(run).passed
-    finally:
-        jax.clear_caches()
+    run = windowed["forfeited_then_carry", True]
+    rule = mutate(
+        handlers._apply_refund, "same = led.win_gen[rows] == gens", "same = rows >= 0"
+    )
+    assert balance_conserved(_after_release(run, 350, handlers._apply_refund)).passed
+    assert not balance_conserved(_after_release(run, 350, rule)).passed
