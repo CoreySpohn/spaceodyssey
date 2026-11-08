@@ -8,7 +8,6 @@ carries a negative `charged` on its own row, so the records still net to the led
 import dataclasses
 from types import SimpleNamespace
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -18,10 +17,19 @@ from spaceodyssey.core.conformance.invariants import balance_conserved
 from spaceodyssey.core.enums import ChargePricing
 from tests.core.helpers import one_world
 from tests.core.program_helpers import cancel, observe, wait
-from tests.core.refund_helpers import mutate, receipt, refund_study
+from tests.core.refund_helpers import (
+    apply_refund,
+    before_release,
+    mutate,
+    receipt,
+    refund_study,
+)
 
 pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
 
+# Every study here shares one compiled executor: two programs, and a log of three rows,
+# which is the most a case with two receipts fills and the least that still overflows.
+SHARED = dict(n_programs=2, n_log=3)
 CANCELLED = (observe(0, 0, 10, 0), wait(0, 60), cancel(1, 0))
 SURCHARGE = dict(charge=10.0, pricing=ChargePricing.SURCHARGE, surcharge=2.0)
 CASES = {
@@ -43,7 +51,7 @@ class _Runs(dict):
     """The runs by case, each made on first use."""
 
     def __missing__(self, name):
-        self[name] = _run(refund_study(CANCELLED, **CASES[name]))
+        self[name] = _run(refund_study(CANCELLED, **CASES[name], cap_kw=SHARED))
         return self[name]
 
 
@@ -124,37 +132,49 @@ def test_a_receipt_row_that_loses_its_negative_charge_is_caught(runs):
     assert not balance_conserved(forged).passed
 
 
-@pytest.mark.slow  # a one-row log is static: each study compiles, 17 s cold
 def test_the_check_still_holds_when_the_log_overflows():
-    """A one-row log refuses the receipt; the trace accounts the lost completion."""
-    study = refund_study(
-        CANCELLED, **SURCHARGE, receipts=(receipt(200),), cap_kw=dict(n_log=1)
-    )
-    result = balance_conserved(_run(study))
-    assert result.passed, result
-
-
-@pytest.mark.slow  # a one-row log is static: each study compiles, 17 s cold
-def test_a_lost_completion_is_charged_to_the_program_that_paid_it():
-    """Two programs, a one-row log: the refused completion belongs to program 1."""
-    script = (observe(0, 0, 10, 1), wait(1, 200), observe(2, 0, 10, 1))
-    study = refund_study(script, cap_kw=dict(n_programs=2, n_log=1))
-    run = _run(study, n_steps=120)
-    assert int(run.carry.n_log) == 1
+    """A full log refuses the third receipt; the trace accounts the lost completion."""
+    receipts = (receipt(200), receipt(210), receipt(220))
+    study = refund_study(CANCELLED, **SURCHARGE, receipts=receipts, cap_kw=SHARED)
+    run = _run(study)
+    assert int(run.carry.n_log) == 3
     assert int(np.asarray(run.carry.overflow_mask)) != 0
-    held = np.asarray(run.carry.ledger.balance)
-    program_rows = held[study.caps.n_assets : study.caps.n_assets + 2, 1]
-    np.testing.assert_allclose(program_rows, [100.0, 80.0])
     result = balance_conserved(run)
     assert result.passed, result
 
 
-@pytest.mark.slow  # a one-row log is static: each study compiles, 17 s cold
+def _lost_completion_run():
+    """Four completions of program 1 into a log of three rows: the fourth is lost."""
+    script = (
+        observe(0, 0, 10, 1),
+        wait(1, 50),
+        observe(2, 0, 10, 1),
+        wait(3, 50),
+        observe(4, 0, 10, 1),
+        wait(5, 50),
+        observe(6, 0, 10, 1),
+    )
+    study = refund_study(script, cap_kw=SHARED)
+    return _run(study, n_steps=240)
+
+
+def test_a_lost_completion_is_charged_to_the_program_that_paid_it():
+    """Two programs, a full log: the refused completion belongs to program 1."""
+    run = _lost_completion_run()
+    study = run.study
+    assert int(run.carry.n_log) == 3
+    assert int(np.asarray(run.carry.overflow_mask)) != 0
+    held = np.asarray(run.carry.ledger.balance)
+    program_rows = held[study.caps.n_assets : study.caps.n_assets + 2, 1]
+    np.testing.assert_allclose(program_rows, [100.0, 60.0])
+    result = balance_conserved(run)
+    assert result.passed, result
+
+
 def test_a_debit_moved_to_the_wrong_program_is_caught_after_an_overflow():
     """Fails if the lost completion's program is read from the counters it checks."""
-    script = (observe(0, 0, 10, 1), wait(1, 200), observe(2, 0, 10, 1))
-    study = refund_study(script, cap_kw=dict(n_programs=2, n_log=1))
-    run = _run(study, n_steps=120)
+    run = _lost_completion_run()
+    study = run.study
     row = study.caps.n_assets
     assert balance_conserved(run).passed
     ledger = run.carry.ledger
@@ -166,56 +186,42 @@ def test_a_debit_moved_to_the_wrong_program_is_caught_after_an_overflow():
     forged = SimpleNamespace(
         study=study, carry=dataclasses.replace(run.carry, ledger=moved), trace=run.trace
     )
-    np.testing.assert_allclose(np.asarray(moved.balance)[row : row + 2, 1], [90, 90])
+    np.testing.assert_allclose(np.asarray(moved.balance)[row : row + 2, 1], [90, 70])
     assert not balance_conserved(forged).passed
 
 
-def _mutant(monkeypatch, old, new):
-    monkeypatch.setattr(
-        handlers, "_apply_refund", mutate(handlers._apply_refund, old, new)
-    )
-    jax.clear_caches()  # the compiled step closed over the real handler
+# ---- mutants: the rule, changed, applied by hand to the carry before a release ------
+#
+# The real rule leaves the books conserved on the release it guards; each mutant
+# applied to the same carry does not. See the matching tests in `test_refund.py`: the
+# mutant is a changed `_apply_refund` run eagerly, so no program is compiled for it.
 
 
-@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
+def _mutant_case(case, program, tick, old, new):
+    script = (observe(0, 0, 10, program), wait(0, 60), cancel(1, 0))
+    study = refund_study(script, **CASES[case], cap_kw=SHARED)
+    before, slot = before_release(study, _run(study).trace, tick)
+    real = apply_refund(handlers._apply_refund, before, slot)
+    mutant = apply_refund(mutate(handlers._apply_refund, old, new), before, slot)
+    return before, real, mutant
+
+
 @pytest.mark.parametrize("program", [0, 1])
-def test_mutant_a_refund_of_the_whole_charge_fails_conservation(monkeypatch, program):
+def test_mutant_a_refund_of_the_whole_charge_fails_conservation(program):
     """Mutant: the credit includes the surcharge; the ledger and receipt agree on it."""
-    _mutant(
-        monkeypatch,
-        "log.charged[origin] - log.nonrefundable[origin]",
-        "log.charged[origin]",
+    old = "log.charged[origin] - log.nonrefundable[origin]"
+    before, real, mutant = _mutant_case(
+        "refunded", program, 200, old, "log.charged[origin]"
     )
-    try:
-        script = (observe(0, 0, 10, program), wait(0, 60), cancel(1, 0))
-        study = refund_study(
-            script,
-            **SURCHARGE,
-            receipts=(receipt(200),),
-            cap_kw=dict(n_programs=2),
-        )
-        run = _run(study)
-        assert int(run.carry.n_log) == 2  # the acquisition and the receipt
-        assert not balance_conserved(run).passed
-    finally:
-        jax.clear_caches()
+    assert int(before.carry.n_log) == 2  # the acquisition and the receipt
+    assert balance_conserved(real).passed
+    assert not balance_conserved(mutant).passed
 
 
-@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
 @pytest.mark.parametrize("program", [0, 1])
-def test_mutant_a_second_receipt_credit_fails_conservation(monkeypatch, program):
+def test_mutant_a_second_receipt_credit_fails_conservation(program):
     """Mutant: no once-only test, so two receipts credit one acquisition twice."""
-    _mutant(monkeypatch, " & ~paid", "")
-    try:
-        script = (observe(0, 0, 10, program), wait(0, 60), cancel(1, 0))
-        study = refund_study(
-            script,
-            **SURCHARGE,
-            receipts=(receipt(200), receipt(210)),
-            cap_kw=dict(n_programs=2),
-        )
-        run = _run(study)
-        assert int(run.carry.n_log) == 3  # the acquisition and two receipts
-        assert not balance_conserved(run).passed
-    finally:
-        jax.clear_caches()
+    before, real, mutant = _mutant_case("refunded_twice", program, 210, " & ~paid", "")
+    assert int(before.carry.n_log) == 3  # the acquisition and two receipts
+    assert balance_conserved(real).passed
+    assert not balance_conserved(mutant).passed

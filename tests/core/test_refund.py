@@ -9,7 +9,6 @@ control or a mutant of the rule it guards. The runs share one compiled executor.
 
 import dataclasses
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -29,7 +28,13 @@ from spaceodyssey.core.records import masked_record, record_none
 from spaceodyssey.studies import toy
 from tests.core.helpers import one_world
 from tests.core.program_helpers import cancel, observe, wait
-from tests.core.refund_helpers import mutate, receipt, refund_study
+from tests.core.refund_helpers import (
+    apply_refund,
+    before_release,
+    mutate,
+    receipt,
+    refund_study,
+)
 
 pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
 
@@ -291,64 +296,51 @@ def test_mutant_a_visible_internal_refund_id_moves_the_fingerprint(runs, monkeyp
     assert _fingerprint(study, plain.carry) != _fingerprint(study, shifted.carry)
 
 
-# ---- mutants (last: each clears the compile caches) ---------------------------------
+# ---- mutants: the rule, changed, applied by hand to the carry before a release -----
+#
+# Each mutant is the real `_apply_refund` with one test removed, run eagerly on the
+# carry just before the release it guards, next to the real rule on the same carry. That
+# keeps the compiled executor the runs share; a mutant that went through the executor
+# would compile a program of its own.
 
 
-def _with_apply(monkeypatch, apply):
-    monkeypatch.setattr(handlers, "_apply_refund", apply)
-    jax.clear_caches()  # the compiled step closed over the real handler
+def _credit(runs, scenario, tick, source, mutant, first=True):
+    """The held balances after the real rule and after the mutant on one release."""
+    study, run = runs[scenario]
+    before, slot = before_release(study, run.trace, tick)
+    real = apply_refund(handlers._apply_refund, before, slot, first)
+    rule = mutate(handlers._apply_refund, source, mutant)
+    return _held(real), _held(apply_refund(rule, before, slot, first))
 
 
-@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
-def test_mutant_a_refund_of_the_whole_charge_is_caught(monkeypatch):
+def test_mutant_a_refund_of_the_whole_charge_is_caught(runs):
     """Mutant: the credit is the retained charge, surcharge included (7, not 5)."""
     old = "log.charged[origin] - log.nonrefundable[origin]"
-    _with_apply(monkeypatch, mutate(handlers._apply_refund, old, "log.charged[origin]"))
-    try:
-        study = refund_study(CANCELLED, **SURCHARGE, receipts=(receipt(200),))
-        np.testing.assert_allclose(_held(_run(study)), 100.0)  # not 98
-    finally:
-        jax.clear_caches()
+    real, mutant = _credit(runs, "applied", 200, old, "log.charged[origin]")
+    np.testing.assert_allclose(real, 98.0)
+    np.testing.assert_allclose(mutant, 100.0)  # not 98
 
 
-@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
-def test_mutant_a_refund_applied_twice_is_caught(monkeypatch):
+def test_mutant_a_refund_applied_twice_is_caught(runs):
     """Mutant: no once-only test, so a second receipt credits again."""
-    _with_apply(monkeypatch, mutate(handlers._apply_refund, " & ~paid", ""))
-    try:
-        study = refund_study(
-            CANCELLED, **SURCHARGE, receipts=(receipt(200), receipt(210))
-        )
-        np.testing.assert_allclose(_held(_run(study)), 103.0)  # not 98
-    finally:
-        jax.clear_caches()
+    real, mutant = _credit(runs, "duplicate", 210, " & ~paid", "")
+    np.testing.assert_allclose(real, 98.0)
+    np.testing.assert_allclose(mutant, 103.0)  # not 98
 
 
-@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
-def test_mutant_a_refund_past_its_deadline_is_caught(monkeypatch):
+def test_mutant_a_refund_past_its_deadline_is_caught(runs):
     """Mutant: no deadline test, so the expired claim credits."""
-    _with_apply(monkeypatch, mutate(handlers._apply_refund, " & in_time", ""))
-    try:
-        study = refund_study(
-            CANCELLED, **SURCHARGE, receipts=(receipt(200),), deadline=100
-        )
-        np.testing.assert_allclose(_held(_run(study)), 98.0)  # not 93
-    finally:
-        jax.clear_caches()
+    real, mutant = _credit(runs, "late", 200, " & in_time", "")
+    np.testing.assert_allclose(real, 93.0)
+    np.testing.assert_allclose(mutant, 98.0)  # not 93
 
 
-@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
-def test_mutant_a_refund_on_any_release_leaks_an_observer_only_receipt(monkeypatch):
+def test_mutant_a_refund_on_any_release_leaks_an_observer_only_receipt(runs):
     """Mutant: the credit applies on any release, not the policy's first."""
     old = "        first\n        & rec.valid\n"
-    _with_apply(monkeypatch, mutate(handlers._apply_refund, old, "        rec.valid\n"))
-    try:
-        study = refund_study(
-            CANCELLED,
-            **SURCHARGE,
-            receipts=(receipt(200, audience=OBSERVER_ONLY),),
-            failure=0,
-        )
-        np.testing.assert_allclose(_held(_run(study)), 98.0)  # not 93
-    finally:
-        jax.clear_caches()
+    # the observer-only receipt is released to the observer alone: `first` does not hold
+    real, mutant = _credit(
+        runs, "observer_only", 200, old, "        rec.valid\n", first=False
+    )
+    np.testing.assert_allclose(real, 93.0)
+    np.testing.assert_allclose(mutant, 98.0)  # not 93
