@@ -97,6 +97,9 @@ def advance(carry, root, study, truth, *, wake_fn=wake_by_audience):
         | (c3.ev.kind == EventKind.RESULT)
         | (c3.ev.kind == EventKind.REFRESH)
     )
+    if caps.commitments:
+        # a commitment still to start is work in flight: a drain waits for its start
+        drainable = drainable | (c3.ev.valid & (c3.ev.kind == EventKind.COMMIT_START))
     drained = (
         handled & c3.draining & ~drainable.any() & ~c3.request.valid & ~c3.refresh.valid
     )
@@ -610,6 +613,16 @@ def _group_code(c, eff, member, study):
         later = member & (jax.vmap(lambda f: _start_of(eff, f, caps, t))(idx) > t)
         room = room & ((c.ledger.cm_state == CommitState.NONE).sum() >= later.sum())
     cols = jnp.arange(caps.n_resources)
+    if caps.commitments:
+        starts = jax.vmap(lambda f: _start_of(eff, f, caps, t))(idx)
+        assets_of = study.assets.lane_asset[lanes].astype(I64)
+        dcols = jnp.clip(
+            study.assets.disruptive_resource[assets_of], 0, caps.n_resources - 1
+        )
+        # a row that starts inside its asset's horizon spends one activation
+        spends = member & jax.vmap(
+            lambda f: _frozen(c, study, lanes[f], starts[f], eff.disruptive[f])[0]
+        )(idx)
 
     def code_of(f):
         ci = eff.channel_index[f]
@@ -628,6 +641,22 @@ def _group_code(c, eff, member, study):
         # result depends on the order
         demand = lax.fori_loop(0, n, add, jnp.zeros(caps.n_resources))
         funds = jnp.all(c.ledger.balance[rows[f], cols] >= demand)
+        if caps.commitments:
+            # the activations of the group come out of the asset row's cell as well, on
+            # top of whatever the group's charges take from that cell; a row that
+            # spends one needs the whole demand on the cell covered
+            def cell(g, total):
+                same = (assets_of[g] == assets_of[f]) & (dcols[g] == dcols[f])
+                paid = member[g] & (rows[g][dcols[f]] == assets_of[f])
+                return (
+                    total
+                    + jnp.where(spends[g] & same, 1.0, 0.0)
+                    + jnp.where(paid, cost[g][dcols[f]], 0.0)
+                )
+
+            need = lax.fori_loop(0, n, cell, jnp.asarray(0.0))
+            held = c.ledger.balance[assets_of[f], dcols[f]]
+            funds = funds & (~spends[f] | (held >= need))
         closed = c.ledger.lane_closed[lanes[f]] | c.draining
         if caps.n_programs > 1:
             # a closed program refuses its own admissions; its lanes stay open
@@ -769,15 +798,30 @@ def _admit_rows(c, eff, mask, study, fp):
                 & (c.ledger.cm_start == eff.start_tick[e])
             )
             slot = jnp.argmax(hit)
+            # a commitment already named by a Cancel waiting in the queue has no
+            # second cancellation to give
+            again = jnp.any(
+                c.ev.valid & (c.ev.kind == EventKind.CANCEL) & (c.ev.slot == slot)
+            )
             inserts, may_break = _frozen(
                 c, study, eff.lane[e], eff.start_tick[e], eff.disruptive[e]
             )
+            queued = (~c.ev.valid).any() & (c.next_sid < caps.max_sid)
             cancel_code = jnp.select(
-                [named & ~hit.any(), named & inserts & ~may_break],
-                [AdmissionCode.UNSUPPORTED, AdmissionCode.FROZEN_HORIZON],
+                [
+                    named & (~hit.any() | again),
+                    named & inserts & ~may_break,
+                    named & ~queued,
+                ],
+                [
+                    AdmissionCode.UNSUPPORTED,
+                    AdmissionCode.FROZEN_HORIZON,
+                    AdmissionCode.NO_SLOT,
+                ],
                 AdmissionCode.OK,
             ).astype(I64)
             cancels = cancels & (cancel_code == AdmissionCode.OK)
+            # the activation is spent only by a Cancel that is queued
             c = _debit_activation(c, study, eff.lane[e], cancels & named & inserts)
             cancel_extra = {"slot": jnp.where(named, slot, -1)}
         c = enqueue(
