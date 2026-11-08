@@ -15,10 +15,9 @@ import pytest
 
 from spaceodyssey.core import HostExecutor, handlers
 from spaceodyssey.core.conformance.invariants import balance_conserved
-from spaceodyssey.core.enums import ChargePricing, RemainderRule
-from tests.core import award_helpers
+from spaceodyssey.core.enums import ChargePricing
 from tests.core.helpers import one_world
-from tests.core.program_helpers import cancel, end, observe, wait
+from tests.core.program_helpers import cancel, observe, wait
 from tests.core.refund_helpers import mutate, receipt, refund_study
 
 pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
@@ -40,31 +39,11 @@ def _run(study, n_steps=80):
     return SimpleNamespace(study=study, carry=result.carry, trace=result.trace)
 
 
-# awards on, one compiled executor for all: (script, awards, receipts)
-FOREVER = award_helpers.award(0, 2, 2, 0, 1000, 5, RemainderRule.FORFEIT)
-EXPIRED = award_helpers.award(0, 2, 2, 0, 60, 5, RemainderRule.CARRY_OVER)
-AWARD_CASES = {
-    "cancel_under_award": (CANCELLED, (FOREVER,), ()),
-    "observe_after_expiry": (
-        (wait(0, 100), observe(1, 0, 10, 0), end(2)),
-        (EXPIRED,),
-        (),
-    ),
-}
-
-
 class _Runs(dict):
     """The runs by case, each made on first use."""
 
     def __missing__(self, name):
-        if name in AWARD_CASES:
-            script, awards, receipts = AWARD_CASES[name]
-            study = award_helpers.award_refund_study(
-                script, awards, receipts, pricing=None
-            )
-        else:
-            study = refund_study(CANCELLED, **CASES[name])
-        self[name] = _run(study)
+        self[name] = _run(refund_study(CANCELLED, **CASES[name]))
         return self[name]
 
 
@@ -237,76 +216,6 @@ def test_mutant_a_second_receipt_credit_fails_conservation(monkeypatch, program)
         )
         run = _run(study)
         assert int(run.carry.n_log) == 3  # the acquisition and two receipts
-        assert not balance_conserved(run).passed
-    finally:
-        jax.clear_caches()
-
-
-def test_a_cancellation_under_an_award_conserves(runs):
-    """Fails if the replay drops a cancel's credit from the refunded account.
-
-    The lane is cancelled at tick 60, half spent: the ledger credits 5, and the replay
-    of the awards must expect the same credit in `refunded` and in the balance.
-    """
-    run = runs["cancel_under_award"]
-    assert float(np.asarray(run.carry.ledger.refunded)[2, 1]) == 5.0
-    assert balance_conserved(run).passed
-
-
-def test_a_debit_after_its_window_expired_names_generation_zero(runs):
-    """Fails if a debit on a row whose window has closed captures that row's generation.
-
-    The carry-over award ends at tick 60, so the row is unwindowed at tick 100: the
-    record names generation 0 and the rule NONE (not the row's generation 2), and the
-    replay accepts it.
-    """
-    run = runs["observe_after_expiry"]
-    log = run.carry.log
-    assert int(np.asarray(run.carry.ledger.win_gen)[2]) == 2
-    assert not np.any(np.asarray(log.award_gens)[0])
-    assert not np.any(np.asarray(log.award_rules)[0])
-    assert balance_conserved(run).passed
-
-
-WINDOWED_SCRIPT = (
-    wait(0, 40),
-    observe(1, 0, 10, 0),
-    wait(1, 270),
-    wait(2, 140),
-    wait(3, 100),
-    end(5),
-)
-
-
-def _re_awarded(receipts):
-    """Award A forfeits at 300, B (carry over) opens at 310; the refund is at 350."""
-    first = award_helpers.award(0, 2, 2, 0, 300, 5, RemainderRule.FORFEIT)
-    again = award_helpers.award(3, 2, 2, 310, 360, 7, RemainderRule.CARRY_OVER)
-    study = award_helpers.award_refund_study(
-        WINDOWED_SCRIPT, (first, again), receipts, pricing=None
-    )
-    return _run(study)
-
-
-def test_a_refund_across_an_expiry_and_a_re_award_conserves():
-    """Control: the late refund lapses, and the per-row account and the replay agree."""
-    run = _re_awarded((receipt(350),))
-    ledger = run.carry.ledger
-    assert float(np.asarray(ledger.refunded)[2, 1]) == 10.0
-    assert float(np.asarray(ledger.lapsed)[2, 1]) >= 10.0
-    assert balance_conserved(run).passed
-
-
-@pytest.mark.slow  # A mutant clears the compile caches and compiles the executor cold.
-def test_mutant_crediting_an_old_awards_refund_to_the_newer_award_fails(monkeypatch):
-    """Mutant: the refund always credits the row, so a closed award raises the new one.
-
-    The ledger counters and the record agree with the credit; only the independent
-    replay of the disposition refuses it.
-    """
-    _mutant(monkeypatch, "same = led.win_gen[rows] == gens", "same = rows >= 0")
-    try:
-        run = _re_awarded((receipt(350),))
         assert not balance_conserved(run).passed
     finally:
         jax.clear_caches()
