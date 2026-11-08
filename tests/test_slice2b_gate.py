@@ -489,6 +489,7 @@ def test_k6_k7_the_quick_tier_step_enforces_the_budgets():
         "--require-tier medium",
     ):
         assert flag in step, flag
+    assert "--advisory-baseline" not in step
     assert 'pytest tests/ -m "not slow"' in text
     assert "hwoutils.testbudget.plugin" in conftest.pytest_plugins
     budget = tomllib.loads((REPO / "pyproject.toml").read_text())["tool"]["testbudget"]
@@ -546,3 +547,21 @@ def test_k6_k7_the_summary_script_fails_over_its_limits(tmp_path, wall, tier, ok
         check=False,
     )
     assert (result.returncode == 0) == ok, result.stdout + result.stderr
+
+
+def test_k6_an_advisory_baseline_prints_the_increase_without_failing(tmp_path):
+    """Fails if --advisory-baseline still fails a run 61 s above its baseline, or
+    stops printing the increase, or is accepted without a baseline.
+    """
+    junit = tmp_path / "junit.xml"
+    junit.write_text(JUNIT.format(wall=161.0, tier="medium"))
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"wall_s": 100.0, "source": "t", "status": "x"}))
+    env = {k: v for k, v in os.environ.items() if k != "GITHUB_STEP_SUMMARY"}
+    command = [sys.executable, str(CI_SUMMARY), str(junit), "--advisory-baseline"]
+    alone = subprocess.run(command, capture_output=True, text=True, env=env)
+    assert alone.returncode != 0
+    command += ["--baseline", str(baseline), "--max-increase-seconds", "60"]
+    result = subprocess.run(command, capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "advisory: not a failure" in result.stdout

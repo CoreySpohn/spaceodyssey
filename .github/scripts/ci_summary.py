@@ -1,14 +1,16 @@
 """Write a job summary from a pytest junit file and enforce suite time budgets.
 
 Usage: python ci_summary.py junit.xml [--title TITLE] [--budget-seconds N]
-       [--baseline SUMMARY.json --max-increase-seconds N] [--require-tier TIER]
+       [--baseline SUMMARY.json --max-increase-seconds N [--advisory-baseline]]
+       [--require-tier TIER]
        [--write-summary OUT.json [--commit SHA]] [--allow-skips]
 
 Appends markdown to $GITHUB_STEP_SUMMARY (stdout when unset). Exits non-zero when:
 
 - the suite's wall time exceeds ``--budget-seconds`` (the absolute ceiling);
 - the wall time exceeds the baseline summary's wall time by more than
-  ``--max-increase-seconds`` (the relative limit; both options go together);
+  ``--max-increase-seconds`` (the relative limit; both options go together),
+  unless ``--advisory-baseline`` makes that comparison print-only;
 - a tier named by ``--require-tier`` has no test in the file (so a selection that
   drops the medium tests cannot pass the budget unnoticed);
 - any test was skipped (a skip hides a missing dependency), unless allowed.
@@ -78,6 +80,7 @@ def main():
     parser.add_argument("--budget-seconds", type=float, default=0.0)
     parser.add_argument("--baseline", default="")
     parser.add_argument("--max-increase-seconds", type=float, default=None)
+    parser.add_argument("--advisory-baseline", action="store_true")
     parser.add_argument("--require-tier", action="append", default=[], choices=TIERS)
     parser.add_argument("--write-summary", default="")
     parser.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""))
@@ -85,6 +88,8 @@ def main():
     args = parser.parse_args()
     if bool(args.baseline) != (args.max_increase_seconds is not None):
         parser.error("--baseline and --max-increase-seconds go together")
+    if args.advisory_baseline and not args.baseline:
+        parser.error("--advisory-baseline needs --baseline")
 
     if not os.path.exists(args.junit):
         print(f"{args.junit} not found: the test step did not run")
@@ -113,7 +118,8 @@ def main():
             f"- baseline: {float(baseline['wall_s']):.1f} s "
             f"({baseline.get('status', 'unstated')}; "
             f"cache {baseline.get('cache', 'unstated')}), "
-            f"increase {increase:+.1f} s (limit {args.max_increase_seconds:.0f} s)",
+            f"increase {increase:+.1f} s (limit {args.max_increase_seconds:.0f} s"
+            + (", advisory)" if args.advisory_baseline else ")"),
             f"- baseline source: {baseline.get('source', 'unstated')}",
         ]
     lines += ["", "| slowest tests | tier | seconds |", "|---|---|---|"]
@@ -160,8 +166,9 @@ def main():
             f"wall time {wall:.1f} s is {wall - float(baseline['wall_s']):.1f} s above "
             f"the baseline {float(baseline['wall_s']):.1f} s; the limit is "
             f"{args.max_increase_seconds:.0f} s"
+            + (" (advisory: not a failure)" if args.advisory_baseline else "")
         )
-        failed = True
+        failed = failed or not args.advisory_baseline
     for tier in args.require_tier:
         if tier not in totals:
             print(f"no {tier} test in {args.junit}: the selection dropped that tier")
