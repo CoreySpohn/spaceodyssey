@@ -537,6 +537,38 @@ def test_an_award_past_the_representable_balance_range_is_refused():
     assert np.asarray(srun.trace.admit_code)[sa].tolist() == [OK]
 
 
+@pytest.mark.parametrize("quantum", [1.0, 0.125, 10.0])
+def test_opposite_budgets_do_not_offset_in_the_range_bound(quantum):
+    """Fails if a negative budget row lowers the supply the range bound measures.
+
+    Rows hold +B and -B of the program resource (B is 2**53 quanta), so their sum is
+    zero while the positive row already sits at the limit: an award of 8 quanta on it
+    would pass 2**53 quanta. Small budgets of the same signs are the control.
+    """
+
+    def codes(big):
+        study = award_study(
+            (wait(0, 10), end(5)),
+            (award(0, 2, P0, 0, 200, 8.0 * quantum),),
+            caps_extra={"snapshot_balances": True, "balance_quantum": quantum},
+        )
+        budget = np.asarray(study.budget).copy()
+        budget[P0, PROGRAM_COL] = big
+        budget[P1, PROGRAM_COL] = -big
+        study = dataclasses.replace(study, budget=jnp.asarray(budget))
+        run = _host(study)
+        allocs = _handled(run)[:, None] & (
+            np.asarray(run.trace.eff_kind) == EffectKind.ALLOCATE
+        )
+        return np.asarray(run.trace.admit_code)[allocs].tolist(), run
+
+    top = 2.0**53 * quantum
+    refused, run = codes(top)
+    assert refused == [AdmissionCode.UNSUPPORTED]
+    assert float(np.asarray(run.carry.ledger.granted).sum()) == 0.0
+    assert codes(100.0 * quantum)[0] == [OK]
+
+
 def test_a_large_award_without_snapshot_balances_is_admitted():
     """Control: the range rule binds only when balances are in the snapshot."""
     study = award_study((wait(0, 10), end(5)), (award(0, 2, P0, 0, 200, 1e20),))
@@ -614,6 +646,92 @@ def test_a_refund_credited_to_another_programs_row_is_caught():
     refunded = ledger.refunded + move
     forged = _forged(run, balance=ledger.balance + move, refunded=refunded)
     assert not balance_conserved(forged).passed
+
+
+def _forged_log(run, **columns):
+    log = eqx.tree_at(
+        lambda lg: tuple(getattr(lg, n) for n in columns),
+        run.carry.log,
+        tuple(jnp.asarray(v) for v in columns.values()),
+    )
+    return SimpleNamespace(
+        study=run.study,
+        carry=eqx.tree_at(lambda c: c.log, run.carry, log),
+        trace=run.trace,
+    )
+
+
+TWO_PROGRAMS = (
+    wait(0, 40),
+    observe(1, 0, 10, 0),
+    wait(1, 200),
+    observe(2, 0, 10, 1),
+    wait(2, 300),
+    end(5),
+)
+
+
+@functools.cache
+def _two_program_run():
+    study = award_refund_study(
+        TWO_PROGRAMS, REFUND_AWARD, (receipt(350),), pricing=None
+    )
+    return _host(study, n_steps=60)
+
+
+def test_a_refund_routed_to_another_acquisition_in_both_places_is_caught():
+    """Fails if the replay trusts the handler's `refund_of` to find the origin.
+
+    The receipt names subject 0 on channel 10, index 0 (a program 0 acquisition; index 1
+    is program 1's). The
+    credit is moved to program 1's row in the balance and the refunded counter, and
+    `refund_of` is repointed at program 1's acquisition, so every counter and the
+    handler's own column agree with the forgery. Only the receipt's identity does not.
+    """
+    run = _two_program_run()
+    assert balance_conserved(run).passed
+    log = run.carry.log
+    refs = np.asarray(log.refund_of).copy()
+    ids = np.asarray(log.acquisition_id)
+    valid = np.asarray(log.valid)
+    (receipt_row,) = np.flatnonzero(valid & (refs >= 0))
+    other = [
+        j
+        for j in np.flatnonzero(valid & (refs < 0))
+        if int(np.asarray(log.channel)[j]) == 10
+        and int(np.asarray(log.acquisition_index)[j]) == 1
+    ]
+    assert len(other) == 1
+    refs[receipt_row] = ids[other[0]]
+    ledger = run.carry.ledger
+    move = jnp.zeros_like(ledger.balance)
+    move = move.at[P0, PROGRAM_COL].set(-10.0).at[P1, PROGRAM_COL].set(10.0)
+    forged = _forged(
+        _forged_log(run, refund_of=refs),
+        balance=ledger.balance + move,
+        refunded=ledger.refunded + move,
+    )
+    assert not balance_conserved(forged).passed
+
+
+@pytest.mark.parametrize(
+    "receipts",
+    [
+        (receipt(160), receipt(170)),
+        (receipt(160, index=7),),
+        (receipt(160, held=True),),
+        (receipt(160, channel=11),),
+    ],
+    ids=["duplicate", "unmatched", "held", "wrong-channel"],
+)
+def test_receipts_that_apply_nothing_do_not_fail_conservation(receipts):
+    """Fails if an ignored, unmatched or held receipt is replayed as an acquisition."""
+    study = award_refund_study(REFUND_SCRIPT, REFUND_AWARD, receipts, pricing=None)
+    run = _host(study, n_steps=60)
+    assert balance_conserved(run).passed
+    log = run.carry.log
+    kinds = np.asarray(log.channel)[np.asarray(log.valid)]
+    assert (kinds == 50).any(), "the receipt reached the log"
 
 
 def test_a_record_naming_a_newer_award_generation_is_caught():

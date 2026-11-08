@@ -4,10 +4,12 @@ orphan: true
 
 # Slice 3a S5: awards, windows and remainder rules
 
-Round 3 is rebuilt on `main` 10a9b06. Round 2 added the award generation of the drawn row,
+Round 4 is on top of round 3, which is rebuilt on `main` 10a9b06. Round 2 added the award generation of the drawn row,
 an independent expiry replay, and the amount-shape and range refusals; round 3 makes the
 replay cover refunds and queued settlements, keeps one generation per payer slot, bounds
-the range by supply, and fixes the program-row crash. No new `CORE_KINDS`, so no
+the range by supply, and fixes the program-row crash; round 4 resolves a receipt's origin from its identity
+in the replay, replays only applied receipts, bounds the range by the absolute value of the
+budget, and puts `log.award_gens` in the field order the contract requires. No new `CORE_KINDS`, so no
 entry-point change.
 
 S5 lets a policy grant a balance row an amount for a window with an Allocate effect, closes
@@ -54,8 +56,10 @@ this change.
 - **Expiry reconciliation.** `balance_conserved` replays the money events of the run in
   the order the executor handled them and requires the ledger's `balance`, `granted`,
   `lapsed` and `win_gen` to equal the replay. The events, by tick and stage: an applied
-  receipt's credit at its `released_tick` (stage RELEASE, resolved through `refund_of` to
-  the origin's rows and refundable credit); each handled WINDOW_END (ANALYZE); and, in the
+  receipt's credit at its `released_tick` (stage RELEASE; the origin is found from the
+  receipt's subject, `source` channel and `refund_index`, never from the handler's
+  `refund_of`, which must name the same acquisition or the run fails; only applied
+  receipts are replayed, so a duplicate, unmatched or held receipt moves no money); each handled WINDOW_END (ANALYZE); and, in the
   decision stage, each admitted Allocate, each admission debit (a settled or cancelled
   record gives `start_tick` less the lane transition; a queued settlement, which has no
   record yet, gives its due tick less occupancy and transition) and a cancellation's
@@ -78,7 +82,8 @@ this change.
   table (a `(n,)` or `(n, 1)` vector would broadcast into every resource) is refused as
   UNSUPPORTED, statically at trace time, together with every other Allocate of the decision.
 - **Representable range.** With `caps.snapshot_balances`, an Allocate is admitted only if
-  the resource's supply, the budget over all rows plus everything granted so far (a
+  the resource's supply, the absolute budget over all rows (a negative row cannot
+  offset a positive one) plus everything granted so far (a
   reallocation counts again, which only refuses early), stays within `2**53` times the
   balance quantum (S4's exact bound). Balances never go negative and a debit, refund, lapse
   and REALLOCATE move quantity without adding any, so supply bounds every row at every

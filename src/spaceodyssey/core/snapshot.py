@@ -285,7 +285,7 @@ def snapshot_view(carry, audience, caps):
     balance, balance_q, balance_rows = balance_view(carry, audience, caps)
     shows = caps.snapshot_balances and audience == Audience.POLICY
     return Snapshot(
-        log=RecordLog(**cols),
+        log=RecordLog(**cols, award_gens=None),
         n_rows=vis.sum().astype(I64),
         belief=carry.pbelief if audience == Audience.POLICY else carry.belief,
         tick=carry.tick,

@@ -359,7 +359,10 @@ def _commit_allocate(c, eff, e, want, study):
         # everything granted so far (a reallocation counts again, which only refuses
         # early) bounds every row at every time, whichever refund or reallocation
         # lands where. The award is admitted only if that supply stays within bound.
-        supply = jnp.asarray(study.budget).sum(axis=0) + c.ledger.granted.sum(axis=0)
+        # a negative budget row counts as its absolute value, so it cannot offset a
+        # positive one (each row is bounded on its own)
+        supply = jnp.abs(jnp.asarray(study.budget)).sum(axis=0)
+        supply = supply + c.ledger.granted.sum(axis=0)
         fine = fine & jnp.all((supply + amount) / caps.balance_quantum <= _EXACT_QUANTA)
     open_ = c.ledger.win_state[r] == WindowState.WINDOWED
     room = (~c.ev.valid).any() & (c.next_sid < caps.max_sid)
