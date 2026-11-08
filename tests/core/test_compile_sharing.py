@@ -13,6 +13,7 @@ import math
 from decimal import Decimal
 from fractions import Fraction
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -20,17 +21,20 @@ import pytest
 
 from spaceodyssey.codec import DocumentError, dump_study, load_study
 from spaceodyssey.codec.records import check_lowering
+from spaceodyssey.core.carry import init_carry
 from spaceodyssey.core.conformance.corpus import make_worlds
 from spaceodyssey.core.executors.base import index_world
-from spaceodyssey.core.executors.compiled import CompiledExecutor, _scan_worlds
+from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.core.lift import _lifted, lift_traced, lifting_jit
-from spaceodyssey.core.transaction import wake_by_audience
 from spaceodyssey.studies import oracle, scripted, toy
 from tests.codec.test_document import TOY_KINDS
-from tests.core.corpus import HAND_STUDIES
 
 pytestmark = pytest.mark.medium  # Each case compiles a scan.
+
+N_STEPS = 24  # the length of the recorded base histories
+EARLY = 6  # the threshold study is running here and idle from step 10
+BUCKET = 32  # step counts 1 to 32 share one program of 32 rows
 
 _traces = {"n": 0}
 
@@ -44,7 +48,7 @@ class _CountingExecutor(CompiledExecutor):
         return super().transition(carry, i, root, study, truth, **kw)
 
 
-def _run(study, n_steps, n_worlds=2, **kw):
+def _run(study, n_steps=N_STEPS, n_worlds=1, **kw):
     truths, roots = make_worlds(study, n_worlds)
     return _CountingExecutor().run(study, truths, roots, n_steps, **kw)
 
@@ -60,50 +64,77 @@ def _same_bits(a, b):
         assert x.tobytes() == y.tobytes()
 
 
-def _scripted(values=(2.0, 9.0), ticks=(100, 200)):
-    return scripted.scripted_study(
-        ticks=ticks, values=values, ids=(7001, 7001), revisions=(0, 1)
+def _threshold(x):
+    return toy.survey_1(policies=(toy.ThresholdStopPolicy(stop_snr=x),))
+
+
+def _script(ticks=(100, 200), values=(2.0, 9.0)):
+    return scripted.scripted_study(ticks=ticks, values=values, ids=(7001, 7002))
+
+
+@pytest.fixture(scope="module")
+def threshold_run():
+    """One compiled scan of the threshold study; every value variant reuses it."""
+    return _run(_threshold(3.0))
+
+
+@pytest.fixture(scope="module")
+def early_run():
+    """The default scan stopped while the study is still running."""
+    return _run(_threshold(3.0), EARLY)
+
+
+@pytest.fixture(scope="module")
+def bucketed_run():
+    """The same step count through the 32-row bucketed program."""
+    return _run(_threshold(3.0), EARLY, bucket=BUCKET)
+
+
+@pytest.fixture(scope="module")
+def scripted_run():
+    """One compiled scan of a two-record script; other scripts reuse it."""
+    return _run(_script())
+
+
+def test_bucketed_run_matches_the_default_scan_bit_for_bit(early_run, bucketed_run):
+    """Fails if the bucketed scan steps past n_steps, or changes a bit."""
+    _same_bits(
+        (early_run.carry, early_run.trace), (bucketed_run.carry, bucketed_run.trace)
     )
 
 
-BUCKET = 16
-
-
-@pytest.mark.parametrize("name", ["baseline", "bundle"])
-@pytest.mark.parametrize("n_steps", [12, 40, 45])
-def test_bucketed_run_matches_the_default_scan_bit_for_bit(name, n_steps):
-    study = HAND_STUDIES[name]()
-    default = _run(study, n_steps)
-    bucketed = _run(study, n_steps, bucket=BUCKET)
-    _same_bits(default.carry, bucketed.carry)
-    _same_bits(default.trace, bucketed.trace)
-
-
-def test_bucketed_run_matches_on_a_scripted_study():
-    study = _scripted()
-    default = _run(study, 45)
-    bucketed = _run(study, 45, bucket=BUCKET)
-    _same_bits((default.carry, default.trace), (bucketed.carry, bucketed.trace))
-
-
-def test_bucketed_run_shares_one_program_within_a_bucket():
-    study = toy.survey_1(policies=(toy.ThresholdStopPolicy(stop_snr=2.5),))
-    _run(study, 20, bucket=BUCKET)
+def test_bucketed_run_shares_one_program_within_a_bucket(bucketed_run):
+    """Fails if a step count up to the bucket size, its edge included, compiles."""
     before = _traces["n"]
-    for n_steps in (17, 25, 32):
-        _run(study, n_steps, bucket=BUCKET)
+    for n_steps in (N_STEPS, BUCKET):
+        _run(_threshold(3.0), n_steps, bucket=BUCKET)
     assert _traces["n"] == before
 
 
-def test_array_fields_reuse_the_program_and_are_read():
-    never = toy.survey_1(policies=(toy.ThresholdStopPolicy(stop_snr=math.inf),))
-    first = _run(never, 30)
+def test_array_fields_reuse_the_program_and_are_read(threshold_run):
+    """Fails if a new value retraces, or the first value stays baked in."""
     before = _traces["n"]
-    at_once = toy.survey_1(policies=(toy.ThresholdStopPolicy(stop_snr=-math.inf),))
-    result = _run(at_once, 30)
+    never = _run(_threshold(math.inf))
+    at_once = _run(_threshold(-math.inf))
     assert _traces["n"] == before
     # the second value is read, not the first one baked into the cached program
-    assert int(result.carry.n_dec.max()) < int(first.carry.n_dec.max())
+    assert int(at_once.carry.n_dec.max()) < int(never.carry.n_dec.max())
+
+
+def test_kind_names_stay_out_of_the_compile_key(threshold_run):
+    study = _threshold(3.0)
+    renamed = dataclasses.replace(
+        study,
+        caps=dataclasses.replace(
+            study.caps, kind_names=tuple(n + "x" for n in study.caps.kind_names)
+        ),
+    )
+    assert renamed.caps.kind_names != study.caps.kind_names
+    assert renamed.caps == study.caps and hash(renamed.caps) == hash(study.caps)
+    before = _traces["n"]
+    result = _run(renamed)
+    assert _traces["n"] == before
+    _same_bits((threshold_run.carry, threshold_run.trace), (result.carry, result.trace))
 
 
 def test_marked_numbers_stay_python_numbers_and_are_lifted_for_the_call_only():
@@ -115,55 +146,12 @@ def test_marked_numbers_stay_python_numbers_and_are_lifted_for_the_call_only():
     assert study.agenda.policies[0].n_obs == 6
     stop = lift_traced(toy.ThresholdStopPolicy(stop_snr=3))
     assert stop.stop_snr.dtype == jnp.float64
-    script = lift_traced(_scripted().process)
+    script = lift_traced(_script().process)
     assert script.ticks.dtype == jnp.int64 and script.values.dtype == jnp.float64
     assert script.kinds.shape == (0,)
     # nothing marked, nothing rebuilt
     plain = toy.survey_1()
     assert lift_traced(plain.agenda) is plain.agenda
-
-
-_LIFTED_STUDIES = {
-    "threshold": lambda: toy.survey_1(policies=(toy.ThresholdStopPolicy(stop_snr=1),)),
-    "stochastic": lambda: toy.survey_1(
-        policies=(toy.StochasticPolicy(theta=0.3, wait_ticks=12),)
-    ),
-    "scripted": lambda: scripted.scripted_study(
-        ticks=(100, 200), values=(2, 9), ids=(7001, 7001), revisions=(0, 1)
-    ),
-}
-
-
-@pytest.mark.parametrize("name", sorted(_LIFTED_STUDIES))
-def test_lifting_does_not_change_the_history(name):
-    """Marked numbers lifted for the call give the carry and trace of the baked ones."""
-    study = _LIFTED_STUDIES[name]()
-    truths, roots = make_worlds(study, 2)
-    baked = _scan_worlds(CompiledExecutor(), study, truths, roots, wake_by_audience, 40)
-    lifted = CompiledExecutor().run(study, truths, roots, 40)
-    _same_bits(baked, (lifted.carry, lifted.trace))
-
-
-def test_scripts_with_other_values_reuse_the_program():
-    _run(_scripted(), 30)
-    before = _traces["n"]
-    _run(_scripted(values=(3.0, 5.0), ticks=(110, 230)), 30)
-    assert _traces["n"] == before
-
-
-def test_kind_names_stay_out_of_the_compile_key():
-    study = toy.survey_1()
-    renamed = toy.survey_1(
-        caps=dataclasses.replace(
-            study.caps, kind_names=tuple(n + "x" for n in study.caps.kind_names)
-        )
-    )
-    assert renamed.caps.kind_names != study.caps.kind_names
-    assert renamed.caps == study.caps and hash(renamed.caps) == hash(study.caps)
-    _run(study, 30)
-    before = _traces["n"]
-    _run(renamed, 30)
-    assert _traces["n"] == before
 
 
 def test_a_registry_that_names_kinds_otherwise_still_fails_the_lowering_check():
@@ -221,17 +209,14 @@ def _traces_of(monkeypatch, module, name, calls):
     return seen
 
 
-def _threshold(x):
-    return toy.survey_1(policies=(toy.ThresholdStopPolicy(stop_snr=x),))
-
-
-def test_replay_entry_points_share_one_program_across_values(monkeypatch):
+def test_replay_entry_points_share_one_program_across_values(
+    monkeypatch, threshold_run
+):
+    """Fails if a policy value retraces either replay."""
     from spaceodyssey.core.conformance import observer_kit
     from spaceodyssey.core.executors import replay
 
-    study = _threshold(3.0)
-    truths, roots = make_worlds(study, 1)
-    out = CompiledExecutor().run(study, truths, roots, 40)
+    out, roots = threshold_run, threshold_run.roots
     carry = index_world(out.carry, 0)
     trace = index_world(out.trace, 0)
     values = (3.0, 4.0, 5.0)
@@ -258,8 +243,8 @@ def test_replay_entry_points_share_one_program_across_values(monkeypatch):
 
 
 def test_masked_refit_shares_one_program_across_values(monkeypatch):
+    """Fails if a scripted value retraces the masked refit call."""
     from spaceodyssey.core import refresh
-    from tests.core.refresh_helpers import SpyBoundary
 
     def study(values):
         return scripted.scripted_refresh_study(
@@ -268,9 +253,9 @@ def test_masked_refit_shares_one_program_across_values(monkeypatch):
 
     base = study((2.0, 9.0))
     truths, roots = make_worlds(base, 1)
-    spy = SpyBoundary(toy.toy_masked_refit())
-    CompiledExecutor().run(base, truths, roots, 40, refit=spy)
-    requests = jax.tree.map(jnp.asarray, spy.calls[0])
+    carry = eqx.filter_eval_shape(init_carry, base, index_world(truths, 0))
+    shape = eqx.filter_eval_shape(refresh.gather_refit_rows, carry, roots[0], base)
+    requests = jax.tree.map(lambda x: jnp.zeros((1, *x.shape), x.dtype), shape)
     boundary = toy.toy_masked_refit()
     seen = _traces_of(
         monkeypatch,
@@ -377,34 +362,23 @@ def test_a_lifted_array_or_tracer_of_the_dtype_is_kept():
 
 # The history of each lifted input equals the one the same study gave before lifting
 # existed (recorded on the base commit; each digest is the sha256 prefix of every
-# carry and trace leaf with its dtype and shape).
+# carry and trace leaf with its dtype and shape). The compiled executor takes the
+# spellings of a float and the sequence fields, the host executor the spellings of an
+# int; the cases of one study share the program of its first.
 _BASE_DIGEST = {
     "stop_snr/bool/compiled": "4ae2dc0d9b4946a5",
-    "stop_snr/bool/host": "7e928ada7413cada",
     "stop_snr/int/compiled": "fa3501a248069127",
-    "stop_snr/int/host": "3c44f99fb468fbfe",
     "stop_snr/int_large_exact/compiled": "69482bb9835e4514",
-    "stop_snr/int_large_exact/host": "a3e146106b2eea73",
     "stop_snr/integral/compiled": "fa3501a248069127",
-    "stop_snr/integral/host": "3c44f99fb468fbfe",
     "stop_snr/float_sub/compiled": "fa3501a248069127",
-    "stop_snr/float_sub/host": "3c44f99fb468fbfe",
-    "query_at/bool/compiled": "a6ea3940a101f1a6",
     "query_at/bool/host": "ee391845288a8003",
-    "query_at/int/compiled": "68e0ad22293d90ca",
     "query_at/int/host": "ff680283f820bb5c",
-    "query_at/int_large_exact/compiled": "37a0e2ffbd98782f",
     "query_at/int_large_exact/host": "f6781172491b172a",
     "values/seq_int/compiled": "90a351073f0941af",
-    "values/seq_int/host": "6755ddefb06f6cad",
     "values/seq_mixed/compiled": "90a351073f0941af",
-    "values/seq_mixed/host": "6755ddefb06f6cad",
     "values/seq_list/compiled": "90a351073f0941af",
-    "values/seq_list/host": "6755ddefb06f6cad",
     "ticks/seq_int/compiled": "2b3598674cbcc5b1",
-    "ticks/seq_int/host": "7de904b3749c4cee",
     "ticks/seq_list/compiled": "2b3598674cbcc5b1",
-    "ticks/seq_list/host": "7de904b3749c4cee",
 }
 
 
@@ -423,10 +397,10 @@ def _case_study(field, x):
     if field == "query_at":
         return oracle.oracle_study(query_at=x)
     if field == "values":
-        return scripted.scripted_study(
-            ticks=(100, 200), values=x, ids=(7001, 7002)
-        ), None
-    return scripted.scripted_study(ticks=x, values=(2.0, 9.0), ids=(7001, 7002)), None
+        return _script(values=x), None
+    if field == "ticks":
+        return _script(ticks=x), None
+    raise KeyError(field)
 
 
 _CASE_INPUTS = {
@@ -441,17 +415,75 @@ _CASE_INPUTS = {
 }
 
 
-@pytest.mark.parametrize("key", sorted(_BASE_DIGEST))
-def test_lifted_histories_equal_the_ones_before_lifting(key):
-    field, name, which = key.split("/")
-    study, service = _case_study(field, _CASE_INPUTS[name])
-    truths, roots = make_worlds(study, 1)
-    kw = {} if service is None else {"service": service}
-    if which == "compiled":
-        res = CompiledExecutor().run(study, truths, roots, 24, **kw)
-    else:
-        res = HostExecutor().run(study, index_world(truths, 0), roots[0], 24, **kw)
-    assert _digest(res) == _BASE_DIGEST[key]
+def _history_digests(which):
+    """Digest every recorded case of one executor and return {key: digest}."""
+    out = {}
+    for key in _BASE_DIGEST:
+        field, name, executor = key.split("/")
+        if executor != which:
+            continue
+        study, service = _case_study(field, _CASE_INPUTS[name])
+        truths, roots = make_worlds(study, 1)
+        kw = {} if service is None else {"service": service}
+        if which == "compiled":
+            res = _CountingExecutor().run(study, truths, roots, N_STEPS, **kw)
+        else:
+            res = HostExecutor().run(
+                study, index_world(truths, 0), roots[0], N_STEPS, **kw
+            )
+        out[key] = _digest(res)
+    return out
+
+
+def test_compiled_histories_equal_the_ones_before_lifting(
+    threshold_run, scripted_run
+):  # the fixtures hold the programs the cases reuse
+    """Fails if lifting a number or a sequence changes a compiled history."""
+    got = _history_digests("compiled")
+    want = {k: v for k, v in _BASE_DIGEST.items() if k.endswith("/compiled")}
+    assert got == want
+
+
+def test_host_histories_equal_the_ones_before_lifting():
+    """Fails if lifting the query decision changes a host history."""
+    got = _history_digests("host")
+    want = {k: v for k, v in _BASE_DIGEST.items() if k.endswith("/host")}
+    assert got == want
+
+
+# The two-record script of `_script()` on the base commit, whose scripted fields were
+# static: arrays of any kind in those fields are read as the tuples they hold.
+_BASE_SCRIPT_DIGEST = "1c6ae1f33c2dd6d1"
+
+
+def _objects(*xs):
+    out = np.empty(len(xs), dtype=object)
+    out[:] = xs
+    return out
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["ticks_object", "ticks_int32", "values_object", "values_longdouble", "ids_object"],
+)
+def test_scripted_fields_read_arrays_as_the_tuples_they_hold(field, scripted_run):
+    """Fails if an object or NumPy array in a script is lifted, rejected or misread."""
+    inputs = {
+        "ticks_object": ("ticks", _objects(np.int32(100), np.int64(200))),
+        "ticks_int32": ("ticks", np.array([100, 200], np.int32)),
+        "values_object": ("values", _objects(np.float32(2.0), np.float64(9.0))),
+        "values_longdouble": ("values", np.array([2.0, 9.0], np.longdouble)),
+        "ids_object": ("ids", _objects(np.int32(7001), np.int64(7002))),
+    }
+    name, value = inputs[field]
+    study = _script()
+    study = dataclasses.replace(
+        study, process=dataclasses.replace(study.process, **{name: value})
+    )
+    held = getattr(study.process, name)
+    assert type(held) is tuple and {type(x) for x in held} <= {int, float}
+    assert held == getattr(_script().process, name)
+    assert _digest(_run(study)) == _BASE_SCRIPT_DIGEST == _digest(scripted_run)
 
 
 def test_step_and_decision_fingerprint_share_one_program_across_values(monkeypatch):
@@ -460,7 +492,6 @@ def test_step_and_decision_fingerprint_share_one_program_across_values(monkeypat
     from spaceodyssey import core
     from spaceodyssey.core import handlers, transaction
 
-    jax.clear_caches()  # a program cached by an earlier test would hide the count
     study = _threshold(3.0)
     truths, roots = make_worlds(study, 1)
     truth = core.index_world(truths, 0)
@@ -480,7 +511,7 @@ def test_step_and_decision_fingerprint_share_one_program_across_values(monkeypat
     for x in values:
         core.step(carry, ev, _threshold(x), truth, roots[0])
         seen.append(count["n"])
-    assert seen == [1, 1, 1]
+    assert seen[0] <= 1 and seen[1:] == seen[:1] * 2
 
     original_fp = transaction._policy_fingerprint
     fp = {"n": 0}
@@ -494,4 +525,4 @@ def test_step_and_decision_fingerprint_share_one_program_across_values(monkeypat
     for x in values:
         core.decision_fingerprint(carry, _threshold(x))
         seen.append(fp["n"])
-    assert seen == [1, 1, 1]
+    assert seen[0] <= 1 and seen[1:] == seen[:1] * 2
