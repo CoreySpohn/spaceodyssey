@@ -14,6 +14,12 @@ from spaceodyssey.core.events import _order_key_py
 # hash.
 OPTIONAL = {"optional": True}
 
+# Field metadata for a number held as an array so that its value is traced (a new value
+# reuses the compiled program) but written in a document as the plain number or tuple
+# the field took before it was an array, so every earlier document keeps its hash. The
+# field's converter makes the array back when a document loads.
+PLAIN_VALUE = {"plain_value": True}
+
 PEDIGREE_HEAD = 3  # audience, refit status, row count
 PEDIGREE_TRIPLE = 3  # channel, acquisition index, revision
 
@@ -48,7 +54,9 @@ class Capacities:
     # Registered kind names by index and the indices of derived kinds, lowered from
     # the registry; and the observer's refit kind indices and statuses (empty when it
     # does not refit), lowered by `KindRegistry.lower`.
-    kind_names: tuple[str, ...] = ()
+    # `kind_names` is read only while a study is built or checked, never under trace, so
+    # it stays out of the equality and hash that key a compiled program.
+    kind_names: tuple[str, ...] = dataclasses.field(default=(), compare=False)
     derived_kinds: tuple[int, ...] = ()
     refit_kinds: tuple[int, ...] = ()
     refit_statuses: tuple[int, ...] = ()

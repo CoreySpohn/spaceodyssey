@@ -7,10 +7,11 @@ The catalog kind registers itself through `KindRegistry.register`; nothing in
 import dataclasses
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 
-from spaceodyssey.core.capacities import Capacities
-from spaceodyssey.core.enums import Audience
+from spaceodyssey.core.capacities import PLAIN_VALUE, Capacities
+from spaceodyssey.core.enums import I64, Audience
 from spaceodyssey.core.snapshot import MeanBelief
 from spaceodyssey.studies import toy
 
@@ -33,10 +34,16 @@ def register_catalog(registry):
     return registry.register(CATALOG_KIND)
 
 
+def _as_i64(x):
+    return jnp.asarray(x, I64)
+
+
 class CatalogObserver(toy.ToyRunningMean):
     """Running mean of measurements; catalog values accumulate in an auxiliary slot."""
 
-    catalog_kind: int = eqx.field(default=3)
+    catalog_kind: jax.Array = eqx.field(
+        default=3, converter=_as_i64, metadata=PLAIN_VALUE
+    )
 
     def fold(self, belief, rec, caps, key=None):
         """Fold as the running mean does, then add a catalog row's value."""

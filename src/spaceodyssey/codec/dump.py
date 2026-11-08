@@ -143,7 +143,9 @@ def _encode_kind(value, path, table):
         item = getattr(value, field.name)
         if is_optional_field(field) and at_default(field, item, cls):
             continue
-        if field.type is jax.Array and not isinstance(item, (jax.Array, np.ndarray)):
+        if field.metadata.get("plain_value") and isinstance(item, jax.Array):
+            item = _plain_value(item)
+        elif field.type is jax.Array and not isinstance(item, (jax.Array, np.ndarray)):
             raise DocumentError(
                 f"field {field.name!r} is annotated as an array but holds a "
                 f"{type(item).__name__}",
@@ -153,6 +155,16 @@ def _encode_kind(value, path, table):
         if cls is Agenda and field.name == "phase_until":
             out[field.name] = _tag_no_switch(out[field.name])
     return out
+
+
+def _plain_value(arr):
+    """A `PLAIN_VALUE` array as the Python number, or tuple of numbers, it holds."""
+    data = np.asarray(arr).tolist()
+
+    def tup(x):
+        return tuple(map(tup, x)) if type(x) is list else x
+
+    return tup(data)
 
 
 def _tag_no_switch(node):
