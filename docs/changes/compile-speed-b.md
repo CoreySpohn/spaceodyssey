@@ -21,10 +21,17 @@ one program:
 - `CatalogObserver.catalog_kind`.
 
 The dtype is the one the arithmetic used before, so every history is bit for bit the
-same. A document still writes each of these fields as the plain number or tuple it was
-built from (field metadata `PLAIN_VALUE`), and the loader makes the array again through
-the field's converter. Every earlier document therefore keeps its content hash and still
-loads. A document that stores such a field as an array is refused.
+same. Each array is a `PlainArray` (`spaceodyssey.plain`), a NumPy array that also keeps
+the value it was built from. A document writes the field as that value (`3`, not `3.0`;
+an enum member, not its integer), so every earlier document re-dumps byte for byte and
+keeps its content hash. The kept value plays no part in a compiled program, which sees
+only dtype and shape. An array made any other way, such as one put in with `tree_at`,
+is written as the plain numbers it holds.
+
+The loader makes the array again through the field's converter, also for an omitted
+optional field. It refuses a stored form that is not numbers or tuples of numbers
+(including a nested array tag), a fraction for an integer field, a number out of range,
+and a shape the converter would change, each with a pointer to the field.
 
 Left as they are:
 
@@ -41,6 +48,10 @@ compiled scan and passes the step count as an array. Steps past `n_steps` take n
 and the trace is cut to `n_steps` rows. Every step count in one bucket then shares one
 program. The carry and trace equal the default path's bit for bit, including a step
 count that is not a multiple of `N`. The default (`bucket=None`) is the unchanged scan.
+
+A `bucket` must be a positive int. Rows past `n_steps` still evaluate the step before it
+is masked, so a padded row costs run time, but the returned carry and trace show no
+extra consumption.
 
 The initial carry is built inside the program, as the default scan does. A program that
 takes the carry as an input, such as the chunk program of the host-service path, compiles
