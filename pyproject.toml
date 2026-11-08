@@ -206,6 +206,8 @@ charge_fixture_setup = true
 clear_caches = true
 # The per-file program budgets are read in report mode until runner data confirms them.
 module_mode = "report"
+# Every medium and slow mark states why the test cannot be cheaper.
+require_tier_reason = true
 
 # Programs each quick-tier file compiles or loads from the persistent cache, with
 # headroom; regenerate with tools/program_budgets.py from a --budget-json run.
@@ -213,7 +215,7 @@ module_mode = "report"
 "tests/adapters/test_jaxedith_summary.py" = 602
 "tests/adapters/test_photomancy_ofti.py" = 262
 "tests/adapters/test_physical_context.py" = 560
-"tests/adapters/test_reporting_law.py" = 768
+"tests/adapters/test_reporting_law.py" = 819
 "tests/adapters/test_skyscapes_scene.py" = 653
 "tests/anchors/test_profile_table.py" = 10
 "tests/codec/test_document.py" = 129
@@ -226,7 +228,7 @@ module_mode = "report"
 "tests/core/test_agenda_levels.py" = 73
 "tests/core/test_awards.py" = 308
 "tests/core/test_belief_layout.py" = 223
-"tests/core/test_charging.py" = 96
+"tests/core/test_charging.py" = 169
 "tests/core/test_coincident_order.py" = 109
 "tests/core/test_compile_sharing.py" = 456
 "tests/core/test_conservation.py" = 170
@@ -255,7 +257,7 @@ module_mode = "report"
 "tests/core/test_reserved_fields.py" = 106
 "tests/core/test_schema.py" = 128
 "tests/core/test_slice3_guard.py" = 300
-"tests/core/test_snapshot_balances.py" = 272
+"tests/core/test_snapshot_balances.py" = 275
 "tests/core/test_snapshot_fingerprint.py" = 243
 "tests/core/test_stop_equivalence.py" = 53
 "tests/core/test_stop_grid.py" = 10
@@ -264,6 +266,7 @@ module_mode = "report"
 "tests/studies/test_physical_ofti.py" = 301
 "tests/studies/test_survey_14_static.py" = 53
 "tests/studies/test_survey_2.py" = 173
+"tests/studies/test_survey_2_calibration.py" = 89
 "tests/studies/test_survey_2_static.py" = 98
 "tests/studies/test_survey_3.py" = 138
 "tests/studies/test_survey_4.py" = 284
