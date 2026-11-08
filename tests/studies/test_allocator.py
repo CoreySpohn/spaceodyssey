@@ -23,6 +23,7 @@ import pytest
 
 from spaceodyssey.core import RunStatus
 from spaceodyssey.core import service as host_service
+from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.conformance.invariants import balance_conserved
 from spaceodyssey.core.enums import AdmissionCode, Audience, EffectKind, EventKind
 from spaceodyssey.core.executors.base import index_world
@@ -105,6 +106,30 @@ def _effects(view, asked, done):
     ps = jnp.zeros(study.caps.n_pstate).at[0].set(asked).at[1].set(done)
     eff, _, _ = _decide()(ps, view, study, jax.random.PRNGKey(0))
     return eff
+
+
+@pytest.mark.parametrize("n_effects", (5, 6))
+def test_the_policy_fills_the_effect_table_of_any_capacity(n_effects):
+    study = al.allocator_study(
+        caps=Capacities(n_programs=2, n_effects=n_effects, awards=True)
+    )
+    view = _view([_award(0, 8.0, 4.0)])
+    ps = jnp.zeros(study.caps.n_pstate).at[0].set(1)
+    eff, _, _ = al.AllocationPolicy().decide(ps, view, study, jax.random.PRNGKey(0))
+    assert eff.kind.shape == (n_effects,) and eff.amount.shape[0] == n_effects
+    assert not np.asarray(eff.kind)[5:].any()  # rows past the policy's own are empty
+    assert len(_allocates(eff)) == 2
+
+
+def test_the_policy_refuses_a_table_narrower_than_its_own():
+    study = al.allocator_study(caps=Capacities(n_programs=2, n_effects=5, awards=True))
+    narrow = dataclasses.replace(
+        study, caps=dataclasses.replace(study.caps, n_effects=4)
+    )
+    with pytest.raises(ValueError, match=r"emits 5 effect rows.*n_effects is 4"):
+        al.AllocationPolicy().decide(
+            jnp.zeros(study.caps.n_pstate), _view([]), narrow, jax.random.PRNGKey(0)
+        )
 
 
 def _allocates(eff):

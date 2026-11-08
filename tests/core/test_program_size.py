@@ -1,5 +1,7 @@
 """The compiled program stays small: loops are rolled and shared bodies traced once."""
 
+import dataclasses
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -138,5 +140,26 @@ def test_transition_names_the_policy_that_emits_a_short_table():
     caps = Capacities(n_effects=3)
     study = toy.survey_1(caps=caps, policies=(_OneRow(plan=((0, 10),)),))
     truths, roots = worlds(1, caps)
-    with pytest.raises(ValueError, match=r"n_effects is 3.*policies: .*_OneRow"):
+    with pytest.raises(ValueError, match=r"n_effects is 3.*policy: .*_OneRow"):
+        CompiledExecutor().run(study, truths, roots, 4)
+
+
+@pytest.mark.parametrize("rows", (1, 2, 4))
+def test_admit_refuses_a_program_column_of_the_wrong_width(rows):
+    caps = Capacities(n_programs=2, n_effects=3)
+    study = toy.survey_1(caps=caps)
+    truth, _ = one_world(caps=caps)
+    carry = eqx.filter_jit(core.init_carry)(study, truth)
+    table = core.effects_none(caps)
+    table = dataclasses.replace(table, program=jnp.ones(rows, jnp.int64))
+    with pytest.raises(ValueError, match=r"column 'program'.*n_effects is 3"):
+        core.admit(carry, table, study)
+
+
+def test_a_short_policy_is_named_beside_a_correct_one():
+    caps = Capacities(n_effects=3)
+    good = toy.FixedPlanPolicy(plan=((0, 10),))
+    study = toy.survey_1(caps=caps, policies=(good, _OneRow(plan=((0, 10),))))
+    truths, roots = worlds(1, caps)
+    with pytest.raises(ValueError, match=r"n_effects is 3.*policy: .*_OneRow"):
         CompiledExecutor().run(study, truths, roots, 4)
