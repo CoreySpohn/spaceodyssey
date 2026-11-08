@@ -4,9 +4,11 @@ orphan: true
 
 # Slice 3a S5: awards, windows and remainder rules
 
-Round 2 (review of c4bb47e) is rebuilt on `main` c7add43 (S4): the award generation of the
-drawn row, an independent expiry replay, and the amount-shape and range refusals. No new
-`CORE_KINDS`, so no entry-point change.
+Round 3 is rebuilt on `main` 10a9b06. Round 2 added the award generation of the drawn row,
+an independent expiry replay, and the amount-shape and range refusals; round 3 makes the
+replay cover refunds and queued settlements, keeps one generation per payer slot, bounds
+the range by supply, and fixes the program-row crash. No new `CORE_KINDS`, so no
+entry-point change.
 
 S5 lets a policy grant a balance row an amount for a window with an Allocate effect, closes
 the window with a `WINDOW_END` event, and applies the remainder rule the award declared. It is
@@ -49,29 +51,41 @@ this change.
 - **Trace.** The Allocate rows of a decision keep their amount, window, recipient, remainder
   rule and reallocation target in `trace.alloc_amount`, `alloc_from`, `alloc_until`,
   `alloc_recipient`, `alloc_remainder` and `alloc_to`.
-- **Expiry reconciliation.** `balance_conserved` replays the handled trace rows in order.
-  Each admitted Allocate grants its amount; each handled WINDOW_END finds the award that
-  opened that window (same row and expiry tick), and what must lapse is the row's initial
-  balance plus what was granted to it, less what lapsed from it, less what the retained
-  records debited before the expiry tick (FORFEIT lapses it, REALLOCATE lapses it and grants
-  it to the declared row, NONE and CARRY_OVER move nothing). The counters `granted` and
-  `lapsed` must equal the replay, so restoring a forfeited balance while erasing its lapse
-  (the paired mutant) fails. The replay is skipped, and the three-way account still binds,
-  when the log overflowed or the run holds refund receipts, because a debit or credit then
-  has no timed record.
-- **Award generation.** A DONE or cancel row records the `win_gen` of the row the debit
-  drew from: the first payer row of the charge that is WINDOWED and charged, else the
-  first payer row. Several awarded payers record the first, in the order asset, program,
-  shared.
+- **Expiry reconciliation.** `balance_conserved` replays the money events of the run in
+  the order the executor handled them and requires the ledger's `balance`, `granted`,
+  `lapsed` and `win_gen` to equal the replay. The events, by tick and stage: an applied
+  receipt's credit at its `released_tick` (stage RELEASE, resolved through `refund_of` to
+  the origin's rows and refundable credit); each handled WINDOW_END (ANALYZE); and, in the
+  decision stage, each admitted Allocate, each admission debit (a settled or cancelled
+  record gives `start_tick` less the lane transition; a queued settlement, which has no
+  record yet, gives its due tick less occupancy and transition) and a cancellation's
+  credit at its `end_tick`. An expiry finds the award that opened its window (same row and
+  expiry tick) and applies that award's rule to what the replayed row holds then: FORFEIT
+  lapses it, REALLOCATE lapses it and grants it to the declared row, NONE and CARRY_OVER
+  move nothing. So restoring a forfeited balance while erasing its lapse (the paired
+  mutant) fails, with or without a refund in the run, and a refund credited to the wrong
+  row fails. A record's `award_gens` must be the replayed generation of the row that paid
+  at its debit, so a refund resolved to the wrong award identity is caught as well (late
+  refund routing itself is S5b; today the credit lands on the origin's row). The replay is
+  skipped only when the log overflowed, because a debit or credit may then have no record.
+- **Award generation per payer slot.** The conditional leaf `ledger.lane_award_gens`
+  (I64[lanes, resources]) holds the `win_gen` of the row that pays each resource at the
+  debit of a lane's live occupancy; a DONE or cancel record copies it into the conditional
+  log leaf `log.award_gens` (I64[resources]). Both exist only under `caps.awards`, are
+  listed in `CONDITIONAL_FIELDS` and follow the codec rule. The scalar `award_gen` column
+  of S3a stays reserved, and the event `disposition` carries nothing new.
 - **Amount shape.** An Allocate whose `amount` is not the full `(n_effects, n_resources)`
   table (a `(n,)` or `(n, 1)` vector would broadcast into every resource) is refused as
   UNSUPPORTED, statically at trace time, together with every other Allocate of the decision.
-- **Representable range.** With `caps.snapshot_balances`, an Allocate that would take a
-  resource column above `2**53` times the balance quantum (S4's exact bound) is refused as
-  UNSUPPORTED, so S4's balance view never clamps a granted balance. S4's QUERY_MIXED guard
-  still covers Allocate.
+- **Representable range.** With `caps.snapshot_balances`, an Allocate is admitted only if
+  the resource's supply, the budget over all rows plus everything granted so far (a
+  reallocation counts again, which only refuses early), stays within `2**53` times the
+  balance quantum (S4's exact bound). Balances never go negative and a debit, refund, lapse
+  and REALLOCATE move quantity without adding any, so supply bounds every row at every
+  time, through refunds and reallocation targets alike. S4's QUERY_MIXED guard still
+  covers Allocate.
 - **Conditional leaves.** With awards on: `ledger.win_state`, `win_gen`, `realloc_row`,
-  `granted`, `lapsed`, the six `trace.alloc_*` leaves and the six effect columns. They are
+  `granted`, `lapsed`, `lane_award_gens`, `log.award_gens`, the six `trace.alloc_*` leaves and the six effect columns. They are
   `None` otherwise, listed in `CANONICAL_FIELDS` and gated by `awards_on` in
   `CONDITIONAL_FIELDS`. `step` slices the handler table (`HANDLERS[:-1]`) when awards are off,
   so a study without awards lowers the table it always had.
@@ -80,9 +94,9 @@ this change.
   balance row is out of range, whose window is empty or outside the run, or that overlaps
   another award on the same row. `Declaration.awards` is its input: a tuple of
   `(row, start, until)`.
-- **Late refunds.** Under `caps.refunds` and `caps.awards`, a DONE or cancel row records the
-  generation of the window it was charged in (`award_gen`, carried through `disposition`), so
-  S5b can decide a late refund by window. S5 itself does not use it.
+- **Late refunds.** Under `caps.awards`, a DONE or cancel row records the window generation
+  of each payer row at the debit (`award_gens`), so S5b can decide a late refund by window.
+  S5 itself credits the origin's row as before; only the conservation check reads it.
 
 ## Moves
 
@@ -95,8 +109,8 @@ None. `tests/core/golden_histories.json` and every pin file are unchanged.
 
 ## Sibling sites checked
 
-- `h_done` and `_cancel_lane` set `award_gen` only under `caps.refunds` and `caps.awards`;
-  `_commit_observe` reads the window generation only under both. The `_group_code`
+- `h_done` and `_cancel_lane` set `award_gens` only under `caps.awards`;
+  `_commit_observe` writes `lane_award_gens` only under it. The `_group_code`
   admission chain keeps its original conditions and gains the OUTSIDE_VALIDITY test as a
   static insertion under `caps.awards`.
 - Every walk over `Ledger`, `Trace` and `EffectTable` fields tolerates the `None` leaves: the
@@ -123,10 +137,9 @@ None. `tests/core/golden_histories.json` and every pin file are unchanged.
 
 1. FORBIDDEN is the code for an award onto a row with an open window; the spec names no code.
 2. UNSUPPORTED is the code for a malformed Allocate row.
-3. `award_gen` takes the generation of the first WINDOWED, charged payer row, else the
-   first payer row.
-4. `disposition` carries that generation on the DONE row (the column was otherwise unused
-   there), so no new event field was needed.
+3. The record keeps one award generation per payer slot (`log.award_gens`), carried from
+   debit to settlement or cancellation in `ledger.lane_award_gens`.
+4. `disposition` is not used for it, so no event field changed.
 5. No X002 window field existed to lift: X002 flags channel refund declarations, which S3a
    already gated, so only X001 changed.
 6. `Declaration.awards` is the W001 input; a policy that allocates without declaring is not

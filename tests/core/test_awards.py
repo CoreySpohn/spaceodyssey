@@ -37,9 +37,15 @@ from spaceodyssey.core.enums import (
 from spaceodyssey.core.events import empty_event_row
 from spaceodyssey.core.snapshot import EffectTable
 from spaceodyssey.studies import toy
-from tests.core.award_helpers import ScriptedAwards, award, award_study
+from tests.core.award_helpers import (
+    ScriptedAwards,
+    award,
+    award_refund_study,
+    award_study,
+)
 from tests.core.helpers import one_world, worlds
 from tests.core.program_helpers import end, observe, wait
+from tests.core.refund_helpers import receipt
 
 pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
 
@@ -421,14 +427,15 @@ def test_the_paired_forged_expiry_is_caught_for_a_reallocation():
 
 def _record_award_gens(run):
     log = run.carry.log
-    return np.asarray(log.award_gen)[np.asarray(log.valid)].tolist()
+    return np.asarray(log.award_gens)[np.asarray(log.valid)].tolist()
 
 
-def test_a_completion_records_the_generation_of_the_row_it_drew_from():
-    """Fails if the award generation is the asset row's instead of the program's.
+def test_a_completion_records_the_generation_of_every_row_it_drew_from():
+    """Fails if the record keeps one generation instead of one per payer slot.
 
-    Row 2 is awarded for [0, 200), so its generation is 1 at the debit; the asset row
-    never held a window and stays at 0. The record must hold 1.
+    Row 2 (program 0) is awarded for [0, 200), so its generation is 1 at the debit; the
+    asset row 0 and the shared row 4 never held a window and stay at 0. The record
+    holds a generation for each of the three resources.
     """
     study = award_study(
         (wait(0, 10), observe(1, 0, 10, 0), end(5)),
@@ -436,29 +443,29 @@ def test_a_completion_records_the_generation_of_the_row_it_drew_from():
         refunds=True,
     )
     run = _host(study)
-    assert np.asarray(run.carry.ledger.win_gen)[0] == 0
-    assert _record_award_gens(run) == [1]
+    assert _record_award_gens(run) == [[0, 1, 0]]
 
 
-def test_the_captured_generation_differs_from_the_asset_rows():
-    """Fails if the repro cannot tell the drawn row from the asset row.
+def test_two_awarded_payers_each_keep_their_own_generation():
+    """Fails if the generation of a second awarded payer row is lost.
 
-    Run until the award is open (before its expiry): the helper must return the
-    program row's generation, which a mutant capturing the asset row would not.
+    The asset row 0 is awarded twice (generation 3 after its first window ends and a
+    second opens) while program row 2 is awarded once (generation 1): the record keeps
+    both, where a single number would drop one.
     """
-    from spaceodyssey.core import transaction
-
     study = award_study(
-        (wait(0, 10), observe(1, 0, 10, 0), end(5)),
-        (award(0, 2, P0, 0, 200, 5),),
+        (wait(0, 5), wait(1, 100), wait(2, 40), observe(3, 0, 10, 0), end(5)),
+        (
+            award(0, 2, 0, 0, 20, 2, RemainderRule.NONE),
+            award(0, 1, P0, 0, 300, 5),
+            award(2, 2, 0, 100, 300, 2, RemainderRule.NONE),
+        ),
         refunds=True,
     )
-    run = _host(study, n_steps=3)
-    c = run.carry
-    rows = jnp.asarray([0, P0, study.caps.n_balance_rows - 1])
-    drawn = int(transaction._award_generation(c, rows, study, 0))
-    asset = int(c.ledger.win_gen[0])
-    assert (drawn, asset) == (1, 0)
+    run = _host(study)
+    gens = _record_award_gens(run)
+    assert len(gens) == 1
+    assert gens[0][0] == 3 and gens[0][1] == 1  # asset row 0 twice awarded; row 2 once
 
 
 class _Reshaped(ScriptedAwards):
@@ -553,3 +560,133 @@ def test_an_allocate_mixed_with_a_query_is_refused_whole():
     eff = dataclasses.replace(base, kind=kind.astype(base.kind.dtype))
     _, codes = eqx.filter_jit(core.admit)(c0, eff, study)
     assert codes.tolist()[:2] == [AdmissionCode.QUERY_MIXED] * 2
+
+
+# ---- review round 2: refunds in the replay, pending debits, a program-row award ----
+
+REFUND_SCRIPT = (wait(0, 40), observe(1, 0, 10, 0), wait(1, 400), end(5))
+REFUND_AWARD = (award(0, 2, P0, 0, 300, 5, FORFEIT),)
+
+
+@functools.cache
+def _refund_run(receipt_tick):
+    study = award_refund_study(
+        REFUND_SCRIPT, REFUND_AWARD, (receipt(receipt_tick),), pricing=None
+    )
+    return _host(study, n_steps=60)
+
+
+def test_a_refund_after_the_expiry_is_replayed_and_conserves():
+    """Control: the replay credits the late refund and agrees with the ledger."""
+    run = _refund_run(350)
+    assert float(np.asarray(run.carry.ledger.refunded)[P0, PROGRAM_COL]) == 10.0
+    assert float(np.asarray(run.carry.ledger.lapsed)[P0, PROGRAM_COL]) > 0.0
+    assert balance_conserved(run).passed
+
+
+def test_a_refund_before_the_expiry_is_replayed_and_conserves():
+    """Control: a refund that lands inside the window raises what the expiry takes."""
+    run = _refund_run(250)
+    assert balance_conserved(run).passed
+    late = _refund_run(350)
+    assert float(np.asarray(run.carry.ledger.lapsed)[P0, PROGRAM_COL]) == (
+        float(np.asarray(late.carry.ledger.lapsed)[P0, PROGRAM_COL]) + 10.0
+    )
+
+
+@pytest.mark.parametrize("tick", [250, 350])
+def test_a_paired_forged_expiry_is_caught_when_the_run_holds_a_refund(tick):
+    """Fails if a receipt in the log switches the expiry reconciliation off."""
+    run = _refund_run(tick)
+    ledger = run.carry.ledger
+    lapsed = float(np.asarray(ledger.lapsed)[P0, PROGRAM_COL])
+    bump = jnp.zeros_like(ledger.balance).at[P0, PROGRAM_COL].set(lapsed)
+    forged = _forged(run, balance=ledger.balance + bump, lapsed=ledger.lapsed - bump)
+    assert not balance_conserved(forged).passed
+
+
+def test_a_refund_credited_to_another_programs_row_is_caught():
+    """Fails if a refund that lands on the wrong program's row conserves."""
+    run = _refund_run(350)
+    ledger = run.carry.ledger
+    move = jnp.zeros_like(ledger.balance)
+    move = move.at[P0, PROGRAM_COL].set(-10.0).at[P1, PROGRAM_COL].set(10.0)
+    refunded = ledger.refunded + move
+    forged = _forged(run, balance=ledger.balance + move, refunded=refunded)
+    assert not balance_conserved(forged).passed
+
+
+def test_a_record_naming_a_newer_award_generation_is_caught():
+    """Fails if the replay accepts a record whose payer generation is not the row's.
+
+    A late refund is credited by the origin's award identity, so a record that names a
+    newer award than the row held at its debit would send the credit to the wrong one.
+    """
+    run = _refund_run(350)
+    log = run.carry.log
+    gens = np.asarray(log.award_gens).copy()
+    (row,) = np.flatnonzero(np.asarray(log.valid) & (np.asarray(log.refund_of) < 0))
+    gens[row, PROGRAM_COL] += 1
+    new = eqx.tree_at(lambda lg: lg.award_gens, log, jnp.asarray(gens))
+    forged = SimpleNamespace(
+        study=run.study,
+        carry=eqx.tree_at(lambda c: c.log, run.carry, new),
+        trace=run.trace,
+    )
+    assert not balance_conserved(forged).passed
+
+
+def test_a_pending_acquisition_at_the_expiry_is_replayed_without_its_record():
+    """Fails if an admission debit with no record yet is missing from the replay.
+
+    The run stops just after the expiry with the settlement still queued: the lapse
+    excludes the debited unit, and the replay finds it from the queued settlement.
+    """
+    script, awards = SCENARIOS["completes_late"]
+    study = award_study(script, awards)
+    full = _run("completes_late")
+    stop = int(_window_ends(full)[0]) + 1  # just after the expiry, before the DONE
+    run = _host(study, n_steps=stop)
+    pending = run.carry.ev.valid & (run.carry.ev.kind == EventKind.DONE)
+    assert bool(np.asarray(pending).any())
+    assert not np.asarray(run.carry.log.valid).any()
+    assert balance_conserved(run).passed
+
+
+def test_an_award_to_a_program_row_does_not_crash_the_conservation_check():
+    """Fails if a queued WINDOW_END's balance-row id is read as a lane number."""
+    study = award_study(
+        (wait(0, 10), end(5)),
+        (award(0, 2, P1, 0, 200, 5, FORFEIT),),
+    )
+    run = _host(study, n_steps=1)
+    assert (
+        int(
+            np.asarray(
+                run.carry.ev.valid & (run.carry.ev.kind == EventKind.WINDOW_END)
+            ).sum()
+        )
+        == 1
+    )
+    assert balance_conserved(run).passed
+
+
+def test_an_allocate_after_a_debit_cannot_pass_the_representable_supply():
+    """Fails if refunds or reallocations can carry a row past 2**53 quanta.
+
+    A row starts at 2**53 and is debited 1; the old rule (current balance plus the
+    award) admitted an award of 1 elsewhere, after which the refund would return the
+    unit. The rule is on supply (budget plus grants), so the award is refused.
+    """
+    top = 2.0**53
+    study = award_study(
+        (wait(0, 10), observe(1, 0, 10, 0), wait(2, 10), end(5)),
+        (award(2, 2, P1, 0, 200, 1.0),),
+        program_credit=top,
+        caps_extra={"snapshot_balances": True},
+    )
+    run = _host(study)
+    t = run.trace
+    allocs = _handled(run)[:, None] & (np.asarray(t.eff_kind) == EffectKind.ALLOCATE)
+    codes = np.asarray(t.admit_code)[allocs].tolist()
+    assert codes == [AdmissionCode.UNSUPPORTED]

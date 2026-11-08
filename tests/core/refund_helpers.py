@@ -114,6 +114,7 @@ def refund_study(
     failure=FAILURE_KIND,
     refunds=True,
     cap_kw=None,
+    policy=None,
     **overrides,
 ):
     """The toy study with refunds on, a scripted policy and scripted receipts.
@@ -150,7 +151,7 @@ def refund_study(
         caps=caps,
         channels=ch,
         budget=budget,
-        policies=(ScriptedPrograms(script=rows),),
+        policies=(policy or ScriptedPrograms(script=rows),),
         process=process,
         **overrides,
     )

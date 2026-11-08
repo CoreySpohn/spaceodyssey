@@ -111,6 +111,7 @@ def empty_carry(caps, balance=None):
             refund_ignored=z if caps.refunds else None,
             win_state=jnp.zeros(br, I64) if caps.awards else None,
             win_gen=jnp.zeros(br, I64) if caps.awards else None,
+            lane_award_gens=jnp.zeros((caps.n_lanes, nr), I64) if caps.awards else None,
             realloc_row=jnp.zeros(br, I64) if caps.awards else None,
             granted=jnp.zeros((br, nr), F64) if caps.awards else None,
             lapsed=jnp.zeros((br, nr), F64) if caps.awards else None,

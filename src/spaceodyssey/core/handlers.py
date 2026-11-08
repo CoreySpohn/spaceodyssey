@@ -25,6 +25,7 @@ from spaceodyssey.core.events import empty_event_row, enqueue, requeue, where_tr
 from spaceodyssey.core.keys import asset_coordinate, draw_key, fold_key
 from spaceodyssey.core.ledger import _resource_rows, charge_parts
 from spaceodyssey.core.records import (
+    AWARD_COLUMNS,
     REFUND_COLUMNS,
     Record,
     derived_rows,
@@ -41,8 +42,8 @@ def _emit(n, slot):
 
 
 # the columns a log row always has; `program` is present only with several programs
-# and the refund columns only while refunds are on
-_OPTIONAL_ROW = ("program", *REFUND_COLUMNS)
+# and the refund and award columns only while refunds or awards are on
+_OPTIONAL_ROW = ("program", *REFUND_COLUMNS, *AWARD_COLUMNS)
 _ROW_FIELDS = tuple(
     f for f in dataclasses.fields(Record) if f.name not in _OPTIONAL_ROW
 )
@@ -152,9 +153,8 @@ def h_done(c, ev, study, truth, root):
     if caps.refunds:
         charge, fixed, _ = charge_parts(study, channel_index)
         base = dataclasses.replace(base, charged=charge, nonrefundable=fixed)
-        if caps.awards:
-            # the window generation of the payer row at debit rides the Done row
-            base = dataclasses.replace(base, award_gen=ev.disposition)
+    if caps.awards:
+        base = dataclasses.replace(base, award_gens=c.ledger.lane_award_gens[ev.lane])
     rec = eqx.filter_jit(_realize_rec)(
         c, study, truth, root, base, jnp.asarray(1.0, F64)
     )
@@ -515,8 +515,8 @@ def _cancel_lane(
         part = jnp.where(pricing == ChargePricing.FLAT_FRACTION, 1.0, spent)
         kept = (charge - fixed) * part + fixed
         base = dataclasses.replace(base, charged=kept, nonrefundable=fixed)
-        if caps.awards:
-            base = dataclasses.replace(base, award_gen=c.ev.disposition[i])
+    if caps.awards:
+        base = dataclasses.replace(base, award_gens=c.ledger.lane_award_gens[lane])
     rec = eqx.filter_jit(_realize_rec)(c, study, truth, root, base, frac)
     owner = 0 if c.ev.program is None else c.ev.program[i]
     rows = _resource_rows(study, lane, owner)

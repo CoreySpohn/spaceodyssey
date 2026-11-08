@@ -42,12 +42,11 @@ def _valid_rows(run):
 def _pending_settlements(run):
     """Slots of queued completions that still belong to a live occupancy."""
     ev, ledger = run.carry.ev, run.carry.ledger
-    live = (
-        np.asarray(ev.valid)
-        & (np.asarray(ev.kind) == EventKind.DONE)
-        & (np.asarray(ev.gen) == np.asarray(ledger.lane_gen)[np.asarray(ev.lane)])
-    )
-    return np.flatnonzero(live)
+    done = np.asarray(ev.valid) & (np.asarray(ev.kind) == EventKind.DONE)
+    lane_gen = np.asarray(ledger.lane_gen)
+    # only a DONE row names a lane; a WINDOW_END names a balance row in the same column
+    lane = np.clip(np.asarray(ev.lane), 0, lane_gen.shape[0] - 1)
+    return np.flatnonzero(done & (np.asarray(ev.gen) == lane_gen[lane]))
 
 
 def order_keys_monotone(run):
@@ -302,94 +301,169 @@ def _refused_completions(run):
     return lost
 
 
-def _debits_before(run, tick):
-    """What the retained records debited each row and resource before `tick`."""
-    study, log = run.study, run.carry.log
-    out = np.zeros(np.asarray(study.budget).shape)
-    refs, start = np.asarray(log.refund_of), np.asarray(log.start_tick)
-    for i in _valid_rows(run):
-        if int(refs[i]) >= 0 or int(start[i]) >= tick:
-            continue
-        rows = _balance_rows(study, int(np.asarray(log.lane)[i]), _log_program(log, i))
-        for r, row in enumerate(rows):
-            out[row, r] += float(np.asarray(log.charged)[i, r])
-    return out
+def _award_timeline(run):
+    """The money events of a run in the order the executor handled them.
 
-
-def _expire(run, opened, i, granted, lapsed):
-    """Apply the expiry the handled trace row `i` names, to the replayed counters."""
-    t = run.trace
-    row, now = int(np.asarray(t.lane)[i]), int(np.asarray(t.tick)[i])
-    hit = [w for w in opened if w[0] == row and w[1] == now]
-    if not hit:
-        return
-    _, _, rule, to = hit[-1]
-    opened.remove(hit[-1])
-    if rule not in (RemainderRule.FORFEIT, RemainderRule.REALLOCATE):
-        return
-    held = np.asarray(run.study.budget)[row] + granted[row] - lapsed[row]
-    held = held - _debits_before(run, now)[row]
-    lapsed[row] += held
-    if rule == RemainderRule.REALLOCATE:
-        granted[to] += held
-
-
-def _expected_awards(run):
-    """Replay the trace's grants and expiries; what `granted` and `lapsed` must be.
-
-    Walks the handled trace rows in order. A handled WINDOW_END names its row; the award
-    that opened that window (same row, same expiry tick, earlier in the trace) gives the
-    remainder rule, and what the row held then is its initial balance, plus what was
-    granted to it, less what lapsed from it, less what the records debited before the
-    expiry tick. FORFEIT lapses all of it; REALLOCATE lapses it and grants it to the
-    declared row; NONE and CARRY_OVER move nothing. The step of an expiry may also hold
-    the decision it woke, so the expiry is applied first. An admitted Allocate grants
-    its amount to its recipient. Nothing here reads the ledger's counters or balances.
+    Each entry is `(tick, stage, seq, kind, data)`. Stage 1 holds the credit of an
+    applied receipt (at its `released_tick`), stage 2 the expiries the trace handled,
+    stage 3 everything a decision does: grants, admission debits (a settled or
+    cancelled record gives its tick as `start_tick` less the lane's transition, a queued
+    settlement as its due tick less occupancy and transition) and a cancellation's
+    credit (at its `end_tick`). Nothing here reads the ledger's balances or counters.
     """
-    t, study = run.trace, run.study
-    budget = np.asarray(study.budget)
-    granted, lapsed = np.zeros_like(budget), np.zeros_like(budget)
-    handled = np.asarray(t.handled)
-    kind = np.asarray(t.kind)
-    eff = np.asarray(t.eff_kind)
+    study, c, t = run.study, run.carry, run.trace
+    log, assets, ch = c.log, study.assets, study.channels
+    totals = _charge_totals(study)
+    occupancy = np.asarray(ch.occupancy_ticks)
+    transition = np.asarray(assets.transition_ticks)
+    out, seq = [], 0
+    kind, tick, eff = np.asarray(t.kind), np.asarray(t.tick), np.asarray(t.eff_kind)
     ok = np.asarray(t.admit_code) == AdmissionCode.OK
-    opened = []  # (recipient, until, remainder, to) of each admitted award, in order
-    for i in np.flatnonzero(handled):
+    for i in np.flatnonzero(np.asarray(t.handled)):
         if int(kind[i]) == EventKind.WINDOW_END:
-            _expire(run, opened, i, granted, lapsed)
+            out.append((int(tick[i]), 2, seq, "expire", int(np.asarray(t.lane)[i])))
+            seq += 1
         for e in np.flatnonzero((eff[i] == EffectKind.ALLOCATE) & ok[i]):
-            row = int(np.asarray(t.alloc_recipient)[i, e])
-            granted[row] += np.asarray(t.alloc_amount)[i, e]
-            opened.append(
-                (
-                    row,
-                    int(np.asarray(t.alloc_until)[i, e]),
-                    int(np.asarray(t.alloc_remainder)[i, e]),
-                    int(np.asarray(t.alloc_to)[i, e]),
+            data = tuple(
+                np.asarray(x)[i, e]
+                for x in (
+                    t.alloc_recipient,
+                    t.alloc_amount,
+                    t.alloc_until,
+                    t.alloc_remainder,
+                    t.alloc_to,
                 )
             )
-    return granted, lapsed
+            out.append((int(tick[i]), 3, seq, "grant", data))
+            seq += 1
+    valid, credited = _valid_rows(run), set()
+    refs, status = np.asarray(log.refund_of), np.asarray(log.status)
+    charged, lane = np.asarray(log.charged), np.asarray(log.lane)
+    for i in valid:
+        if int(refs[i]) >= 0:
+            j, credit = _refund_credit(log, i, valid, credited)
+            if j is not None:
+                rows = _balance_rows(study, int(lane[j]), _log_program(log, j))
+                when = int(np.asarray(log.released_tick)[i])
+                out.append((when, 1, seq, "credit", (rows, credit, None)))
+                seq += 1
+            continue
+        index = int(np.asarray(log.channel_index)[i])
+        rows = _balance_rows(study, int(lane[i]), _log_program(log, i))
+        start = int(np.asarray(log.start_tick)[i]) - int(transition[int(lane[i])])
+        gens = None if log.award_gens is None else np.asarray(log.award_gens)[i]
+        cancelled = int(status[i]) in (RecordStatus.PARTIAL, RecordStatus.CANCELLED)
+        debit = totals[index] if cancelled else charged[i]
+        out.append((start, 3, seq, "debit", (rows, debit, gens)))
+        seq += 1
+        if cancelled:
+            back = np.maximum(totals[index] - charged[i], 0.0)
+            end = int(np.asarray(log.end_tick)[i])
+            out.append((end, 3, seq, "credit", (rows, back, None)))
+            seq += 1
+    ev = c.ev
+    for i in _pending_settlements(run):
+        index = int(np.asarray(ev.channel_index)[i])
+        program = 0 if ev.program is None else int(np.asarray(ev.program)[i])
+        rows = _balance_rows(study, int(ev.lane[i]), program)
+        start = int(np.asarray(ev.tick)[i]) - int(occupancy[index])
+        start -= int(transition[int(ev.lane[i])])
+        out.append((start, 3, seq, "debit", (rows, totals[index], None)))
+        seq += 1
+    return sorted(out, key=lambda x: x[:3])
+
+
+def _replay_awards(run):
+    """Replay every credit, debit, grant and expiry; return what the ledger must hold.
+
+    The result is `(balance, granted, lapsed, win_gen, problems)`. An expiry finds the
+    award that opened its window (same row and expiry tick, earlier in the trace) and
+    applies that award's remainder rule to what the replayed row holds at that moment:
+    FORFEIT lapses it, REALLOCATE lapses it and grants it to the declared row, NONE and
+    CARRY_OVER move nothing. A record's `award_gens`, one generation per payer slot,
+    must be the replayed generation of the row that paid at its debit (a grant on that
+    row in the same tick may come before or after the debit, so either is accepted).
+    Late refunds are credited to the origin's rows as the handlers do today.
+    """
+    budget = np.asarray(run.study.budget)
+    balance, granted = budget.astype(np.float64).copy(), np.zeros_like(budget)
+    lapsed, gen = np.zeros_like(budget), np.zeros(budget.shape[0], np.int64)
+    opened, problems = [], []
+    timeline = _award_timeline(run)
+    by_group = {}
+    for entry in timeline:
+        by_group.setdefault(entry[:2], []).append(entry)
+    for (now, _), group in by_group.items():
+        before = gen.copy()
+        for _, _, _, what, data in group:
+            if what == "grant":
+                row, amount, until, rule, to = data
+                row = int(row)
+                balance[row] += amount
+                granted[row] += amount
+                gen[row] += 1
+                opened.append((row, int(until), int(rule), int(to)))
+            elif what == "credit":
+                rows, amount, _ = data
+                for r, row in enumerate(rows):
+                    balance[row, r] += float(amount[r])
+            elif what == "debit":
+                rows, amount, _ = data
+                for r, row in enumerate(rows):
+                    balance[row, r] -= float(amount[r])
+            else:
+                row = int(data)
+                hit = [w for w in opened if w[0] == row and w[1] == now]
+                if not hit:
+                    continue
+                _, _, rule, to = hit[-1]
+                opened.remove(hit[-1])
+                gen[row] += 1
+                if rule in (RemainderRule.FORFEIT, RemainderRule.REALLOCATE):
+                    held = balance[row].copy()
+                    balance[row] -= held
+                    lapsed[row] += held
+                    if rule == RemainderRule.REALLOCATE:
+                        balance[to] += held
+                        granted[to] += held
+        for _, _, _, what, data in group:
+            if what != "debit" or data[2] is None:
+                continue
+            rows, _, seen = data
+            for r, row in enumerate(rows):
+                if int(seen[r]) not in (int(before[row]), int(gen[row])):
+                    problems.append(
+                        f"a record names generation {int(seen[r])} for row {row}"
+                    )
+    return balance, granted, lapsed, gen, problems
 
 
 def _award_mismatches(run):
-    """Award counters that differ from the independent replay of the trace.
+    """What the ledger's award counters and balances hold that the replay does not.
 
-    Skipped when the log overflowed (a debit may have no record) or the run holds
-    refund receipts (a credit lands at a time the record does not carry); the final
-    balance gap in `balance_conserved` still binds then.
+    Skipped only when the log overflowed: a debit or credit may then have no record to
+    replay it from, and the three-way account in `balance_conserved` still binds.
     """
     c = run.carry
     if int(c.overflow_mask) & Capacity.LOG_ROWS:
         return []
-    refs = np.asarray(c.log.refund_of)
-    if np.any(refs[_valid_rows(run)] >= 0):
-        return []
-    want_granted, want_lapsed = _expected_awards(run)
-    bad = []
-    if np.any(np.abs(np.asarray(c.ledger.granted) - want_granted) > ATOL):
-        bad.append("a row's granted counter differs from the replay of the trace")
-    if np.any(np.abs(np.asarray(c.ledger.lapsed) - want_lapsed) > ATOL):
-        bad.append("a row's lapsed counter differs from the replay of the trace")
+    balance, granted, lapsed, gen, bad = _replay_awards(run)
+    led = c.ledger
+    for name, want, have in (
+        ("balance", balance, led.balance),
+        ("granted", granted, led.granted),
+        ("lapsed", lapsed, led.lapsed),
+    ):
+        diff = np.abs(np.asarray(have) - want)
+        if np.any(diff > ATOL):
+            row, res = np.unravel_index(int(np.argmax(diff)), diff.shape)
+            bad.append(
+                f"the replay of the trace and records puts {name} at row {row} "
+                f"resource {res} at {want[row, res]}, the ledger holds "
+                f"{np.asarray(have)[row, res]}"
+            )
+    if np.any(np.asarray(led.win_gen) != gen):
+        bad.append("a row's window generation differs from the replay")
     return bad
 
 
