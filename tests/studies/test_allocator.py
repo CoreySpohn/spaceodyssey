@@ -351,12 +351,12 @@ def _drop_allocate(run, which):
     return _with_effects(run, edit)
 
 
-def _corrupt_allocate(run, field):
-    """Change one field of the first recorded Allocate."""
+def _corrupt(run, kind, field):
+    """Change one field of the first recorded effect of `kind`."""
     done = [False]
 
     def edit(eff):
-        slots = np.flatnonzero(np.asarray(eff.kind) == EffectKind.ALLOCATE)
+        slots = np.flatnonzero(np.asarray(eff.kind) == kind)
         if done[0] or not len(slots):
             return eff
         done[0] = True
@@ -390,9 +390,20 @@ def test_replay_fails_when_the_run_is_altered():
         assert not al.replay_allocation(study, _drop_allocate(run, which)).ok, which
         assert _follows_awards(_drop_allocate(run, which)), which
     for field in FIELDS:
-        altered = _corrupt_allocate(run, field)
+        altered = _corrupt(run, EffectKind.ALLOCATE, field)
         assert not al.replay_allocation(study, altered).ok, field
         assert _follows_awards(altered), field
+    # every other effect the policy emitted is compared with the replayed one too
+    for kind, field in (
+        (EffectKind.OBSERVE, "program"),
+        (EffectKind.OBSERVE, "subject"),
+        (EffectKind.OBSERVE, "channel_index"),
+        (EffectKind.WAIT, "tick"),
+        (EffectKind.QUERY, "subject"),
+        (EffectKind.STOP, "scope"),
+    ):
+        altered = _corrupt(run, kind, field)
+        assert not al.replay_allocation(study, altered).ok, (kind, field)
     # an award the policy was never shown, as the log records it
     for field, value in (("audience", int(Audience.OBSERVER)), ("released_tick", -1)):
         report = al.replay_allocation(study, _set_award(run, field, value))
