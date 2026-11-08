@@ -60,14 +60,7 @@ def _balance(run):
     return float(np.asarray(run.carry.ledger.balance)[0, 0])
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        # the occupancy study is the default one, so it shares the compile below
-        n if n == "occupancy" else pytest.param(n, marks=pytest.mark.slow)
-        for n in MATRIX
-    ],
-)
+@pytest.mark.parametrize("name", MATRIX)
 def test_a_halfway_cancel_retains_what_the_pricing_mode_spends(runs, name):
     """Occupancy and statistical keep half, flat keeps all, a surcharge stays fixed."""
     _, balance, retained, fixed = MATRIX[name]

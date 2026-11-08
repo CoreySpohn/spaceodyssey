@@ -130,12 +130,17 @@ def refund_study(
     ch = dataclasses.replace(base.channels, cost=cost, charge=cost)
     if charge is not None:
         ch = dataclasses.replace(ch, charge=ch.charge.at[0].set(charge))
-    if pricing is not None:
+    if refunds:
+        # Absent columns change the pytree structure, so a study that sets only some of
+        # them compiles a program of its own. Every refund study carries all of them,
+        # filled with the values an absent column stands for, and shares one program.
+        pricing = ChargePricing.OCCUPANCY if pricing is None else pricing
+        surcharge = 0.0 if surcharge is None else surcharge
         table = jnp.full((c, r), ChargePricing.OCCUPANCY, I64)
-        ch = dataclasses.replace(ch, pricing=table.at[0].set(pricing))
-    if surcharge is not None:
         ch = dataclasses.replace(
-            ch, surcharge=jnp.zeros((c, r), F64).at[0].set(surcharge)
+            ch,
+            pricing=table.at[0].set(pricing),
+            surcharge=jnp.zeros((c, r), F64).at[0].set(surcharge),
         )
     if failure is not None:
         kinds = jnp.full(c, -1, I64).at[0].set(failure)

@@ -52,20 +52,14 @@ def runs():
     return _Runs()
 
 
-# the plain study has no surcharge, so it compiles the executor again, 14 s cold
-QUICK_CASES = [
-    pytest.param(n, marks=pytest.mark.slow) if n == "plain" else n for n in CASES
-]
-
-
-@pytest.mark.parametrize("name", QUICK_CASES)
+@pytest.mark.parametrize("name", CASES)
 def test_every_account_agrees_after_pricing_cancels_and_refunds(runs, name):
     """Fails if a charge component or a credit moves the balance without the ledger."""
     result = balance_conserved(runs[name])
     assert result.passed, result
 
 
-@pytest.mark.parametrize("name", QUICK_CASES)
+@pytest.mark.parametrize("name", CASES)
 def test_each_row_nets_debits_and_refunds(runs, name):
     """Final balance is initial minus debited plus refunded, in every row."""
     run = runs[name]

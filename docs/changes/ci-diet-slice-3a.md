@@ -138,3 +138,45 @@ The nightly slow job covers the moved tests from here on.
 3. If compile cost keeps growing, the next step is a library change so that the balance
    quantum and the snapshot flag are array-valued rather than static, which would let the
    variants share one compile. That change touches `src/` and is not made here.
+
+## Second round: shared compiles
+
+The first round moved tests to slow and the cold runner measured 546 s instead of the
+435 s projected, because the compiles the moved tests carried shifted onto the tests that
+stayed. A profile of the quick tier (one compile attributed to each test) shows the
+cost is a small number of large programs: 94 compiles of more than 0.3 s take 65 percent
+of all backend compile time, and the host executor's `admit` and `advance` programs are
+about 22 s of the 157 s. Each distinct study structure compiles them once.
+
+### What makes two studies distinct
+
+Measured on the host executor with one refund study (about 5 s cold on the Mac):
+
+| Change between two studies | Extra compile |
+|---|---|
+| a new study object of the same structure | none |
+| array values: charge, receipts, scripts, budgets | none |
+| an optional column present instead of absent (pricing, surcharge) | one program |
+| `refunds`, `n_log`, `snapshot_balances`, `balance_quantum` | one program each |
+
+### Changes
+
+- `refund_study` always carries the pricing and surcharge columns when refunds are on,
+  filled with the values an absent column stands for (occupancy pricing, zero surcharge).
+  Every refund study of one capacity set now shares one program. The arithmetic is the
+  same, because an absent column is computed as exactly those values.
+- Tests returned to the quick tier because they no longer compile: the statistical, flat
+  and surcharge cases of the halfway cancel, the plain conservation case, and the three
+  refund tests that had their own channel columns (8 tests, about 0.2 s each).
+- The memoized runs in the test helpers are dropped when a module ends, and the cache
+  watermark clears Equinox's caches along with JAX's. Resident memory was crossing the
+  watermark in the middle of a module and clearing programs the next test then rebuilt.
+
+### Still in slow, and why
+
+These each need a program of their own because the variant is a static capacity or a
+patched handler: the overflow studies (a one-row log), the refunds-off study, the
+award variants (snapshot balances, balance quantum, a reshaped policy, refunds with
+awards), the three snapshot-balance tests on two executors, the two survey guards, and the
+mutants. Making the quantum and the snapshot flag array-valued, or rolling the admission
+loop, would let several of them return; those are library changes and are not made here.

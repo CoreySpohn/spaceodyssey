@@ -159,7 +159,6 @@ def test_a_receipt_of_the_kind_of_its_own_origin_still_credits():
     assert _ignored(run) == 0
 
 
-@pytest.mark.slow  # its own channel columns compile the executor, 19 s cold
 def test_an_acquisition_of_the_failure_kind_is_not_a_receipt():
     """Fails if a second acquisition of the failure kind refunds the first."""
     script = (observe(0, 0, 10, 0), observe(1, 0, 10, 0))
@@ -180,7 +179,6 @@ def test_control_a_receipt_inside_the_deadline_credits(runs):
     assert _ignored(run) == 0
 
 
-@pytest.mark.slow  # its own channel columns compile the executor, 19 s cold
 def test_the_remainder_of_a_completed_acquisition_excludes_its_surcharge():
     """Completed, never cancelled: charged 12, of which 2 is fixed, so 10 returns."""
     study = refund_study(COMPLETED, **SURCHARGE, receipts=(receipt(200),))
@@ -189,7 +187,6 @@ def test_the_remainder_of_a_completed_acquisition_excludes_its_surcharge():
     assert _ignored(run) == 0
 
 
-@pytest.mark.slow  # its own channel columns compile the executor, 19 s cold
 def test_a_flat_price_is_refundable_on_a_failure_but_not_on_a_cancel():
     """Flat 4: the cancel returns nothing (96); the failure returns the 4 (100)."""
     flat = dict(charge=4.0, pricing=ChargePricing.FLAT_FRACTION)

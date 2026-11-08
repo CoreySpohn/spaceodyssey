@@ -21,6 +21,7 @@ import os
 import sys
 from pathlib import Path
 
+import equinox as eqx
 import jax
 import pytest
 from hwoutils.testbudget.config import load_config
@@ -124,9 +125,23 @@ def bound_resident_memory():
         _release_freed_memory()
         rss = _rss_bytes()
     if rss > RSS_LIMIT or _heap_bytes(rss) > RSS_LIMIT // 2:
+        eqx.clear_caches()
         jax.clear_caches()
         gc.collect()
         _release_freed_memory()
+
+
+@pytest.fixture(autouse=True, scope="module")
+def drop_shared_runs():
+    """Release the runs the test helpers memoize once a module is done with them."""
+    yield
+    for name, module in tuple(sys.modules.items()):
+        if not name.startswith("tests."):
+            continue
+        for value in vars(module).values():
+            clear = getattr(value, "cache_clear", None)
+            if callable(clear):
+                clear()
 
 
 @pytest.fixture
