@@ -386,24 +386,30 @@ def _effects(
     disposition=0,
     disruptive=False,
 ):
-    def col(v):
-        return jnp.asarray(v, I64) * jnp.ones(caps.n_effects, I64)
+    n = caps.n_effects
+
+    def fit(v, dtype=I64):
+        # a column of fewer rows than the capacity is completed with empty rows
+        a = jnp.asarray(v, dtype)
+        if a.ndim == 1 and a.shape[0] < n:
+            a = jnp.concatenate([a, jnp.zeros(n - a.shape[0], dtype)])
+        return a
+
+    def col(v, dtype=I64):
+        if np.ndim(v) == 0:
+            return jnp.asarray(v, dtype) * jnp.ones(n, dtype)
+        return fit(v, dtype)
 
     return EffectTable(
-        kind=jnp.asarray(kind, I64),
-        subject=col(subject) if np.ndim(subject) == 0 else jnp.asarray(subject, I64),
-        channel_index=col(channel_index)
-        if np.ndim(channel_index) == 0
-        else jnp.asarray(channel_index, I64),
+        kind=fit(kind),
+        subject=col(subject),
+        channel_index=col(channel_index),
         group=col(group),
-        tick=col(tick) if np.ndim(tick) == 0 else jnp.asarray(tick, I64),
-        lane=col(lane) if np.ndim(lane) == 0 else jnp.asarray(lane, I64),
-        scope=col(scope) if np.ndim(scope) == 0 else jnp.asarray(scope, I64),
-        disposition=col(disposition)
-        if np.ndim(disposition) == 0
-        else jnp.asarray(disposition, I64),
-        disruptive=jnp.asarray(disruptive, jnp.bool_)
-        * jnp.ones(caps.n_effects, jnp.bool_),
+        tick=col(tick),
+        lane=col(lane),
+        scope=col(scope),
+        disposition=col(disposition),
+        disruptive=col(disruptive, jnp.bool_),
     )
 
 
