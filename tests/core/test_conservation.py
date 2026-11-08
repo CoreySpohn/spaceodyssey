@@ -133,12 +133,16 @@ def test_a_receipt_row_that_loses_its_negative_charge_is_caught(runs):
 
 
 def test_the_check_still_holds_when_the_log_overflows():
-    """A full log refuses the third receipt; the trace accounts the lost completion."""
-    receipts = (receipt(200), receipt(210), receipt(220))
+    """A full log refuses the payable receipt; the lost completion is accounted."""
+    # two receipts for an acquisition that does not exist fill the log; the one that
+    # names the acquisition is the one refused, and its credit is never settled
+    receipts = (receipt(200, index=7), receipt(210, index=7), receipt(220))
     study = refund_study(CANCELLED, **SURCHARGE, receipts=receipts, cap_kw=SHARED)
     run = _run(study)
     assert int(run.carry.n_log) == 3
     assert int(np.asarray(run.carry.overflow_mask)) != 0
+    balance = np.asarray(run.carry.ledger.balance)
+    assert balance[0, 0] == pytest.approx(93.0)  # debited 12, the cancel credited 5
     result = balance_conserved(run)
     assert result.passed, result
 
