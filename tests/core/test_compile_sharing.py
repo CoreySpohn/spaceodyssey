@@ -104,16 +104,16 @@ def test_bucketed_run_matches_the_default_scan_bit_for_bit(cut_run, bucketed_run
 
 def test_bucketed_run_shares_one_program_within_a_bucket(bucketed_run):
     """Fails if a step count of the same bucket, its edge included, compiles."""
+    _run(_threshold(3.0), BUCKET + 1, bucket=BUCKET)  # warm: the caches may be cleared
     before = _traces["n"]
-    for n_steps in (BUCKET + 1, 2 * BUCKET):
-        _run(_threshold(3.0), n_steps, bucket=BUCKET)
+    _run(_threshold(3.0), 2 * BUCKET, bucket=BUCKET)
     assert _traces["n"] == before
 
 
 def test_array_fields_reuse_the_program_and_are_read(threshold_run):
     """Fails if a new value retraces, or the first value stays baked in."""
+    never = _run(_threshold(math.inf))  # warm: the caches may be cleared
     before = _traces["n"]
-    never = _run(_threshold(math.inf))
     at_once = _run(_threshold(-math.inf))
     assert _traces["n"] == before
     # the second value is read, not the first one baked into the cached program
@@ -130,6 +130,7 @@ def test_kind_names_stay_out_of_the_compile_key(threshold_run):
     )
     assert renamed.caps.kind_names != study.caps.kind_names
     assert renamed.caps == study.caps and hash(renamed.caps) == hash(study.caps)
+    _run(study)  # warm: the caches may be cleared
     before = _traces["n"]
     result = _run(renamed)
     assert _traces["n"] == before
@@ -509,6 +510,7 @@ def test_host_histories_equal_the_ones_before_lifting(monkeypatch):
 
 def test_a_changed_script_reuses_the_program(scripted_run):
     """Fails if other ticks or values compile the scripted scan again."""
+    _run(_script())  # warm: the caches may be cleared since the fixture ran
     before = _traces["n"]
     _run(_script(ticks=(150, 250), values=(3.0, 8.0)))
     assert _traces["n"] == before
@@ -525,7 +527,7 @@ def test_step_and_decision_fingerprint_share_one_program_across_values(monkeypat
     truth = core.index_world(truths, 0)
     carry = eqx.filter_jit(core.init_carry)(study, truth)
     carry, ev, _ = core.select_next(carry, study.caps)
-    values = (3.0, 4.0, 5.0)
+    values = (3.25, 4.25, 5.25)  # no other test calls these: never cached before
 
     original = handlers.HANDLERS[0]
     count = {"n": 0}
