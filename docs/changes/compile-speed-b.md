@@ -8,38 +8,35 @@ scan is byte for byte the program it was.
 
 ## What changed
 
-### Numbers held as arrays
+### Numbers lifted at the call
 
 These fields were Python floats, ints or tuples, so each value was a new static key.
-They are now int64 or float64 arrays, so studies that differ only in these values share
-one program:
+They stay plain Python numbers and tuples on the objects, exactly as before, so every
+document, content hash and constructor is unchanged. Each is marked with
+`spaceodyssey.core.lift.traced(dtype)`, and the executors lift a marked field to an array
+of that dtype for the duration of a call (`run`, `advance` and `decide`). The study you
+pass in is not modified. Studies that differ only in these values then share one program:
 
-- `ThresholdStopPolicy.stop_snr`, `StochasticPolicy.n_obs` and `wait_ticks`;
+- `ThresholdStopPolicy.stop_snr` (float64), `StochasticPolicy.n_obs` and `wait_ticks`
+  (int64);
 - `ScriptedRecords.ticks`, `values`, `ids`, `revisions`, `statuses` and `kinds`: the
-  number of fires is the array length and stays part of the program;
-- `QueryPolicy.query_at`, `subject` and `service`;
-- `CatalogObserver.catalog_kind`.
+  number of fires is the tuple length and stays part of the program;
+- `QueryPolicy.query_at`, `subject` and `service` (int64);
+- `CatalogObserver.catalog_kind` (int64).
 
-The dtype is the one the arithmetic used before, so every history is bit for bit the
-same. Each array is a `PlainArray` (`spaceodyssey.plain`), a NumPy array that also keeps
-the value it was built from. A document writes the field as that value (`3`, not `3.0`;
-an enum member, not its integer), so every earlier document re-dumps byte for byte and
-keeps its content hash. The kept value plays no part in a compiled program, which sees
-only dtype and shape. An array made any other way, such as one put in with `tree_at`,
-is written as the plain numbers it holds.
+The dtypes are the ones the arithmetic used before. The histories are compared lifted
+against unlifted, leaf by leaf (dtype, shape, weak type and raw bytes), on both
+executors, for every study listed above in its default and varied forms: no leaf
+differs.
 
-The loader makes the array again through the field's converter, also for an omitted
-optional field. It refuses a stored form that is not numbers or tuples of numbers
-(including a nested array tag), a fraction for an integer field, a number out of range,
-and a shape the converter would change, each with a pointer to the field.
-
-Left as they are:
+Left as they are, because lifting changes a program or a history, or the field selects a
+Python branch or a shape:
 
 - `ToyRunningMean.measurement_kind` and `auxiliary_kind`. The default study holds them as
   literals in its program, and turning them into inputs changes that program.
-- `ScriptedRecords.audience` and the prior observer's kinds and rule. A document writes
-  the audience as an enum member, and the rule selects a Python branch.
-- Every field that sets a shape or selects a Python branch.
+- `ScriptedRecords.audience`, the prior observer's kinds and rule, and
+  `HeartbeatProcess.writes`.
+- Every other field that sets a shape or selects a Python branch.
 
 ### Bucketed run
 
@@ -88,4 +85,6 @@ The default scan StableHLO (survey 1, 2 worlds, 40 steps) has sha256
 `tests/core/test_compile_sharing.py` compares the bucketed run with the default scan leaf
 by leaf on two hand studies and a scripted study at 12, 40 and 45 steps, checks that
 varied values, scripts, step counts within a bucket and kind names add no program, that
-the lowering check still refuses mismatched kind names, and the plain document form.
+the lowering check still refuses mismatched kind names, that a bad `bucket` is refused,
+and that lifting leaves the history of the threshold, stochastic and scripted studies
+unchanged.
