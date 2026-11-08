@@ -26,9 +26,19 @@ The compiled program itself (StableHLO) changes by design, so its hash changes.
   view once and hands it to both `decide` and `decision_fingerprint` (both take an
   optional `view`). The saving is small because XLA already merged the duplicate work.
 
-A decision whose effect table has fewer rows than `Capacities.n_effects` was
-silently read with clamped indices before. It now fails at trace time with a shape
-error. A study must build effect tables of `n_effects` rows.
+## Effect table width
+
+Admission now refuses an effect table whose row count is not `Capacities.n_effects`.
+`transition` and `admit` raise a `ValueError` at trace time that names the column, both
+numbers and, from `transition`, the policies of the study.
+
+Before this change a table of the wrong width was read through clamped indices, and a
+one-row table broadcast into every row. The built-in toy policies emit two rows
+whatever `n_effects` is, so `toy.survey_1` with `Capacities(n_effects=3)` or more
+silently ran row 1 a second time as row 2 (and again for each further row). The toy
+effect builder now completes a short column with empty (`NONE`) rows, so those studies
+run as written. Histories at the default `n_effects=2` are unchanged (the pins hold, and
+the default program hash is the one above).
 
 ## Measured effect
 
@@ -77,5 +87,7 @@ Per refactor, default study (equations, lines, cold time): rolled admission 10,8
 ## Tests
 
 `tests/core/test_program_size.py` holds the admission program flat in `n_effects`,
-checks the switch holds only distinct bodies, and checks the shared branches equal the
-handlers of their own kinds.
+checks the switch holds only distinct bodies, checks the shared branches equal the
+handlers of their own kinds, runs the toy study at `n_effects` 3, 4 and 5, and checks
+the width error for tables of 1, n-1 and n+1 rows. The mutation controls that replace
+the policy snapshot view now replace it where `transition` builds it.
