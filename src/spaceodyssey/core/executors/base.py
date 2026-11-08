@@ -126,6 +126,13 @@ CANONICAL_FIELDS = {
         "realloc_row",
         "granted",
         "lapsed",
+        "cm_state",
+        "cm_lane",
+        "cm_program",
+        "cm_start",
+        "cm_end",
+        "cm_index",
+        "cm_count",
     ),
     "carry.request": (
         "kind",
@@ -246,6 +253,11 @@ def awards_on(carry):
     return carry.ledger.win_gen is not None
 
 
+def commitments_on(carry):
+    """Whether the carry holds the commitment table."""
+    return carry.ledger.cm_state is not None
+
+
 # Fields that exist only where a feature does, by dotted path, each with the predicate
 # that says whether the carry holds the feature. A field of a feature that is off has
 # zero size and leaves the canonical history, so no history of a study without the
@@ -279,6 +291,13 @@ CONDITIONAL_FIELDS = {
     "carry.ledger.realloc_row": awards_on,
     "carry.ledger.granted": awards_on,
     "carry.ledger.lapsed": awards_on,
+    "carry.ledger.cm_state": commitments_on,
+    "carry.ledger.cm_lane": commitments_on,
+    "carry.ledger.cm_program": commitments_on,
+    "carry.ledger.cm_start": commitments_on,
+    "carry.ledger.cm_end": commitments_on,
+    "carry.ledger.cm_index": commitments_on,
+    "carry.ledger.cm_count": commitments_on,
     "trace.alloc_amount": awards_on,
     "trace.alloc_from": awards_on,
     "trace.alloc_until": awards_on,

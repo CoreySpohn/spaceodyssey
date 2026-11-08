@@ -119,6 +119,7 @@ def empty_carry(caps, balance=None):
             realloc_row=jnp.zeros(br, I64) if caps.awards else None,
             granted=jnp.zeros((br, nr), F64) if caps.awards else None,
             lapsed=jnp.zeros((br, nr), F64) if caps.awards else None,
+            **commitment_leaves(caps),
         ),
         belief=_zero_belief(caps),
         pbelief=_zero_belief(caps),
@@ -198,6 +199,22 @@ class Trace(eqx.Module):
     alloc_recipient: jax.Array | None = None  # I64[E]
     alloc_remainder: jax.Array | None = None  # I64[E]: the `RemainderRule`
     alloc_to: jax.Array | None = None  # I64[E]: a REALLOCATE's destination row
+
+
+def commitment_leaves(caps):
+    """The commitment table of an empty ledger: no leaves unless commitments are on."""
+    if not caps.commitments:
+        return {}
+    k = jnp.zeros(caps.n_commitments, I64)
+    return {
+        "cm_state": k,
+        "cm_lane": k,
+        "cm_program": k,
+        "cm_start": k,
+        "cm_end": k,
+        "cm_index": k,
+        "cm_count": jnp.zeros((caps.n_programs, caps.n_lanes), I64),
+    }
 
 
 def absent(trace, name):

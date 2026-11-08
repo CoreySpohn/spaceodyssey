@@ -386,6 +386,7 @@ def _effects(
     scope=0,
     disposition=0,
     disruptive=False,
+    start_tick=None,
 ):
     n = caps.n_effects
 
@@ -411,6 +412,9 @@ def _effects(
         scope=col(scope),
         disposition=col(disposition),
         disruptive=col(disruptive, jnp.bool_),
+        start_tick=col(0 if start_tick is None else start_tick)
+        if caps.commitments
+        else None,
     )
 
 

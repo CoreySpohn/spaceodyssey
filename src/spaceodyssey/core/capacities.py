@@ -81,6 +81,11 @@ class Capacities:
     balance_quantum: float = dataclasses.field(default=1.0, metadata=OPTIONAL)
 
     @property
+    def commitments(self) -> bool:
+        """Whether future-start commitments are on (the commitment table has rows)."""
+        return self.n_commitments > 0
+
+    @property
     def n_balance_rows(self) -> int:
         """Number of asset, program, and shared balance rows."""
         return self.n_assets + self.n_programs + 1

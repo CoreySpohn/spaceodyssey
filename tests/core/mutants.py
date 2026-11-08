@@ -36,10 +36,11 @@ def _mutant_realize(c, study, truth, root, base, fraction):
 
 
 def _step_with_table(carry, ev, study, truth, root, table):
-    if not study.caps.awards:  # the real step leaves the window handler out
-        table = tuple(
-            handlers.h_none if h is handlers.h_window_end else h for h in table
-        )
+    # the real step leaves out the handlers of a feature that is off
+    left_out = (() if study.caps.awards else (handlers.h_window_end,)) + (
+        () if study.caps.commitments else (handlers.h_commit_start,)
+    )
+    table = tuple(handlers.h_none if h in left_out else h for h in table)
     branches = tuple((lambda c, h=h: h(c, ev, study, truth, root)) for h in table)
     return lax.switch(
         jnp.clip(ev.kind, 0, len(table) - 1).astype(jnp.int32), branches, carry
