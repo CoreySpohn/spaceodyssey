@@ -36,10 +36,13 @@ from spaceodyssey.core.enums import (
     Scope,
 )
 from spaceodyssey.core.events import empty_event_row, empty_events
+from spaceodyssey.core.executors.host import _adm, _close, _fp
 from spaceodyssey.core.ledger import _resource_rows
+from spaceodyssey.core.lift import lift_traced
 from spaceodyssey.core.preflight import FindingCode, preflight
 from spaceodyssey.core.records import empty_log, masked_record, record_none
 from spaceodyssey.core.snapshot import effects_none
+from spaceodyssey.core.transaction import mask_effects
 from spaceodyssey.studies import toy
 from tests.core.helpers import one_world
 from tests.core.program_helpers import (
@@ -399,7 +402,7 @@ def _stop_event(carry):
 
 
 def _stopped(handler, study, run):
-    """The carry and log rows after `handler` handles the Stop of the run."""
+    """The carry after `handler` handles the Stop of the run."""
     carry, truth, root = _before_step(study, run, _is_stop)
     ev = _stop_event(carry)
     carry = _tree_set(carry, tick=ev.tick)
@@ -408,9 +411,50 @@ def _stopped(handler, study, run):
     return out
 
 
+def _resumed(handler, study, run):
+    """The run to its end with the Stop handled by `handler`, the rest the real path.
+
+    The real run's carry after the Stop step takes the closed flags `handler` set, and
+    the compiled advance, decision and admission carry it through the remaining steps,
+    so what the flags do to the next admissions is the real code's.
+    """
+    flags = _stopped(handler, study, run)
+    handled = np.asarray(run.trace.handled)
+    step = int(np.flatnonzero(handled & _is_stop(run.trace))[0]) + 1
+    truth, root = one_world(caps=study.caps)
+    ex = HostExecutor()
+    carry = ex.run(study, truth, root, step).carry
+    carry = _tree_set(
+        carry,
+        **{
+            "ledger.lane_closed": flags.ledger.lane_closed,
+            "ledger.program_closed": flags.ledger.program_closed,
+        },
+    )
+    lifted = lift_traced(study)
+    caps = study.caps
+    for _ in range(N_STEPS - step):
+        carry, _trace, wake = ex.advance(carry, root, lifted, truth)
+        if bool(wake):
+            eff, pstate, _u = ex.decide(carry, root, lifted)
+        else:
+            eff, pstate = effects_none(caps), carry.pstate
+        eff = mask_effects(eff, wake)
+        fp = _fp(carry, lifted) if bool(wake) else jnp.asarray(0, I64)
+        carry, _codes = _adm(carry, eff, lifted, fp)
+        carry = _close(carry, eff, pstate, wake, lifted)
+    n = int(carry.n_log)
+    return carry, np.asarray(carry.log.program)[:n].tolist()
+
+
 @pytest.mark.medium  # The shared run's compile is paid in its setup.
-def test_mutant_a_stop_that_closes_every_lane_is_caught(stop_one, monkeypatch):
-    """Mutant: with programs, a program Stop closes all lanes. The check must fail."""
+def test_mutant_a_stop_that_closes_every_lane_is_caught(stop_one):
+    """Mutant: with programs, a program Stop closes all lanes. The check must fail.
+
+    Real: lane open, program 1 admitted on it, programs [0, 1]. Mutant: every lane
+    closed, so the real admission refuses program 1 on its lane, programs [0] (the old
+    test's outcome).
+    """
     study, run = stop_one
     real = handlers.h_stop
 
@@ -419,14 +463,22 @@ def test_mutant_a_stop_that_closes_every_lane_is_caught(stop_one, monkeypatch):
         closed = jnp.where(ev.scope == Scope.PROGRAM, True, out.ledger.lane_closed)
         return _tree_set(out, **{"ledger.lane_closed": closed}), emit, rec
 
-    assert not np.asarray(_stopped(real, study, run).ledger.lane_closed).any()
-    # the closed lane would refuse program 1, which the real run admits on it
-    assert np.asarray(_stopped(closes_all, study, run).ledger.lane_closed).all()
+    carry, programs = _resumed(real, study, run)
+    assert not np.asarray(carry.ledger.lane_closed).any()
+    assert programs == [0, 1]
+    carry, programs = _resumed(closes_all, study, run)
+    assert np.asarray(carry.ledger.lane_closed).all()
+    assert programs == [0]
 
 
 @pytest.mark.medium  # The shared run's compile is paid in its setup.
 def test_mutant_a_stop_that_never_sets_the_flag_admits_the_closed_program(stop_one):
-    """Mutant: the flag is not set, so the closed program is admitted again."""
+    """Mutant: the flag is not set, so the closed program is admitted again.
+
+    Real: program 0 closed, programs [0, 1]. Mutant: the flag is never set, program 0
+    is admitted again on its free lane and program 1 finds it busy, programs [0, 0]
+    (the old test's outcome).
+    """
     study, run = stop_one
     real = handlers.h_stop
 
@@ -435,11 +487,12 @@ def test_mutant_a_stop_that_never_sets_the_flag_admits_the_closed_program(stop_o
         flag = c.ledger.program_closed
         return _tree_set(out, **{"ledger.program_closed": flag}), emit, rec
 
-    assert list(np.asarray(_stopped(real, study, run).ledger.program_closed)) == [
-        True,
-        False,
-    ]
-    assert not np.asarray(_stopped(forgets, study, run).ledger.program_closed).any()
+    carry, programs = _resumed(real, study, run)
+    assert list(np.asarray(carry.ledger.program_closed)) == [True, False]
+    assert programs == [0, 1]
+    carry, programs = _resumed(forgets, study, run)
+    assert not np.asarray(carry.ledger.program_closed).any()
+    assert programs == [0, 0]
 
 
 @pytest.mark.medium  # The shared run's compile is paid in its setup.
