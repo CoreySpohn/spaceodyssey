@@ -133,6 +133,10 @@ class CompiledExecutor(AbstractExecutor):
         default (`bucket=None`) is the unchanged scan.
         """
         require_x64()
+        if bucket is not None and (
+            isinstance(bucket, bool) or not isinstance(bucket, int) or bucket <= 0
+        ):
+            raise ValueError(f"bucket must be a positive int, not {bucket!r}")
         if service is not None or int(study.refresh.every_ticks) > 0:
             return self._run_hosted(
                 study, truths, roots, n_steps, wake_fn, service, refit, chunk
