@@ -43,6 +43,15 @@ CAP_FIELDS = (
 STUDY_FIELDS = ("key_version",)
 CHANNEL_FIELDS = ("pricing", "surcharge", "failure_kind", "refund_deadline_ticks")
 RECORD_FIELDS = ("nonrefundable", "refund_index", "award_gen")
+AWARD_COLUMNS = (
+    "amount",
+    "window_from",
+    "window_until",
+    "recipient",
+    "remainder",
+    "realloc_to",
+)
+EFFECT_OPTIONAL = ("program", *AWARD_COLUMNS)
 
 
 def _text(study):
@@ -66,7 +75,7 @@ def test_the_optional_fields_are_the_ones_slice_3a_added():
     assert marked == (
         {("Capacities", n) for n in CAP_FIELDS}
         | {("Study", n) for n in STUDY_FIELDS}
-        | {("EffectTable", "program")}
+        | {("EffectTable", n) for n in EFFECT_OPTIONAL}
         | {("ChannelTable", n) for n in CHANNEL_FIELDS}
         | {("Record", n) for n in RECORD_FIELDS}
     )
@@ -402,3 +411,49 @@ def test_a_populated_record_refund_columns_round_trip():
     assert set(RECORD_FIELDS) <= set(node)
     built = load_module.decode(node, ("record",), _RECORD_KINDS)
     assert_same_pytree(rec, built)
+
+
+# ---- the award columns of an effect table (S5) --------------------------------------
+
+
+def _award_node(awards):
+    caps = dataclasses.replace(Capacities(), awards=awards)
+    return encode(effects_none(caps), ("effects",), as_resolver(None))
+
+
+def test_an_effect_table_without_awards_is_written_without_the_award_columns():
+    """Fails if the default table writes columns its older documents lack."""
+    node = _award_node(False)
+    assert node  # a nonempty node, so the absence below is about the columns
+    assert not set(AWARD_COLUMNS) & set(node)
+
+
+def test_an_effect_table_document_from_before_awards_still_loads():
+    """Fails if a document without the award columns is refused or filled non-None."""
+    node = {k: v for k, v in _award_node(False).items() if k not in AWARD_COLUMNS}
+    built = load_module.decode(node, ("effects",), as_resolver(None))
+    assert all(getattr(built, n) is None for n in AWARD_COLUMNS)
+
+
+@pytest.mark.parametrize("name", AWARD_COLUMNS)
+def test_an_effect_table_written_with_a_null_award_column_is_refused(name):
+    """Control: a null column is the default written out, so it is two documents."""
+    node = {**_award_node(False), name: None}
+    with pytest.raises(DocumentError, match="at its default"):
+        load_module.decode(node, ("effects",), as_resolver(None))
+
+
+def test_a_populated_award_column_set_round_trips():
+    """Fails if an award column is dropped, omitted or rebuilt with another dtype."""
+    caps = dataclasses.replace(Capacities(), awards=True)
+    eff = effects_none(caps)
+    eff = dataclasses.replace(
+        eff,
+        amount=eff.amount.at[0, 0].set(4.0),
+        window_until=eff.window_until.at[0].set(9),
+        remainder=eff.remainder.at[0].set(2),
+    )
+    node = encode(eff, ("effects",), as_resolver(None))
+    assert set(AWARD_COLUMNS) <= set(node)
+    built = load_module.decode(node, ("effects",), as_resolver(None))
+    assert_same_pytree(eff, built)

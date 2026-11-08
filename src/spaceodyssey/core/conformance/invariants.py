@@ -301,8 +301,43 @@ def _refused_completions(run):
     return lost
 
 
+def _awarded(run):
+    """What the trace says admitted Allocate rows granted, per row and resource."""
+    t, study = run.trace, run.study
+    out = np.zeros(np.asarray(study.budget).shape)
+    admitted = (
+        np.asarray(t.handled)[:, None]
+        & (np.asarray(t.eff_kind) == EffectKind.ALLOCATE)
+        & (np.asarray(t.admit_code) == AdmissionCode.OK)
+    )
+    for i, e in zip(*np.nonzero(admitted), strict=True):
+        row = int(np.asarray(t.alloc_recipient)[i, e])
+        out[row] += np.asarray(t.alloc_amount)[i, e]
+    return out
+
+
+def _award_mismatches(run):
+    """Award counters the trace does not support.
+
+    Every admitted Allocate grants its amount to its recipient, so a row's `granted`
+    is at least what the trace shows it was allocated; any excess is a reallocation,
+    which lapses the same amount at its source, so the total excess cannot exceed the
+    total lapsed. Nothing lapses that was not granted or held to begin with.
+    """
+    c, study = run.carry, run.study
+    granted, lapsed = np.asarray(c.ledger.granted), np.asarray(c.ledger.lapsed)
+    bad, allocated = [], _awarded(run)
+    if np.any(granted < allocated - ATOL):
+        bad.append("a row's granted counter is below what the trace allocated to it")
+    if np.any((granted.sum(0) - allocated.sum(0)) > lapsed.sum(0) + ATOL):
+        bad.append("more was reallocated than lapsed")
+    if np.any(lapsed > granted + np.asarray(study.budget) + ATOL):
+        bad.append("a row lapsed more than it was ever given")
+    return bad
+
+
 def balance_conserved(run):
-    """Initial balance minus what was spent equals the final balance, row by row.
+    """Initial balance plus awards less what was spent equals the final balance.
 
     Three independent accounts must agree, with or without log overflow: the final
     balance, the ledger's own debit and refund counters, and the retained records plus
@@ -318,12 +353,16 @@ def balance_conserved(run):
         return make_result("balance_conserved", ["the final balance is not finite"])
     failures = []
     net = np.asarray(c.ledger.debited) - np.asarray(c.ledger.refunded)
-    gap = np.abs(final - (budget - net))
+    awarded = np.zeros_like(budget)
+    if c.ledger.granted is not None:
+        awarded = np.asarray(c.ledger.granted) - np.asarray(c.ledger.lapsed)
+    gap = np.abs(final - (budget + awarded - net))
     if not np.all(np.isfinite(gap) & (gap <= ATOL)):
         row, res = np.unravel_index(int(np.argmax(gap)), gap.shape)
         failures.append(
             f"balance row {row} resource {res} is {final[row, res]} but initial "
-            f"minus the ledger's net debits is {budget[row, res] - net[row, res]}"
+            f"plus awards less the ledger's net debits is "
+            f"{budget[row, res] + awarded[row, res] - net[row, res]}"
         )
     kept = _retained_net_spend(run)
     overflowed = bool(int(c.overflow_mask) & Capacity.LOG_ROWS)
@@ -338,6 +377,8 @@ def balance_conserved(run):
         )
     for i in _receipt_mismatches(run):
         failures.append(f"receipt row {i} does not carry the credit it is owed")
+    if c.ledger.granted is not None:
+        failures.extend(_award_mismatches(run))
     return make_result(
         "balance_conserved",
         failures,

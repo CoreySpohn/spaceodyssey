@@ -15,6 +15,7 @@ from spaceodyssey.core.battery.result import (
     worlds_of,
 )
 from spaceodyssey.core.capacities import Capacities
+from spaceodyssey.core.carry import absent
 from spaceodyssey.core.enums import BIG, F64, EventKind, Purpose, RecordStatus
 from spaceodyssey.core.keys import (
     Coupling,
@@ -184,7 +185,7 @@ def _trace_prefix(w, trunk, side, at):
     return [
         f"world {w}: trace field {name} differs before the fork"
         for name in type(trunk).__dataclass_fields__
-        if (name != "program" or trunk.program is not None)
+        if not absent(trunk, name)
         and not bits_equal(
             np.asarray(getattr(trunk, name))[:first],
             np.asarray(getattr(side, name))[:first],

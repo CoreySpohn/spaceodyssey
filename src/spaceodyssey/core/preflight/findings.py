@@ -23,6 +23,7 @@ class FindingCode(StrEnum):
     X002 = "X002"  # a reserved field set to a non-default value
     T001 = "T001"  # a drain that equals a close below campaign scope
     P001 = "P001"  # a policy names a program the capacities do not hold
+    W001 = "W001"  # an award window that is empty, out of range or overlaps another
     W002 = "W002"  # a declared failure kind the policy cannot read
     T002 = "T002"  # a channel with no valid coincident order
     R001 = "R001"  # a channel declares a record kind the registry lacks
