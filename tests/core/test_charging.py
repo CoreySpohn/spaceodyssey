@@ -71,8 +71,8 @@ def test_a_halfway_cancel_retains_what_the_pricing_mode_spends(runs, name):
     assert float(log.nonrefundable[0, 0]) == pytest.approx(fixed)
 
 
-@pytest.mark.slow(
-    reason="the refunds-off study compiles the executor on its own, 18 s cold"
+@pytest.mark.medium(
+    reason="the refunds-off study compiles on its own: 6.7 s on a laptop"
 )
 def test_without_refunds_the_cost_is_debited_and_no_column_exists():
     """The default path: charge is not read, the refund columns are absent."""
@@ -109,8 +109,8 @@ def test_the_default_charge_is_the_cost():
     assert _balance(_run(study)) == pytest.approx(95.0)
 
 
-@pytest.mark.slow(
-    reason="A mutant clears the compile caches and compiles the executor cold"
+@pytest.mark.medium(
+    reason="a mutant clears the caches and recompiles: 7.2 s on a laptop"
 )
 def test_mutant_a_cancel_that_credits_the_surcharge_is_caught(monkeypatch):
     """Mutant: the cancel credit ignores the fixed part, so 93 becomes 95.5 or more."""

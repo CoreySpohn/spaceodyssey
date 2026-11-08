@@ -16,8 +16,8 @@ from spaceodyssey.studies.survey_2 import (
     survey_2,
 )
 
-pytestmark = pytest.mark.slow(
-    reason="2000 worlds on one adaptive run, shared by every test"
+pytestmark = pytest.mark.medium(
+    reason="2000 worlds on one adaptive run shared by every test: 14 s on a laptop"
 )
 
 N_WORLDS = 2000
