@@ -164,6 +164,13 @@ LOCATORS = {
     "duplicate_channel_ids": ("channels", None, "id", (1,)),
     "allocate": ("policy", 0, "effects", ()),
     "commitments_with_awards": ("caps", None, "n_commitments", ()),
+    "disruptive_resource_past_the_columns": (
+        "assets",
+        None,
+        "disruptive_resource",
+        (0,),
+    ),
+    "disruptive_resource_below_none": ("assets", None, "disruptive_resource", (1,)),
     "gradients_on_host": ("policy", 0, "requires", ()),
     "host_only_policy_on_compiled": ("policy", 0, "executors", ()),
     "charge_differs_from_cost": ("channels", None, "charge", (0, 0)),
