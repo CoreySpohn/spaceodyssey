@@ -60,6 +60,9 @@ class Ledger(eqx.Module):
     # what awards have granted and expiries have lapsed (F64[BR, R])
     win_state: jax.Array | None = None
     win_gen: jax.Array | None = None
+    # per lane and payer slot, the window generation of the paying row at the debit of
+    # the lane's live occupancy (I64[L, R]); read back into the record's `award_gens`
+    lane_award_gens: jax.Array | None = None
     realloc_row: jax.Array | None = None
     granted: jax.Array | None = None
     lapsed: jax.Array | None = None

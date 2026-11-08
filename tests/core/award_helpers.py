@@ -109,4 +109,18 @@ def run(study, n_steps=200):
     return HostExecutor().run(study, truth, root, n_steps)
 
 
-__all__ = ["award", "award_study", "row", "run"]
+def award_refund_study(script, awards, receipts=(), **overrides):
+    """The refund study (every row holds 100, channels cost 10 of each resource) with
+    two programs, awards on, the scripted awards and the scripted receipts."""
+    from tests.core.refund_helpers import refund_study
+
+    return refund_study(
+        script,
+        receipts,
+        cap_kw={"n_programs": 2, "awards": True},
+        policy=ScriptedAwards(script=script, awards=awards),
+        **overrides,
+    )
+
+
+__all__ = ["award", "award_refund_study", "award_study", "row", "run"]

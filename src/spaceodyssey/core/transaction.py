@@ -255,21 +255,6 @@ def _program_of(eff, e, caps):
     return jnp.asarray(0, I64)
 
 
-def _award_generation(c, rows, study, channel_index):
-    """Window generation, at debit, of the payer row whose award pays the charge.
-
-    A charge draws one resource from each of the asset, program and shared rows. The
-    award it spends is the open window (WINDOWED) of the first of those rows, in that
-    order, that is charged anything; with no open window the first payer row's
-    generation stands, since a refund to a row that nothing has opened or closed since
-    needs no disposition.
-    """
-    cost = charge_parts(study, channel_index)[0]
-    open_ = (c.ledger.win_state[rows] == WindowState.WINDOWED) & (cost > 0.0)
-    paying = jnp.where(open_.any(), rows[jnp.argmax(open_)], rows[0])
-    return c.ledger.win_gen[paying]
-
-
 def _commit_observe(c, eff, e, ok, study):
     """Debit, occupy the lane and queue the settlement of effect row e where `ok`."""
     caps, channels = study.caps, study.channels
@@ -303,6 +288,18 @@ def _commit_observe(c, eff, e, ok, study):
             "acquisition_counts": c.acquisition_counts.at[subject].add(ok.astype(I64)),
         },
     )
+    if caps.awards:
+        # the generation, at debit, of each row that pays one resource of the charge
+        c1 = _tree_set(
+            c1,
+            **{
+                "ledger.lane_award_gens": c1.ledger.lane_award_gens.at[lane].set(
+                    jnp.where(
+                        ok, c.ledger.win_gen[rows], c1.ledger.lane_award_gens[lane]
+                    )
+                )
+            },
+        )
     return enqueue(
         c1,
         ok,
@@ -320,11 +317,6 @@ def _commit_observe(c, eff, e, ok, study):
         scope=c.phase,
         acquisition_id=c.next_sid,
         program=program,
-        # the window generation of the row whose award pays at debit; read back into
-        # the record's `award_gen` (a Done row has no disposition of its own)
-        disposition=_award_generation(c, rows, study, channel_index)
-        if caps.awards and caps.refunds
-        else 0,
         caps=caps,
     )
 
@@ -337,7 +329,8 @@ def _commit_allocate(c, eff, e, want, study):
     finite, its window is empty, already over or past the last tick, or its rule is
     unknown; an award onto a row that already holds a window is FORBIDDEN (one window
     per row), and a full queue is NO_SLOT. While the balance view is on, an award that
-    would take a resource's total over all rows past 2**53 quanta is unsupported too.
+    would take a resource's supply (budget plus grants) past 2**53 quanta is unsupported
+    too.
     """
     caps = study.caps
     rows = caps.n_balance_rows
@@ -360,12 +353,14 @@ def _commit_allocate(c, eff, e, want, study):
     )
     if caps.snapshot_balances:
         # The balance view counts `balance_quantum` units exactly up to 2**53 (the bound
-        # `Study` holds the budget to). Debits only fall and a refund restores at most
-        # what was debited, so only an award can raise a balance; keeping each
-        # resource's total over all rows within the bound keeps every row within it,
-        # whichever row a REALLOCATE moves a remainder to.
-        total = c.ledger.balance.sum(axis=0)
-        fine = fine & jnp.all((total + amount) / caps.balance_quantum <= _EXACT_QUANTA)
+        # `Study` holds the budget to). Rows never go negative, and a debit, a refund,
+        # a lapse and a REALLOCATE all move quantity without adding any; only the
+        # budget and the awards add. So a resource's budget over all rows plus
+        # everything granted so far (a reallocation counts again, which only refuses
+        # early) bounds every row at every time, whichever refund or reallocation
+        # lands where. The award is admitted only if that supply stays within bound.
+        supply = jnp.asarray(study.budget).sum(axis=0) + c.ledger.granted.sum(axis=0)
+        fine = fine & jnp.all((supply + amount) / caps.balance_quantum <= _EXACT_QUANTA)
     open_ = c.ledger.win_state[r] == WindowState.WINDOWED
     room = (~c.ev.valid).any() & (c.next_sid < caps.max_sid)
     code = jnp.select(
@@ -491,6 +486,8 @@ class _AdmissionInputs(eqx.Module):
     assets: AssetTable
     channels: ChannelTable
     horizon_tick: jax.Array
+    # the study's initial balances, read by the award range bound only
+    budget: jax.Array | None = None
 
 
 @eqx.filter_jit
@@ -686,7 +683,11 @@ def admit(carry, effects, study, snapshot_fp=None):
     c = _tree_set(carry, stage=jnp.where(any_eff, Stage.ADMIT, carry.stage))
     c = _tree_set(c, phase=jnp.where(any_eff, phase, c.phase))
     inputs = _AdmissionInputs(
-        study.caps, study.assets, study.channels, study.horizon_tick
+        study.caps,
+        study.assets,
+        study.channels,
+        study.horizon_tick,
+        study.budget if study.caps.awards and study.caps.snapshot_balances else None,
     )
     c, codes = _admit_rows(c, effects, mask, inputs, fp)
     if mixed is not None:

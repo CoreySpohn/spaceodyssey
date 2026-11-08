@@ -236,6 +236,9 @@ class Record(eqx.Module):
     )  # F64[R]
     refund_index: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
     award_gen: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    # Under awards: the window generation, at debit, of the row that paid each resource
+    # (one entry per payer slot: asset, program, shared), I64[R].
+    award_gens: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
 
 
 def record_none(caps):
@@ -243,6 +246,7 @@ def record_none(caps):
     z = jnp.asarray(0, I64)
     return Record(
         **{n: z for n in RECORD_INT_FIELDS if n != "refund_of"},
+        award_gens=jnp.zeros(caps.n_resources, I64) if caps.awards else None,
         refund_of=jnp.asarray(-1, I64),
         cost=jnp.zeros(caps.n_resources, F64),
         charged=jnp.zeros(caps.n_resources, F64),
@@ -298,6 +302,7 @@ class RecordLog(eqx.Module):
     # count and the revision set as (channel, acquisition index, revision) triples. It
     # is not a `Record` field: only a refresh writes it; every other row holds zeros.
     product: jax.Array
+    award_gens: jax.Array | None = None  # I64[L, R], present only with awards
 
 
 def log_records(log, **replace):
@@ -316,6 +321,7 @@ def log_columns(log):
 
 
 REFUND_COLUMNS = ("nonrefundable", "refund_index", "award_gen")
+AWARD_COLUMNS = ("award_gens",)
 
 
 def empty_log(caps):
@@ -335,6 +341,9 @@ def empty_log(caps):
         refund_index=z if caps.refunds else None,
         award_gen=z if caps.refunds else None,
         product=jnp.zeros((caps.n_log, caps.product_width), I64),
+        award_gens=jnp.zeros((caps.n_log, caps.n_resources), I64)
+        if caps.awards
+        else None,
     )
 
 
@@ -364,7 +373,7 @@ def write_log(carry, rec, caps):
     col = carry.log.program
     if col is not None:
         col = col.at[s].set(jnp.where(ok, rec.program, col[s]))
-    for name in REFUND_COLUMNS:
+    for name in (*REFUND_COLUMNS, *AWARD_COLUMNS):
         old = getattr(carry.log, name)
         cols[name] = (
             None
@@ -462,6 +471,7 @@ _NOT_INT = (
     "product",
     "program",
     *REFUND_COLUMNS,
+    *AWARD_COLUMNS,
 )
 RECORD_INT_FIELDS = tuple(
     f.name for f in dataclasses.fields(Record) if f.name not in _NOT_INT

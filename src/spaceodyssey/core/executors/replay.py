@@ -17,6 +17,7 @@ from spaceodyssey.core.executors.base import (
 )
 from spaceodyssey.core.keys import fold_key
 from spaceodyssey.core.records import (
+    AWARD_COLUMNS,
     LOG_INT_FIELDS,
     REFUND_COLUMNS,
     Record,
@@ -38,7 +39,7 @@ def _row(log, i):
     fields["valid"] = jnp.asarray(True)
     if log.program is not None:
         fields["program"] = jnp.asarray(log.program[i])
-    for n in REFUND_COLUMNS:
+    for n in (*REFUND_COLUMNS, *AWARD_COLUMNS):
         if getattr(log, n) is not None:
             fields[n] = jnp.asarray(getattr(log, n)[i])
     return Record(**fields)  # the full row; callers mask it for their audience
