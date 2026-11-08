@@ -138,28 +138,34 @@ class ToyCommittee(AbstractHostService):
 
 
 class CarryCommittee(ToyCommittee):
-    """The negative control: it reads every proposal already written, released or not.
+    """The negative control: it reads the carry's log, released or not.
 
-    It totals the proposals the study's script has written by the query tick, whatever
-    their audience and release tick, as a committee holding the carry would. A proposal
-    that is still unreleased to the policy, or that reached the observer only, moves its
-    awards.
+    The service is handed only the masked snapshot. This committee also holds the carry
+    (see `hold`) and totals every proposal row in its log written by the query tick,
+    whatever the row's audience and release tick. A proposal that is still unreleased
+    to the policy, or that reached the observer only, moves its awards.
     """
 
-    def __init__(self, proposals=DEFAULT_PROPOSALS, kind=AWARD_KIND_INDEX):
-        """Hold the script of proposals the study was built from."""
+    def __init__(self, kind=AWARD_KIND_INDEX):
+        """Start without a carry; call `hold` before each answer."""
         super().__init__(kind)
-        self.proposals = tuple(proposals)
+        self.carry = None
+
+    def hold(self, carry):
+        """Keep the carry whose log the next answers read."""
+        self.carry = carry
 
     def requested(self, view):
-        """The total request of each program among the proposals written by now."""
-        tick = int(view.tick)
+        """The total request of each program among the proposals in the log."""
+        log = self.carry.log
+        pay = np.asarray(log.payload)
+        seen = (
+            np.asarray(log.valid)
+            & (np.asarray(log.kind) == PROPOSAL_KIND_INDEX)
+            & (np.asarray(log.start_tick) <= int(view.tick))
+        )
         return np.asarray(
-            [
-                sum(r for t, p, r, _, _ in self.proposals if p == q and t <= tick)
-                for q in PROGRAMS
-            ],
-            dtype=np.float64,
+            [pay[seen & (pay[:, 1] == p), 0].sum() for p in PROGRAMS], dtype=np.float64
         )
 
 
@@ -396,6 +402,7 @@ def release_steps(trace, n_log):
         & ((kind == EventKind.RELEASE) | (kind == EventKind.RESULT))
         & ((audience & int(Audience.POLICY)) != 0)
         & (slot >= 0)
+        & (slot < n_log)
     )
     for step in np.flatnonzero(released):
         if out[slot[step]] < 0:
@@ -525,6 +532,8 @@ def replay_allocation(study, run, committee=None):
     awards. Returns a `ReplayReport`; it never raises on a mismatch.
     """
     committee = ToyCommittee() if committee is None else committee
+    if hasattr(committee, "hold"):
+        committee.hold(run.carry)
     caps = study.caps
     layout = study.observer.layout(caps)
     (policy,) = study.agenda.policies
