@@ -17,15 +17,18 @@ HORIZON = 30  # the horizon of asset 0 (lanes 0 and 1); asset 1 (lane 2) has non
 DISRUPTIVE_COL = 0  # the resource column an activation of asset 0 is debited from
 
 
-def plan(n, slot, start, disruptive=0):
-    """The start tick and disruptive flag of effect row `slot` of decision `n`."""
-    return (n, slot, start, int(disruptive))
+def plan(n, slot, start, disruptive=0, grouped=0):
+    """The start tick and flags of effect row `slot` of decision `n`.
+
+    A row that is `grouped` joins the one group the decision's grouped rows share.
+    """
+    return (n, slot, start, int(disruptive), int(grouped))
 
 
 def _as_plan(rows):
-    out = np.full((SCRIPT_ROWS, 4), NONE, np.int64)
+    out = np.full((SCRIPT_ROWS, 5), NONE, np.int64)
     for i, r in enumerate(rows):
-        out[i] = r
+        out[i, : len(r)] = r
     return jnp.asarray(out, I64)
 
 
@@ -42,14 +45,19 @@ class ScriptedCommitments(ScriptedPrograms):
     def decide(self, pstate, view, study, key):
         """Emit the script rows, then the start tick and flag of each planned row."""
         eff, ps, u = super().decide(pstate, view, study, key)
-        start = jnp.zeros(study.caps.n_effects, I64)
-        flag = jnp.zeros(study.caps.n_effects, jnp.bool_)
-        for e in range(study.caps.n_effects):
+        n_effects = study.caps.n_effects
+        start = jnp.zeros(n_effects, I64)
+        flag = jnp.zeros(n_effects, jnp.bool_)
+        group = eff.group
+        for e in range(n_effects):
             pick = (self.plan[:, 0] == view.n_dec) & (self.plan[:, 1] == e)
             r = self.plan[jnp.argmax(pick)]
             start = start.at[e].set(jnp.where(pick.any(), r[2], 0))
             flag = flag.at[e].set(pick.any() & (r[3] > 0))
-        return dataclasses.replace(eff, start_tick=start, disruptive=flag), ps, u
+            joined = pick.any() & (r[4] > 0)
+            group = group.at[e].set(jnp.where(joined, view.n_dec * n_effects, group[e]))
+        eff = dataclasses.replace(eff, start_tick=start, disruptive=flag, group=group)
+        return eff, ps, u
 
 
 def commitment_study(
@@ -60,6 +68,8 @@ def commitment_study(
     activations=1.0,
     n_programs=1,
     refunds=False,
+    n_commitments=4,
+    max_sid=None,
     **overrides,
 ):
     """The toy study with commitments on, a horizon on asset 0 and the scripted policy.
@@ -69,8 +79,13 @@ def commitment_study(
     """
     from spaceodyssey.studies import toy
 
+    extra = {} if max_sid is None else {"max_sid": max_sid}
     caps = Capacities(
-        n_effects=3, n_commitments=4, n_programs=n_programs, refunds=refunds
+        n_effects=3,
+        n_commitments=n_commitments,
+        n_programs=n_programs,
+        refunds=refunds,
+        **extra,
     )
     study = toy.survey_1(
         caps=caps,
