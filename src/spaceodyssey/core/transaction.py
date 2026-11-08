@@ -290,11 +290,15 @@ def _commit_observe(c, eff, e, ok, study):
     )
     if caps.awards:
         # the generation, at debit, of each row that pays one resource of the charge,
-        # with the rule and destination of its window (NONE outside a window)
+        # with the rule and destination of its window; a debit outside a window has
+        # generation 0 and the rule NONE
         led = c.ledger
         windowed = led.win_state[rows] == WindowState.WINDOWED
         captured = {
-            "ledger.lane_award_gens": (c1.ledger.lane_award_gens, led.win_gen[rows]),
+            "ledger.lane_award_gens": (
+                c1.ledger.lane_award_gens,
+                jnp.where(windowed, led.win_gen[rows], 0),
+            ),
             "ledger.lane_award_rules": (
                 c1.ledger.lane_award_rules,
                 jnp.where(windowed, led.remainder_rule[rows], RemainderRule.NONE),

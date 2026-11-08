@@ -40,11 +40,31 @@ def _run(study, n_steps=80):
     return SimpleNamespace(study=study, carry=result.carry, trace=result.trace)
 
 
+# awards on, one compiled executor for all: (script, awards, receipts)
+FOREVER = award_helpers.award(0, 2, 2, 0, 1000, 5, RemainderRule.FORFEIT)
+EXPIRED = award_helpers.award(0, 2, 2, 0, 60, 5, RemainderRule.CARRY_OVER)
+AWARD_CASES = {
+    "cancel_under_award": (CANCELLED, (FOREVER,), ()),
+    "observe_after_expiry": (
+        (wait(0, 100), observe(1, 0, 10, 0), end(2)),
+        (EXPIRED,),
+        (),
+    ),
+}
+
+
 class _Runs(dict):
     """The runs by case, each made on first use."""
 
     def __missing__(self, name):
-        self[name] = _run(refund_study(CANCELLED, **CASES[name]))
+        if name in AWARD_CASES:
+            script, awards, receipts = AWARD_CASES[name]
+            study = award_helpers.award_refund_study(
+                script, awards, receipts, pricing=None
+            )
+        else:
+            study = refund_study(CANCELLED, **CASES[name])
+        self[name] = _run(study)
         return self[name]
 
 
@@ -220,6 +240,32 @@ def test_mutant_a_second_receipt_credit_fails_conservation(monkeypatch, program)
         assert not balance_conserved(run).passed
     finally:
         jax.clear_caches()
+
+
+def test_a_cancellation_under_an_award_conserves(runs):
+    """Fails if the replay drops a cancel's credit from the refunded account.
+
+    The lane is cancelled at tick 60, half spent: the ledger credits 5, and the replay
+    of the awards must expect the same credit in `refunded` and in the balance.
+    """
+    run = runs["cancel_under_award"]
+    assert float(np.asarray(run.carry.ledger.refunded)[2, 1]) == 5.0
+    assert balance_conserved(run).passed
+
+
+def test_a_debit_after_its_window_expired_names_generation_zero(runs):
+    """Fails if a debit on a row whose window has closed captures that row's generation.
+
+    The carry-over award ends at tick 60, so the row is unwindowed at tick 100: the
+    record names generation 0 and the rule NONE (not the row's generation 2), and the
+    replay accepts it.
+    """
+    run = runs["observe_after_expiry"]
+    log = run.carry.log
+    assert int(np.asarray(run.carry.ledger.win_gen)[2]) == 2
+    assert not np.any(np.asarray(log.award_gens)[0])
+    assert not np.any(np.asarray(log.award_rules)[0])
+    assert balance_conserved(run).passed
 
 
 WINDOWED_SCRIPT = (
