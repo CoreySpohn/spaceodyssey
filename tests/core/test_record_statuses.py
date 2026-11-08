@@ -92,14 +92,9 @@ def test_statuses_agree_between_executors_and_replay(scripted_run):
     assert np.array_equal(np.asarray(replayed.mean), np.asarray(carry.belief.mean))
 
 
-@pytest.fixture(scope="module")
-def baseline_run():
-    """The shared baseline host run; its program compiles here."""
-    return baseline_host_run()
-
-
-def test_identities_and_provenance_of_a_settled_record(baseline_run):
-    study, run, _ = baseline_run
+@pytest.mark.medium  # a cold host run compiles the executor: over 5 s
+def test_identities_and_provenance_of_a_settled_record():
+    study, run, _ = baseline_host_run()
     carry, trace = run
     n = int(carry.n_log)
     log = carry.log

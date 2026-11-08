@@ -505,15 +505,8 @@ def _imported(study):
         c = handlers[int(ev.kind)](nxt, ev, study, truth, root)[0]
 
 
-@pytest.fixture(scope="module")
-def imported_split_table():
-    """The carry after the tick-0 imports of the split table; compiles here."""
-    return _imported(study_of(table()))
-
-
-def test_the_battery_matches_split_rows_by_audience_and_refuses_collisions(
-    imported_split_table,
-):
+@pytest.mark.medium  # imports handled eagerly, event by event: over 5 s cold
+def test_the_battery_matches_split_rows_by_audience_and_refuses_collisions():
     """Fails if the battery's record index drops one copy of a split prior (both
     share subject, index, channel, revision and status), if a policy view is not
     matched to its own log rows, or if two rows that collide in every coordinate,
@@ -522,7 +515,8 @@ def test_the_battery_matches_split_rows_by_audience_and_refuses_collisions(
     from spaceodyssey.core.battery.result import log_index
     from spaceodyssey.core.battery.views import _payload_matches_log
 
-    c = imported_split_table
+    study = study_of(table())
+    c = _imported(study)
     assert int(c.n_log) == 5
     assert len(log_index(c)) == 5
     view = snapshot_view(c, Audience.POLICY, CAPS)

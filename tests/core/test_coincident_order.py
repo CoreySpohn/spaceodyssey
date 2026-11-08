@@ -118,18 +118,12 @@ def test_fault_first_fails_the_acquisition_and_the_settlement_goes_stale():
     assert float(c.ledger.balance[0, 0]) == pytest.approx(9.0)
 
 
-@pytest.fixture(scope="module")
-def settle_first_run():
-    """The settle-first carry after the three steps; the program compiles here."""
+@pytest.mark.medium  # over 3 s cold here, about 5 s on the runner
+def test_settle_first_completes_and_the_fault_finds_nothing_to_fail():
     study, c = with_pending_settlement(CoincidentOrder.SETTLE_FIRST)
     c = add_fault(c, study)
     for _ in range(3):
         c, _, _ = advance_j(c, ROOT, study, TRUTH)
-    return c
-
-
-def test_settle_first_completes_and_the_fault_finds_nothing_to_fail(settle_first_run):
-    c = settle_first_run
     assert int(c.n_log) == 1
     assert int(c.log.status[0]) == RecordStatus.COMPLETED
     assert float(c.ledger.balance[0, 0]) == pytest.approx(9.0)
