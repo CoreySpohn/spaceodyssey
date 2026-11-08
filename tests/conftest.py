@@ -5,7 +5,7 @@ The suite is dominated by XLA compilation. Two settings keep it fast and small:
 - a persistent compilation cache per xdist worker (or ``main`` for serial runs), so
   later runs reuse compiled programs without concurrent readers seeing partial writes
   (``SPACEODYSSEY_JAX_CACHE`` names another cache root, ``off`` disables it);
-- fixed cache watermarks: test teardown clears when RSS exceeds
+- fixed cache watermarks: module teardown clears when RSS exceeds
   ``SPACEODYSSEY_RSS_LIMIT_MB`` (default 3500 MiB), or live heap allocations exceed
   half that limit. On macOS, malloc's live bytes exclude freed pages it still keeps
   resident; elsewhere RSS is the fallback. This retains useful executables without
@@ -19,6 +19,7 @@ import ctypes
 import gc
 import os
 import sys
+import warnings
 from pathlib import Path
 
 import equinox as eqx
@@ -50,6 +51,7 @@ if _cache != "off":
     jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 
 RSS_LIMIT = int(os.environ.get("SPACEODYSSEY_RSS_LIMIT_MB", "3500")) * 2**20
+RSS_EMERGENCY = int(os.environ.get("SPACEODYSSEY_RSS_EMERGENCY_MB", "5500")) * 2**20
 
 
 class _TaskInfo(ctypes.Structure):
@@ -116,24 +118,45 @@ def _heap_bytes(fallback):
     return fallback
 
 
-@pytest.fixture(autouse=True)
-def bound_resident_memory():
-    """Drop compiled programs between tests when the process has grown too large."""
-    yield
+def _over_watermark():
+    """True when resident or live heap memory exceeds the clear watermark."""
     rss = _rss_bytes()
     if rss > RSS_LIMIT or _heap_bytes(rss) > RSS_LIMIT // 2:
         _release_freed_memory()
         rss = _rss_bytes()
-    if rss > RSS_LIMIT or _heap_bytes(rss) > RSS_LIMIT // 2:
-        eqx.clear_caches()
-        jax.clear_caches()
-        gc.collect()
+    return rss > RSS_LIMIT or _heap_bytes(rss) > RSS_LIMIT // 2
+
+
+@pytest.fixture(autouse=True)
+def warn_on_runaway_memory():
+    """Fail loudly when one file grows past the emergency limit mid-file.
+
+    Caches are never cleared between tests: a mid-file clear invalidates the compiled
+    programs that module-scoped fixtures share and changes trace counts. The limit sits
+    between the clear watermark and the 6 GB process budget; per-file peaks were about
+    4.6 GB on the Mac and 2.2 GB on the runner, so crossing it means a file needs
+    splitting or sharing more programs.
+    """
+    yield
+    rss = _rss_bytes()
+    if rss > RSS_EMERGENCY:
         _release_freed_memory()
+        rss = _rss_bytes()
+    if rss > RSS_EMERGENCY:
+        warnings.warn(
+            f"resident memory {rss / 2**20:.0f} MiB exceeds the emergency limit "
+            f"{RSS_EMERGENCY / 2**20:.0f} MiB inside one file",
+            ResourceWarning,
+            stacklevel=1,
+        )
 
 
 @pytest.fixture(autouse=True, scope="module")
 def drop_shared_runs():
-    """Release the runs the test helpers memoize once a module is done with them."""
+    """Release memoized runs, then clear compiled programs if memory is high.
+
+    Clearing happens only at a file boundary, where no shared fixture is alive.
+    """
     yield
     for name, module in tuple(sys.modules.items()):
         if not name.startswith("tests."):
@@ -142,6 +165,12 @@ def drop_shared_runs():
             clear = getattr(value, "cache_clear", None)
             if callable(clear):
                 clear()
+    gc.collect()
+    if _over_watermark():
+        eqx.clear_caches()
+        jax.clear_caches()
+        gc.collect()
+        _release_freed_memory()
 
 
 @pytest.fixture
