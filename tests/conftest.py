@@ -179,10 +179,11 @@ def bound_resident_memory(request):
 def drop_shared_runs():
     """Release memoized runs, then clear compiled programs if memory is high.
 
-    In an unmarked file this is the only automatic clear: it runs at the file
-    boundary, after the module-scoped fixtures of that file are torn down. Files
-    marked clear_caches_between_tests also clear after each test. Session-scoped
-    fixtures survive either clear and recompile on use.
+    The budget plugin also clears JAX caches after every file (clear_caches in
+    pyproject.toml), so each file's program count is independent of the files
+    before it; this fixture adds the equinox caches and freed-memory release when
+    over the watermark. Files marked clear_caches_between_tests also clear after
+    each test. Session-scoped fixtures survive either clear and recompile on use.
     """
     yield
     for name, module in tuple(sys.modules.items()):

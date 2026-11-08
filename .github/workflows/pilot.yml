@@ -124,15 +124,18 @@ jobs:
           python -c "import radis"
           pytest tests/ -m "not slow" -n 2 --dist loadfile -ra --tb=short \
             -p no:cacheprovider --timeout=900 --durations=40 --durations-min=0 \
-            --testbudget-mode report --junitxml=junit-quick-cold.xml || true
+            --testbudget-mode report --junitxml=junit-quick-cold.xml \
+            --budget-json budget-quick-cold.json || true
 
-      # Per-test times of this cold run, for fitting the runner's cost per test.
+      # Per-test times and per-file program counts of this cold run.
       - name: Upload the junit file
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-quick-cold
-          path: junit-quick-cold.xml
+          path: |
+            junit-quick-cold.xml
+            budget-quick-cold.json
           if-no-files-found: warn
 
       - name: Job summary

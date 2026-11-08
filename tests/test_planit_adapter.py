@@ -234,6 +234,9 @@ def test_decision_cursor_masks_padding_and_channel_order(study):
     assert not np.any(effects.kind) and not np.any(state)
 
 
+# Half of the replays fixture (both executors over the B7 sequences) is charged here:
+# 5.2 s on a Mac with nothing compiled before it.
+@pytest.mark.medium(reason="shares the both-executor replay with the B7 test")
 def test_host_and_compiled_agree_record_for_record(replays):
     for study, compiled, host in replays:
         comparison = core.histories_equal(compiled.history(0), host.history())

@@ -100,7 +100,16 @@ jobs:
           pytest tests/ -m "not slow" -n 2 --dist loadfile -ra --tb=short \
             --timeout=300 --fail-slow=60s \
             --durations=15 --durations-min=1.0 \
-            --junitxml=junit-quick.xml
+            --junitxml=junit-quick.xml --budget-json budget-quick.json
+
+      # Per-file program counts and per-test costs, for setting the file budgets.
+      - name: Upload the budget summary
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: budget-quick
+          path: budget-quick.json
+          if-no-files-found: warn
 
       # The quick tier, medium tests included, stays under 540 s and within 60 s of
       # the pinned baseline summary (the baseline file records its source and state).
