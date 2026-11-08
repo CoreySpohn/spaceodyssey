@@ -23,6 +23,8 @@ from tests.core.conformance_helpers import runs
 from tests.core.corpus import CORPUS, CORPUS_BY_NAME
 from tests.core.leak_helpers import leaky_wake
 
+pytestmark = pytest.mark.clear_caches_between_tests
+
 
 @pytest.mark.parametrize("executor", EXECUTORS)
 @pytest.mark.parametrize("case", CORPUS, ids=lambda c: c.name)

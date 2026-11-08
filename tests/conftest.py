@@ -127,25 +127,48 @@ def _over_watermark():
     return rss > RSS_LIMIT or _heap_bytes(rss) > RSS_LIMIT // 2
 
 
-@pytest.fixture(autouse=True)
-def warn_on_runaway_memory():
-    """Fail loudly when one file grows past the emergency limit mid-file.
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "clear_caches_between_tests: clear compiled programs after any test that "
+        "leaves memory above the clear watermark; for files that share no compiled "
+        "program or trace count across tests",
+    )
 
-    The memory guard never clears caches between tests: a mid-file clear invalidates the
+
+@pytest.fixture(autouse=True)
+def bound_resident_memory(request):
+    """Keep one file's memory bounded without clearing under shared fixtures.
+
+    By default nothing is cleared between tests: a mid-file clear invalidates the
     compiled programs that module-scoped fixtures share and changes trace counts. Tests
-    that clear caches on purpose (cache-state controls) do so themselves. The limit sits
-    between the clear watermark and the 6 GB process budget; per-file peaks were about
-    4.6 GB on the Mac and 2.2 GB on the runner, so crossing it means a file needs
-    splitting or sharing more programs.
+    that clear caches on purpose (cache-state controls) do so themselves. Past the
+    emergency limit a warning fails the test loudly; it is measured on live heap where
+    the platform reports it, because macOS keeps freed pages resident and RSS stays
+    high after a clear. The limit sits between the clear
+    watermark and the 6 GB process budget; per-file peaks were about 4.6 GB on the Mac
+    and 2.2 GB on the runner.
+
+    A file marked `clear_caches_between_tests` opts back into the watermark clear after
+    each test. Only files that compile many unrelated programs and read no compiled
+    fixture or trace count across tests carry it.
     """
     yield
+    if request.node.get_closest_marker("clear_caches_between_tests"):
+        if _over_watermark():
+            eqx.clear_caches()
+            jax.clear_caches()
+            gc.collect()
+            _release_freed_memory()
+        return
     rss = _rss_bytes()
     if rss > RSS_EMERGENCY:
         _release_freed_memory()
         rss = _rss_bytes()
-    if rss > RSS_EMERGENCY:
+    live = _heap_bytes(rss)
+    if live > RSS_EMERGENCY:
         warnings.warn(
-            f"resident memory {rss / 2**20:.0f} MiB exceeds the emergency limit "
+            f"live memory {live / 2**20:.0f} MiB exceeds the emergency limit "
             f"{RSS_EMERGENCY / 2**20:.0f} MiB inside one file",
             ResourceWarning,
             stacklevel=1,

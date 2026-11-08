@@ -34,6 +34,8 @@ from tests.core.conformance_helpers import (
 )
 from tests.core.corpus import CORPUS
 
+pytestmark = pytest.mark.clear_caches_between_tests
+
 MANIFEST = Path(__file__).with_name("golden_histories.json")
 PIN = Path(__file__).with_name("golden_pin.json")
 WRITE = os.environ.get("SPACEODYSSEY_WRITE_GOLDEN", "0") == "1"

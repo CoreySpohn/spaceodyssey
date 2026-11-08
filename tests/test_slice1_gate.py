@@ -30,6 +30,8 @@ from tests.core.contract_helpers import assert_study_typed
 from tests.core.gate_helpers import stale_allowances, study_branches
 from tests.core.lint_helpers import CORE, FIXTURES, fixture_core, run_lint
 
+pytestmark = pytest.mark.clear_caches_between_tests
+
 with jax.enable_x64():
     from spaceodyssey.studies.conformance import CORPUS, CORPUS_BY_NAME
     from tests.core import test_fork as fork_tests
