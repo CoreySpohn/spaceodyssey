@@ -247,15 +247,18 @@ def _build(cls, node, path, table, version, migrated, fields):
         elif migrated is None and field.name not in node:
             # an optional field the encoder omitted at its default
             value = optional_default(field, cls)
+            if field.metadata.get("plain_value"):
+                value = _from_plain(field, value, where)
         elif migrated is None:
             item = node[field.name]
             if cls is Agenda and field.name == "phase_until":
                 item = _lowered_no_switch(item, where)
             value = decode(item, where, table)
+            stored = value
             if field.metadata.get("plain_value"):
                 value = _from_plain(field, value, where)
             _check_field(cls, field, value, where)
-            if is_optional_field(field) and at_default(field, value, cls):
+            if is_optional_field(field) and at_default(field, stored, cls):
                 raise DocumentError(
                     f"field {field.name!r} is at its default; omit it", pointer(where)
                 )
@@ -326,17 +329,52 @@ def _migrated(node, ref, stored, path, table):
 _CHECK_ERRORS = (ValueError, TypeError, AttributeError, IndexError, KeyError)
 
 
-def _from_plain(field, value, path):
-    """The array a `PLAIN_VALUE` field holds, made from its plain stored form."""
-    if isinstance(value, (jax.Array, np.ndarray, np.generic)):
+def _plain_leaves(value, path, name):
+    """The numbers of a plain stored form, refusing anything that is not one."""
+    if type(value) is tuple:
+        for i, item in enumerate(value):
+            yield from _plain_leaves(item, (*path, i), name)
+    elif isinstance(value, (bool, int, float)):  # an enum member is an int
+        yield value
+    else:
         raise DocumentError(
-            f"field {field.name!r} is stored as a plain number or tuple, not an array",
+            f"field {name!r} is stored as a plain number or tuple of numbers, not a "
+            f"{type(value).__name__}",
             pointer(path),
         )
+
+
+def _from_plain(field, value, path):
+    """The array a `PLAIN_VALUE` field holds, made from its plain stored form.
+
+    The stored form must be numbers, or tuples of them, that the field's array holds
+    exactly: a fraction for an integer field or a number out of range is refused.
+    """
+    leaves = list(_plain_leaves(value, path, field.name))
     try:
-        return field.metadata["converter"](value)
-    except _CHECK_ERRORS as err:
+        out = field.metadata["converter"](value)
+    except (*_CHECK_ERRORS, OverflowError) as err:
         raise DocumentError(f"field {field.name!r}: {err}", pointer(path)) from err
+    held = np.asarray(out).ravel().tolist()
+    try:
+        shaped = np.shape(value) == out.shape
+    except ValueError:  # ragged
+        shaped = False
+    exact = (
+        shaped
+        and len(held) == len(leaves)
+        and all(
+            (math.isnan(a) and math.isnan(b)) or a == b
+            for a, b in zip(held, leaves, strict=True)
+        )
+    )
+    if not exact:
+        raise DocumentError(
+            f"field {field.name!r} does not hold its stored value exactly "
+            f"({value!r} becomes {out.tolist()!r})",
+            pointer(path),
+        )
+    return out
 
 
 def _check_field(cls, field, value, path):

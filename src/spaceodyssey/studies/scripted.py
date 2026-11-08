@@ -16,6 +16,7 @@ from spaceodyssey.core import (
 from spaceodyssey.core.capacities import PLAIN_VALUE
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, I64, PUBLIC, Capacity, RecordStatus
+from spaceodyssey.plain import plain_array
 from spaceodyssey.studies import toy
 
 # The channel scripted records are written on by default: neither an admission channel
@@ -25,11 +26,11 @@ SCRIPTED_CHANNEL = 50
 
 
 def _i64_row(x):
-    return jnp.asarray(x, I64).reshape(-1)
+    return plain_array(I64, x, row=True)
 
 
 def _f64_row(x):
-    return jnp.asarray(x, F64).reshape(-1)
+    return plain_array(F64, x, row=True)
 
 
 class ScriptedRecords(AbstractProcess):
