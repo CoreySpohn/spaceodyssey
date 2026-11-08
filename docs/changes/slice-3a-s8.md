@@ -47,8 +47,8 @@ committee on the first and a policy on the second, and a replay that checks them
   trace. After the walk it applies `award_failures` and `allocation_failures` to the
   recorded records and effects, and requires the ledger's granted totals to equal the
   admitted awards.
-- **The control.** `CarryCommittee` totals every proposal already written at the query
-  tick, released or not and whatever its audience. It is the negative control of the
+- **The control.** `CarryCommittee` is also handed the carry (`hold`) and totals every
+  proposal row in its log by the query tick, released or not and whatever its audience. It is the negative control of the
   perturbation test and of the replay.
 
 ## Core changes
