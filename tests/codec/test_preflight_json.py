@@ -678,6 +678,22 @@ def _variant_x002_resource_needs_commitments(seed):
     return _doc(_with(study, assets=assets)), None
 
 
+def _resource_study(value, seed):
+    study = toy.survey_1(caps=Capacities(n_commitments=2))
+    rows = jnp.asarray([-1, value if seed else -1], I64)
+    return _doc(
+        _with(study, assets=dataclasses.replace(study.assets, disruptive_resource=rows))
+    )
+
+
+def _variant_a001_past(seed):
+    return _resource_study(3, seed), None
+
+
+def _variant_a001_below(seed):
+    return _resource_study(-2, seed), None
+
+
 def _variant_x002_policy_needs_commitments(seed):
     study = toy.survey_1(
         caps=_commitment_caps(seed), policies=(DocPolicy(disruptive=True),)
@@ -754,6 +770,18 @@ VARIANTS = {
         _variant_x001_commitments_with_awards,
         "/study/caps/n_commitments",
         _is(2),
+    ),
+    "A001-past-the-columns": (
+        FindingCode.A001,
+        _variant_a001_past,
+        "/study/assets/disruptive_resource/data/1",
+        _is(3),
+    ),
+    "A001-below-none": (
+        FindingCode.A001,
+        _variant_a001_below,
+        "/study/assets/disruptive_resource/data/1",
+        _is(-2),
     ),
     "X002-resource": (
         FindingCode.X002,

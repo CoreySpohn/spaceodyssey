@@ -429,6 +429,28 @@ def reserved(study: Study):
     return out
 
 
+def asset_columns(study: Study):
+    """A001: a disruptive resource that is neither unset nor a resource column."""
+    if not study.caps.commitments:
+        return []
+    column = np.asarray(study.assets.disruptive_resource)
+    out = []
+    for entry in np.argwhere((column < -1) | (column >= study.caps.n_resources)):
+        out.append(
+            Finding(
+                FindingCode.A001,
+                ERROR,
+                "assets.disruptive_resource",
+                "disruptive resource names a column the study does not hold",
+                "use -1 for none, or a resource column below n_resources",
+                subject="assets",
+                member="disruptive_resource",
+                entry=tuple(int(n) for n in entry),
+            )
+        )
+    return out
+
+
 def failure_kinds(study: Study):
     """W002: a declared failure kind that the policy cannot read.
 
@@ -695,6 +717,7 @@ def preflight(
         *record_channels(study),
         *capability(study, executor),
         *reserved(study),
+        *asset_columns(study),
         *failure_kinds(study),
         *balances(study),
         *stops(study),

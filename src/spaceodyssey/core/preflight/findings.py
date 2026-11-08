@@ -21,6 +21,7 @@ class FindingCode(StrEnum):
     K002 = "K002"  # two measures with identical key coordinates
     X001 = "X001"  # a capability the selected executors do not provide
     X002 = "X002"  # a reserved field set to a non-default value
+    A001 = "A001"  # an asset names a resource column the capacities do not hold
     T001 = "T001"  # a drain that equals a close below campaign scope
     P001 = "P001"  # a policy names a program the capacities do not hold
     W001 = "W001"  # an award window that is empty, out of range or overlaps another
