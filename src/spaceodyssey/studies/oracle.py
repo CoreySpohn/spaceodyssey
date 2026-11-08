@@ -7,16 +7,15 @@ policy audience only. Nothing in `spaceodyssey.core` names it.
 """
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 import numpy as np
 
-from spaceodyssey.core.capacities import PLAIN_VALUE, Capacities
+from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, I64, Audience, EffectKind
 from spaceodyssey.core.kinds import AbstractPolicy
+from spaceodyssey.core.lift import traced
 from spaceodyssey.core.service import AbstractHostService
-from spaceodyssey.plain import plain_array
 from spaceodyssey.studies import toy
 
 ANSWER_KIND = toy.RecordKind(
@@ -57,10 +56,6 @@ class ToyOracleService(AbstractHostService):
         )
 
 
-def _as_i64(x):
-    return plain_array(I64, x)
-
-
 class QueryPolicy(AbstractPolicy):
     """Follow a fixed plan, but ask the host about `subject` at decision `query_at`.
 
@@ -69,9 +64,9 @@ class QueryPolicy(AbstractPolicy):
     """
 
     inner: toy.FixedPlanPolicy
-    query_at: jax.Array = eqx.field(default=1, converter=_as_i64, metadata=PLAIN_VALUE)
-    subject: jax.Array = eqx.field(default=0, converter=_as_i64, metadata=PLAIN_VALUE)
-    service: jax.Array = eqx.field(default=0, converter=_as_i64, metadata=PLAIN_VALUE)
+    query_at: int = eqx.field(default=1, metadata=traced(I64))
+    subject: int = eqx.field(default=0, metadata=traced(I64))
+    service: int = eqx.field(default=0, metadata=traced(I64))
 
     def declare(self):
         """The service channel the answer is recorded on, for pre-flight."""

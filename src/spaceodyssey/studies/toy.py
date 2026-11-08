@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 
-from spaceodyssey.core.capacities import PLAIN_VALUE, Capacities
+from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import (
     ALL_EFFECTS,
@@ -37,6 +37,7 @@ from spaceodyssey.core.kinds import (
     ObserverCapabilities,
 )
 from spaceodyssey.core.ledger import AssetTable, ChannelTable
+from spaceodyssey.core.lift import traced
 from spaceodyssey.core.records import (
     KindRegistry,
     PayloadColumn,
@@ -57,7 +58,6 @@ from spaceodyssey.core.snapshot import (
     project_mean,
 )
 from spaceodyssey.core.study import Agenda, Clock, Study
-from spaceodyssey.plain import plain_array
 
 RECORD_NONE, RECORD_MEASUREMENT, RECORD_AUXILIARY = range(3)
 
@@ -299,14 +299,6 @@ class ToySampleObserver(ToyRunningMean):
 
 def _as_i64(x):
     return jnp.asarray(x, I64)
-
-
-def _plain_i64(x):
-    return plain_array(I64, x)
-
-
-def _plain_f64(x):
-    return plain_array(F64, x)
 
 
 PLAN_ROWS = 8
@@ -647,9 +639,7 @@ class ThresholdStopPolicy(AbstractPolicy):
     the campaign once any subject's snr exceeds `stop_snr`.
     """
 
-    stop_snr: jax.Array = eqx.field(
-        default=3.0, converter=_plain_f64, metadata=PLAIN_VALUE
-    )
+    stop_snr: float = eqx.field(default=3.0, metadata=traced(F64))
 
     def decide(self, pstate, view, study, key):
         """Observe until a subject exceeds the threshold."""
@@ -689,10 +679,8 @@ class StochasticPolicy(AbstractPolicy):
     """
 
     theta: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, F64))
-    n_obs: jax.Array = eqx.field(default=5, converter=_plain_i64, metadata=PLAIN_VALUE)
-    wait_ticks: jax.Array = eqx.field(
-        default=10, converter=_plain_i64, metadata=PLAIN_VALUE
-    )
+    n_obs: int = eqx.field(default=5, metadata=traced(I64))
+    wait_ticks: int = eqx.field(default=10, metadata=traced(I64))
 
     def decide(self, pstate, view, study, key):
         """Choose an observation or wait using the policy key."""
