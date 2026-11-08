@@ -4,4 +4,5 @@ skip = .git,*.ipynb,uv.lock,*/_build,*.fits
 # premission: the pre-mission table module, studies/premission.py
 # lod: lambda over D, the angular unit in the adapter tests
 # disjointness: the set property (a real word codespell does not know)
-ignore-words-list = premission,lod,disjointness
+# radis: the spectroscopy package the CI warms up before parallel collection
+ignore-words-list = premission,lod,disjointness,radis
