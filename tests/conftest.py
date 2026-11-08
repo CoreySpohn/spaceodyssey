@@ -131,8 +131,9 @@ def _over_watermark():
 def warn_on_runaway_memory():
     """Fail loudly when one file grows past the emergency limit mid-file.
 
-    Caches are never cleared between tests: a mid-file clear invalidates the compiled
-    programs that module-scoped fixtures share and changes trace counts. The limit sits
+    The memory guard never clears caches between tests: a mid-file clear invalidates the
+    compiled programs that module-scoped fixtures share and changes trace counts. Tests
+    that clear caches on purpose (cache-state controls) do so themselves. The limit sits
     between the clear watermark and the 6 GB process budget; per-file peaks were about
     4.6 GB on the Mac and 2.2 GB on the runner, so crossing it means a file needs
     splitting or sharing more programs.
@@ -155,7 +156,9 @@ def warn_on_runaway_memory():
 def drop_shared_runs():
     """Release memoized runs, then clear compiled programs if memory is high.
 
-    Clearing happens only at a file boundary, where no shared fixture is alive.
+    The automatic clear happens only at a file boundary, after the module-scoped
+    fixtures of that file are torn down. Session-scoped fixtures survive it and
+    recompile on use.
     """
     yield
     for name, module in tuple(sys.modules.items()):
