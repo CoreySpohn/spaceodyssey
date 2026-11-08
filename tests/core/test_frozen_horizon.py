@@ -15,16 +15,25 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from spaceodyssey.core import HostExecutor
+from spaceodyssey.core import CompiledExecutor, HostExecutor, histories_equal
 from spaceodyssey.core.conformance.invariants import balance_conserved
-from spaceodyssey.core.enums import AdmissionCode, CommitState, EffectKind, RecordStatus
+from spaceodyssey.core.enums import (
+    AdmissionCode,
+    ChargePricing,
+    CommitState,
+    Disposition,
+    EffectKind,
+    RecordStatus,
+    Scope,
+)
 from tests.core.commitment_helpers import (
     DISRUPTIVE_COL,
     commitment_study,
     plan,
+    priced,
 )
-from tests.core.helpers import one_world
-from tests.core.program_helpers import cancel, end, observe, wait
+from tests.core.helpers import one_world, worlds
+from tests.core.program_helpers import cancel, end, observe, stop, wait
 
 pytestmark = pytest.mark.medium  # A cold host run compiles the executor.
 
@@ -72,9 +81,39 @@ SCENARIOS = {
     ),
 }
 
+# a Stop at tick 10 of the lane (or program) holding a commitment that starts at 100
+LANE = Scope.LANE
+STOPS = {
+    f"{what}_{how.name.lower()}": (
+        (observe(0, 0, 10, 0), wait(0, 10), stop(1, LANE, how), wait(1, 200), end(2)),
+        (plan(0, 0, 100),),
+    )
+    for what, how in (
+        ("lane", Disposition.CLOSE),
+        ("lane", Disposition.DRAIN),
+        ("lane", Disposition.ABORT),
+    )
+}
+# program 1 holds the commitment on lane 0 and program 0 one on lane 2; the Stop is of
+# program 1 alone
+PROGRAM = (observe(0, 0, 10, 1), observe(0, 1, 12, 0), wait(0, 10))
+# the abort writes a record, whose release wakes one more decision at tick 30
+for _how, _tail in (
+    (Disposition.CLOSE, (end(2),)),
+    (Disposition.ABORT, (wait(2, 250), end(3))),
+):
+    STOPS[f"program_{_how.name.lower()}"] = (
+        (*PROGRAM, stop(1, Scope.PROGRAM, _how, 1), wait(1, 250), *_tail),
+        (plan(0, 0, 100), plan(0, 1, 100)),
+    )
+SCENARIOS.update(STOPS)
+PROGRAM_SCENARIOS = {"program_close", "program_abort"}
+
 
 def _study(name, **kw):
     script, plans = SCENARIOS[name]
+    if name in PROGRAM_SCENARIOS:
+        kw["n_programs"] = 2
     return commitment_study(script, plans, **kw)
 
 
@@ -215,4 +254,117 @@ def test_work_that_overlaps_a_reservation_is_refused():
     run = _run("overlaps_reservation")
     assert _codes(run)[1][0] == BUSY
     assert _log(run)["end"].tolist() == [155]
+    assert balance_conserved(run).passed
+
+
+# ---- a Stop of the lane or program holding a pending commitment ----------------------
+
+
+def _refused_at_its_start(run):
+    """The commitment never ran: cancelled at fraction 0 and the lane never occupied."""
+    led = _ledger(run)
+    log = _log(run)
+    assert int(led.cm_state[0]) == CommitState.CANCELLED
+    assert log["status"].tolist() == [RecordStatus.PARTIAL]
+    assert log["fraction"].tolist() == [0.0]
+    assert int(led.lane_gen[0]) == 0 and int(led.lane_busy_until[0]) == 0
+    np.testing.assert_array_equal(np.asarray(led.balance), np.asarray(run.study.budget))
+    assert balance_conserved(run).passed
+    return log
+
+
+@pytest.mark.parametrize("how", ["close", "drain"])
+def test_a_close_or_drain_refuses_the_start_of_a_pending_commitment(how):
+    log = _refused_at_its_start(_run(f"lane_{how}"))
+    # refused when its start came due, not when the lane closed
+    assert log["end"].tolist() == [100]
+
+
+def test_an_abort_cancels_a_pending_commitment_when_it_is_ordered():
+    log = _refused_at_its_start(_run("lane_abort"))
+    assert log["end"].tolist() == [10]
+
+
+def test_a_program_close_refuses_only_that_programs_commitment():
+    run = _run("program_close")
+    led = _ledger(run)
+    assert [int(led.cm_state[i]) for i in range(2)] == [
+        CommitState.CANCELLED,
+        CommitState.STARTED,
+    ]
+    log = _log(run)
+    assert sorted(log["status"].tolist()) == [
+        RecordStatus.COMPLETED,
+        RecordStatus.PARTIAL,
+    ]
+    assert balance_conserved(run).passed
+
+
+def test_a_program_abort_cancels_only_that_programs_pending_commitment():
+    run = _run("program_abort")
+    led = _ledger(run)
+    assert [int(led.cm_state[i]) for i in range(2)] == [
+        CommitState.CANCELLED,
+        CommitState.STARTED,
+    ]
+    log = _log(run)
+    assert sorted(log["end"].tolist()) == [10, 155]
+    assert balance_conserved(run).passed
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "name",
+    ["lane_close", "lane_drain", "lane_abort", "program_close", "program_abort"],
+)
+def test_the_executors_agree_on_a_stop_of_a_pending_commitment(name):
+    study = _study(name)
+    truths, roots = worlds(1, study.caps)
+    compiled = CompiledExecutor().run_worlds(study, truths, roots, N_STEPS)
+    host = HostExecutor().run_worlds(study, truths, roots, N_STEPS)
+    rep = histories_equal(compiled.history(0), host.history(0))
+    assert rep.structure_equal and rep.max_int_diff == 0 and rep.max_abs <= 1e-9
+
+
+# ---- a pending cancel credits what its price allows ----------------------------------
+
+CHARGE = (6.0, 4.0, 2.0)
+SURCHARGE = (2.0, 1.0, 0.5)
+BALANCE = 100.0
+# the part of the charge each pricing keeps: none, none, the surcharge, all of it
+KEPT = {
+    ChargePricing.OCCUPANCY: (0.0, 0.0, 0.0),
+    ChargePricing.STATISTICAL: (0.0, 0.0, 0.0),
+    ChargePricing.SURCHARGE: SURCHARGE,
+    ChargePricing.FLAT_FRACTION: CHARGE,
+}
+FIXED = {m: (SURCHARGE if m == ChargePricing.SURCHARGE else (0.0,) * 3) for m in KEPT}
+
+
+@functools.cache
+def _priced_run(mode):
+    script, plans = SCENARIOS["cancel_outside"]
+    study = commitment_study(script, plans, refunds=True)
+    study = priced(study, mode, CHARGE, SURCHARGE, BALANCE)
+    truth, root = one_world(caps=study.caps)
+    result = HostExecutor().run(study, truth, root, N_STEPS)
+    return SimpleNamespace(study=study, carry=result.carry, trace=result.trace)
+
+
+@pytest.mark.parametrize("mode", list(KEPT), ids=lambda m: m.name.lower())
+def test_a_pending_cancel_credits_the_refundable_part_of_its_price(mode):
+    run = _priced_run(mode)
+    assert _codes(run)[1][0] == OK
+    led = _ledger(run)
+    assert int(led.cm_state[0]) == CommitState.CANCELLED
+    # the asset, program and shared rows each hold one resource of the charge
+    rows = (0, run.study.caps.n_assets, run.study.caps.n_balance_rows - 1)
+    held = np.asarray(led.balance)[rows, (0, 1, 2)]
+    np.testing.assert_allclose(held, BALANCE - np.asarray(KEPT[mode]))
+    log = run.carry.log
+    valid = np.asarray(log.valid)
+    assert np.asarray(log.status)[valid].tolist() == [RecordStatus.PARTIAL]
+    assert np.asarray(log.payload)[valid][:, 2].tolist() == [0.0]
+    np.testing.assert_allclose(np.asarray(log.charged)[valid][0], KEPT[mode])
+    np.testing.assert_allclose(np.asarray(log.nonrefundable)[valid][0], FIXED[mode])
     assert balance_conserved(run).passed

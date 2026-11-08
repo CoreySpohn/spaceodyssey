@@ -37,8 +37,21 @@ pinned digest, fingerprint, FAULT fixture or corpus hash changes.
   start on its lane; no match is `UNSUPPORTED`.
 - Awards and commitments together are refused by an X001 preflight finding (path `caps`,
   member `n_commitments`).
-- The charge components of a commitment are not stored.
-- A Stop does not cancel pending commitments on the stopped lane.
+- The charge components of a commitment are not stored: a cancel derives them from the
+  channel's price tables when it runs.
+- A pending commitment whose lane (or program) is closed or drained is refused when its
+  start comes due, and an abort of its scope cancels it when the abort is ordered. Either
+  way it is cancelled as a Cancel would: the record is the partial one at fraction 0 and
+  the credit is what its pricing allows.
+
+## What a cancel of a pending commitment credits
+
+The elapsed fraction is 0, so each resource column credits as follows. OCCUPANCY and
+STATISTICAL: the whole charge. SURCHARGE: the charge less the surcharge, which is fixed
+and stays with the record (`nonrefundable`). FLAT_FRACTION: nothing, by the literal rule
+that a flat price returns nothing on a cancel (D8 credits the refundable amount, and under
+a flat price that amount is 0), even though the commitment never started. The disruptive
+activation of an insertion is debited at admission and is never credited back by a cancel.
 
 ## Tests
 
@@ -47,7 +60,11 @@ the plan executes; an immediate frozen insertion is refused; a disruptive one is
 debits one; an uncovered activation is refused; a zero horizon is unaffected; a cancel inside
 the horizon is refused; a disruptive cancel succeeds; a cancel outside credits fully; a
 cancel of a started commitment is not frozen; work before a reservation is admitted and
-overlapping work is refused. Each asserts `balance_conserved`.
+overlapping work is refused. A Stop of the lane (close, drain, abort) or of the program that
+holds a pending commitment is covered, one test per case, with compiled-versus-host
+agreement in a slow parametrized test, and one priced pending cancel per pricing mode
+asserts the credit, `charged`, `nonrefundable`, the record fraction and conservation.
+Each asserts `balance_conserved`.
 
 ## Changed core paths and their tests (K4)
 
