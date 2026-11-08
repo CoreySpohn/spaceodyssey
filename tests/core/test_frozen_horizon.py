@@ -12,10 +12,11 @@ import dataclasses
 import functools
 from types import SimpleNamespace
 
+import equinox as eqx
 import numpy as np
 import pytest
 
-from spaceodyssey.core import CompiledExecutor, HostExecutor, histories_equal
+from spaceodyssey.core import CompiledExecutor, HostExecutor, enqueue, histories_equal
 from spaceodyssey.core.conformance.invariants import balance_conserved
 from spaceodyssey.core.enums import (
     AdmissionCode,
@@ -23,9 +24,12 @@ from spaceodyssey.core.enums import (
     CommitState,
     Disposition,
     EffectKind,
+    EventKind,
     RecordStatus,
     Scope,
+    Stage,
 )
+from spaceodyssey.core.kinds import AbstractProcess
 from tests.core.commitment_helpers import (
     DISRUPTIVE_COL,
     commitment_study,
@@ -251,11 +255,43 @@ SCENARIOS["cancel_full_queue"] = (
 )
 
 
+class SeededAbort(AbstractProcess):
+    """Seeds a lane ABORT of lane 0 for `tick`, a Stop that is queued from the start."""
+
+    tick: int = eqx.field(static=True)
+
+    def seed(self, carry, caps):
+        """Queue the Stop."""
+        return enqueue(
+            carry,
+            True,
+            kind=EventKind.STOP,
+            tick=self.tick,
+            stage=Stage.SETTLE,
+            lane=0,
+            scope=Scope.LANE,
+            disposition=Disposition.ABORT,
+            caps=caps,
+        )
+
+
+# a Stop seeded for tick 300 is queued when the commitment is made and cancelled at
+# tick 0: it has not run, so it takes nothing and the Cancel behind it still cancels
+SCENARIOS["future_abort_then_cancel"] = (
+    (observe(0, 0, 10, 0), cancel(0, 0), wait(0, 400), end(1)),
+    (plan(0, 0, 100), plan(0, 1, 100)),
+)
+SEEDED = {"future_abort_then_cancel": SeededAbort(tick=300)}
+
+
 def _study(name, **kw):
     script, plans = SCENARIOS[name]
     if name in PROGRAM_SCENARIOS:
         kw["n_programs"] = 2
-    return commitment_study(script, plans, **kw)
+    study = commitment_study(script, plans, **kw)
+    if name in SEEDED:
+        study = eqx.tree_at(lambda s: s.process, study, SEEDED[name])
+    return study
 
 
 @functools.cache
@@ -476,6 +512,7 @@ def test_a_program_abort_cancels_only_that_programs_pending_commitment():
         "asset_abort_then_cancel",
         "program_abort_then_cancel",
         "campaign_abort_then_cancel",
+        "future_abort_then_cancel",
     ],
 )
 def test_the_executors_agree_on_a_stop_of_a_pending_commitment(name):
@@ -524,6 +561,16 @@ def test_control_a_cancel_ahead_of_the_abort_still_spends_its_activation(tag):
     assert int(led.cm_state[0]) == CommitState.CANCELLED
     assert int(led.disruptive_used[0]) == 1
     assert float(led.balance[0, DISRUPTIVE_COL]) == 9.0
+    assert _sound(run)
+
+
+def test_a_future_seeded_abort_does_not_suppress_an_earlier_cancel():
+    run = _run("future_abort_then_cancel")
+    assert _codes(run)[0][:2].tolist() == [OK, OK]
+    led = _ledger(run)
+    assert int(led.cm_state[0]) == CommitState.CANCELLED
+    assert RecordStatus.COMPLETED not in _log(run)["status"].tolist()
+    assert float(led.balance[0, DISRUPTIVE_COL]) == 10.0
     assert _sound(run)
 
 

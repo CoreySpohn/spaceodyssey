@@ -802,13 +802,15 @@ def _admit_rows(c, eff, mask, study, fp):
             slot = jnp.argmax(hit)
             # a commitment already named by a Cancel waiting in the queue has no
             # second cancellation to give
-            # nor does one that an abort already queued for its scope will cancel
+            # nor does one that an abort already queued for its scope will cancel; a
+            # Stop seeded for a later tick has not run, and takes nothing yet
             ev = c.ev
             owner = c.ledger.cm_program[slot] if caps.n_programs > 1 else 0
             stop_program = ev.program if ev.program is not None else 0
             abort_first = (
                 (ev.kind == EventKind.STOP)
                 & (ev.disposition == Disposition.ABORT)
+                & (ev.tick <= t)
                 & stop_reaches(
                     study, ev.scope, ev.lane, stop_program, eff.lane[e], owner
                 )
