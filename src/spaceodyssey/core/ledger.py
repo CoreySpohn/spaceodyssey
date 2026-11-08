@@ -63,6 +63,9 @@ class Ledger(eqx.Module):
     # per lane and payer slot, the window generation of the paying row at the debit of
     # the lane's live occupancy (I64[L, R]); read back into the record's `award_gens`
     lane_award_gens: jax.Array | None = None
+    # and the remainder rule and reallocation destination of that row's window then
+    lane_award_rules: jax.Array | None = None
+    lane_award_tos: jax.Array | None = None
     realloc_row: jax.Array | None = None
     granted: jax.Array | None = None
     lapsed: jax.Array | None = None

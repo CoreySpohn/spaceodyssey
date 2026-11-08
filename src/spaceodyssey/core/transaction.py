@@ -289,15 +289,26 @@ def _commit_observe(c, eff, e, ok, study):
         },
     )
     if caps.awards:
-        # the generation, at debit, of each row that pays one resource of the charge
+        # the generation, at debit, of each row that pays one resource of the charge,
+        # with the rule and destination of its window (NONE outside a window)
+        led = c.ledger
+        windowed = led.win_state[rows] == WindowState.WINDOWED
+        captured = {
+            "ledger.lane_award_gens": (c1.ledger.lane_award_gens, led.win_gen[rows]),
+            "ledger.lane_award_rules": (
+                c1.ledger.lane_award_rules,
+                jnp.where(windowed, led.remainder_rule[rows], RemainderRule.NONE),
+            ),
+            "ledger.lane_award_tos": (
+                c1.ledger.lane_award_tos,
+                jnp.where(windowed, led.realloc_row[rows], 0),
+            ),
+        }
         c1 = _tree_set(
             c1,
             **{
-                "ledger.lane_award_gens": c1.ledger.lane_award_gens.at[lane].set(
-                    jnp.where(
-                        ok, c.ledger.win_gen[rows], c1.ledger.lane_award_gens[lane]
-                    )
-                )
+                name: old.at[lane].set(jnp.where(ok, new, old[lane]))
+                for name, (old, new) in captured.items()
             },
         )
     return enqueue(

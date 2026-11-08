@@ -42,7 +42,14 @@ CAP_FIELDS = (
 )
 STUDY_FIELDS = ("key_version",)
 CHANNEL_FIELDS = ("pricing", "surcharge", "failure_kind", "refund_deadline_ticks")
-RECORD_FIELDS = ("nonrefundable", "refund_index", "award_gen", "award_gens")
+RECORD_FIELDS = (
+    "nonrefundable",
+    "refund_index",
+    "award_gen",
+    "award_gens",
+    "award_rules",
+    "award_tos",
+)
 AWARD_COLUMNS = (
     "amount",
     "window_from",
@@ -399,9 +406,10 @@ def test_a_record_written_with_a_null_refund_column_is_refused():
         load_module.decode(node, ("record",), _RECORD_KINDS)
 
 
-def test_a_record_written_with_a_null_award_generation_column_is_refused():
-    """Control: the per-payer generations are optional too, and null is not omitted."""
-    node = {**_record_node(False), "award_gens": None}
+@pytest.mark.parametrize("name", ["award_gens", "award_rules", "award_tos"])
+def test_a_record_written_with_a_null_award_identity_column_is_refused(name):
+    """Control: the per-payer award identity is optional, and null is not omitted."""
+    node = {**_record_node(False), name: None}
     with pytest.raises(DocumentError, match="at its default"):
         load_module.decode(node, ("record",), _RECORD_KINDS)
 
@@ -414,6 +422,8 @@ def test_a_populated_record_refund_columns_round_trip():
         nonrefundable=jnp.full(caps.n_resources, 2.0),
         refund_index=jnp.asarray(3, I64),
         award_gens=jnp.arange(caps.n_resources, dtype=I64),
+        award_rules=jnp.arange(caps.n_resources, dtype=I64) % 4,
+        award_tos=jnp.arange(caps.n_resources, dtype=I64) + 1,
     )
     node = encode(rec, ("record",), _RECORD_KINDS)
     assert set(RECORD_FIELDS) <= set(node)
