@@ -660,6 +660,25 @@ def h_fault(c, ev, study, truth, root):
     return c1, _emit(n, slot), rec
 
 
+def stop_reaches(study, scope, stop_lane, stop_program, lane, program):
+    """Whether a Stop of `scope` at `stop_lane` reaches work on `lane` of `program`.
+
+    The one reach rule: h_stop cancels with it, and admission asks it to tell a Cancel
+    that a queued abort will already have taken the commitment.
+    """
+    in_lane = jnp.select(
+        [scope == Scope.LANE, scope == Scope.ASSET],
+        [
+            lane == stop_lane,
+            study.assets.lane_asset[lane] == study.assets.lane_asset[stop_lane],
+        ],
+        True,
+    )
+    if study.caps.n_programs > 1:
+        return jnp.where(scope == Scope.PROGRAM, program == stop_program, in_lane)
+    return in_lane
+
+
 def h_stop(c, ev, study, truth, root):
     """Close, drain or abort a scope (lane, asset, program, campaign).
 
@@ -724,11 +743,14 @@ def h_stop(c, ev, study, truth, root):
         def cancel_pending(s, state):
             carry, n_total, slot, rec = state
             led = carry.ledger
+            owner = led.cm_program[s] if by_program is not None else 0
             live = (
-                abort & (led.cm_state[s] == CommitState.PENDING) & reach[led.cm_lane[s]]
+                abort
+                & (led.cm_state[s] == CommitState.PENDING)
+                & stop_reaches(
+                    study, ev.scope, ev.lane, ev.program, led.cm_lane[s], owner
+                )
             )
-            if by_program is not None:
-                live = live & (~by_program | (led.cm_program[s] == ev.program))
             carry, n, sl, r = eqx.filter_jit(_cancel_lane)(
                 carry,
                 study,

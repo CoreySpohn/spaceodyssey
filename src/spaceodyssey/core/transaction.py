@@ -16,6 +16,7 @@ from spaceodyssey.core.enums import (
     AdmissionCode,
     Audience,
     CommitState,
+    Disposition,
     EffectKind,
     EventKind,
     RemainderRule,
@@ -24,7 +25,7 @@ from spaceodyssey.core.enums import (
     version_slot,
 )
 from spaceodyssey.core.events import enqueue, order_key, select_next, where_tree
-from spaceodyssey.core.handlers import step
+from spaceodyssey.core.handlers import step, stop_reaches
 from spaceodyssey.core.keys import policy_key
 from spaceodyssey.core.ledger import (
     AssetTable,
@@ -800,8 +801,20 @@ def _admit_rows(c, eff, mask, study, fp):
             slot = jnp.argmax(hit)
             # a commitment already named by a Cancel waiting in the queue has no
             # second cancellation to give
+            # nor does one that an abort already queued for its scope will cancel
+            ev = c.ev
+            owner = c.ledger.cm_program[slot] if caps.n_programs > 1 else 0
+            stop_program = ev.program if ev.program is not None else 0
+            abort_first = (
+                (ev.kind == EventKind.STOP)
+                & (ev.disposition == Disposition.ABORT)
+                & stop_reaches(
+                    study, ev.scope, ev.lane, stop_program, eff.lane[e], owner
+                )
+            )
             again = jnp.any(
-                c.ev.valid & (c.ev.kind == EventKind.CANCEL) & (c.ev.slot == slot)
+                ev.valid
+                & (((ev.kind == EventKind.CANCEL) & (ev.slot == slot)) | abort_first)
             )
             inserts, may_break = _frozen(
                 c, study, eff.lane[e], eff.start_tick[e], eff.disruptive[e]
