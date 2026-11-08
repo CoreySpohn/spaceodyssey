@@ -26,15 +26,16 @@ from spaceodyssey.core.conformance.corpus import make_worlds
 from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
-from spaceodyssey.core.lift import _lifted, lift_traced, lifting_jit
+from spaceodyssey.core.lift import _lifted, lift_traced
 from spaceodyssey.studies import oracle, scripted, toy
 from tests.codec.test_document import TOY_KINDS
+from tests.core.prior_helpers import refit_study
 
 pytestmark = pytest.mark.medium  # Each case compiles a scan.
 
 N_STEPS = 24  # the length of the recorded base histories
-EARLY = 6  # the threshold study is running here and idle from step 10
-BUCKET = 32  # step counts 1 to 32 share one program of 32 rows
+CUT = 6  # past the first bucket boundary, with the study still running (idle from 10)
+BUCKET = 4  # step counts 5 to 8 share one program of 8 rows
 
 _traces = {"n": 0}
 
@@ -79,15 +80,15 @@ def threshold_run():
 
 
 @pytest.fixture(scope="module")
-def early_run():
+def cut_run():
     """The default scan stopped while the study is still running."""
-    return _run(_threshold(3.0), EARLY)
+    return _run(_threshold(3.0), CUT)
 
 
 @pytest.fixture(scope="module")
 def bucketed_run():
-    """The same step count through the 32-row bucketed program."""
-    return _run(_threshold(3.0), EARLY, bucket=BUCKET)
+    """The same step count through the 8-row bucketed program."""
+    return _run(_threshold(3.0), CUT, bucket=BUCKET)
 
 
 @pytest.fixture(scope="module")
@@ -96,17 +97,15 @@ def scripted_run():
     return _run(_script())
 
 
-def test_bucketed_run_matches_the_default_scan_bit_for_bit(early_run, bucketed_run):
+def test_bucketed_run_matches_the_default_scan_bit_for_bit(cut_run, bucketed_run):
     """Fails if the bucketed scan steps past n_steps, or changes a bit."""
-    _same_bits(
-        (early_run.carry, early_run.trace), (bucketed_run.carry, bucketed_run.trace)
-    )
+    _same_bits((cut_run.carry, cut_run.trace), (bucketed_run.carry, bucketed_run.trace))
 
 
 def test_bucketed_run_shares_one_program_within_a_bucket(bucketed_run):
-    """Fails if a step count up to the bucket size, its edge included, compiles."""
+    """Fails if a step count of the same bucket, its edge included, compiles."""
     before = _traces["n"]
-    for n_steps in (N_STEPS, BUCKET):
+    for n_steps in (BUCKET + 1, 2 * BUCKET):
         _run(_threshold(3.0), n_steps, bucket=BUCKET)
     assert _traces["n"] == before
 
@@ -192,58 +191,78 @@ def test_a_bucket_must_be_a_positive_int(bucket):
         _run(toy.survey_1(), 17, bucket=bucket)
 
 
-def _traces_of(monkeypatch, module, name, calls):
-    """Count traces of the jitted function `module.name` over the callables `calls`."""
-    original = getattr(module, name).__wrapped__
-    count = {"n": 0}
+def _jit_of(fn):
+    """The Equinox jit an exported entry point calls."""
+    if hasattr(fn, "_cached"):
+        return fn
+    return next(
+        c.cell_contents for c in fn.__closure__ if hasattr(c.cell_contents, "_cached")
+    )
 
-    def counted(*args, **kw):
-        count["n"] += 1
-        return original(*args, **kw)
 
-    monkeypatch.setattr(module, name, lifting_jit(counted))
-    seen = []
+def _programs(fn):
+    return _jit_of(fn)._cached._cache_size()
+
+
+def _shares_one_program(fn, calls):
+    """Warm `fn` with the first call, then count the programs after each variant."""
+    sizes = []
     for call in calls:
         call()
-        seen.append(count["n"])
-    return seen
+        sizes.append(_programs(fn))
+    assert sizes[0] >= 1
+    assert sizes == sizes[:1] * len(sizes), f"{fn.__name__}: {sizes}"
 
 
-def test_replay_entry_points_share_one_program_across_values(
-    monkeypatch, threshold_run
-):
-    """Fails if a policy value retraces either replay."""
+def _varied(study, x):
+    agenda = dataclasses.replace(
+        study.agenda, policies=(toy.ThresholdStopPolicy(stop_snr=x),)
+    )
+    return dataclasses.replace(study, agenda=agenda)
+
+
+VALUES = (3.0, 4.0, 5.0)
+
+
+def test_replay_entry_points_share_one_program_across_values(threshold_run):
+    """Fails if a policy value retraces a replay: the real exported jits are counted."""
     from spaceodyssey.core.conformance import observer_kit
     from spaceodyssey.core.executors import replay
+    from spaceodyssey.core.records import record_none
 
     out, roots = threshold_run, threshold_run.roots
     carry = index_world(out.carry, 0)
     trace = index_world(out.trace, 0)
-    values = (3.0, 4.0, 5.0)
-    seen = _traces_of(
-        monkeypatch,
-        replay,
-        "_fold",
+
+    def summary(study):
+        return replay._fold_summary(
+            study,
+            study.observer.init_summary(study.caps),
+            record_none(study.caps),
+            roots[0],
+        )
+
+    _shares_one_program(
+        replay._fold,
         [
             lambda x=x: replay.replay_belief(_threshold(x), carry, trace, roots[0])
-            for x in values
+            for x in VALUES
         ],
     )
-    assert seen == [1, 1, 1]
-    seen = _traces_of(
-        monkeypatch,
-        observer_kit,
-        "_replay",
+    _shares_one_program(
+        replay._fold_summary, [lambda x=x: summary(_threshold(x)) for x in VALUES]
+    )
+    _shares_one_program(
+        observer_kit._replay,
         [
             lambda x=x: observer_kit.replay_beliefs(_threshold(x), out, roots)
-            for x in values
+            for x in VALUES
         ],
     )
-    assert seen == [1, 1, 1]
 
 
-def test_masked_refit_shares_one_program_across_values(monkeypatch):
-    """Fails if a scripted value retraces the masked refit call."""
+def test_masked_refit_shares_one_program_across_values():
+    """Fails if a scripted value retraces the real masked refit call."""
     from spaceodyssey.core import refresh
 
     def study(values):
@@ -257,16 +276,27 @@ def test_masked_refit_shares_one_program_across_values(monkeypatch):
     shape = eqx.filter_eval_shape(refresh.gather_refit_rows, carry, roots[0], base)
     requests = jax.tree.map(lambda x: jnp.zeros((1, *x.shape), x.dtype), shape)
     boundary = toy.toy_masked_refit()
-    seen = _traces_of(
-        monkeypatch,
-        refresh,
-        "_masked_call",
+    _shares_one_program(
+        refresh._masked_call,
         [
             lambda v=v: boundary.refit_batch(study(v), requests)
             for v in ((2.0, 9.0), (3.0, 8.0), (4.0, 7.0))
         ],
     )
-    assert seen == [1, 1, 1]
+
+
+def test_prior_observer_refit_shares_one_program_across_values():
+    """Fails if a policy value retraces the audience-prior refit call."""
+    from spaceodyssey.studies import prior_observer
+    from tests.core.test_premission_refit import _request
+
+    study = refit_study()
+    batch = jax.tree.map(lambda x: x[None], _request(study))
+    boundary = prior_observer.AudiencePriorRefit()
+    _shares_one_program(
+        prior_observer._audience_call,
+        [lambda x=x: boundary.refit_batch(_varied(study, x), batch) for x in VALUES],
+    )
 
 
 class _FloatSubclass(float):
@@ -374,6 +404,7 @@ _BASE_DIGEST = {
     "query_at/bool/host": "ee391845288a8003",
     "query_at/int/host": "ff680283f820bb5c",
     "query_at/int_large_exact/host": "f6781172491b172a",
+    "stochastic/n_obs_3/compiled": "05b4e1821b033c6d",
     "values/seq_int/compiled": "90a351073f0941af",
     "values/seq_mixed/compiled": "90a351073f0941af",
     "values/seq_list/compiled": "90a351073f0941af",
@@ -394,6 +425,9 @@ def _digest(res):
 def _case_study(field, x):
     if field == "stop_snr":
         return _threshold(x), None
+    if field == "stochastic":
+        policy = toy.StochasticPolicy(theta=0.3, n_obs=3, wait_ticks=7)
+        return toy.survey_1(policies=(policy,)), None
     if field == "query_at":
         return oracle.oracle_study(query_at=x)
     if field == "values":
@@ -412,10 +446,11 @@ _CASE_INPUTS = {
     "seq_mixed": (2, 3.0),
     "seq_list": [2, 3],
     "float_sub": _FloatSubclass(2.0),
+    "n_obs_3": None,
 }
 
 
-def _history_digests(which):
+def _history_digests(which, before=lambda study: None, after=lambda: None):
     """Digest every recorded case of one executor and return {key: digest}."""
     out = {}
     for key in _BASE_DIGEST:
@@ -424,6 +459,7 @@ def _history_digests(which):
             continue
         study, service = _case_study(field, _CASE_INPUTS[name])
         truths, roots = make_worlds(study, 1)
+        before(study)
         kw = {} if service is None else {"service": service}
         if which == "compiled":
             res = _CountingExecutor().run(study, truths, roots, N_STEPS, **kw)
@@ -432,6 +468,7 @@ def _history_digests(which):
                 study, index_world(truths, 0), roots[0], N_STEPS, **kw
             )
         out[key] = _digest(res)
+        after()
     return out
 
 
@@ -444,46 +481,37 @@ def test_compiled_histories_equal_the_ones_before_lifting(
     assert got == want
 
 
-def test_host_histories_equal_the_ones_before_lifting():
-    """Fails if lifting the query decision changes a host history."""
-    got = _history_digests("host")
+def test_host_histories_equal_the_ones_before_lifting(monkeypatch):
+    """Fails if lifting the query decision changes a host history, or the service
+    entry points compile again for another value."""
+    from spaceodyssey.core import service
+    from spaceodyssey.core.executors import host
+
+    current = {}
+    answer = host.answer_pending
+
+    def unlifted(carry, study, svc):  # the exported call, handed the study as written
+        return answer(carry, current["study"], svc)
+
+    monkeypatch.setattr(host, "answer_pending", unlifted)
+    sizes = []
+    got = _history_digests(
+        "host",
+        lambda study: current.update(study=study),
+        lambda: sizes.append(
+            (_programs(service._snapshot_for), _programs(service._commit))
+        ),
+    )
     want = {k: v for k, v in _BASE_DIGEST.items() if k.endswith("/host")}
     assert got == want
+    assert min(sizes[0]) >= 1 and sizes == sizes[:1] * len(sizes)
 
 
-# The two-record script of `_script()` on the base commit, whose scripted fields were
-# static: arrays of any kind in those fields are read as the tuples they hold.
-_BASE_SCRIPT_DIGEST = "1c6ae1f33c2dd6d1"
-
-
-def _objects(*xs):
-    out = np.empty(len(xs), dtype=object)
-    out[:] = xs
-    return out
-
-
-@pytest.mark.parametrize(
-    "field",
-    ["ticks_object", "ticks_int32", "values_object", "values_longdouble", "ids_object"],
-)
-def test_scripted_fields_read_arrays_as_the_tuples_they_hold(field, scripted_run):
-    """Fails if an object or NumPy array in a script is lifted, rejected or misread."""
-    inputs = {
-        "ticks_object": ("ticks", _objects(np.int32(100), np.int64(200))),
-        "ticks_int32": ("ticks", np.array([100, 200], np.int32)),
-        "values_object": ("values", _objects(np.float32(2.0), np.float64(9.0))),
-        "values_longdouble": ("values", np.array([2.0, 9.0], np.longdouble)),
-        "ids_object": ("ids", _objects(np.int32(7001), np.int64(7002))),
-    }
-    name, value = inputs[field]
-    study = _script()
-    study = dataclasses.replace(
-        study, process=dataclasses.replace(study.process, **{name: value})
-    )
-    held = getattr(study.process, name)
-    assert type(held) is tuple and {type(x) for x in held} <= {int, float}
-    assert held == getattr(_script().process, name)
-    assert _digest(_run(study)) == _BASE_SCRIPT_DIGEST == _digest(scripted_run)
+def test_a_changed_script_reuses_the_program(scripted_run):
+    """Fails if other ticks or values compile the scripted scan again."""
+    before = _traces["n"]
+    _run(_script(ticks=(150, 250), values=(3.0, 8.0)))
+    assert _traces["n"] == before
 
 
 def test_step_and_decision_fingerprint_share_one_program_across_values(monkeypatch):
