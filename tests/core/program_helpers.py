@@ -56,7 +56,7 @@ class ScriptedPrograms(toy.NullPolicy):
 
     Each row of `script` is (decision, kind, subject, channel id, program, scope,
     disposition, tick); the e-th row of a decision becomes effect row e, in a group of
-    its own. A cancel names its lane in the subject column.
+    its own. A cancel names its lane in the subject column, and so does a Stop.
     """
 
     script: object = eqx.field(converter=_as_script)
@@ -106,7 +106,8 @@ class ScriptedPrograms(toy.NullPolicy):
             cols["channel_index"].append(jnp.argmax(ids == r[3]).astype(I64))
             cols["group"].append(n * caps.n_effects + e)
             cols["tick"].append(jnp.maximum(r[7], 0) * (r[1] == EffectKind.WAIT))
-            cols["lane"].append(jnp.where(is_cancel, jnp.maximum(r[2], 0), 0))
+            names_lane = is_cancel | (r[1] == EffectKind.STOP)
+            cols["lane"].append(jnp.where(names_lane, jnp.maximum(r[2], 0), 0))
             cols["scope"].append(jnp.maximum(r[5], 0))
             cols["disposition"].append(jnp.maximum(r[6], 0))
             cols["program"].append(jnp.maximum(r[4], 0))

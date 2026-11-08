@@ -70,6 +70,7 @@ def commitment_study(
     refunds=False,
     n_commitments=4,
     max_sid=None,
+    n_events=None,
     **overrides,
 ):
     """The toy study with commitments on, a horizon on asset 0 and the scripted policy.
@@ -80,6 +81,8 @@ def commitment_study(
     from spaceodyssey.studies import toy
 
     extra = {} if max_sid is None else {"max_sid": max_sid}
+    if n_events is not None:
+        extra["n_events"] = n_events
     caps = Capacities(
         n_effects=3,
         n_commitments=n_commitments,
