@@ -83,8 +83,10 @@ Mac, single thread, compile plus run of two worlds, seconds:
 | 40 steps then 50, `bucket=32` | 3.9 | 0.10 |
 | 40 steps then 70, `bucket=32` | 3.9 | 4.5 (next bucket) |
 
-The default scan StableHLO (survey 1, 2 worlds, 40 steps) has sha256
-`a67917728c4878feaa35f3bccc622be9ff6850ec65b5adf22867e668c9d1d791` before and after.
+The default scan StableHLO (survey 1, 2 worlds, 40 steps) is the same with and without
+this change: sha256 `8b8ee715bb59413b179fa7c79f086ac18556ed7ae56d0b639c617fb291fd00a0`
+on the branch that carries the program-size reduction, and
+`a67917728c4878feaa35f3bccc622be9ff6850ec65b5adf22867e668c9d1d791` on the one before it.
 
 ## Tests
 
