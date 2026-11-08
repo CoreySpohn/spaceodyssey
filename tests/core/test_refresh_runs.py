@@ -39,23 +39,26 @@ from tests.core.refresh_helpers import (
     policy_study,
     product_rows,
     refresh_study,
+    resume_host,
     run_pair,
 )
 from tests.core.test_canonical_fields import REFRESH_ONLY, _perturb
 
 pytestmark = pytest.mark.clear_caches_between_tests
 
+N_WORLDS = 3  # one batch shape, so each chunk of the base study compiles once
+
 
 @functools.cache
 def pair(chunk=7):
-    return run_pair(refresh_study(100), 60, 2, chunk)
+    return run_pair(refresh_study(100), 60, N_WORLDS, chunk)
 
 
 @pytest.mark.parametrize("chunk", [1, 7, 32])
 def test_host_and_compiled_histories_equal_at_every_chunk(chunk):
-    h, c = pair(chunk) if chunk == 7 else run_pair(refresh_study(100), 60, 2, chunk)
+    h, c = pair(chunk)
     assert h.status.tolist() == c.status.tolist()
-    for w in range(2):
+    for w in range(N_WORLDS):
         r = histories_equal(h.history(w), c.history(w))
         assert r.ok and r.go, r
 
@@ -78,11 +81,11 @@ def test_host_loop_matches_masked_batch():
 
 def test_awaiting_without_a_boundary_on_both_executors():
     study = refresh_study(100)
-    truths, roots = worlds(1)
+    truths, roots = worlds(N_WORLDS)
     h = HostExecutor().run_worlds(study, truths, roots, 60)
-    c = CompiledExecutor().run(study, truths, roots, 60)
-    assert h.status.tolist() == [RunStatus.AWAITING]
-    assert c.status.tolist() == [RunStatus.AWAITING]
+    c = CompiledExecutor().run(study, truths, roots, 60)  # the default chunk is 32
+    assert h.status.tolist() == [RunStatus.AWAITING] * N_WORLDS
+    assert c.status.tolist() == [RunStatus.AWAITING] * N_WORLDS
 
 
 def test_no_refresh_study_ignores_a_boundary():
@@ -97,13 +100,12 @@ def test_no_refresh_study_ignores_a_boundary():
 
 def test_batched_worlds_equal_single_runs():
     study = refresh_study(100)
-    truths, roots = worlds(3)
-    batch = CompiledExecutor().run(study, truths, roots, 60, refit=masked(), chunk=7)
-    for w in range(3):
-        t1, _ = worlds(w + 1)
+    truths, roots = worlds(N_WORLDS)
+    batch = pair(7)[1]  # the compiled batch of three worlds, masked boundary, chunk 7
+    for w in range(N_WORLDS):
         single = HostExecutor().run_worlds(
             study,
-            jax_index(t1, w),
+            jax_index(truths, w),
             roots[w : w + 1],
             60,
             refit=masked(),
@@ -197,10 +199,14 @@ def test_refresh_leaf_mutation_fails_parity(field):
 # ---- leak scenarios ------------------------------------------------------------------
 
 
-def _leak_run(process, n_worlds=2, n_steps=60):
-    study = toy.survey_refresh(
+def _leak_study(process):
+    return toy.survey_refresh(
         100, policies=(toy.ReactivePolicy(plan=LEAK_PLAN),), process=process
     )
+
+
+def _leak_run(process, n_worlds=2, n_steps=60):
+    study = _leak_study(process)
     truths, roots = worlds(n_worlds)
     out = []
     for w in range(n_worlds):
@@ -217,14 +223,22 @@ def _leak_run(process, n_worlds=2, n_steps=60):
     return out
 
 
+LEAK_PROCESSES = {
+    "null": toy.NullProcess(),
+    "heartbeat": LEAK_SCENARIOS["heartbeat"],
+    "private_writer": LEAK_SCENARIOS["private_writer"],
+}
+
+
 @functools.cache
-def _leak_baseline():
-    return _leak_run(toy.NullProcess())
+def _leak(name):
+    """The two-world leak runs of one process, each made once and shared."""
+    return _leak_run(LEAK_PROCESSES[name])
 
 
 @pytest.mark.parametrize("name", ["heartbeat", "private_writer"])
 def test_private_events_leave_wakes_views_and_product_rows_unchanged(name):
-    baseline, scenario = _leak_baseline(), _leak_run(LEAK_SCENARIOS[name])
+    baseline, scenario = _leak("null"), _leak(name)
     n_private = 0
     for (b, bviews), (s, sviews) in zip(baseline, scenario, strict=True):
         assert np.asarray(s.trace.wake).sum() == np.asarray(b.trace.wake).sum()
@@ -421,35 +435,79 @@ def test_checkpoints_do_not_wake_the_policy():
 # ---- schedule mutant -----------------------------------------------------------------
 
 
-def _refresh_ticks_for(process):
-    study = toy.survey_refresh(
-        100, policies=(toy.ReactivePolicy(plan=LEAK_PLAN),), process=process
-    )
-    truths, roots = worlds(1)
-    run = HostExecutor().run(
-        study, base.index_world(truths, 0), roots[0], 60, refit=masked()
-    )
+def _refresh_ticks_for(name):
+    """The ticks of the handled checkpoints of world 0 of a leak run."""
+    run = _leak(name)[0][0]
     return [x[1] for x in handled_steps(run.trace) if x[0] == EventKind.REFRESH]
 
 
-@pytest.fixture
-def fresh_compilation():
-    import equinox as eqx
-
-    eqx.clear_caches()
-    jax.clear_caches()
-    yield
-    eqx.clear_caches()
-    jax.clear_caches()
-
-
 def test_private_events_do_not_move_checkpoints():
-    quiet = _refresh_ticks_for(toy.NullProcess())
-    busy = _refresh_ticks_for(LEAK_SCENARIOS["private_writer"])
+    quiet = _refresh_ticks_for("null")
+    busy = _refresh_ticks_for("private_writer")
     assert quiet and quiet == busy
 
 
-def test_a_transition_count_schedule_is_caught(monkeypatch, fresh_compilation):
+def _refresh_ticks_after_first_release(name, schedule):
+    """The checkpoint ticks of a leak run whose first release schedules by `schedule`.
+
+    The host run goes to the step before the first release. The release is handled
+    eagerly with `handlers.schedule_refresh` the real one and then `schedule`; the
+    real compiled step runs, the queued checkpoint takes the tick `schedule` chose,
+    and the real loop carries it to the end of the run.
+    """
+    study = _leak_study(LEAK_PROCESSES[name])
+    run = _leak(name)[0][0]
+    truths, roots = worlds(2)
+    truth, root = base.index_world(truths, 0), roots[0]
+    refit = masked()
+    t = run.trace
+    handled = np.asarray(t.handled)
+    releases = np.flatnonzero(handled & (np.asarray(t.kind) == EventKind.RELEASE))
+    stop = int(np.flatnonzero(handled & (np.asarray(t.kind) == EventKind.REFRESH))[0])
+
+    def queued_tick(c):
+        pick = np.asarray(c.ev.valid & (c.ev.kind == EventKind.REFRESH))
+        assert pick.sum() <= 1
+        return int(np.asarray(c.ev.tick)[pick][0]) if pick.any() else None
+
+    # the first release before the first checkpoint that queues it (a private
+    # release is not eligible and queues nothing)
+    for first in (int(i) for i in releases if i < stop):
+        carry = HostExecutor().run(study, truth, root, first, refit=refit).carry
+        due = carry.ev.valid & (carry.ev.kind == EventKind.RELEASE)
+        row = int(np.flatnonzero(np.asarray(due & (carry.ev.tick == t.tick[first])))[0])
+        ev = jax.tree_util.tree_map(lambda x, row=row: x[row], carry.ev)
+        at = _tree_set(carry, tick=ev.tick, stage=ev.stage)
+        out, _emit, _rec = handlers.h_release(at, ev, study, truth, root)
+        if queued_tick(out) is not None:
+            break
+    assert queued_tick(out) is not None
+
+    ticks = {}
+    for label, fn in (("real", handlers.schedule_refresh), ("changed", schedule)):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(handlers, "schedule_refresh", fn)
+            out, _emit, _rec = handlers.h_release(at, ev, study, truth, root)
+        ticks[label] = queued_tick(out)
+    after, seen = resume_host(study, carry, truth, root, first, first + 1, refit)
+    assert queued_tick(after) == ticks["real"]  # control: the eager release agrees
+    row = int(
+        np.flatnonzero(
+            np.asarray(after.ev.valid & (after.ev.kind == EventKind.REFRESH))
+        )[0]
+    )
+    after = _tree_set(after, **{"ev.tick": after.ev.tick.at[row].set(ticks["changed"])})
+    final, rest = resume_host(study, after, truth, root, first + 1, 60, refit)
+    handled_ticks = [
+        tick
+        for kind, tick, handled in seen + rest
+        if handled and kind == EventKind.REFRESH
+    ]
+    products = {row[3] for row in product_rows(final)}  # their available ticks
+    return handled_ticks, ticks["changed"], products
+
+
+def test_a_transition_count_schedule_is_caught():
     """A grid shifted by the log length (private writes change it) moves checkpoints."""
     real = handlers.schedule_refresh
 
@@ -457,10 +515,19 @@ def test_a_transition_count_schedule_is_caught(monkeypatch, fresh_compilation):
         shifted = _tree_set(c, tick=c.tick + 25 * c.n_log)
         return _tree_set(real(shifted, mark, study), tick=c.tick)
 
-    monkeypatch.setattr(handlers, "schedule_refresh", by_count)
-    quiet = _refresh_ticks_for(toy.NullProcess())
-    busy = _refresh_ticks_for(LEAK_SCENARIOS["private_writer"])
+    for name in ("null", "private_writer"):  # control: the real rule changes nothing
+        same, queued, products = _refresh_ticks_after_first_release(name, real)
+        assert same == _refresh_ticks_for(name)
+        assert queued in same and queued in products
+    quiet, quiet_at, quiet_rows = _refresh_ticks_after_first_release("null", by_count)
+    busy, busy_at, busy_rows = _refresh_ticks_after_first_release(
+        "private_writer", by_count
+    )
     assert quiet != busy
+    # the real loop handled each checkpoint the changed rule queued, at its tick,
+    # and the product rows it installed carry that tick
+    assert quiet_at in quiet and busy_at in busy
+    assert quiet_at in quiet_rows and busy_at in busy_rows
 
 
 # ---- policy-side parity --------------------------------------------------------------
@@ -527,7 +594,7 @@ def test_observer_only_column_is_computed_twice_and_public_rows_once():
 @pytest.mark.parametrize("budget", [1, 2, 3, 4])
 def test_a_budget_that_ends_on_the_hold_installs_nothing(budget, chunk):
     """Fails if a checkpoint installs when no step is left for its completion."""
-    h, c = run_pair(refresh_study(100), budget, 2, chunk)
+    h, c = run_pair(refresh_study(100), budget, N_WORLDS, chunk)
     for res in (h, c):
         carry = base.index_world(res.carry, 0)
         assert float(np.asarray(carry.belief.n).sum()) == 0.0
@@ -535,7 +602,7 @@ def test_a_budget_that_ends_on_the_hold_installs_nothing(budget, chunk):
         assert product_rows(carry) == []
         assert not np.asarray(carry.refresh.valid)
     # control: with a budget for the completion the same checkpoint installs
-    full = run_pair(refresh_study(100), 60, 2, chunk)[0]
+    full = pair(chunk)[0]
     assert float(np.asarray(full.carry.belief.n[0]).sum()) > 0
 
 

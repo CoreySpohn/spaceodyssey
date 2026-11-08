@@ -198,3 +198,36 @@ def handled_steps(trace):
             strict=True,
         )
     )
+
+
+def resume_host(study, carry, truth, root, first, n_steps, refit):
+    """The host loop of `HostExecutor.run` from step `first` to `n_steps` on `carry`.
+
+    Returns the carry and `(kind, tick, handled)` of each step it ran, so a state set
+    by hand goes through the real compiled advance, decision, admission and refresh
+    boundary. Array-form policies only.
+    """
+    from spaceodyssey.core.executors.host import HostExecutor, _adm, _close, _fp
+    from spaceodyssey.core.lift import lift_traced
+    from spaceodyssey.core.refresh import answer_refresh
+    from spaceodyssey.core.snapshot import effects_none
+    from spaceodyssey.core.transaction import mask_effects
+
+    lifted = lift_traced(study)
+    ex, caps = HostExecutor(), study.caps
+    seen = []
+    for step in range(first, n_steps):
+        carry, trace, wake = ex.advance(carry, root, lifted, truth)
+        if bool(wake):
+            eff, pstate, _u = ex.decide(carry, root, lifted)
+        else:
+            eff, pstate = effects_none(caps), carry.pstate
+        eff = mask_effects(eff, wake)
+        fp = _fp(carry, lifted) if bool(wake) else jnp.asarray(0, jnp.int64)
+        carry, _codes = _adm(carry, eff, lifted, fp)
+        carry = _close(carry, eff, pstate, wake, lifted)
+        carry = answer_refresh(
+            carry, root, lifted, refit, can_finish=step + 1 < n_steps
+        )
+        seen.append((int(trace.kind), int(trace.tick), bool(trace.handled)))
+    return carry, seen
