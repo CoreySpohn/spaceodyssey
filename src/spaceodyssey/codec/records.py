@@ -72,7 +72,7 @@ def check_lowering(registry, study, path=("records",)):
         raise DocumentError(
             f"the registry does not lower: {err}", pointer(path)
         ) from err
-    if lowered != study.caps:
+    if lowered != study.caps or lowered.kind_names != study.caps.kind_names:
         raise DocumentError(
             "the record-kind registry does not lower to the study's capacities "
             "(kind names, payload audiences, derived kinds or refit kinds differ)",
