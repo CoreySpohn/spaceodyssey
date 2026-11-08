@@ -284,6 +284,16 @@ SEEDED = {
         lambda: toy.survey_1(caps=Capacities(awards=True, n_commitments=2)),
         None,
     ),
+    "disruptive_resource_past_the_columns": (
+        C.A001,
+        lambda: _commitment_study(disruptive_resource=jnp.asarray([3, -1], I64)),
+        None,
+    ),
+    "disruptive_resource_below_none": (
+        C.A001,
+        lambda: _commitment_study(disruptive_resource=jnp.asarray([-1, -2], I64)),
+        None,
+    ),
     "gradients_on_host": (
         C.X001,
         lambda: _policy(requires=frozenset({"gradients"})),
