@@ -489,8 +489,8 @@ def _cancel_lane(
     root,
     lane,
     enable,
-    status=RecordStatus.PARTIAL,
-    refund=True,
+    status,
+    refund,
     program=None,
     by_program=False,
 ):
@@ -515,7 +515,7 @@ def _cancel_lane(
     )
     start_tick = c.ev.tick[i] - dur
     frac = jnp.clip((c.tick - start_tick).astype(F64) / dur.astype(F64), 0.0, 1.0)
-    spent = frac if refund else jnp.asarray(1.0, F64)
+    spent = jnp.where(refund, frac, jnp.asarray(1.0, F64))
     base = dataclasses.replace(
         record_none(caps),
         kind=channels.kind[channel_index],
@@ -589,10 +589,16 @@ def _cancel_lane(
 
 
 def h_cancel(c, ev, study, truth, root):
-    """A Cancel is live only if its generation is the lane's current one."""
+    """A Cancel is live only if its generation is the lane's current one.
+
+    A fault event runs this same body under its own kind (see `step`): its status and
+    refund follow from the kind, so one program serves both.
+    """
     live = ev.gen == c.ledger.lane_gen[ev.lane]
+    fault = ev.kind == EventKind.FAULT
+    status = jnp.where(fault, RecordStatus.FAILED, RecordStatus.PARTIAL).astype(I64)
     c1, n, slot, rec = eqx.filter_jit(_cancel_lane)(
-        c, study, truth, root, ev.lane, live
+        c, study, truth, root, ev.lane, live, status, ~fault
     )
     return c1, _emit(n, slot), rec
 
@@ -606,7 +612,14 @@ def h_fault(c, ev, study, truth, root):
     """
     live = ev.gen == c.ledger.lane_gen[ev.lane]
     c1, n, slot, rec = eqx.filter_jit(_cancel_lane)(
-        c, study, truth, root, ev.lane, live, RecordStatus.FAILED, False
+        c,
+        study,
+        truth,
+        root,
+        ev.lane,
+        live,
+        jnp.asarray(RecordStatus.FAILED, I64),
+        jnp.asarray(False),
     )
     return c1, _emit(n, slot), rec
 
@@ -657,6 +670,8 @@ def h_stop(c, ev, study, truth, root):
             root,
             jnp.asarray(lane, I64),
             reach[lane] & abort,
+            jnp.asarray(RecordStatus.PARTIAL, I64),
+            jnp.asarray(True),
             **only,
         )
         return carry, n_total + n, jnp.where(n > 0, s, slot), where_tree(n > 0, r, rec)
@@ -722,10 +737,14 @@ def step(carry, ev, study, truth, root):
     without them lowers the table it always had.
     """
     table = HANDLERS if study.caps.awards else HANDLERS[:-1]
-    branches = tuple((lambda c, h=h: h(c, ev, study, truth, root)) for h in table)
-    return lax.switch(
-        jnp.clip(ev.kind, 0, len(table) - 1).astype(jnp.int32), branches, carry
-    )
+    # A handler that is another's body under a different kind is traced once: the
+    # switch holds the distinct bodies and a table maps each kind to its body.
+    bodies = [_SAME_BODY.get(h, h) for h in table]
+    distinct = list(dict.fromkeys(bodies))
+    branches = tuple((lambda c, h=h: h(c, ev, study, truth, root)) for h in distinct)
+    kind_to_branch = jnp.asarray([distinct.index(h) for h in bodies], jnp.int32)
+    index = kind_to_branch[jnp.clip(ev.kind, 0, len(table) - 1).astype(jnp.int32)]
+    return lax.switch(index, branches, carry)
 
 
 HANDLERS = (
@@ -743,3 +762,7 @@ HANDLERS = (
     h_window_end,
 )
 PUBLIC = Audience.OBSERVER | Audience.POLICY
+
+# kinds whose handler runs another handler's body unchanged: a RESULT is a RELEASE, and
+# a FAULT is a CANCEL whose status and refund follow from the event kind
+_SAME_BODY = {h_result: h_release, h_fault: h_cancel}
