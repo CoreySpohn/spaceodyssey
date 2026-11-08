@@ -58,7 +58,7 @@ AWARD_COLUMNS = (
     "remainder",
     "realloc_to",
 )
-EFFECT_OPTIONAL = ("program", *AWARD_COLUMNS)
+EFFECT_OPTIONAL = ("program", *AWARD_COLUMNS, "start_tick")
 
 
 def _text(study):
@@ -473,5 +473,41 @@ def test_a_populated_award_column_set_round_trips():
     )
     node = encode(eff, ("effects",), as_resolver(None))
     assert set(AWARD_COLUMNS) <= set(node)
+    built = load_module.decode(node, ("effects",), as_resolver(None))
+    assert_same_pytree(eff, built)
+
+
+def _commitment_node(commitments):
+    caps = dataclasses.replace(Capacities(), n_commitments=2 if commitments else 0)
+    return encode(effects_none(caps), ("effects",), as_resolver(None))
+
+
+def test_an_effect_table_without_commitments_is_written_without_a_start_tick():
+    """Fails if the default table writes a column its older documents lack."""
+    node = _commitment_node(False)
+    assert node and "start_tick" not in node
+
+
+def test_an_effect_table_document_from_before_commitments_still_loads():
+    """Fails if a document without the start tick is refused or filled non-None."""
+    node = {k: v for k, v in _commitment_node(False).items() if k != "start_tick"}
+    built = load_module.decode(node, ("effects",), as_resolver(None))
+    assert built.start_tick is None
+
+
+def test_an_effect_table_written_with_a_null_start_tick_is_refused():
+    """Control: a null column is the default written out, so it is two documents."""
+    node = {**_commitment_node(False), "start_tick": None}
+    with pytest.raises(DocumentError, match="at its default"):
+        load_module.decode(node, ("effects",), as_resolver(None))
+
+
+def test_a_populated_start_tick_round_trips():
+    """Fails if the start tick is dropped, omitted or rebuilt with another dtype."""
+    caps = dataclasses.replace(Capacities(), n_commitments=2)
+    eff = effects_none(caps)
+    eff = dataclasses.replace(eff, start_tick=eff.start_tick.at[1].set(77))
+    node = encode(eff, ("effects",), as_resolver(None))
+    assert "start_tick" in node
     built = load_module.decode(node, ("effects",), as_resolver(None))
     assert_same_pytree(eff, built)
