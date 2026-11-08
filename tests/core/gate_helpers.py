@@ -194,6 +194,9 @@ ALLOWED = {
         "events.py",
         "return eqx.tree_at(lambda t: tuple(getattr(t, n) for n in names), table, new)",
     ): Allowance(COLUMN_BY_NAME, ("dynamic-getattr",), "_set_row", 1),
+    ("lift.py", "value = getattr(node, field.name)"): Allowance(
+        FIELD_WALK, ("dynamic-getattr",), "lift_traced", 1
+    ),
     ("executors/base.py", "obj = getattr(obj, part)"): Allowance(
         COLUMN_BY_NAME, ("dynamic-getattr",), "_canonical_leaves", 1
     ),
