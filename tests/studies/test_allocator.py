@@ -22,8 +22,9 @@ import numpy as np
 import pytest
 
 from spaceodyssey.core import RunStatus
+from spaceodyssey.core import service as host_service
 from spaceodyssey.core.conformance.invariants import balance_conserved
-from spaceodyssey.core.enums import AdmissionCode, Audience, EffectKind
+from spaceodyssey.core.enums import AdmissionCode, Audience, EffectKind, EventKind
 from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.preflight import preflight
 from spaceodyssey.core.service import Request
@@ -227,10 +228,23 @@ def _world(proposals=al.DEFAULT_PROPOSALS):
 
 
 @functools.cache
-def _run(executor, proposals=al.DEFAULT_PROPOSALS, committee="toy"):
+def _holding(service, monkeypatch):
+    """Hand the carry to a carry-reading committee at every snapshot the host takes."""
+    snapshot = host_service._snapshot_for
+
+    def spy(carry, audience, decision, study):
+        service.hold(carry)
+        return snapshot(carry, audience, decision, study)
+
+    monkeypatch.setattr(host_service, "_snapshot_for", spy)
+
+
+def _run(executor, proposals=al.DEFAULT_PROPOSALS, committee="toy", monkeypatch=None):
     """`(AllocatorRun, committee service, batched result)` of one world."""
     study, truths, roots = _world(proposals)
-    service = al.ToyCommittee() if committee == "toy" else al.CarryCommittee(proposals)
+    service = al.ToyCommittee() if committee == "toy" else al.CarryCommittee()
+    if committee != "toy":
+        _holding(service, monkeypatch)
     acted = run_with_actions(executor, study, truths, roots, N_STEPS, service=service)
     result = acted.result
     run = al.AllocatorRun(
@@ -368,6 +382,16 @@ def _corrupt(run, kind, field):
     return _with_effects(run, edit)
 
 
+def _set_slot(run, slot):
+    """Point the first release step at log slot `slot`."""
+    t = run.trace
+    kind = np.asarray(t.kind)
+    step = int(np.flatnonzero(np.asarray(t.handled) & (kind == EventKind.RELEASE))[0])
+    column = np.asarray(t.log_slot).copy()
+    column[step] = slot
+    return dataclasses.replace(run, trace=eqx.tree_at(lambda x: x.log_slot, t, column))
+
+
 def _flip_admission(run):
     t = run.trace
     step = int(
@@ -409,6 +433,10 @@ def test_replay_fails_when_the_run_is_altered():
         report = al.replay_allocation(study, _set_award(run, field, value))
         assert not report.ok, field
     assert not al.replay_allocation(study, _flip_admission(run)).ok
+    # a release that names a log slot past the end of the log is a failed report
+    for slot in (len(np.asarray(run.carry.log.kind)), 10**6):
+        report = al.replay_allocation(study, _set_slot(run, slot))
+        assert not report.ok, slot
     # a committee that read more than the view cannot reproduce the recorded awards
     assert not al.replay_allocation(study, run, al.CarryCommittee()).ok
 
@@ -487,11 +515,11 @@ def test_the_committee_reads_only_released_records():
 
 
 @pytest.mark.slow  # the control: the same perturbations, a carry-reading committee
-def test_a_committee_that_reads_unreleased_records_fails_the_perturbation():
-    base, _, _ = _run("host", committee="carry")
+def test_a_committee_that_reads_unreleased_records_fails_the_perturbation(monkeypatch):
+    base, _, _ = _run("host", committee="carry", monkeypatch=monkeypatch)
     ref = _awards(base)
     assert ref.size
     for index in (*OBSERVER_ONLY, *PENDING):
         proposals = _perturbed(index, 1000.0)
-        run, _, _ = _run("host", proposals, committee="carry")
+        run, _, _ = _run("host", proposals, committee="carry", monkeypatch=monkeypatch)
         assert not np.array_equal(_awards(run), ref), index
