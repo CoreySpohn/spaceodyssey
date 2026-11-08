@@ -26,7 +26,7 @@ repos:
       - id: name-tests-test
         args: [--pytest-test-first]
         # Support modules contain fixtures and helpers, not standalone test files.
-        exclude: ^tests/(doubles|codec/run_cases|studies/survey_helpers|anchors/reference_geometry|core/refresh_helpers|core/((acquisition|award|battery|conformance|contract|draw|gate|kit|leak|lint|parity|prior|program|record|refund|status)_helpers|helpers|corpus|gradients|mutants|preflight_cases))\.py$
+        exclude: ^tests/(doubles|codec/run_cases|studies/survey_helpers|anchors/reference_geometry|core/refresh_helpers|core/((acquisition|award|battery|commitment|conformance|contract|draw|gate|kit|leak|lint|parity|prior|program|record|refund|status)_helpers|helpers|corpus|gradients|mutants|preflight_cases))\.py$
       - id: end-of-file-fixer
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.3
