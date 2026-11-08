@@ -94,6 +94,9 @@ jobs:
         run: |
           # Two workers, one file each: the quick tier is compile-bound and a
           # single process runs about 3x slower here than on a laptop.
+          # radis writes its user config on first import; do it once here so two
+          # workers do not race on a half-written file during collection.
+          python -c "import radis"
           pytest tests/ -m "not slow" -n 2 --dist loadfile -ra --tb=short \
             --timeout=300 --fail-slow=60s \
             --durations=15 --durations-min=1.0 \
