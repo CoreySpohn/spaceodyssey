@@ -69,6 +69,16 @@ class Ledger(eqx.Module):
     realloc_row: jax.Array | None = None
     granted: jax.Array | None = None
     lapsed: jax.Array | None = None
+    # The commitment table, present only while commitments are on (a slot each, I64[K]):
+    # the `CommitState`, lane, program, start and end tick and the commitment's semantic
+    # index among those of its program and lane; `cm_count` (I64[P, L]) counts them.
+    cm_state: jax.Array | None = None
+    cm_lane: jax.Array | None = None
+    cm_program: jax.Array | None = None
+    cm_start: jax.Array | None = None
+    cm_end: jax.Array | None = None
+    cm_index: jax.Array | None = None
+    cm_count: jax.Array | None = None
 
 
 def charge_parts(study, channel_index):
