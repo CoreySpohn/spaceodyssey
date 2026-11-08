@@ -163,6 +163,7 @@ LOCATORS = {
     "world_draw_without_world": ("world_source", None, "key_coords", ()),
     "duplicate_channel_ids": ("channels", None, "id", (1,)),
     "allocate": ("policy", 0, "effects", ()),
+    "commitments_with_awards": ("caps", None, "n_commitments", ()),
     "gradients_on_host": ("policy", 0, "requires", ()),
     "host_only_policy_on_compiled": ("policy", 0, "executors", ()),
     "charge_differs_from_cost": ("channels", None, "charge", (0, 0)),
