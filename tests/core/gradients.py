@@ -149,6 +149,7 @@ def d1_reverse_and_fd(
     curve is smallest; `slope` is the least-squares slope of log10 rel_err on log10
     h over h = 1e-1 to 1e-4, nan when fewer than two h fall in that range.
     """
+    width = jnp.asarray(width, F64)  # an array, so a new width does not recompile
     truth0 = jax.tree_util.tree_map(lambda a: a[0], truths)
     study = replay_study(study, truth0, roots[0], n_steps)
     dyn, static = eqx.partition(study.design, eqx.is_inexact_array)
@@ -294,9 +295,13 @@ def d3_pathwise_and_analytic(
     out, gaps = {}, []
     for w in widths:
         est_w = np.asarray(
-            _per_world_grad(dyn, static, study, truths, roots, float(w), n_steps)
+            _per_world_grad(
+                dyn, static, study, truths, roots, jnp.asarray(w, F64), n_steps
+            )
         )
-        gaps.append(np.asarray(_gap_values(study, truths, roots, float(w), n_steps)))
+        gaps.append(
+            np.asarray(_gap_values(study, truths, roots, jnp.asarray(w, F64), n_steps))
+        )
         z, se, power = paired_z(est_w, ref_w)
         out[w] = dict(
             estimate=float(est_w.mean()),

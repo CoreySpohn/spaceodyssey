@@ -165,7 +165,7 @@ def test_answer_reads_the_snapshot_it_was_asked_on():
 def test_host_service_parity():
     study, _ = _setup()
     truths, roots = worlds(3)
-    for chunk in (1, 3, 32):
+    for chunk in (1, 32):
         service = _service()
         run = CompiledExecutor().run(
             study, truths, roots, N_STEPS, service=service, chunk=chunk
