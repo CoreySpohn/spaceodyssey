@@ -29,11 +29,11 @@ marks the last commit that has it.
 - `plugins` (entry-point resolution used by the codec) and the `core`, `codec`, `adapters`
   and `studies` packages, unchanged.
 - The typed byte encoding and its SHA-256 digest, which the golden histories pin. They moved
-  from `inputs` to `spaceodyssey.core.digest` with the same framing, tags and magic bytes, so
+  from `inputs` to `spaceodyssey.codec.digest` with the same framing, tags and magic bytes, so
   every golden digest is unchanged. The plan-summary and truth tags, the snapshot copy and the
   tagged JSON form were used only by the removed stack and went with it; the byte vectors,
   refusal paths and normalization cases that apply to plain values moved to
-  `tests/core/test_digest.py`.
+  `tests/codec/test_digest.py`.
 - `tests/doubles.py` keeps `ToyEpochPhotometry`, used by the realize-context tests.
 
 ## Moved and trimmed

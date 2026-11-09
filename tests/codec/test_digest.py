@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from spaceodyssey.core.digest import CODEC, MAGIC, digest, encode
+from spaceodyssey.codec.digest import CODEC, MAGIC, digest, encode
 
 VECTORS = [
     (
