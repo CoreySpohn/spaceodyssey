@@ -625,8 +625,8 @@ def config_timeline(study: Study):
                 ERROR,
                 "assets.config_switch_ticks",
                 why,
-                "declare max_config_switches and one strictly increasing row of switch ticks "
-                "inside the horizon per asset, padded with CONFIG_PAD",
+                "declare max_config_switches and one strictly increasing row of switch "
+                "ticks inside the horizon per asset, padded with CONFIG_PAD",
                 subject="assets",
                 member="config_switch_ticks",
                 entry=entry,
