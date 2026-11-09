@@ -150,4 +150,5 @@ def test_decrement_mutant_is_caught():
     ops = [("observe", 0, 0), ("cancel", 0), ("observe", 0, 0)]
     assert drive(ops, steps=[0, 3, 0]) == []
     problems = drive(ops, advance=decrementing_advance_jit, steps=[0, 3, 0])
-    assert problems, "a cancel that frees its index must be detected"
+    assert any(problem[1] == "decrement" for problem in problems), problems
+    assert any(problem[0] == "dense" for problem in problems), problems

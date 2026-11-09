@@ -31,9 +31,10 @@ def test_overflow_sets_status(executor, name):
     assert res.status.tolist() == [RunStatus.OVERFLOW] * 2
     assert not res.complete.any()
     assert res.carry.overflow_mask.tolist() == [int(bit)] * 2
-    h = res.history(0)
-    assert h.status == RunStatus.OVERFLOW and not h.complete
-    assert h.overflow_mask == bit
+    for world in range(2):
+        h = res.history(world)
+        assert h.status == RunStatus.OVERFLOW and not h.complete
+        assert h.overflow_mask == bit
 
 
 @pytest.mark.parametrize("executor", EXECUTORS, ids=lambda e: e.__name__)
