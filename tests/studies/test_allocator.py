@@ -257,6 +257,7 @@ def test_admitted_observations_must_match_the_observation_records():
     assert al.observation_failures(log, both[:1])  # a record with no admission
     assert al.observation_failures(log, [*both, (12, 0, 500, 50)])  # no record
     assert al.observation_failures(log, [*both, both[0]])  # one record, two
+    assert al.observation_failures(log, [*both, (10, 0, 450, 100)])  # shared record
     assert al.observation_failures(
         log, [(10, 0, 200, 100), (11, 1, 500, 150)]
     )  # swapped

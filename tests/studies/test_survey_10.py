@@ -31,6 +31,7 @@ from spaceodyssey.core import RunStatus
 from spaceodyssey.core.enums import AdmissionCode, Audience, EffectKind
 from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.studies import allocator as al
+from spaceodyssey.studies import toy
 from tests.core.helpers import worlds
 from tests.studies.survey_helpers import run_with_actions, same_histories
 
@@ -370,6 +371,19 @@ def _bend_trace(r, field):
     )
 
 
+def _drop_measurement(r):
+    """Invalidate the first measurement record, which an admitted request started."""
+    log = r.carry.log
+    (first, *_) = np.flatnonzero(
+        np.asarray(log.valid) & (np.asarray(log.kind) == toy.RECORD_MEASUREMENT)
+    )
+    valid = np.asarray(log.valid).copy()
+    valid[first] = False
+    return dataclasses.replace(
+        r, carry=eqx.tree_at(lambda c: c.log.valid, r.carry, valid)
+    )
+
+
 def _bend_proposal(r, index):
     """Change the request of the recorded proposal scripted at `index`."""
     log = r.carry.log
@@ -423,6 +437,7 @@ def test_replay_reproduces_the_run_and_fails_without_a_recorded_award(runs):
         ("trace window end", _bend_trace(run, "alloc_until")),
         ("trace recipient", _bend_trace(run, "alloc_recipient")),
         ("recorded proposal", _bend_proposal(run, 0)),
+        ("measurement record dropped", _drop_measurement(run)),
     ):
         assert not al.replay_allocation(study, edited).ok, name
     # a committee that read the carry cannot reproduce the recorded awards

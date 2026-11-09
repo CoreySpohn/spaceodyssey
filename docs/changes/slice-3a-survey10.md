@@ -42,7 +42,7 @@ count it relies on is asserted nonzero.
   amount, flipping the admission code of an `Allocate`, `Observe`, `Query`, `Wait` or `Stop`,
   changing the amount,
   window start, window end or recipient retained in the trace for an `Allocate`, changing a
-  recorded proposal, and replaying with the carry-reading committee.
+  recorded proposal, dropping a measurement record, and replaying with the carry-reading committee.
 - **Refused observations.** A run releases the unreleased proposal at tick 180 and raises the
   program-0 request written at tick 400 from 2 to 20. Program 0 then holds 0.5 at the first query
   and 2.5 at the second, so its first `Observe` (cost 1) is refused `NO_FUNDS` and its second is
@@ -99,15 +99,22 @@ the real code. Fifteen mutants from an independent review all fail the file exce
 | every proposal addressed to the policy | (a), (b), (d) |
 | every proposal released at write time | (a), (b), (d) |
 
+Nine mutants of the replay reconciliation, added after a second review, are all killed:
+skipping the observation reconciliation (survey, (d)); counting records on the wrong channel,
+letting an admitted request own no record, or letting a record belong to two requests (the
+`observation_failures` unit test, and (d) for the channel); skipping the `Query`, `Wait` or `Stop`
+admission check (each only by (d)); skipping the funds check, and rejecting every refused
+`Observe` (both by (d), through the refused-observation runs).
+
 The survivor stays alive because no study produces a refused `Allocate`: the two award windows
 (200 to 450 and 500 to 750) never overlap, and the window length and query ticks are constants of
-the toy committee and policy, not data. Skipping the new observation reconciliation also fails (d).
+the toy committee and policy, not data. 
 
 ## Tiers and cost
 
 All five tests are medium with a stated reason. Cold, with caches off, the survey file alone takes
-about 31 s (9 passed, 274 programs, budget 326). The host tests alone take about 17 s and the
-compiled tests about 18 s; each fixture is about 12.6 s (host) and 13.4 s (compiled), and the eager
+about 31 s (9 passed, 274 programs, budget 326). The host tests alone take about 16 s and the
+compiled tests about 17 s; each fixture is about 12.6 s (host) and 13.4 s (compiled), and the eager
 replays add about 2 s each.
 
 ## Notes
