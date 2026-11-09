@@ -238,7 +238,7 @@ values rather than inventing a before/after memory comparison.
 `ruff check .`, changed-file formatting, the internal-reference scanner, ASCII
 validation of changed Python, and `git diff --check` pass. A repository-wide
 formatter check also reports an existing fenced-stub formatting issue in the
-unrelated `docs/changes/slice-2-t1b.md`; that file is left untouched. Core sources
+unrelated `changes/slice-2-t1b.md`; that file is left untouched. Core sources
 and golden histories have no diff. No commit or push was made.
 
 ## Verification of replay activation

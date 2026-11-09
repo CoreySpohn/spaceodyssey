@@ -76,12 +76,12 @@ names, and that the codec and plugin entry points import.
   resolves relative imports against the importing file, catches removed root names
   (`from spaceodyssey import Ledger, Mission, run`), and parses `pyproject.toml`
   entry-point targets, flagging a target in a deleted module or in a module that does
-  not exist. Only the prose of `docs/changes` is exempt; Python and notebook code is
+  not exist. Only the prose of `changes` is exempt; Python and notebook code is
   always scanned. The scan asserts that its sentinel files and a minimum number of
   Python files were reached, so an empty scan fails.
 - Negative controls run the whole scanner on a temporary tree with one injected
   violation per case: plain, from-module, from-package, root name, `importlib` string,
-  three relative forms, markdown code, a broken file under `docs/changes`, a notebook,
+  three relative forms, markdown code, a broken file under `changes`, a notebook,
   and entry points to a deleted and a missing module. Valid imports and history prose
   must pass.
 - `tests/test_docs_names.py` (B5): README, `docs/` and diagrams, plus the module, class
@@ -138,7 +138,7 @@ from the job summary after the merge to main: the CI workflow does not run on a 
   entry-point object paths. Negative controls cover direct and aliased attributes,
   removed root names and modules after the colon, and script targets.
 - Only `.md`, `.rst` and `.txt` change records are exempt. Negative controls cover
-  a `docs/changes/pyproject.toml` entry point to `spaceodyssey.registry:Registry`,
+  a `changes/pyproject.toml` entry point to `spaceodyssey.registry:Registry`,
   YAML and other configuration files; Python and notebooks remain scanned.
 - The docs gate shares the removed root-name inventory with the import gate,
   including `Mission` and `Ledger`, and checks qualified forms. A method-docstring

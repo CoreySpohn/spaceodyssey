@@ -2,7 +2,7 @@
 # upstream.yml, whose canary tests newer releases). The golden history pins
 # (tests/core/test_golden_histories.py) are bit-exact only under one jaxlib: float64 normal
 # draws round differently between jaxlib releases. The goldens read the version from this
-# file. Bump it in a commit that changes nothing else; docs/changes/golden-jax-pin.md says
+# file. Bump it in a commit that changes nothing else; changes/golden-jax-pin.md says
 # what to do when the pins move under the new release.
 jax==0.12.0.1
 jaxlib==0.12.0.1

@@ -76,7 +76,7 @@ one command runs them, and adds the checks no other file makes.
 ### Which commits are Slice 2b (K2)
 
 - **Range.** From the pins' source commit `96a6447` (the R0a record) to the newest
-  commit that touches a `docs/changes/slice-2b-*.md` record. Every task ends with its
+  commit that touches a `changes/slice-2b-*.md` record. Every task ends with its
   record, so the slice ends there; later work on `main` is not judged.
 - **Other work in the range** is listed in the gate by full sha with its subject
   prefix and its change record: physical PT4 (8 commits, which landed between the pin

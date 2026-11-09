@@ -28,12 +28,12 @@ on a cold runner. No file under `src/` changed.
   `tests/core/refresh_helpers.py` and `tests/anchors/reference_geometry.py` are support
   modules, not test files. They join the hook's exclude list, which already names the
   other support modules.
-- **ruff-format.** The hook reformats Python fences in `docs/changes/*.md`; the one
+- **ruff-format.** The hook reformats Python fences in `changes/*.md`; the one
   rewrite (`slice-2-t1b.md`) is committed.
-- **Executed fences.** Three fences in `docs/changes` fail when run
+- **Executed fences.** Three fences in `changes` fail when run
   (`slice-2-t1b.md` line 155, `slice-2-t6.md` line 27, `slice-2b-r0a.md` line 109).
   They are design sketches in change records, not user examples, so `ci.yml` passes
-  `--ignore=docs/changes` to the markdown-docs run. README and the user docs are still
+  `--ignore=changes` to the markdown-docs run. README and the user docs are still
   executed (two fences, both pass). Marking each sketch `python notest` was rejected: it
   would have to be repeated for every future record.
 
@@ -43,7 +43,7 @@ hosted runner:
 | Step | Result |
 |---|---|
 | `pre-commit run --all-files` (with `SKIP=conventional-pre-commit`) | all hooks pass |
-| `pytest README.md docs --ignore=docs/changes --markdown-docs --markdown-docs-syntax=superfences` | 2 passed |
+| `pytest README.md docs --ignore=changes --markdown-docs --markdown-docs-syntax=superfences` | 2 passed |
 | `uvx zizmor --format=github --min-severity=medium .github` | clean |
 | `uvx codespell --check-hidden` (without the local `.ruff_cache`) | clean |
 | `uvx deptry src/spaceodyssey` | no dependency issues |
