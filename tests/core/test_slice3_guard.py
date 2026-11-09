@@ -279,3 +279,94 @@ def test_control_a_lookup_that_returns_zero_leaves_the_draws_alone(
         assert _same(key_runs[ON_ASSET_1, 1], _state(_run(ON_ASSET_1, 2)))
     finally:
         jax.clear_caches()
+
+
+# These paths state each feature's contract independently of the executor inventory.
+FEATURE_PATHS = {
+    "refunds": (
+        "carry.log.nonrefundable",
+        "carry.log.refund_index",
+        "carry.log.award_gen",
+        "carry.ledger.refund_ignored",
+    ),
+    "awards": (
+        "carry.ledger.win_state",
+        "carry.ledger.win_gen",
+        "carry.ledger.realloc_row",
+        "carry.ledger.granted",
+        "carry.ledger.lapsed",
+        "carry.ledger.lane_award_gens",
+        "carry.ledger.lane_award_rules",
+        "carry.ledger.lane_award_tos",
+        "carry.log.award_gens",
+        "carry.log.award_rules",
+        "carry.log.award_tos",
+        "trace.alloc_amount",
+        "trace.alloc_from",
+        "trace.alloc_until",
+        "trace.alloc_recipient",
+        "trace.alloc_remainder",
+        "trace.alloc_to",
+    ),
+    "commitments": tuple(
+        f"carry.ledger.cm_{name}"
+        for name in ("state", "lane", "program", "start", "end", "index", "count")
+    ),
+    "balances": ("carry.query_refused",),
+}
+
+
+@eqx.filter_jit
+def _feature_state(study, truth):
+    """Build the carry, trace and both views in one compiled function."""
+    carry = init_carry(study, truth)
+    return (
+        carry,
+        empty_trace(study.caps),
+        snapshot_view(carry, Audience.POLICY, study.caps),
+        snapshot_view(carry, Audience.OBSERVER, study.caps),
+    )
+
+
+@pytest.mark.parametrize("feature", list(FEATURE_PATHS))
+def test_each_feature_owns_only_its_expected_leaves(feature):
+    """Fails if enabling one feature omits its leaves or adds unrelated leaves to the
+    carry or canonical history.
+    """
+    caps = {
+        "refunds": Capacities(refunds=True),
+        "awards": Capacities(awards=True),
+        "commitments": Capacities(n_commitments=2),
+        "balances": Capacities(snapshot_balances=True),
+    }[feature]
+    study = toy.survey_1(caps=caps)
+    truth, _ = one_world()
+    carry, trace, policy_view, observer_view = _feature_state(study, truth)
+    leaves = _leaves_of(carry, trace)
+    for owner, paths in FEATURE_PATHS.items():
+        for path in paths:
+            leaf = _by_path(carry, path, trace)
+            if owner == feature:
+                assert leaf is not None and np.asarray(leaf).size > 0, path
+                assert path in leaves, path
+            else:
+                assert leaf is None or np.asarray(leaf).size == 0, path
+                assert path not in leaves, path
+    for path in (
+        "carry.ev.program",
+        "carry.log.program",
+        "carry.request.program",
+        "carry.refresh.program",
+        "carry.ledger.program_closed",
+        "trace.program",
+    ):
+        assert _by_path(carry, path, trace) is None, path
+        assert path not in leaves, path
+    for audience, view in (
+        (Audience.POLICY, policy_view),
+        (Audience.OBSERVER, observer_view),
+    ):
+        for name in ("balance", "balance_q", "balance_rows"):
+            assert (getattr(view, name) is not None) == (
+                feature == "balances" and audience == Audience.POLICY
+            )

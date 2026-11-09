@@ -215,7 +215,8 @@ def import_study(mistake=None):
     unverified without a document), `"pedigree"` (an in-table pedigree entry naming
     an absent source), `"index"` (a local index repeated for one subject on one
     channel) or
-    `"offset"` (a row that ends after its release).
+    `"offset"` (a row that ends after its release), `"start_positive"` (a start
+    after release), or `"start_after_end"` (a nonpositive start after its end).
     """
     pedigree = [(), ()]
     if mistake == "pedigree":
@@ -227,8 +228,18 @@ def import_study(mistake=None):
         kind=[toy.RECORD_MEASUREMENT] * 2,
         audience=[3, 3],
         payload=[[1.0], [2.0]],
-        start_offset=[-5, -5],
-        end_offset=[3 if mistake == "offset" else -1, -1],
+        start_offset=[
+            3
+            if mistake == "start_positive"
+            else -1
+            if mistake == "start_after_end"
+            else -5,
+            -5,
+        ],
+        end_offset=[
+            3 if mistake == "offset" else -2 if mistake == "start_after_end" else -1,
+            -1,
+        ],
         pedigree=pedigree,
         source_index=[0, 1],
         upstream_hash="ab" * 32 if mistake == "upstream" else "",
@@ -314,6 +325,21 @@ SEEDED = {
         lambda: _channel_edit(pricing=jnp.full((3, 3), 3, I64)),
         None,
     ),
+    "surcharge_without_refunds": (
+        C.X002,
+        lambda: _channel_edit(surcharge=jnp.zeros((3, 3)).at[1, 2].set(2.0)),
+        None,
+    ),
+    "deadline_without_refunds": (
+        C.X002,
+        lambda: _channel_edit(refund_deadline_ticks=jnp.asarray([0, 0, 5], I64)),
+        None,
+    ),
+    "failure_kind_unregistered": (
+        C.W002,
+        lambda: _refund_channels(failure_kind=jnp.asarray([-1, -1, 99], I64)),
+        None,
+    ),
     "failure_kind_without_refunds": (
         C.X002,
         lambda: _channel_edit(failure_kind=jnp.asarray([-1, -1, 2], I64)),
@@ -322,6 +348,26 @@ SEEDED = {
     "failure_kind_unreadable": (
         C.W002,
         lambda: _refund_channels(failure_kind=jnp.asarray([-1, -1, 0], I64)),
+        None,
+    ),
+    "award_recipient_negative": (
+        C.W001,
+        lambda: _award_policy(awards=((-1, 50, 80),)),
+        None,
+    ),
+    "award_start_negative": (
+        C.W001,
+        lambda: _award_policy(awards=((2, -1, 80),)),
+        None,
+    ),
+    "award_bounds_reversed": (
+        C.W001,
+        lambda: _award_policy(awards=((2, 80, 50),)),
+        None,
+    ),
+    "award_until_past_max_tick": (
+        C.W001,
+        lambda: _award_policy(awards=((2, 50, Capacities().max_tick + 1),)),
         None,
     ),
     "award_window_empty": (C.W001, lambda: _award_policy(awards=((2, 50, 50),)), None),
@@ -359,6 +405,7 @@ SEEDED = {
         ),
         None,
     ),
+    "program_negative": (C.P001, lambda: _policy(programs=(-1,)), None),
     "program_out_of_range": (C.P001, lambda: _policy(programs=(1,)), None),
     "channel_without_order": (C.T002, _dropped_order, None),
     "channel_order_out_of_range": (
@@ -370,6 +417,8 @@ SEEDED = {
     "import_upstream_unverified": (C.D004, lambda: import_study("upstream"), None),
     "import_pedigree_absent": (C.D005, lambda: import_study("pedigree"), None),
     "import_index_repeated": (C.D006, lambda: import_study("index"), None),
+    "import_start_positive": (C.D007, lambda: import_study("start_positive"), None),
+    "import_start_after_end": (C.D007, lambda: import_study("start_after_end"), None),
     "import_offset_positive": (C.D007, lambda: import_study("offset"), None),
     "priors_summarize_one_source": (
         C.D008,
@@ -406,6 +455,26 @@ CLEAN = {
             effects=frozenset({EffectKind.ALLOCATE}),
             awards=((2, 50, 80), (2, 80, 90), (3, 50, 80)),
         ),
+        (),
+    ),
+    "charge_with_refunds": (
+        lambda: _refund_channels(charge=2.0 * jnp.ones((3, 3))),
+        (),
+    ),
+    "pricing_with_refunds": (
+        lambda: _refund_channels(pricing=jnp.full((3, 3), 3, I64)),
+        (),
+    ),
+    "surcharge_with_refunds": (
+        lambda: _refund_channels(surcharge=jnp.zeros((3, 3)).at[1, 2].set(2.0)),
+        (),
+    ),
+    "deadline_with_refunds": (
+        lambda: _refund_channels(refund_deadline_ticks=jnp.asarray([0, 0, 5], I64)),
+        (),
+    ),
+    "failure_kind_with_refunds": (
+        lambda: _refund_channels(failure_kind=jnp.asarray([-1, -1, 2], I64)),
         (),
     ),
     "stated_clean_components": (

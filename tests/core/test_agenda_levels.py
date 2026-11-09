@@ -1,9 +1,11 @@
 """Agenda levels: numbered, nested effect masks intersected with the phase masks."""
 
+import dataclasses
 import itertools
 
 import equinox as eqx
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from spaceodyssey import core
@@ -59,6 +61,44 @@ def test_allocate_outside_the_level_is_forbidden_and_changes_nothing(level, code
     assert int(codes[0]) == code
     r = core.tree_equal_report(c0, c1)
     assert r["max_int_diff"] == 0 and r["max_abs"] == 0.0
+
+
+@pytest.mark.parametrize("level", [1, 3])
+def test_awards_enabled_allocate_obeys_the_agenda_level(level):
+    """Fails if awards bypass level 1 or a valid Allocate at level 3 fails to credit
+    its recipient.
+    """
+    from tests.core.award_helpers import award_study
+
+    study = with_levels(
+        award_study((), (), caps_extra={"snapshot_balances": True}), (level,)
+    )
+    before = carry0(study)
+    effects = core.effects_none(study.caps)
+    effects = dataclasses.replace(
+        effects,
+        kind=effects.kind.at[0].set(EffectKind.ALLOCATE),
+        amount=effects.amount.at[0, 1].set(5.0),
+        recipient=effects.recipient.at[0].set(2),
+        window_from=effects.window_from.at[0].set(30),
+        window_until=effects.window_until.at[0].set(200),
+    )
+    after, codes = admit_j(before, effects, study)
+    assert int(codes[0]) == (
+        AdmissionCode.FORBIDDEN if level == 1 else AdmissionCode.OK
+    )
+    if level == 1:
+        report = core.tree_equal_report(before, after)
+        assert (
+            report["structure_equal"]
+            and report["max_int_diff"] == 0
+            and report["max_abs"] == 0.0
+        )
+    else:
+        expected = np.asarray(before.ledger.balance).copy()
+        expected[2, 1] += 5.0
+        assert np.array_equal(after.ledger.balance, expected)
+        assert float(after.ledger.granted[2, 1]) == 5.0
 
 
 def test_level_masks_match_the_table_and_are_nested():

@@ -184,7 +184,11 @@ def _fingerprint_rules():
     on, off = _study(True, 0.5), _study(False)
     c_on, c_off = _carry(True, 0.5), _carry(False)
     base = _fp(on, c_on)
-    assert snapshot.snapshot_view(c_off, POLICY, off.caps).balance is None
+    off_view = snapshot.snapshot_view(c_off, POLICY, off.caps)
+    assert all(
+        getattr(off_view, name) is None
+        for name in ("balance", "balance_q", "balance_rows")
+    )
     # the integer view joins the fingerprint only when balances are on
     assert base != _fp(off, c_off)
     assert _fp(off, _bumped(c_off, 3.0)) == _fp(off, c_off)
@@ -198,7 +202,11 @@ def _fingerprint_rules():
         (off, c_off),
     ):
         assert _fp(*observer_view, OBSERVER) == _fp(off, c_off, OBSERVER)
-    assert snapshot.snapshot_view(c_on, OBSERVER, on.caps).balance is None
+    observer = snapshot.snapshot_view(c_on, OBSERVER, on.caps)
+    assert all(
+        getattr(observer, name) is None
+        for name in ("balance", "balance_q", "balance_rows")
+    )
 
 
 def test_balances_move_the_policy_fingerprint_only_when_on_and_never_the_observers():

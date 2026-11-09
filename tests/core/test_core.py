@@ -114,11 +114,33 @@ def test_settle_exactly_once():
 
 
 def test_unsupported_effect_refused_without_change():
+    """Fails if Allocate changes an awards-off carry or fails to credit a valid awards-
+    on recipient.
+    """
     c0 = carry0()
     c2, code = admit_j(c0, effects_of(EffectKind.ALLOCATE), STUDY)
     r = sch.tree_equal_report(c0, c2)
     assert int(code[0]) == AdmissionCode.UNSUPPORTED
     assert r["max_abs"] == 0 and r["max_int_diff"] == 0
+
+    from tests.core.award_helpers import award_study
+
+    enabled = award_study((), (), caps_extra={"snapshot_balances": True})
+    before = carry0(enabled)
+    effects = core.effects_none(enabled.caps)
+    effects = dataclasses.replace(
+        effects,
+        kind=effects.kind.at[0].set(EffectKind.ALLOCATE),
+        amount=effects.amount.at[0, 1].set(5.0),
+        recipient=effects.recipient.at[0].set(2),
+        window_from=effects.window_from.at[0].set(30),
+        window_until=effects.window_until.at[0].set(200),
+    )
+    after, accepted = admit_j(before, effects, enabled)
+    assert int(accepted[0]) == AdmissionCode.OK
+    expected = before.ledger.balance.at[2, 1].add(5.0)
+    assert jnp.array_equal(after.ledger.balance, expected)
+    assert float(after.ledger.granted[2, 1]) == 5.0
 
 
 def test_no_funds_and_lane_busy_codes():

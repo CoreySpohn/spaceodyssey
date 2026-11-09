@@ -18,6 +18,7 @@ def codes(findings):
 
 @pytest.mark.parametrize("name", sorted(SEEDED))
 def test_seeded_mistake_is_caught(name):
+    """Fails if a seeded mistake does not report its single expected code."""
     code, make, executor = SEEDED[name]
     found = preflight(make(), executor)
     assert codes(found) == [str(code)], [str(f) for f in found]
@@ -28,6 +29,7 @@ def test_seeded_mistake_is_caught(name):
 
 @pytest.mark.parametrize("name", sorted(CLEAN))
 def test_correct_study_is_clean(name):
+    """Fails if a valid configuration reports an unexpected finding."""
     make, expected = CLEAN[name]
     found = preflight(make())
     assert codes(found) == sorted(str(c) for c in expected), [str(f) for f in found]
@@ -175,8 +177,15 @@ LOCATORS = {
     "host_only_policy_on_compiled": ("policy", 0, "executors", ()),
     "charge_differs_from_cost": ("channels", None, "charge", (0, 0)),
     "pricing_without_refunds": ("channels", None, "pricing", (0, 0)),
+    "surcharge_without_refunds": ("channels", None, "surcharge", (1, 2)),
+    "deadline_without_refunds": ("channels", None, "refund_deadline_ticks", (2,)),
+    "failure_kind_unregistered": ("channels", None, "failure_kind", (2,)),
     "failure_kind_without_refunds": ("channels", None, "failure_kind", (2,)),
     "failure_kind_unreadable": ("channels", None, "failure_kind", (2,)),
+    "award_recipient_negative": ("policy", 0, "awards", (0,)),
+    "award_start_negative": ("policy", 0, "awards", (0,)),
+    "award_bounds_reversed": ("policy", 0, "awards", (0,)),
+    "award_until_past_max_tick": ("policy", 0, "awards", (0,)),
     "award_window_empty": ("policy", 0, "awards", (0,)),
     "award_row_out_of_range": ("policy", 0, "awards", (0,)),
     "award_windows_overlap": ("policy", 0, "awards", (1,)),
@@ -185,6 +194,7 @@ LOCATORS = {
     "disruptive_effect": ("policy", 0, "disruptive", ()),
     "balance_quantum_unread": ("caps", None, "balance_quantum", ()),
     "drain_below_campaign": ("policy", 0, "stops", (1,)),
+    "program_negative": ("policy", 0, "programs", (0,)),
     "program_out_of_range": ("policy", 0, "programs", (0,)),
     "channel_without_order": ("channels", None, "coincident_order", ()),
     "channel_order_out_of_range": ("channels", None, "coincident_order", (2,)),
@@ -192,6 +202,8 @@ LOCATORS = {
     "import_upstream_unverified": ("process", None, "table.upstream_hash", ()),
     "import_pedigree_absent": ("process", None, "table.pedigree.source_index", (1, 0)),
     "import_index_repeated": ("process", None, "table.local_index", (1,)),
+    "import_start_positive": ("process", None, "table.start_offset", (0,)),
+    "import_start_after_end": ("process", None, "table.start_offset", (0,)),
     "import_offset_positive": ("process", None, "table.end_offset", (0,)),
     "priors_summarize_one_source": (
         "observer",

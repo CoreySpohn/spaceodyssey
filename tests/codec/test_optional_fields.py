@@ -154,11 +154,19 @@ def test_a_missing_optional_field_loads_at_its_default():
     [
         (("key_version",), 1),
         (("caps", "awards"), False),
+        (("caps", "refunds"), False),
         (("caps", "n_commitments"), 0),
         (("caps", "snapshot_balances"), False),
         (("caps", "balance_quantum"), 1.0),
     ],
-    ids=["study", "caps-bool", "caps-int", "caps-balances", "caps-quantum"],
+    ids=[
+        "study",
+        "caps-bool",
+        "caps-refunds",
+        "caps-int",
+        "caps-balances",
+        "caps-quantum",
+    ],
 )
 def test_a_field_written_at_its_default_is_refused(path, value):
     """Fails if a second document for the same study loads: it would hash apart."""
@@ -184,9 +192,9 @@ def test_a_wrong_typed_optional_value_is_refused_not_taken_for_the_default():
         load_study(json.dumps(doc), TOY_KINDS)
 
 
-@pytest.mark.parametrize("name", ["snapshot_balances", "balance_quantum"])
+@pytest.mark.parametrize("name", CAP_FIELDS)
 def test_an_explicit_null_balance_field_is_refused(name):
-    """Fails if `null` loads as the default of a balance field."""
+    """Fails if null loads as the default of an optional capacity field."""
     caps = Capacities(snapshot_balances=True, balance_quantum=0.5)
     doc = _doc(toy.survey_1(caps=caps))
     doc["study"]["caps"][name] = None
@@ -329,6 +337,7 @@ def test_a_populated_program_column_round_trips():
     assert "program" in node
     built = load_module.decode(node, ("effects",), as_resolver(None))
     assert_same_pytree(eff, built)
+    assert encode(built, ("effects",), as_resolver(None)) == node
 
 
 def _refund_channel_study():
@@ -399,9 +408,10 @@ def test_a_record_document_from_before_refunds_still_loads():
     assert all(getattr(built, n) is None for n in RECORD_FIELDS)
 
 
-def test_a_record_written_with_a_null_refund_column_is_refused():
-    """Control: a null column is the default written out, so it is two documents."""
-    node = {**_record_node(False), "nonrefundable": None}
+@pytest.mark.parametrize("name", ["nonrefundable", "refund_index", "award_gen"])
+def test_a_record_written_with_a_null_refund_column_is_refused(name):
+    """Fails if an explicit null refund column is accepted as an omitted default."""
+    node = {**_record_node(False), name: None}
     with pytest.raises(DocumentError, match="at its default"):
         load_module.decode(node, ("record",), _RECORD_KINDS)
 
@@ -421,6 +431,7 @@ def test_a_populated_record_refund_columns_round_trip():
         record_none(caps),
         nonrefundable=jnp.full(caps.n_resources, 2.0),
         refund_index=jnp.asarray(3, I64),
+        award_gen=jnp.asarray(7, I64),
         award_gens=jnp.arange(caps.n_resources, dtype=I64),
         award_rules=jnp.arange(caps.n_resources, dtype=I64) % 4,
         award_tos=jnp.arange(caps.n_resources, dtype=I64) + 1,
@@ -429,6 +440,7 @@ def test_a_populated_record_refund_columns_round_trip():
     assert set(RECORD_FIELDS) <= set(node)
     built = load_module.decode(node, ("record",), _RECORD_KINDS)
     assert_same_pytree(rec, built)
+    assert encode(built, ("record",), _RECORD_KINDS) == node
 
 
 # ---- the award columns of an effect table (S5) --------------------------------------
@@ -468,13 +480,17 @@ def test_a_populated_award_column_set_round_trips():
     eff = dataclasses.replace(
         eff,
         amount=eff.amount.at[0, 0].set(4.0),
+        window_from=eff.window_from.at[0].set(3),
         window_until=eff.window_until.at[0].set(9),
+        recipient=eff.recipient.at[0].set(2),
+        realloc_to=eff.realloc_to.at[0].set(1),
         remainder=eff.remainder.at[0].set(2),
     )
     node = encode(eff, ("effects",), as_resolver(None))
     assert set(AWARD_COLUMNS) <= set(node)
     built = load_module.decode(node, ("effects",), as_resolver(None))
     assert_same_pytree(eff, built)
+    assert encode(built, ("effects",), as_resolver(None)) == node
 
 
 def _commitment_node(commitments):
@@ -511,3 +527,93 @@ def test_a_populated_start_tick_round_trips():
     assert "start_tick" in node
     built = load_module.decode(node, ("effects",), as_resolver(None))
     assert_same_pytree(eff, built)
+    assert encode(built, ("effects",), as_resolver(None)) == node
+
+
+@pytest.mark.parametrize("feature", ["charge", "commitments", "declarations"])
+def test_a_nondefault_feature_recipe_round_trips_exactly(feature):
+    """Fails if nondefault charge, commitment columns or policy declarations change on
+    a recipe round trip.
+    """
+    from spaceodyssey.core.preflight import preflight
+    from tests.core.preflight_cases import DOC_KINDS, DocPolicy
+
+    kinds = {**TOY_KINDS, **DOC_KINDS}
+    if feature == "charge":
+        study = toy.survey_1(caps=Capacities(refunds=True))
+        study = dataclasses.replace(
+            study,
+            channels=dataclasses.replace(
+                study.channels, charge=study.channels.cost.at[1, 2].set(7.0)
+            ),
+        )
+    elif feature == "commitments":
+        study = toy.survey_1(
+            caps=Capacities(n_commitments=2), policies=(DocPolicy(disruptive=True),)
+        )
+        study = dataclasses.replace(
+            study,
+            assets=dataclasses.replace(
+                study.assets,
+                freeze_ticks=jnp.asarray([5, 0], I64),
+                disruptive_resource=jnp.asarray([-1, 1], I64),
+            ),
+        )
+    else:
+        study = toy.survey_1(
+            caps=Capacities(n_programs=2, awards=True),
+            policies=(DocPolicy(programs=(0, 1), awards=((2, 10, 80), (3, 20, 90))),),
+        )
+    assert preflight(study) == []
+    text = dump_study(study, kinds).to_json()
+    loaded = load_study(text, kinds)
+    assert_same_pytree(study, loaded)
+    assert dump_study(loaded, kinds).to_json() == text
+    if feature == "charge":
+        assert float(loaded.channels.charge[1, 2]) == 7.0
+        assert float(loaded.channels.charge[1, 2]) != float(loaded.channels.cost[1, 2])
+    elif feature == "commitments":
+        assert loaded.assets.freeze_ticks.tolist() == [5, 0]
+        assert loaded.assets.disruptive_resource.tolist() == [-1, 1]
+        assert loaded.agenda.policies[0].declare().disruptive is True
+    else:
+        declaration = loaded.agenda.policies[0].declare()
+        assert declaration.programs == (0, 1)
+        assert declaration.awards == ((2, 10, 80), (3, 20, 90))
+
+
+def test_a_populated_record_program_round_trips():
+    """Fails if a populated Record program loses its value or integer dtype in the
+    codec.
+    """
+    rec = dataclasses.replace(
+        record_none(Capacities(n_programs=2)), program=jnp.asarray(1, I64)
+    )
+    node = encode(rec, ("record",), _RECORD_KINDS)
+    loaded = load_module.decode(node, ("record",), _RECORD_KINDS)
+    assert loaded.program.dtype == rec.program.dtype
+    assert int(loaded.program) == 1
+    assert_same_pytree(rec, loaded)
+    assert encode(loaded, ("record",), _RECORD_KINDS) == node
+
+
+def test_an_explicit_null_key_version_is_refused():
+    """Fails if a null key version loads instead of reporting its input location."""
+    doc = _doc(toy.survey_1(key_version=2))
+    doc["study"]["key_version"] = None
+    with pytest.raises(DocumentError) as err:
+        load_study(json.dumps(doc), TOY_KINDS)
+    assert err.value.pointer == "/study"
+
+
+@pytest.mark.parametrize("member", list(ChargePricing))
+def test_each_charge_pricing_member_round_trips(member):
+    """Fails if a registered ChargePricing member changes its enum type or value on
+    decoding.
+    """
+    resolver = as_resolver(None)
+    node = encode(member, ("pricing",), resolver)
+    loaded = load_module.decode(node, ("pricing",), resolver)
+    assert type(loaded) is ChargePricing
+    assert loaded is member
+    assert encode(loaded, ("pricing",), resolver) == node

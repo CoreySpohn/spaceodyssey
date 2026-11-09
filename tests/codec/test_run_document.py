@@ -1125,3 +1125,130 @@ def test_a_missing_schema_version_or_study_is_a_document_error_not_a_key_error()
         assert info.value.pointer == pointer
         found = preflight_document(text, KINDS)
         assert found and found[0].pointer == pointer
+
+
+@pytest.fixture(scope="module")
+def allocator_recipe():
+    """The allocator document and decoded recipe, with explicit registrations."""
+    from spaceodyssey.studies import allocator
+
+    kinds = {
+        **TOY_KINDS,
+        ("process", "test.proposals", 1): allocator.ProposalRecords,
+        ("policy", "test.allocation", 1): allocator.AllocationPolicy,
+    }
+    table = Bindings(
+        (
+            BindingKind(
+                "test.committee",
+                1,
+                cls=allocator.ToyCommittee,
+                describe=lambda obj, registry: {"record_kind": registry[obj.kind].name},
+                build=lambda config, registry: allocator.ToyCommittee(
+                    registry.index(config["record_kind"])
+                ),
+            ),
+        )
+    )
+    study = allocator.allocator_study()
+    doc = dump_run(
+        study,
+        allocator.allocator_registry(),
+        executor="host",
+        bindings=table,
+        service=allocator.ToyCommittee(),
+        kinds=kinds,
+    )
+    loaded = load_run(doc.to_json(), table, kinds)
+    return study, doc, loaded, kinds, table
+
+
+def test_the_allocator_recipe_round_trips_process_policy_and_committee(
+    allocator_recipe,
+):
+    """Fails if the allocator loses proposal configuration, policy type or committee
+    binding on a run document round trip.
+    """
+    from spaceodyssey.studies import allocator
+
+    study, doc, loaded, kinds, table = allocator_recipe
+    assert type(loaded.study.process) is allocator.ProposalRecords
+    for name in (
+        "ticks",
+        "values",
+        "ids",
+        "revisions",
+        "statuses",
+        "kinds",
+        "programs",
+        "audiences",
+        "releases",
+    ):
+        assert getattr(loaded.study.process, name) == getattr(study.process, name)
+    assert loaded.study.process.programs == tuple(
+        p[1] for p in allocator.DEFAULT_PROPOSALS
+    )
+    assert loaded.study.process.audiences == tuple(
+        int(p[3]) for p in allocator.DEFAULT_PROPOSALS
+    )
+    assert loaded.study.process.releases == tuple(
+        p[4] for p in allocator.DEFAULT_PROPOSALS
+    )
+    assert type(loaded.study.agenda.policies[0]) is allocator.AllocationPolicy
+    assert (
+        loaded.study.agenda.policies[0].declare() == study.agenda.policies[0].declare()
+    )
+    service = loaded.make_service()
+    assert type(service) is allocator.ToyCommittee
+    assert service.kind == loaded.registry.index("award")
+    assert loaded.service == {
+        "kind": "test.committee",
+        "version": 1,
+        "configuration": {"record_kind": "award"},
+    }
+    again = dump_run(
+        loaded.study,
+        loaded.registry,
+        executor=loaded.executor,
+        bindings=table,
+        service=service,
+        refit=loaded.refit or None,
+        kinds=kinds,
+    )
+    assert again.to_json() == doc.to_json()
+
+
+def test_the_allocator_registry_preserves_order_columns_and_flags(allocator_recipe):
+    """Fails if the allocator registry changes kind order, payload names, widths,
+    audiences or derived flags on decoding.
+    """
+    _, doc, loaded, _, _ = allocator_recipe
+    rows = encode_records(loaded.registry)
+    assert rows == doc.records
+    assert [row["name"] for row in rows] == [
+        "none",
+        "measurement",
+        "auxiliary",
+        "proposal",
+        "award",
+    ]
+    assert rows[3:] == [
+        {
+            "name": "proposal",
+            "derived": False,
+            "columns": [["request", 2], ["program", 2]],
+        },
+        {
+            "name": "award",
+            "derived": False,
+            "columns": [
+                ["round", 2],
+                ["window_from", 2],
+                ["window_until", 2],
+                ["amount_0", 2],
+                ["amount_1", 2],
+            ],
+        },
+    ]
+    assert [len(row["columns"]) for row in rows[3:]] == [2, 5]
+    assert loaded.study.caps.payload_width == 5

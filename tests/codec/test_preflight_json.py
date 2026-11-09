@@ -4,6 +4,7 @@ import copy
 import dataclasses
 import json
 import sys
+from functools import partial
 
 import equinox as eqx
 import jax
@@ -603,20 +604,38 @@ def _variant_x001_executors(seed):
 
 def _variant_x002_charge(seed):
     study = toy.survey_1()
-    charge = study.channels.cost.at[1, 2].set(2.0 if seed else 1.0)
-    return _doc(_with(study, channels=_channels(charge=charge))), None
+    charge = study.channels.cost.at[1, 2].set(2.0)
+    return _doc(
+        _with(
+            study,
+            caps=dataclasses.replace(study.caps, refunds=not seed),
+            channels=_channels(charge=charge),
+        )
+    ), None
 
 
 def _variant_x002_pricing(seed):
     study = toy.survey_1()
-    pricing = jnp.zeros((3, 3), I64).at[1, 2].set(3 if seed else 0)
-    return _doc(_with(study, channels=_channels(pricing=pricing))), None
+    pricing = jnp.zeros((3, 3), I64).at[1, 2].set(3)
+    return _doc(
+        _with(
+            study,
+            caps=dataclasses.replace(study.caps, refunds=not seed),
+            channels=_channels(pricing=pricing),
+        )
+    ), None
 
 
 def _variant_x002_failure_kind(seed):
     study = toy.survey_1()
-    kind = jnp.asarray([-1, -1, 2 if seed else -1], I64)
-    return _doc(_with(study, channels=_channels(failure_kind=kind))), None
+    kind = jnp.asarray([-1, -1, 2], I64)
+    return _doc(
+        _with(
+            study,
+            caps=dataclasses.replace(study.caps, refunds=not seed),
+            channels=_channels(failure_kind=kind),
+        )
+    ), None
 
 
 def _variant_w002(seed):
@@ -651,7 +670,7 @@ def _variant_x002_resource(seed):
 
 
 def _variant_x002_quantum(seed):
-    caps = Capacities(balance_quantum=0.5 if seed else 1.0)
+    caps = Capacities(balance_quantum=0.5, snapshot_balances=not seed)
     return _doc(toy.survey_1(caps=caps)), None
 
 
@@ -716,7 +735,68 @@ def _variant_t001_second_drain(seed):
     return _policy_doc(stops=stops), None
 
 
+def _variant_refund_column(name, seed):
+    study = toy.survey_1(caps=Capacities(refunds=not seed))
+    column = (
+        jnp.zeros((3, 3)).at[1, 2].set(2.0)
+        if name == "surcharge"
+        else jnp.asarray([0, 0, 5], I64)
+    )
+    return _doc(_with(study, channels=_channels(**{name: column}))), None
+
+
+def _variant_award_windows(windows, seed):
+    clean = ((2, 50, 80), (2, 80, 90)) if len(windows) == 2 else ((2, 50, 80),)
+    return _policy_doc(awards=windows if seed else clean), None
+
+
+def _variant_negative_program(seed):
+    return _policy_doc(programs=(-1,) if seed else (0,)), None
+
+
+def _variant_unregistered_failure_kind(seed):
+    study = toy.survey_1(caps=Capacities(refunds=True))
+    kind = jnp.asarray([-1, -1, 99 if seed else 2], I64)
+    return _doc(_with(study, channels=_channels(failure_kind=kind))), None
+
+
 VARIANTS = {
+    "X002-surcharge": (
+        FindingCode.X002,
+        partial(_variant_refund_column, "surcharge"),
+        "/study/channels/surcharge/data/1/2",
+        _is(2.0),
+    ),
+    "X002-deadline": (
+        FindingCode.X002,
+        partial(_variant_refund_column, "refund_deadline_ticks"),
+        "/study/channels/refund_deadline_ticks/data/2",
+        _is(5),
+    ),
+    "P001-negative": (
+        FindingCode.P001,
+        _variant_negative_program,
+        "/study/agenda/policies/0/programs/0",
+        _is(-1),
+    ),
+    "W002-unregistered": (
+        FindingCode.W002,
+        _variant_unregistered_failure_kind,
+        "/study/channels/failure_kind/data/2",
+        _is(99),
+    ),
+    "D007-start-positive": (
+        FindingCode.D007,
+        _import("start_positive"),
+        "/study/process/table/start_offset/data/0",
+        _is(3),
+    ),
+    "D007-start-after-end": (
+        FindingCode.D007,
+        _import("start_after_end"),
+        "/study/process/table/start_offset/data/0",
+        _is(-1),
+    ),
     "X001-requires": (
         FindingCode.X001,
         _variant_x001_requires,
@@ -832,6 +912,22 @@ VARIANTS = {
         _is([11, 0, 5]),
     ),
 }
+
+
+for _name, _windows, _entry in (
+    ("recipient", ((9, 50, 80),), 0),
+    ("overlap", ((2, 50, 80), (2, 70, 90)), 1),
+    ("recipient-negative", ((-1, 50, 80),), 0),
+    ("start-negative", ((2, -1, 80),), 0),
+    ("reversed", ((2, 80, 50),), 0),
+    ("past-max-tick", ((2, 50, Capacities().max_tick + 1),), 0),
+):
+    VARIANTS[f"W001-{_name}"] = (
+        FindingCode.W001,
+        partial(_variant_award_windows, _windows),
+        f"/study/agenda/policies/0/awards/{_entry}",
+        _is(list(_windows[_entry])),
+    )
 
 
 @pytest.mark.parametrize("name", list(VARIANTS))
@@ -1430,3 +1526,58 @@ def test_a_study_document_with_a_run_record_does_not_rebuild_without_a_registry(
     text.pop("content_hash")
     rebuilt = preflight_document(json.dumps(text), RESOLVER, bindings=bindings)
     assert [(str(f.code), str(f.severity)) for f in rebuilt] == [("D010", "error")]
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "where"),
+    [
+        *(
+            (("caps", name), value, "/study/caps")
+            for name, value in (
+                ("awards", 1),
+                ("refunds", "yes"),
+                ("snapshot_balances", 0),
+                ("n_commitments", -1),
+                ("n_commitments", True),
+                ("n_commitments", 1.0),
+                ("balance_quantum", 0.0),
+                ("balance_quantum", -1.0),
+                ("balance_quantum", 2),
+                ("balance_quantum", True),
+            )
+        ),
+        *((("key_version",), value, "/study") for value in (0, 3, -1, True, 2.0, "2")),
+        (("caps", "balance_quantum"), float("nan"), "/study/caps/balance_quantum"),
+        (("caps", "balance_quantum"), float("inf"), "/study/caps/balance_quantum"),
+    ],
+)
+def test_malformed_feature_metadata_has_a_resolvable_load_pointer(path, value, where):
+    """Fails if malformed feature metadata loads or its load finding points outside the
+    document.
+    """
+    doc = _doc(toy.survey_1())
+    node = doc["study"]
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    found = _find(doc, None)
+    assert [(str(f.code), f.pointer) for f in found] == [("L001", where)]
+    assert resolve_pointer(doc, where) is not None
+
+
+def test_an_import_over_the_log_budget_is_located_at_its_table():
+    """Fails if JSON preflight ignores an import one row over its log budget or checks
+    it without a run.
+    """
+    study = _rows_study(11, 100)
+    study = dataclasses.replace(study, caps=dataclasses.replace(study.caps, n_log=10))
+    doc = _doc(study)
+    found = _find(doc, {"executor": "host"})
+    assert [(str(f.code), f.pointer) for f in found] == [
+        ("D006", "/study/process/table")
+    ]
+    assert "log rows" in found[0].message
+    assert resolve_pointer(doc, found[0].pointer) == doc["study"]["process"]["table"]
+    assert _find(doc, None) == []
+    fits = dataclasses.replace(study, caps=dataclasses.replace(study.caps, n_log=11))
+    assert _find(_doc(fits), {"executor": "host"}) == []

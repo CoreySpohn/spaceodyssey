@@ -94,16 +94,38 @@ def test_one_mask_per_phase_is_required():
         kinds.survey_1(permitted_effects=(ALL_EFFECTS, ALL_EFFECTS))
 
 
-# ---- allocate and query stay unsupported ---------------------------------------
+# ---- Allocate requires awards -------------------------------------------------
 
 
 def test_allocate_answers_unsupported_and_changes_nothing():
+    """Fails if Allocate changes an awards-off carry or fails to credit a valid awards-
+    on recipient.
+    """
     study = kinds.survey_1()
     c0 = carry0(study)
     c1, codes = admit_j(c0, effects_of(EffectKind.ALLOCATE), study)
     assert int(codes[0]) == AdmissionCode.UNSUPPORTED
     r = core.tree_equal_report(c0, c1)
     assert r["max_int_diff"] == 0 and r["max_abs"] == 0.0
+
+    from tests.core.award_helpers import award_study
+
+    enabled = award_study((), (), caps_extra={"snapshot_balances": True})
+    before = carry0(enabled)
+    effects = core.effects_none(enabled.caps)
+    effects = dataclasses.replace(
+        effects,
+        kind=effects.kind.at[0].set(EffectKind.ALLOCATE),
+        amount=effects.amount.at[0, 1].set(5.0),
+        recipient=effects.recipient.at[0].set(2),
+        window_from=effects.window_from.at[0].set(30),
+        window_until=effects.window_until.at[0].set(200),
+    )
+    after, accepted = admit_j(before, effects, enabled)
+    assert int(accepted[0]) == AdmissionCode.OK
+    expected = before.ledger.balance.at[2, 1].add(5.0)
+    assert jnp.array_equal(after.ledger.balance, expected)
+    assert float(after.ledger.granted[2, 1]) == 5.0
 
 
 # ---- atomic groups -------------------------------------------------------------
