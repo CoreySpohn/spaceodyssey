@@ -1,16 +1,24 @@
 # Slice 3a S10: the gate, the pruning pass and the budget check
 
-`tests/test_slice3a_gate.py` runs the kill rules K1 to K8 and the acceptance map A1 to A10
-as one command. It follows `tests/test_slice2b_gate.py`: evidence that already lives in a
-test is invoked by alias or through a thin wrapper that supplies the shared run, and only
-what no test held is built in the gate, next to its mutant. Every rule has checks whose
-names start with its number, and each check fails when its evidence is empty (a pin file
-with no entries, a commit range with no commits, a loop that ran zero times).
+`tests/test_slice3a_gate.py` runs the kill rules K1 to K8 and the acceptance items A1 to
+A10 as one command. It does not alias other tests. It holds an explicit inventory: for each
+rule and each acceptance item, the exact canonical test ids that carry the evidence,
+mutant checks included. One test runs the whole inventory once in a child pytest process
+(`python -m pytest <ids> -m "" -p no:cacheprovider --junitxml ...`) with the parent
+environment, so `SPACEODYSSEY_JAX_CACHE` and the budget plugin apply to it. It requires
+every listed id to be collected and to pass with the listed number of cases. A missing id,
+a skip, an xfail, a failure or a different case count fails the gate and names the rule.
+
+What no test held is built in the gate file next to its mutant (pin bytes, K3 ratio
+check, K4, the K7 wiring, three K1 mutants). A recorder registered for the module checks
+that each of those ran and passed in the parent process. The last test checks that every
+rule and item has a listed check, that every own check passed, and that each spec mutant
+maps to an inventory id that ran and passed in the child run or to an own check that
+passed.
 
 The whole file is marked slow in `tests/conftest.py` (`SLOW_FILES`), like the Slice 2b
-gate, because it reruns the golden histories and four mutant runs. It stays out of the
-quick tier. No test in it takes more than 12 s cold; the longest are the golden digests of
-`refresh` on both executors.
+gate, because it reruns the golden histories, four mutant runs and the acceptance files.
+The quick tier deselects it.
 
 ## Cold run
 
@@ -18,90 +26,116 @@ One process, `SPACEODYSSEY_JAX_CACHE=off`, four threads, through `compute-run`.
 
 | Measure | Value |
 |---|---|
-| Tests | 231 |
-| Wall time | about 225 s |
-| Programs (per-file count) | 1588 |
-| Peak footprint | 2.6 GiB |
-| Budget violations | 0 |
-| Budget entry | `tests/test_slice3a_gate.py = 1837` (ceil(1588 * 1.15) + 10) |
+| Wall time, gate alone | 361.7 s (16 tests, of which 335.9 s is the one child run of the inventory; 697 inventory cases passed in the child, 334.7 s) |
+| Peak footprint | 2.2 GiB sampled by `compute-run` |
+| Gate file module programs | 237 measured |
+| Budget entry | `tests/test_slice3a_gate.py = 283` in `[tool.testbudget.module_compile_budget_by_file]`, ceil(237 * 1.15) + 10 |
 
-The gate is slow, so the quick tier never collects it and the quick count is zero; the
-full count is the larger of the two and sets the entry.
+The budget plugin counts programs in the process that compiles them. The child pytest
+process compiles the inventory tests and applies each source file's own budget (enforce
+mode, caches cleared between files); the gate file's entry covers only the programs the
+parent compiles (the child's 3718 programs are counted in the child process) for its own checks and the import of the package.
 
 ## Rule to evidence
 
 Each mutant row names the check that must fail on it. A check is a test that passes only
 when the mutant is caught, so a passing gate means the mutant failed the rule.
 
-| Rule | Evidence invoked | Built here | Mutants and controls (kill result) |
+| Rule | Inventory evidence (child run) | Own checks (parent) | Mutants and controls |
 |---|---|---|---|
-| K1 earlier slices stay true | the golden digests of all 116 histories, the fingerprints and their evidence, the fault fixture, the corpus hashes and schema versions, the pin commit | a check that no commit after the pins touched a pin file | an asset-key change moves `phase_switch` floats (killed); an always-on empty leaf moves the fingerprint and the history ints (killed); a changed `N_TIES` moves `baseline` (killed); lane closure on a fault breaks the fault pin (killed); a one-bit digest change and a changed study miss their pins (killed) |
-| K2 conservation | every account on every case, the forged balances, every award scenario and remainder rule, the refund across an expiry and a re-award, the paired forged expiry | none | a refund of the whole charge, a second receipt credit, an old award's refund credited to the newer award, and the paired expiry omission each fail conservation (killed) |
-| K3 step cost | none (measured on the CI runner by `pilot.yml`) | the wiring check: thirteen handlers, the probe and its calibrated mutant, the workflow step, the measured excess in the S0 record | not measurable locally (see below) |
-| K4 a survey needs no core patch | none | every core commit after S0 is listed under a task, the task record cites a core test, and no survey commit touches the core | an unlisted commit and a record that cites no test are reported; a core edit in a survey commit is flagged (killed) |
-| K5 the Q22 frame | the domain-word and import lints over the core and their fixtures | none | each denied token and each import fixture is caught (killed) |
-| K6 truth and release discipline | refund views invariant under a private event, survey 8 policy stop and its control, survey 10 awards ignore unreleased and observer-only proposals, a release moves its award | none | a visible internal `refund_of` and a truth-reading committee are caught (killed) |
-| K7 quick-tier time | the summary script over its limits, the step's budget flags | the wiring check: no advisory baseline, the 540 s ceiling, medium tests counted, the budget plugin enforcing | measured on the runner (see below) |
-| K8 action replay | the survey 10 replay of awards, `Allocate` effects and admission outcomes on both executors | none | dropping one award from the log fails the replay and the allocator check (killed) |
+| K1 earlier slices stay true | golden digests of all 116 histories, fingerprints and their evidence, fault fixture, corpus hashes and schema versions, pin commit; live runs must yield every world key | each pin file is byte-identical to the blob of its capture commit; no commit after the pins touched a pin file | asset-key change moves `phase_switch` floats; always-on empty leaf moves fingerprint and history ints; changed `N_TIES` moves `baseline`; lane closure on a fault breaks the fault pin; one-bit digest change and a changed study miss their pins |
+| K2 conservation | every account on every case, forged balances, every award scenario and remainder rule, refund across expiry and re-award, paired forged expiry | none | whole-charge refund, second receipt credit, old award's refund credited to the newer award, paired expiry omission |
+| K3 step cost | none (measured on the CI runner by `pilot.yml`) | wiring (13 handlers, probe, workflow input, S0 excess); ratio check | an extra handler pass per step (1.48 and 1.51 times the plain step) fails the ratio check |
+| K4 a survey needs no core patch | none | every core commit listed under a task; each task record names the exact path and cites a core test; no survey commit touches the core | a synthetic history with a survey commit that edits the core is flagged; an unlisted commit and loose naming are caught |
+| K5 the Q22 frame | domain-word and import lints over the core and their fixtures | none | each denied token and import fixture |
+| K6 truth and release discipline | refund view under a private event, survey 8 policy stop, survey 10 awards ignore unreleased and observer-only, a release moves the award | none | visible internal `refund_of`, truth-reading committee, removed policy stop |
+| K7 quick-tier time | the summary script over its limits, the step's budget flags | wiring: no advisory baseline, 540 s ceiling, medium tests counted, plugin enforcing | measured on the runner (below) |
+| K8 action replay | survey 10 replay of awards, `Allocate` effects and admission outcomes on both executors; the allocator check | none | dropping one award from the log |
 
-Mutants new in this change live in `tests/core/mutants.py`: an asset-keyed host executor,
-a listing of empty conditional leaves, an opened conditional gate, and a changed `N_TIES`
-that clears the compile caches. The gate's last test fails if a rule has no check or a
-spec mutant is not tied to a check that exists.
+New mutants live in `tests/core/mutants.py`: an asset-keyed host executor, a listing of
+empty conditional leaves, an opened conditional gate, and a changed `N_TIES` that clears
+the compile caches.
 
-## Acceptance map
+## Acceptance items
 
-| Item | Evidence |
+Each item runs canonical ids in the child run, so a placeholder or skipped file fails.
+
+| Item | Evidence run by the gate |
 |---|---|
-| A1 charge components | `tests/core/test_charging.py` |
-| A2 refunds | `tests/core/test_refund.py`, `tests/core/test_awards.py` |
-| A3 awards | `tests/core/test_awards.py` |
-| A4 frozen horizon | `tests/core/test_frozen_horizon.py` |
-| A5 programs and Stop | `tests/core/test_programs.py`, and the twelve `stop_*` golden pins, checked in the gate |
-| A6 conservation | `tests/core/test_conservation.py`, K2 |
-| A7 snapshot balances | `tests/core/test_snapshot_balances.py` |
-| A8 pre-flight | `tests/core/test_preflight.py`, `tests/codec/test_preflight_json.py` |
-| A9 surveys | `tests/studies/test_survey_8.py` to `test_survey_11.py` |
-| A10 earlier slices unchanged | K1 |
+| A1 charge components | all of `tests/core/test_charging.py` |
+| A2 refunds | the refund remainder tests, the refund across an expiry and re-award |
+| A3 awards | every award scenario, every remainder rule, survey 10 release moves the award |
+| A4 frozen horizon | all of `tests/core/test_frozen_horizon.py` |
+| A5 programs and Stop | all of `tests/core/test_programs.py`; the twelve `stop_*` golden pins (own check) |
+| A6 conservation | every account on every case |
+| A7 snapshot balances | all of `tests/core/test_snapshot_balances.py` |
+| A8 pre-flight | all of `tests/core/test_preflight.py` and `tests/codec/test_preflight_json.py` |
+| A9 surveys | survey 8 policy stop, all of survey 9 and survey 11, survey 10 executors agree |
+| A10 earlier slices unchanged | the K1 inventory |
 
-The gate checks that each file exists and still defines tests. Those files run in the quick
-tier, so the gate does not rerun them.
+Survey 9 is entirely slow-marked: the quick tier selects none of it, so the gate is where
+it runs on a pull request-sized change.
 
 ## K4 attribution
 
-The range is the last S0 commit to HEAD: 53 non-merge commits touch `core/`. Each is listed
-under the task whose record describes it: S1, S2, S3a, S4, S5, S5b, S6, the Slice 2b
-records, or the compile-speed records. The gate fails on a commit no list names, a stale
-entry, or a record that cites no existing `tests/core` file. No survey commit (surveys 8 to
-11, records and tests) touches `core/`.
+The range is the last S0 commit to HEAD: 53 non-merge commits touch `core/`. Each is
+listed under the task whose record describes it. The spec allows feature tasks only. Two
+other tasks changed the core inside the range: Slice 2b (its records, judged by the 2b
+gate) and the compile-speed work (bit-identical, so the K1 pins are its evidence). Their
+commits are attributed by their own task records, with K1 as the evidence; that is a
+stated scope note, not an exception the gate hides.
 
-What the gate does not prove, and prints instead of failing: the records describe behavior
-and name a module only where it helps, so 34 touched paths are not named in their task's
-record (module name or `package/` directory not found). They are listed by the gate on
-every run. They fall in S3a (`transaction`, `enums`, `preflight/checks`, `core/__init__`,
-the `truth_swap` and `replay_latency` batteries), S5 and S5b (`transaction`, `invariants`,
-`executors/base`, `carry`, `handlers`, `records`, `snapshot`, `enums`, `preflight/findings`,
-two batteries) and the compile-speed work (`observer_kit`, `refresh`). Two further
-weaknesses: the compile-speed commits are attributed to their own records, not to a 3a
-feature task, and their evidence is K1 (every history and pin bit-identical); and no record
-carries a machine-readable list of core paths, so the check cannot be made stricter without
-adding one.
+The gate fails on a commit no list names, a stale entry, a record that cites no existing
+`tests/core/test_*.py` file, and any touched core path that the record of its task does
+not name exactly (the full repository path, not a module name or a directory). To meet
+that, each responsible record now carries a "Core paths changed (K4)" section with the
+exact paths and the core tests that cover them: `slice-3a-s1`, `slice-3a-s2`,
+`slice-3a-s3a`, `slice-3a-s4`, `slice-3a-s5`, `slice-3a-s5b`, `slice-3a-s6`,
+`slice-2b-r6` (for the Slice 2b commits R1 to R6) and `compile-speed-c` (for the
+compile-speed commits). No survey commit (surveys 8 to 11, records and tests) touches
+`core/`; the negative control runs the same discovery on a synthetic history that holds a
+survey commit that edits the core.
+
+Limit: the commit-to-task table is hand-listed in the gate, so a new core commit needs an
+entry and a record update, by design.
 
 ## K3 and K7
 
-K3 cannot be measured from inside pytest. The gate checks the wiring and prints a manual
-read: dispatch `pilot.yml` on the final commit and compare the per-step minimum with the
-eleven-handler baseline (limit 1.10). The S0 record holds the mutant's measured excess
-(1.48 and 1.51), which shows the probe can fail. There is no K3 figure for the thirteen
-handler table in this change.
+K3 is pending CI measurement. It cannot be measured from inside pytest. The probe
+`tools/step_cost.py` now takes `--baseline-per-step-us` and exits 1 when the plain
+per-step minimum exceeds the baseline by more than 1.10; `pilot.yml` takes the input
+`baseline_per_step_min_us` and prints the ratio and the mutant ratio in the job summary.
+The exact read: dispatch `pilot.yml` on the final commit with `baseline_per_step_min_us`
+set to the eleven-handler per-step minimum, measured in the same job (the S0 record
+recommends interleaving the two tables, because separate jobs differ by more than 10
+percent). The gate checks the wiring and that the ratio check fails the calibrated mutant
+(the S0 record measured 1.48 and 1.51 locally). It does not claim a K3 result.
 
 K7 is enforced by the quick-tier step in `ci.yml`: the summary runs without
 `--advisory-baseline`, with the 540 s ceiling, with medium tests counted
 (`--require-tier medium`), and the budget plugin in enforce mode. The last warm figure is
 CI run 42576344367 for commit ad113d3, job "Quick tier (py3.12)", success: 2681 tests in
 391.2 s against the 540 s ceiling, 0 budget violations under enforce with
-`SPACEODYSSEY_BUDGET_SCALE=3` and 229 compiles. The gate prints this line on every run and
-fails if this record does not carry the run id and the time.
+`SPACEODYSSEY_BUDGET_SCALE=3` and 229 compiles. It is a measurement of that commit, not of
+the final one. The gate prints this line on every run and fails if this record does not
+carry the run id and the time.
+
+## Slow nightly tier
+
+Section 7 asks for the status of the slow tier. The scheduled `CI` runs on main, newest
+first: 2026-11-08 (run 42489079500) cancelled during the slow tier after about 13
+minutes; 2026-11-07 (42379525028) cancelled; 2026-11-06 (42239283717) cancelled;
+2026-11-05 (42055076555) failed. No scheduled run in that window completed green, so there
+is no successful slow-tier run to cite. The gate does not depend on the nightly: it runs
+its own slow evidence.
+
+## Pin immutability
+
+Git history shows which commits edited the pin files, and the gate checks that only the
+two capture commits did. It also compares the bytes of each pin file with the blob at its
+capture commit, after the child run, so a loader that rewrites a pin during the run is
+seen. A test-loader change that regenerates pins in some other way (for example into a
+different file the loader then reads) is a code-review concern, not a gate concern.
 
 ## Pruning pass
 
@@ -111,12 +145,14 @@ and delete only a test whose assertions a stronger test over the same object alr
 Removed:
 
 - `test_each_row_nets_debits_and_refunds` (5 cases, `tests/core/test_conservation.py`).
-  It asserts that the final balance equals the budget less debits plus refunds in every row.
-  `balance_conserved`, called on the same five runs by
+  It asserted that the final balance equals the budget less debits plus refunds in every
+  row, with `assert_allclose` at its default relative tolerance of 1e-7 and an absolute
+  1e-9. `balance_conserved`, called on the same five runs by
   `test_every_account_agrees_after_pricing_cancels_and_refunds`, checks the same equation
-  with the same 1e-9 tolerance (no awards, so the granted term is zero) and two further
-  accounts. Every mutant the removed test killed fails the stronger one. Net 5 cases; no
-  compiled program is removed because the runs are shared.
+  against an absolute 1e-9 bound (no awards, so the granted term is zero) and two further
+  accounts. The survivor is stricter: an error of 1e-6 passed the removed test and fails
+  the survivor. Every mutant the removed test killed fails the stronger one. Net 5 cases;
+  no compiled program is removed because the runs are shared.
 
 Reviewed and kept:
 

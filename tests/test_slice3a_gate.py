@@ -1,44 +1,49 @@
-"""The Slice 3a kill-rule gate: K1 to K8 and the acceptance map A1 to A10.
+"""The Slice 3a kill-rule gate: K1 to K8 and the acceptance items A1 to A10.
 
-Run ``pytest tests/test_slice3a_gate.py`` with the full commit history (K4 reads it).
-Every rule has at least one check whose name starts with its number, and a check fails
-when its evidence is empty. Evidence that already lives in a test is invoked here, by
-alias or through a thin wrapper that supplies the shared run; it is never rebuilt. The
-evidence a rule needs and no test held is built below, each next to its mutant.
+Run ``pytest tests/test_slice3a_gate.py`` with the full commit history (K4 and the pin
+check read it). The gate does not alias other tests. It lists, in `INVENTORY`, the exact
+canonical test ids that carry each rule's and each acceptance item's evidence, runs them
+once in a child pytest process (same environment, so the compile-cache switch and the
+budget plugin apply), and requires every listed id to be collected and to pass: a
+missing id, a skip, an xfail or a changed case count fails the gate and names the rule.
+What no test held is built here, next to its mutant, and is listed in `OWN`; a recorder
+checks that each of those ran and passed in this process.
 
 - K1, earlier slices stay true: the golden histories, fingerprints, fault fixture and
-  corpus document hashes match their pins, no later commit touched a pin file, and four
-  mutants (an asset-key change, an always-on empty leaf, a changed ``N_TIES``, lane
-  closure on a fault) each move a pinned value.
+  corpus document hashes match their pins, each pin file is byte-identical to its
+  capture commit, no later commit touched one, and three mutants (an asset-key change,
+  an always-on empty leaf, a changed ``N_TIES``) plus lane closure on a fault each move
+  a pinned value.
 - K2, conservation: the independent reconciliation holds on every scenario, refunds
   across expiry and re-award included, and the forged and mutant books fail it.
-- K3, step cost: measured on the CI runner by ``pilot.yml``; the gate checks the
-  measurement is wired and prints a manual-read line.
-- K4, a survey needs a core patch: every ``core/`` commit after S0 is attributed to a
-  task whose change record names each path it touched and cites a core test, and no
-  survey commit touches the core.
+- K3, step cost: measured on the CI runner by `pilot.yml`; the gate checks the
+  measurement is wired, that the ratio check fails the calibrated mutant, and prints a
+  manual-read line. It is pending CI measurement.
+- K4, a survey needs no core patch: every `core/` commit after S0 is listed under a
+  task, the task record names each exact path the commit touched and cites a core test,
+  and no survey commit touches the core.
 - K5, the Q22 frame: the domain-word and import lints pass over the core.
-- K6, truth and release discipline: the survey 8 and 10 controls fail as designed,
-  refund views are invariant under a private event, the truth-reading committee and the
-  visible refund identity are caught.
+- K6, truth and release discipline, and K8, action replay: survey 8 and 10 controls,
+  refund views, the replay and the allocator check.
 - K7, quick-tier time: enforced by the CI step; the gate checks the step and prints a
   manual-read line carrying the last measured figure.
-- K8, action replay: the survey 10 replay reproduces awards, ``Allocate`` effects and
-  admission outcomes, and a dropped award fails it.
 
-The acceptance items A1 to A10 are mapped to their test files below. Those files run in
-the quick tier; the gate checks that each exists and still defines tests.
-
-Which commits K4 judges. The range runs from the last S0 commit to HEAD. A core
-commit is listed under the task whose record describes it: a 3a feature task (S1 to
-S6), Slice 2b (its own records, judged by the 2b gate), or the compile-speed work
-(bit-identical, so the K1 pins are its evidence). A core commit that no list names, a
-stale entry, a path the record does not name, or a record with no core test fails.
+Which commits K4 judges. The range runs from the last S0 commit to HEAD. A core commit
+is listed under the task whose record describes it: a 3a feature task (S1 to S6), or two
+other tasks that changed the core in the range, Slice 2b and the compile-speed work,
+which are attributed by their own task records with K1 as their evidence. A core commit
+that no list names, a stale entry, a path the record does not name exactly, or a record
+with no core test fails.
 """
 
 import ast
+import collections
 import json
+import os
 import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import equinox as eqx
@@ -53,32 +58,291 @@ from spaceodyssey.core.executors.base import canonical_history
 from spaceodyssey.core.handlers import HANDLERS
 from tests import conftest
 from tests import test_slice2b_gate as gate_2b
-from tests.codec import test_premission_codec as codec_tests
-from tests.codec import test_run_document_runs as run_document_tests
 from tests.core import mutants
-from tests.core import test_awards as awards
-from tests.core import test_conservation as conservation
 from tests.core import test_golden_histories as golden
-from tests.core import test_lints as lints
-from tests.core import test_refund as refund
 from tests.core.conformance_helpers import N_WORLDS
 from tests.core.conformance_helpers import runs as corpus_runs
 from tests.core.corpus import CORPUS_BY_NAME
-from tests.core.refund_helpers import refund_study
-from tests.core.test_awards import conserved, windowed  # noqa: F401 (fixtures)
-from tests.studies import test_allocator as allocator
-from tests.studies import test_survey_8 as survey8
-from tests.studies import test_survey_10 as survey10
-from tests.studies.test_survey_8 import stopped  # noqa: F401 (fixture)
 
 pytestmark = pytest.mark.clear_caches_between_tests
 
 REPO = Path(__file__).resolve().parents[1]
 CHANGES = REPO / "docs/changes"
-CI = gate_2b.CI
 CORE = "src/spaceodyssey/core/"
 _git = gate_2b._git
 _resolve = gate_2b._resolve
+
+GOLD = "tests/core/test_golden_histories.py::"
+CODEC = "tests/codec/test_premission_codec.py::"
+RUNDOC = "tests/codec/test_run_document_runs.py::"
+CONS = "tests/core/test_conservation.py::"
+AWARDS = "tests/core/test_awards.py::"
+REFUND = "tests/core/test_refund.py::"
+LINTS = "tests/core/test_lints.py::"
+S8 = "tests/studies/test_survey_8.py::"
+S10 = "tests/studies/test_survey_10.py::"
+ALLOC = "tests/studies/test_allocator.py::"
+G2B = "tests/test_slice2b_gate.py::"
+
+# rule -> {canonical test id: number of cases that must pass}. A function id runs every
+# case of it; a file id runs every test of the file.
+_K1 = {
+    GOLD + "test_manifest_covers_every_case_executor_and_world": 1,
+    GOLD + "test_the_pin_names_its_commit_and_covers_every_entry": 1,
+    GOLD + "test_the_manifest_equals_its_pin": 1,
+    GOLD + "test_history_matches_its_golden_digest": 58,
+    GOLD + "test_fingerprints_match_their_pin": 58,
+    GOLD + "test_the_pinned_fingerprints_carry_evidence": 1,
+    GOLD + "test_the_fault_fixture_matches_its_pin": 2,
+    GOLD + "test_a_one_bit_change_moves_the_digest": 1,
+    GOLD + "test_a_lane_closing_fault_breaks_the_fault_pin": 1,
+    RUNDOC + "test_the_hash_pin_names_its_commit_and_covers_every_corpus_document": 1,
+    RUNDOC + "test_a_changed_study_misses_its_pinned_hash": 1,
+    CODEC + "test_every_corpus_document_keeps_its_pinned_hash_and_schema_version": 1,
+}
+_K2 = {
+    CONS + "test_every_account_agrees_after_pricing_cancels_and_refunds": 5,
+    CONS + "test_a_refund_nets_the_surcharge_out_of_the_credit": 1,
+    CONS + "test_a_forged_balance_is_caught": 1,
+    CONS + "test_a_forged_consistent_balance_and_counter_is_caught_by_the_records": 1,
+    CONS + "test_a_receipt_row_that_loses_its_negative_charge_is_caught": 1,
+    CONS + "test_mutant_a_refund_of_the_whole_charge_fails_conservation": 2,
+    CONS + "test_mutant_a_second_receipt_credit_fails_conservation": 2,
+    AWARDS + "test_every_award_scenario_conserves_the_balance": 11,
+    AWARDS + "test_each_remainder_rule_settles_the_unspent_balance": 4,
+    AWARDS + "test_forged_award_counters_are_caught": 2,
+    AWARDS + "test_a_paired_forged_expiry_is_caught": 1,
+    AWARDS + "test_the_paired_forged_expiry_is_caught_for_a_reallocation": 1,
+    AWARDS + "test_a_paired_forged_expiry_is_caught_when_the_run_holds_a_refund": 2,
+    AWARDS + "test_a_refund_across_an_expiry_and_a_re_award_conserves": 1,
+    AWARDS + "test_a_cancellation_under_an_award_conserves": 1,
+    AWARDS + "test_crediting_an_old_awards_refund_to_the_newer_award_is_caught": 1,
+    AWARDS + "test_mutant_crediting_an_old_awards_refund_to_the_newer_award_fails": 1,
+}
+_K5 = {
+    LINTS + "test_lint_scans_the_core": 1,
+    LINTS + "test_core_is_clean": 1,
+    LINTS + "test_core_imports_clean": 1,
+    LINTS + "test_lint_catches_each_denied_token": 27,
+    LINTS + "test_core_imports_catches_fixtures": 2,
+}
+_K6 = {
+    REFUND + "test_the_policy_fingerprint_ignores_a_private_event_before_the_refund": 1,
+    REFUND + "test_mutant_a_visible_internal_refund_id_moves_the_fingerprint": 1,
+    S8 + "test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected": 1,
+    S8
+    + "test_control_without_the_policy_stop_every_refusal_is_no_funds_and_row_b_fails": 1,  # noqa: E501
+    S10 + "test_awards_ignore_unreleased_and_observer_only_proposals": 2,
+    S10 + "test_releasing_a_proposal_moves_the_award_the_expected_way": 2,
+    S10 + "test_a_committee_reading_the_carry_fails_the_perturbation": 2,
+}
+_K7 = {
+    G2B + "test_k6_k7_the_quick_tier_step_enforces_the_budgets": 1,
+    G2B + "test_k6_k7_the_summary_script_fails_over_its_limits": 4,
+}
+_K8 = {
+    S10 + "test_replay_reproduces_the_run_and_fails_without_a_recorded_award": 2,
+    ALLOC + "test_dropping_a_recorded_award_fails_the_check": 1,
+}
+_ACCEPT = {
+    "A1": {"tests/core/test_charging.py": 9},
+    "A2": {
+        REFUND + "test_a_receipt_credits_the_remainder_without_the_surcharge": 1,
+        REFUND
+        + "test_the_remainder_of_a_completed_acquisition_excludes_its_surcharge": 1,
+        AWARDS + "test_a_refund_across_an_expiry_and_a_re_award_conserves": 1,
+    },
+    "A3": {
+        AWARDS + "test_every_award_scenario_conserves_the_balance": 11,
+        AWARDS + "test_each_remainder_rule_settles_the_unspent_balance": 4,
+        S10 + "test_releasing_a_proposal_moves_the_award_the_expected_way": 2,
+    },
+    "A4": {"tests/core/test_frozen_horizon.py": 59},
+    "A5": {"tests/core/test_programs.py": 22},
+    "A6": {CONS + "test_every_account_agrees_after_pricing_cancels_and_refunds": 5},
+    "A7": {"tests/core/test_snapshot_balances.py": 54},
+    "A8": {
+        "tests/core/test_preflight.py": 160,
+        "tests/codec/test_preflight_json.py": 160,
+    },
+    "A9": {
+        S8 + "test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected": 1,
+        "tests/studies/test_survey_9.py": 6,
+        S10 + "test_both_executors_make_the_same_awards": 1,
+        "tests/studies/test_survey_11.py": 9,
+    },
+    "A10": _K1,
+}
+INVENTORY = {
+    "K1": _K1,
+    "K2": _K2,
+    "K5": _K5,
+    "K6": _K6,
+    "K7": _K7,
+    "K8": _K8,
+    **_ACCEPT,
+}
+
+# rule -> {name of a check in this file: cases that must pass in this process}
+OWN = {
+    "K1": {
+        "test_k1_every_pin_file_is_the_blob_of_its_capture_commit": 1,
+        "test_k1_no_commit_after_the_pins_touched_a_pin_file": 1,
+        "test_k1_mutant_an_asset_key_change_moves_a_pinned_history": 1,
+        "test_k1_mutant_an_always_on_empty_leaf_moves_the_pins": 1,
+        "test_k1_mutant_a_changed_n_ties_moves_a_pinned_history": 1,
+    },
+    "K3": {
+        "test_k3_the_step_cost_measurement_is_wired_for_the_final_table": 1,
+        "test_k3_the_ratio_check_fails_the_calibrated_mutant": 1,
+        "test_k3_k7_manual_reads": 1,
+    },
+    "K4": {
+        "test_k4_every_core_change_is_attributed_to_a_task_record_and_a_core_test": 1,
+        "test_k4_no_survey_commit_touches_the_core": 1,
+        "test_k4_control_a_survey_commit_that_touches_the_core_is_flagged": 1,
+        "test_k4_control_an_unlisted_commit_and_an_unnamed_path_are_caught": 1,
+    },
+    "K7": {
+        "test_k7_the_quick_tier_step_enforces_the_ceiling_with_medium_tests_counted": 1,
+    },
+    "A5": {"test_a5_the_twelve_stop_goldens_are_pinned": 1},
+}
+
+# Each spec mutant and the check that must fail on it: an inventory id or an own check.
+MUTANT_CHECKS = {
+    "K1 an asset-key change for asset 1": "test_k1_mutant_an_asset_key_change_moves_a_pinned_history",  # noqa: E501
+    "K1 an always-on empty leaf": "test_k1_mutant_an_always_on_empty_leaf_moves_the_pins",  # noqa: E501
+    "K1 a changed N_TIES": "test_k1_mutant_a_changed_n_ties_moves_a_pinned_history",
+    "K1 lane closure on FAULT by default": GOLD
+    + "test_a_lane_closing_fault_breaks_the_fault_pin",
+    "K2 omit the expiry debit and its counter together": AWARDS
+    + "test_a_paired_forged_expiry_is_caught",
+    "K2 refund a nonrefundable surcharge": CONS
+    + "test_mutant_a_refund_of_the_whole_charge_fails_conservation",
+    "K2 credit an old award's refund to a newer award": AWARDS
+    + "test_mutant_crediting_an_old_awards_refund_to_the_newer_award_fails",
+    "K3 an extra handler pass per step": "test_k3_the_ratio_check_fails_the_calibrated_mutant",  # noqa: E501
+    "K4 a core edit in a survey commit": "test_k4_control_a_survey_commit_that_touches_the_core_is_flagged",  # noqa: E501
+    "K6 a truth-reading committee": S10
+    + "test_a_committee_reading_the_carry_fails_the_perturbation",
+    "K6 a visible internal refund_of": REFUND
+    + "test_mutant_a_visible_internal_refund_id_moves_the_fingerprint",
+    "K8 drop one award from the log": S10
+    + "test_replay_reproduces_the_run_and_fails_without_a_recorded_award",
+}
+
+# The last warm quick-tier run of the slice's head commit on the CI runner, read by hand
+# from the job summary (CI time cannot be measured from inside pytest).
+K7_RUN = {"commit": "ad113d3", "run_id": 42576344367, "wall_s": 391.2, "tests": 2681}
+K7_CEILING_S = 540
+STEP_COST = REPO / "tools/step_cost.py"
+PILOT = REPO / ".github/workflows/pilot.yml"
+S0_RECORD = CHANGES / "slice-3a-s0.md"
+S10_RECORD = CHANGES / "slice-3a-s10.md"
+
+
+# ---- running the inventory ---------------------------------------------------------
+
+
+def _module(nodeid):
+    return nodeid.split("::")[0].removesuffix(".py").replace("/", ".")
+
+
+def _function(nodeid):
+    return nodeid.split("::")[1] if "::" in nodeid else None
+
+
+def passed_counts(root, ids):
+    """Number of passed cases for each id, from a junit file, and the other outcomes.
+
+    A skip, an xfail (reported as a skip), a failure or an error is an outcome other
+    than passed.
+    """
+    passed, other = collections.Counter(), collections.Counter()
+    for case in ET.parse(root).getroot().iter("testcase"):
+        module, name = case.get("classname"), case.get("name").split("[")[0]
+        bad = any(case.find(t) is not None for t in ("skipped", "failure", "error"))
+        for nodeid in ids:
+            fn = _function(nodeid)
+            if (module + ".").startswith(_module(nodeid) + ".") and fn in (None, name):
+                (other if bad else passed)[nodeid] += 1
+    return passed, other
+
+
+def inventory_problems(inventory, passed, other):
+    """Messages naming the rule of each listed id that did not run and pass exactly."""
+    problems = []
+    for rule, entries in inventory.items():
+        for nodeid, n in entries.items():
+            if other[nodeid] or passed[nodeid] != n:
+                problems.append(
+                    f"{rule}: {nodeid} passed {passed[nodeid]} of {n} cases"
+                    f" ({other[nodeid]} skipped, failed or errored)"
+                )
+    return problems
+
+
+@pytest.fixture(scope="module")
+def child(tmp_path_factory):
+    """One child pytest run of every inventory id: its junit counts and exit code."""
+    ids = sorted({i for entries in INVENTORY.values() for i in entries})
+    xml = tmp_path_factory.mktemp("inventory") / "junit.xml"
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        *ids,
+        "-m",
+        "",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+    ]
+    run = subprocess.run(
+        [*cmd, "--junitxml", str(xml)],
+        cwd=REPO,
+        env=dict(os.environ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert xml.exists(), run.stdout[-3000:] + run.stderr[-1000:]
+    passed, other = passed_counts(xml, ids)
+    return {"passed": passed, "other": other, "code": run.returncode, "out": run.stdout}
+
+
+class _Outcomes:
+    """Passed cases of the checks of this file, recorded as they report."""
+
+    def __init__(self):
+        self.passed = collections.Counter()
+        self.other = collections.Counter()
+
+    def pytest_runtest_logreport(self, report):
+        name = report.nodeid.split("::")[-1].split("[")[0]
+        if report.when == "call" and report.passed:
+            self.passed[name] += 1
+        elif report.when != "teardown" and not report.passed:
+            self.other[name] += 1
+
+
+@pytest.fixture(scope="module", autouse=True)
+def outcomes(request):
+    recorder = _Outcomes()
+    request.config.pluginmanager.register(recorder)
+    yield recorder
+    request.config.pluginmanager.unregister(recorder)
+
+
+def test_inventory_every_listed_check_was_collected_and_passed(child):
+    """Fails if any canonical id of any rule or acceptance item is missing, skipped,
+    xfailed, failed or ran another number of cases, or if the child run exited nonzero.
+    """
+    assert all(INVENTORY.values())  # no rule with an empty list
+    problems = inventory_problems(INVENTORY, child["passed"], child["other"])
+    assert problems == [], "\n".join(problems)
+    assert child["code"] == 0, child["out"][-3000:]
 
 
 def _pin():
@@ -87,31 +351,34 @@ def _pin():
 
 # ---- K1 ----------------------------------------------------------------------------
 
-test_k1_pin_names_its_commit = (
-    golden.test_the_pin_names_its_commit_and_covers_every_entry
-)
-test_k1_manifest_equals_pin = golden.test_the_manifest_equals_its_pin
-test_k1_history_digest = golden.test_history_matches_its_golden_digest
-test_k1_fingerprints = golden.test_fingerprints_match_their_pin
-test_k1_fingerprints_carry_evidence = golden.test_the_pinned_fingerprints_carry_evidence
-test_k1_fault_fixture = golden.test_the_fault_fixture_matches_its_pin
-test_k1_hash_pin_names_its_commit = run_document_tests.test_the_hash_pin_names_its_commit_and_covers_every_corpus_document  # noqa: E501
-test_k1_corpus_hashes_and_schema = (
-    codec_tests.test_every_corpus_document_keeps_its_pinned_hash_and_schema_version
-)
-test_k1_control_a_changed_study = (
-    run_document_tests.test_a_changed_study_misses_its_pinned_hash
-)
-test_k1_control_a_one_bit_change = golden.test_a_one_bit_change_moves_the_digest
-test_k1_mutant_lane_closure_on_a_fault = (
-    golden.test_a_lane_closing_fault_breaks_the_fault_pin
-)
+
+def _blob_at_capture(path):
+    """The pin file as committed by the capture commit that last wrote it."""
+    rel = str(path.relative_to(REPO))
+    log = _git("log", "--format=%H", f"{gate_2b.PIN_SOURCE}..HEAD", "--", rel).split()
+    captures = [c for c in log if c in gate_2b.PIN_CAPTURES]
+    assert captures, rel
+    return subprocess.run(
+        ["git", "cat-file", "blob", f"{captures[0]}:{rel}"],
+        cwd=REPO,
+        capture_output=True,
+        check=True,
+    ).stdout
+
+
+def test_k1_every_pin_file_is_the_blob_of_its_capture_commit(child):
+    """Fails if a pin file differs by one byte from the blob its capture commit wrote,
+    for instance because a test loader regenerated it. It runs after the child run,
+    so a pin rewritten by that run is seen.
+    """
+    for path in (gate_2b.GOLDEN_PIN, gate_2b.HASH_PIN):
+        assert path.read_bytes() == _blob_at_capture(path), path.name
+    assert len(_pin()["histories"]) == golden.N_PINNED > 0
 
 
 def test_k1_no_commit_after_the_pins_touched_a_pin_file():
     """Fails if a pin names another source commit, or if any commit from the pins'
-    capture to HEAD, other than the two capture commits, changed a pin file: the pins
-    hold through the whole of Slice 3a, documented or not.
+    capture to HEAD, other than the two capture commits, changed a pin file.
     """
     assert json.loads(gate_2b.GOLDEN_PIN.read_text())["source_commit"] == (
         gate_2b.PIN_SOURCE
@@ -130,7 +397,6 @@ def test_k1_no_commit_after_the_pins_touched_a_pin_file():
         ).split()
     )
     assert touched == gate_2b.PIN_CAPTURES, sorted(touched - gate_2b.PIN_CAPTURES)
-    assert len(_pin()["histories"]) == golden.N_PINNED > 0
 
 
 def _corpus_history(name):
@@ -205,87 +471,55 @@ def test_k1_mutant_a_changed_n_ties_moves_a_pinned_history():
         assert got["ints"] != pinned[key]["ints"], key
 
 
-# ---- K2 ----------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def conservation_runs():
-    return conservation._Runs()
-
-
-@pytest.mark.parametrize("name", conservation.CASES)
-def test_k2_every_account_agrees(conservation_runs, name):
-    """Fails if the balance, the counters and the records disagree on a case."""
-    conservation.test_every_account_agrees_after_pricing_cancels_and_refunds(
-        conservation_runs, name
-    )
-
-
-def test_k2_a_refund_nets_the_surcharge_out(conservation_runs):
-    """Fails if a refund credits the nonrefundable part of the charge."""
-    conservation.test_a_refund_nets_the_surcharge_out_of_the_credit(conservation_runs)
-
-
-def test_k2_a_forged_balance_is_caught(conservation_runs):
-    """Fails if a forged balance, alone or with its counter, passes."""
-    conservation.test_a_forged_balance_is_caught(conservation_runs)
-    conservation.test_a_forged_consistent_balance_and_counter_is_caught_by_the_records(
-        conservation_runs
-    )
-
-
-test_k2_every_award_scenario_conserves = (
-    awards.test_every_award_scenario_conserves_the_balance
-)
-test_k2_each_remainder_rule_balance = (
-    awards.test_each_remainder_rule_settles_the_unspent_balance
-)
-test_k2_forged_award_counters = awards.test_forged_award_counters_are_caught
-test_k2_a_refund_across_an_expiry_and_a_re_award = (
-    awards.test_a_refund_across_an_expiry_and_a_re_award_conserves
-)
-test_k2_a_cancellation_under_an_award = (
-    awards.test_a_cancellation_under_an_award_conserves
-)
-test_k2_mutant_the_expiry_debit_and_counter_omitted_together = (
-    awards.test_a_paired_forged_expiry_is_caught
-)
-test_k2_mutant_a_refund_of_the_whole_charge = (
-    conservation.test_mutant_a_refund_of_the_whole_charge_fails_conservation
-)
-test_k2_mutant_a_second_receipt_credit = (
-    conservation.test_mutant_a_second_receipt_credit_fails_conservation
-)
-test_k2_mutant_an_old_awards_refund_credited_to_the_newer_award = (
-    awards.test_mutant_crediting_an_old_awards_refund_to_the_newer_award_fails
-)
-
-
 # ---- K3 and K7 ---------------------------------------------------------------------
 
-# The last warm quick-tier run of the slice's head commit on the CI runner, read by hand
-# from the job summary (CI time cannot be measured from inside pytest).
-K7_RUN = {"commit": "ad113d3", "run_id": 42576344367, "wall_s": 391.2, "tests": 2681}
-K7_CEILING_S = 540
-STEP_COST = REPO / "tools/step_cost.py"
-PILOT = REPO / ".github/workflows/pilot.yml"
-S0_RECORD = CHANGES / "slice-3a-s0.md"
+
+def _step_cost_function(name):
+    """A function of the probe, compiled alone (importing the probe sets JAX flags)."""
+    tree = ast.parse(STEP_COST.read_text())
+    node = next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name
+    )
+    limit = next(
+        n.value.value
+        for n in tree.body
+        if isinstance(n, ast.Assign) and n.targets[0].id == "K3_LIMIT"
+    )
+    scope = {"K3_LIMIT": limit}
+    exec(compile(ast.Module([node], []), str(STEP_COST), "exec"), scope)
+    return scope[name]
 
 
 def test_k3_the_step_cost_measurement_is_wired_for_the_final_table():
     """Fails if the table is not the thirteen-handler table K3 is judged at, if the
-    probe, its calibrated mutant or the workflow that runs it on the CI runner is
-    gone, or if the S0 record lost the mutant's measured excess.
+    probe, its calibrated mutant, its baseline check or the workflow that runs them on
+    the CI runner is gone, or if the S0 record lost the mutant's measured excess.
     """
     assert len(HANDLERS) == 13
     kinds = {k.name for k in core.EventKind}
     assert {"WINDOW_END", "COMMIT_START"} <= kinds
     probe = STEP_COST.read_text()
-    assert "--mutant" in probe and "block_until_ready" in probe
+    assert "class ExtraPassExecutor" in probe and "block_until_ready" in probe
+    assert "--baseline-per-step-us" in probe and "SystemExit(1)" in probe
     workflow = PILOT.read_text()
     assert "tools/step_cost.py --mutant" in workflow
+    assert (
+        "--baseline-per-step-us" in workflow and "baseline_per_step_min_us" in workflow
+    )
     record = S0_RECORD.read_text()
     assert "1.48" in record and "1.51" in record  # the mutant beats the 1.10 limit
+
+
+def test_k3_the_ratio_check_fails_the_calibrated_mutant():
+    """Fails if the baseline check passes the extra-handler-pass mutant, which costs
+    1.48 to 1.51 times the plain step (S0 record), or fails a step within the limit.
+    """
+    verdict = _step_cost_function("verdict")
+    assert verdict(100.0, 100.0)["within_limit"]
+    assert verdict(110.0, 100.0)["within_limit"]
+    for ratio in (1.48, 1.51):
+        assert not verdict(100.0 * ratio, 100.0)["within_limit"]
+    assert not verdict(111.0, 100.0)["within_limit"]
 
 
 def test_k7_the_quick_tier_step_enforces_the_ceiling_with_medium_tests_counted():
@@ -300,32 +534,25 @@ def test_k7_the_quick_tier_step_enforces_the_ceiling_with_medium_tests_counted()
     assert K7_RUN["wall_s"] < K7_CEILING_S and K7_RUN["tests"] > 0
 
 
-test_k7_the_summary_script_fails_over_its_limits = (
-    gate_2b.test_k6_k7_the_summary_script_fails_over_its_limits
-)
-test_k7_the_step_carries_every_budget_flag = (
-    gate_2b.test_k6_k7_the_quick_tier_step_enforces_the_budgets
-)
-
-
 def test_k3_k7_manual_reads(capsys):
     """Prints the two numbers the gate cannot measure, and fails if the S10 record
-    does not carry the K7 figure it prints.
+    does not carry the K7 figure it prints or marks K3 as pending.
     """
     run = K7_RUN
     with capsys.disabled():
         print(
-            "\nK3 manual read: dispatch .github/workflows/pilot.yml on the final "
-            "commit and compare its per-step minimum with the eleven-handler "
-            "baseline; the limit is 1.10."
+            "\nK3 manual read: dispatch .github/workflows/pilot.yml with "
+            "baseline_per_step_min_us set to the eleven-handler per-step minimum "
+            "measured in the same job; the plain run must stay within 1.10 times it."
         )
         print(
             f"K7 manual read: warm CI run {run['run_id']} of {run['commit']}, quick "
             f"tier {run['wall_s']} s over {run['tests']} tests, ceiling "
             f"{K7_CEILING_S} s."
         )
-    record = (CHANGES / "slice-3a-s10.md").read_text()
+    record = S10_RECORD.read_text()
     assert str(run["run_id"]) in record and str(run["wall_s"]) in record
+    assert "pending CI measurement" in record
 
 
 # ---- K4 ----------------------------------------------------------------------------
@@ -454,27 +681,19 @@ def _record_text(names):
 
 
 def _mentions(text, path):
-    """Whether a record names a core path: by its module name or, for a subpackage
-    file, by `package/file` or the bare `package/` directory.
-    """
-    rel = path.removeprefix(CORE).removesuffix(".py")
-    names = {rel, rel.rsplit("/", 1)[-1]}
-    if "/" in rel:
-        names.add(rel.split("/", 1)[0] + "/")
-    return any(
-        re.search(r"(?<![\w])" + re.escape(n) + r"(?![\w])", text) for n in names
-    )
+    """Whether a record names a core path exactly, as the full repository path."""
+    return bool(re.search(r"(?<![\w/.])" + re.escape(path) + r"(?![\w])", text))
 
 
 def _core_test_cited(text):
-    """Whether a record cites an existing file under `tests/core/`."""
-    cited = re.findall(r"tests/core/[\w/]+\.py", text)
+    """Whether a record cites an existing `tests/core/test_*.py` file."""
+    cited = re.findall(r"tests/core/test_\w+\.py", text)
     return any((REPO / path).exists() for path in cited)
 
 
 def unattributed(owners, commits, text_of):
-    """Problems with the attribution: commits no task lists, stale entries, and tasks
-    whose records cite no core test.
+    """Problems with the attribution: commits no task lists, stale entries, tasks whose
+    records cite no core test, and exact core paths a record does not name.
     """
     found = []
     for sha in commits:
@@ -487,16 +706,15 @@ def unattributed(owners, commits, text_of):
     ]
     for task in {owners[s] for s in commits if s in owners}:
         if not _core_test_cited(text_of(task)):
-            found.append(f"the {task} record cites no tests/core file")
+            found.append(f"the {task} record cites no tests/core test file")
+    found += unnamed_paths(owners, commits, text_of)
     return found
 
 
 def unnamed_paths(owners, commits, text_of):
-    """Core paths a commit touched that its task's record does not name (reported,
-    not failed: the records describe behavior, and name modules only where it helps).
-    """
+    """Exact core paths a commit touched that its task's record does not name."""
     return [
-        f"{sha[:7]} {path} ({owners[sha]})"
+        f"{sha[:7]} {path} not named in the {owners[sha]} record"
         for sha in commits
         if sha in owners
         for path in _core_paths(sha)
@@ -509,186 +727,95 @@ def _text_of(task):
     return _record_text(records)
 
 
-def _touching_the_core(shas):
-    return [s for s in shas if _core_paths(s)]
+def commit_paths():
+    """Paths touched by each non-merge commit from the last S0 commit to HEAD."""
+    out = _git(
+        "log",
+        "--no-merges",
+        "--no-renames",
+        "--name-only",
+        "--format=@@%H",
+        f"{S0_END}..HEAD",
+    )
+    commits, sha = {}, None
+    for line in out.splitlines():
+        if line.startswith("@@"):
+            sha = line[2:]
+            commits[sha] = []
+        elif line:
+            commits[sha].append(line)
+    return commits
 
 
-def _survey_commits():
-    """The commits that add a survey test or record, from S0 to HEAD."""
-    return _git(
-        "rev-list", "--no-merges", f"{S0_END}..HEAD", "--", *SURVEY_FILES
-    ).split()
+def survey_commits_touching_the_core(commits):
+    """Commits (sha -> touched paths) that add a survey test or record and also touch
+    the core, plus the number of survey commits seen.
+    """
+    survey = {s: p for s, p in commits.items() if set(p) & set(SURVEY_FILES)}
+    return [s for s, p in survey.items() if any(f.startswith(CORE) for f in p)], len(
+        survey
+    )
 
 
-def test_k4_every_core_change_is_attributed_to_a_task_record_and_a_core_test(capsys):
+def test_k4_every_core_change_is_attributed_to_a_task_record_and_a_core_test():
     """Fails if a core commit after S0 is listed under no task, a listed commit is not
-    in the range, or a task's record cites no existing core test. Core paths a record
-    does not name are printed, not failed.
+    in the range, a task's record cites no existing core test, or a record does not name
+    an exact core path its commit touched.
     """
     commits = _core_commits()
     assert len(commits) >= 40  # evidence: the slice's core work is in the range
     owners = _owners()
     assert unattributed(owners, commits, _text_of) == []
     assert {"S1", "S2", "S3a", "S4", "S5", "S5b", "S6"} <= set(owners.values())
-    unnamed = unnamed_paths(owners, commits, _text_of)
-    with capsys.disabled():
-        print(f"\nK4: {len(commits)} core commits, {len(unnamed)} unnamed paths")
-        for line in unnamed:
-            print(f"K4 unnamed: {line}")
 
 
 def test_k4_no_survey_commit_touches_the_core():
     """Fails if a commit that adds a survey test or its record touches `core/`."""
-    shas = _survey_commits()
-    assert len(shas) >= 4  # evidence: surveys 8, 9, 10 and 11 each landed
-    assert _touching_the_core(shas) == []
+    touching, n_survey = survey_commits_touching_the_core(commit_paths())
+    assert n_survey >= 4  # evidence: surveys 8, 9, 10 and 11 each landed
+    assert touching == [], [s[:7] for s in touching]
 
 
-def test_k4_control_a_core_edit_in_a_survey_commit_is_caught():
-    """Control: a commit that edited the core is flagged by the survey check."""
-    feature = _resolve("f155d0b")
-    assert _touching_the_core([feature]) == [feature]
+def test_k4_control_a_survey_commit_that_touches_the_core_is_flagged():
+    """Control: a synthetic history with a survey commit that edits the core is flagged
+    by the same discovery the real check uses, and a clean survey commit is not.
+    """
+    history = {
+        "aaa": ["tests/studies/test_survey_9.py", CORE + "transaction.py"],
+        "bbb": ["tests/studies/test_survey_10.py", "docs/changes/slice-3a-survey10.md"],
+        "ccc": [CORE + "carry.py"],
+    }
+    touching, n_survey = survey_commits_touching_the_core(history)
+    assert touching == ["aaa"] and n_survey == 2
 
 
 def test_k4_control_an_unlisted_commit_and_an_unnamed_path_are_caught():
     """Control: dropping a commit from the owner table is reported, and a record that
-    does not name a path the commit touched is reported.
+    names a path only by its module name or directory does not name it.
     """
     commits = _core_commits()
     owners = _owners()
     dropped = _resolve("f155d0b")
     fewer = {s: t for s, t in owners.items() if s != dropped}
     assert any(dropped[:7] in p for p in unattributed(fewer, commits, _text_of))
-    blank = lambda task: "tests/core/test_nothing_here.py"  # noqa: E731
-    assert unnamed_paths(owners, [dropped], blank)
-    assert any("cites no" in p for p in unattributed(owners, [dropped], blank))
+    path = _core_paths(dropped)[0]
+    stem = path.removeprefix(CORE).removesuffix(".py")
+    loose = lambda task: f"tests/core/test_lints.py {stem} core/{stem.split('/')[0]}/"  # noqa: E731
+    assert unnamed_paths(owners, [dropped], loose)
+    exact = lambda task: "tests/core/test_lints.py " + " ".join(_core_paths(dropped))  # noqa: E731
+    assert unnamed_paths(owners, [dropped], exact) == []
+    assert any("not named" in p for p in unattributed(owners, [dropped], loose))
+    nothing = lambda task: "no paths here"  # noqa: E731
+    assert any("cites no" in p for p in unattributed(owners, [dropped], nothing))
 
 
-# ---- K5 ----------------------------------------------------------------------------
+# ---- A5 and the meta check -----------------------------------------------------------
 
-test_k5_lint_scans_the_core = lints.test_lint_scans_the_core
-test_k5_core_has_no_domain_word = lints.test_core_is_clean
-test_k5_core_imports_clean = lints.test_core_imports_clean
-test_k5_control_each_denied_token = lints.test_lint_catches_each_denied_token
-test_k5_control_each_import_fixture = lints.test_core_imports_catches_fixtures
-
-
-# ---- K6 ----------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def refund_runs():
-    """The plain and the private-row-shifted refund runs the privacy checks read."""
-    out = {}
-    for name in ("applied", "shifted"):
-        study = refund_study(
-            refund.CANCELLED, **refund.SURCHARGE, **refund.SCENARIOS[name]
-        )
-        out[name] = (study, refund._run(study))
-    return out
-
-
-@pytest.fixture(scope="module", params=("host", "compiled"))
-def survey10_runs(request):
-    return survey10._Runs(request.param)
-
-
-def test_k6_a_refund_view_ignores_a_private_event(refund_runs):
-    """Fails if an observer-only receipt moves the policy fingerprint of a refund."""
-    refund.test_the_policy_fingerprint_ignores_a_private_event_before_the_refund(
-        refund_runs
-    )
-
-
-def test_k6_mutant_a_visible_internal_refund_identity(refund_runs, monkeypatch):
-    """Fails if showing the internal `refund_of` leaves the view invariant."""
-    refund.test_mutant_a_visible_internal_refund_id_moves_the_fingerprint(
-        refund_runs, monkeypatch
-    )
-
-
-def test_k6_survey_10_awards_ignore_unreleased_and_observer_only(survey10_runs):
-    """Fails if an award reads a proposal the policy never saw (counts nonzero)."""
-    survey10.test_awards_ignore_unreleased_and_observer_only_proposals(survey10_runs)
-
-
-def test_k6_survey_10_a_release_moves_the_award(survey10_runs):
-    """Fails if releasing a proposal does not move its award the expected way."""
-    survey10.test_releasing_a_proposal_moves_the_award_the_expected_way(survey10_runs)
-
-
-def test_k6_mutant_a_truth_reading_committee(survey10_runs):
-    """Fails if a committee that reads the carry directly passes the perturbation."""
-    survey10.test_a_committee_reading_the_carry_fails_the_perturbation(survey10_runs)
-
-
-test_k6_survey_8_a_policy_stops_the_dry_asset = (
-    survey8.test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected
-)
-test_k6_control_the_removed_policy_stop = survey8.test_control_without_the_policy_stop_every_refusal_is_no_funds_and_row_b_fails  # noqa: E501
-
-
-# ---- K8 ----------------------------------------------------------------------------
-
-
-def test_k8_the_survey_10_replay_reproduces_the_run_and_a_dropped_award_fails(
-    survey10_runs,
-):
-    """Fails if the replay misses an award row, an `Allocate`, an admission outcome, or
-    accepts a log with one award dropped.
-    """
-    survey10.test_replay_reproduces_the_run_and_fails_without_a_recorded_award(
-        survey10_runs
-    )
-
-
-test_k8_mutant_a_dropped_award = (
-    allocator.test_dropping_a_recorded_award_fails_the_check
-)
-
-
-# ---- A1 to A10 ---------------------------------------------------------------------
-
-ACCEPTANCE = {
-    "A1": ("tests/core/test_charging.py",),
-    "A2": ("tests/core/test_refund.py", "tests/core/test_awards.py"),
-    "A3": ("tests/core/test_awards.py",),
-    "A4": ("tests/core/test_frozen_horizon.py",),
-    "A5": ("tests/core/test_programs.py",),
-    "A6": ("tests/core/test_conservation.py",),
-    "A7": ("tests/core/test_snapshot_balances.py",),
-    "A8": ("tests/core/test_preflight.py", "tests/codec/test_preflight_json.py"),
-    "A9": (
-        "tests/studies/test_survey_8.py",
-        "tests/studies/test_survey_9.py",
-        "tests/studies/test_survey_10.py",
-        "tests/studies/test_survey_11.py",
-    ),
-}
 STOP_GOLDENS = tuple(
     f"stop_{scope}_{disposition}"
     for scope in ("asset", "campaign", "lane", "program")
     for disposition in ("abort", "close", "drain")
 )
-
-
-def _test_functions(path):
-    tree = ast.parse((REPO / path).read_text())
-    return [
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
-    ]
-
-
-@pytest.mark.parametrize("item", sorted(ACCEPTANCE))
-def test_a1_to_a9_each_acceptance_item_has_its_tests(item):
-    """Fails if an acceptance file is gone or defines no test, which would leave the
-    item's check empty (the files run in the quick tier).
-    """
-    for path in ACCEPTANCE[item]:
-        assert (REPO / path).exists(), path
-        assert _test_functions(path), path
 
 
 def test_a5_the_twelve_stop_goldens_are_pinned():
@@ -701,43 +828,27 @@ def test_a5_the_twelve_stop_goldens_are_pinned():
     assert len(STOP_GOLDENS) == 12
 
 
-def test_a10_the_pins_are_the_k1_checks():
-    """Fails if a K1 check this gate invokes went missing: A10 is K1."""
-    here = {n for n in globals() if n.startswith("test_k1_")}
-    assert len(here) >= 12
-
-
-# ---- the gate itself ---------------------------------------------------------------
-
-# Each spec mutant and the check in this file that must fail on it.
-MUTANT_CHECKS = {
-    "K1 an asset-key change for asset 1": test_k1_mutant_an_asset_key_change_moves_a_pinned_history,  # noqa: E501
-    "K1 an always-on empty leaf": test_k1_mutant_an_always_on_empty_leaf_moves_the_pins,
-    "K1 a changed N_TIES": test_k1_mutant_a_changed_n_ties_moves_a_pinned_history,
-    "K1 lane closure on FAULT by default": test_k1_mutant_lane_closure_on_a_fault,
-    "K2 omit the expiry debit and its counter together": test_k2_mutant_the_expiry_debit_and_counter_omitted_together,  # noqa: E501
-    "K2 refund a nonrefundable surcharge": test_k2_mutant_a_refund_of_the_whole_charge,
-    "K2 credit an old award's refund to a newer award": test_k2_mutant_an_old_awards_refund_credited_to_the_newer_award,  # noqa: E501
-    "K4 a core edit in a survey commit": test_k4_control_a_core_edit_in_a_survey_commit_is_caught,  # noqa: E501
-    "K6 a truth-reading committee": test_k6_mutant_a_truth_reading_committee,
-    "K6 a visible internal refund_of": test_k6_mutant_a_visible_internal_refund_identity,  # noqa: E501
-    "K8 drop one award from the log": test_k8_mutant_a_dropped_award,
-}
-
-
-def test_the_gate_has_checks_for_every_rule_and_every_mutant():
-    """Fails if a rule K1 to K8 has no check in this file, or a spec mutant is not
-    tied to a check that exists here. K3 and K7 are the wired measurements.
+def test_zz_every_rule_item_and_mutant_has_a_check_that_ran_and_passed(child, outcomes):
+    """Fails if a rule K1 to K8 or an item A1 to A10 has no listed check, a listed
+    check of this file did not pass, or a spec mutant is not tied to a check that ran
+    and passed (an inventory id from the child run, or a check of this file).
     """
-    for rule in range(1, 9):
-        checks = [n for n in globals() if n.startswith(f"test_k{rule}_")]
-        assert checks, f"K{rule} has no check"
-    here = {id(v) for n, v in globals().items() if n.startswith("test_")}
+    for rule in [f"K{i}" for i in range(1, 9)] + [f"A{i}" for i in range(1, 11)]:
+        assert INVENTORY.get(rule) or OWN.get(rule), f"{rule} has no check"
+    own = {name: n for entries in OWN.values() for name, n in entries.items()}
+    for name, n in own.items():
+        assert outcomes.passed[name] == n and not outcomes.other[name], name
+    inventory = {i for entries in INVENTORY.values() for i in entries}
     for label, check in MUTANT_CHECKS.items():
-        assert id(check) in here, label
+        if check in own:
+            assert outcomes.passed[check] == own[check], label
+        else:
+            assert check in inventory, label
+            assert child["passed"][check] > 0 and not child["other"][check], label
     assert {label.split()[0] for label in MUTANT_CHECKS} == {
         "K1",
         "K2",
+        "K3",
         "K4",
         "K6",
         "K8",

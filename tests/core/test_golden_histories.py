@@ -74,6 +74,11 @@ def expected_keys():
     }
 
 
+def _case_keys(name, executor):
+    """The keys one case must produce on one executor: every world, none missing."""
+    return {entry_key(name, executor, w) for w in range(N_WORLDS)}
+
+
 def test_manifest_covers_every_case_executor_and_world():
     """Fails if a corpus case, executor or world has no golden entry, or one is stale.
 
@@ -96,6 +101,7 @@ def test_history_matches_its_golden_digest(case, executor):
     """Fails if any integer or float of a corpus history changed, by even one bit."""
     manifest = json.loads(MANIFEST.read_text())
     got = case_digests(case.name, executor)
+    assert set(got) == _case_keys(case.name, executor)  # every world ran
     moved = {k: v for k, v in got.items() if manifest.get(k) != v}
     assert not moved, sorted(moved)
 
@@ -186,6 +192,7 @@ def test_fingerprints_match_their_pin(case, executor):
         entry_key(case.name, executor, run.world): run_fingerprints(run)
         for run in runs(case.name, executor)
     }
+    assert set(got) == _case_keys(case.name, executor)  # every world ran
     moved = {k: v for k, v in got.items() if pinned[k] != v}
     assert not moved, sorted(moved)
 
