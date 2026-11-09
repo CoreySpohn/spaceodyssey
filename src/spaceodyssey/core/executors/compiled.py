@@ -152,6 +152,11 @@ class CompiledExecutor(AbstractExecutor):
             isinstance(bucket, bool) or not isinstance(bucket, int) or bucket <= 0
         ):
             raise ValueError(f"bucket must be a positive int, not {bucket!r}")
+        if checkpoint is not None and bucket is not None:
+            raise ValueError(
+                "bucket is ignored by the chunked driver a checkpoint uses: "
+                "pass one or the other"
+            )
         if (
             checkpoint is not None
             or service is not None

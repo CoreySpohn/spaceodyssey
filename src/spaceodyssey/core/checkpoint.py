@@ -46,6 +46,7 @@ class CheckpointCode(enum.StrEnum):
     C007 = "C007"  # a saved array does not fit the structure the study builds
     C008 = "C008"  # a checkpoint exists and the call did not ask to resume
     C009 = "C009"  # the directory or a file in it is not safe to use
+    C010 = "C010"  # the call asked to resume and the directory holds no checkpoint
 
 
 class CheckpointError(Exception):
