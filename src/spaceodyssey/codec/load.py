@@ -328,6 +328,9 @@ def _check_field(cls, field, value, path):
     """Refuse a value its converter would change or its annotation does not fit."""
     if value is None and (cls, field.name) in _NULL_OK.get():
         return
+    if cls is Capacities and value is None:
+        # no capacity is nullable; refuse at the field, not at the caps table
+        raise DocumentError(f"field {field.name!r} cannot be null", pointer(path))
     if field.type is jax.Array and not isinstance(value, (jax.Array, np.ndarray)):
         raise DocumentError(
             f"field {field.name!r} holds an array, not a {type(value).__name__}",

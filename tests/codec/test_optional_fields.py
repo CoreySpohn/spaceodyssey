@@ -208,9 +208,8 @@ def test_an_explicit_null_balance_field_is_refused(name):
     doc["study"]["caps"][name] = None
     with pytest.raises(DocumentError) as err:
         load_study(json.dumps(doc), TOY_KINDS)
-    # the capacity table is rejected as a whole, so the pointer names the table
-    assert err.value.pointer == "/study/caps"
-    assert _resolve(doc, err.value.pointer)[name] is None
+    assert err.value.pointer == f"/study/caps/{name}"
+    assert _resolve(doc, err.value.pointer) is None
 
 
 def test_a_required_field_still_cannot_be_missing():
