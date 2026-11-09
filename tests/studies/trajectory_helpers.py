@@ -1,4 +1,4 @@
-"""Two-truth host runs and view comparisons for the trajectory surveys (not a test file)."""
+"""Two-truth host runs and view comparisons for the trajectory surveys."""
 
 from types import SimpleNamespace
 
