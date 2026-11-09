@@ -280,6 +280,10 @@ def realize_row(study, truth, rec, fraction, key):
     model = study.channel_model
     args = (truth, rec.subject, rec.channel_index, fraction, key)
     width = study.caps.payload_width
+    if model.version not in (1, 2):
+        raise ValueError(
+            f"channel model version {model.version} is not supported; use 1 or 2"
+        )
     if model.version == 1:
         meas, z = model.realize(*args, study.design, study.channels)
         return jnp.zeros(width, F64).at[0].set(meas).at[1].set(z).at[2].set(fraction)

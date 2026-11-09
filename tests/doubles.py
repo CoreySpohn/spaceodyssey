@@ -22,11 +22,11 @@ from spaceodyssey.truth import AbstractTruthModel, ObservedData, PriorSet, _plan
 
 
 class ToyEpochPhotometry(AbstractChannelModel):
-    """A version-2 toy channel model: its row records when the exposure started.
+    """A version-2 toy channel model: its row records the whole realize context.
 
-    The row is `[start_tick, 3 * start_tick + 1, z]` with `z` a standard normal draw
-    from the key, so the first two columns are a known function of the context and
-    the third keeps the draw sensitive to the key.
+    The row is `[start_tick, end_tick, acquisition_index, fraction, z]` with `z` a
+    standard normal draw from the key, so every context field is checked and the draw
+    stays sensitive to the key. The study must register a five-column kind.
     """
 
     version: int = eqx.field(default=2, kw_only=True)
@@ -40,8 +40,14 @@ class ToyEpochPhotometry(AbstractChannelModel):
         self, truth, subject, channel_index, fraction, key, design, channels, *, context
     ):
         """Return the full payload row."""
-        start = context.start_tick.astype(jnp.float64)
-        return jnp.stack([start, 3.0 * start + 1.0, jr.normal(key, dtype=jnp.float64)])
+        fields = (
+            context.start_tick,
+            context.end_tick,
+            context.acquisition_index,
+            context.fraction,
+        )
+        z = jr.normal(key, dtype=jnp.float64)
+        return jnp.stack([*(jnp.asarray(f, jnp.float64) for f in fields), z])
 
 
 def check_predictive(pred, *, key, n: int = 4096) -> None:
