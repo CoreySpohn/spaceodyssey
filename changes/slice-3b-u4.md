@@ -39,7 +39,8 @@ new leaves and lowers the same program.
 - `core/battery/metamorphic.py`: the extra asset of `zero_time_asset` gets a padded row.
 - Pre-flight: finding code `S001` for a timeline set while `max_config_switches` is 0, a
   missing or wrongly shaped timeline while it is positive, a tick outside 0 to the horizon,
-  and a row that is not ascending with its padding last.
+  and a row that is not strictly increasing with its padding last (equal ticks are
+  refused: two switches at one tick would skip a configuration id).
 - `studies/toy.py`: `survey_1` accepts `config_switch_ticks`.
 
 ## Tests
@@ -56,7 +57,7 @@ two-slot timeline on; scenarios are script data and the timeline leaf):
 | fork battery passes on a run whose records straddle the switch | medium |
 | the timeline round trips through the codec with its dtype, and a study without one writes no field | unit |
 
-Also: `S001` seeded cases (four) and one clean case in `preflight_cases.py` with their
+Also: `S001` seeded cases (five, one a tied tick) and one clean case in `preflight_cases.py` with their
 locators, `max_config_switches` in the optional-capacity inventories of
 `test_optional_fields.py` and `test_slice3_guard.py` (the non-default round trip carries
 it).

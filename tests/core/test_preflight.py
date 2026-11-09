@@ -199,6 +199,7 @@ LOCATORS = {
     "config_ticks_without_capacity": ("assets", None, "config_switch_ticks", ()),
     "config_ticks_missing": ("assets", None, "config_switch_ticks", ()),
     "config_ticks_unsorted": ("assets", None, "config_switch_ticks", (0,)),
+    "config_ticks_tied": ("assets", None, "config_switch_ticks", (0,)),
     "config_tick_past_horizon": ("assets", None, "config_switch_ticks", (1,)),
     "frozen_horizon": ("assets", None, "freeze_ticks", (0,)),
     "disruptive_resource": ("assets", None, "disruptive_resource", (0,)),

@@ -611,7 +611,8 @@ def config_timeline(study: Study):
     """S001: a configuration timeline the capacities and horizon cannot hold.
 
     With `max_config_switches` zero the assets declare no switch ticks. With it positive
-    each asset declares a row of exactly that many ticks, ascending, inside the horizon
+    each asset declares a row of exactly that many ticks, strictly increasing (two
+    switches at one tick would skip a configuration id), inside the horizon
     (0 to `horizon_tick`), the unused tail padded with `CONFIG_PAD`.
     """
     caps = study.caps
@@ -624,7 +625,7 @@ def config_timeline(study: Study):
                 ERROR,
                 "assets.config_switch_ticks",
                 why,
-                "declare max_config_switches and one ascending row of switch ticks "
+                "declare max_config_switches and one strictly increasing row of switch ticks "
                 "inside the horizon per asset, padded with CONFIG_PAD",
                 subject="assets",
                 member="config_switch_ticks",
@@ -643,8 +644,8 @@ def config_timeline(study: Study):
         real = row[row != CONFIG_PAD]
         if len(real) and (real[0] < 0 or real[-1] > horizon):
             out += flag(f"holds a tick outside 0 to {horizon}", (a,))
-        elif (np.diff(row) < 0).any():
-            out += flag("is not ascending with its padding last", (a,))
+        elif (np.diff(row) < 0).any() or (np.diff(real) == 0).any():
+            out += flag("is not strictly increasing with its padding last", (a,))
     return out
 
 

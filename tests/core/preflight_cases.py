@@ -448,6 +448,11 @@ SEEDED = {
         lambda: _timeline_study(jnp.asarray([[30, 20, PAD], [PAD, PAD, PAD]], I64)),
         None,
     ),
+    "config_ticks_tied": (
+        C.S001,
+        lambda: _timeline_study(jnp.asarray([[30, 30, PAD], [PAD, PAD, PAD]], I64)),
+        None,
+    ),
     "config_tick_past_horizon": (
         C.S001,
         lambda: _timeline_study(jnp.asarray([[PAD] * 3, [10, 2000, PAD]], I64)),
