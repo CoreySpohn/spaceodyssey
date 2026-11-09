@@ -162,7 +162,7 @@ def h_done(c, ev, study, truth, root):
         audience=channels.audience[channel_index],
         source=ev.channel,
         vintage=ev.scope,
-        config_id=jnp.asarray(0, I64),
+        config_id=jnp.asarray(0 if ev.config is None else ev.config, I64),
         cost=channels.cost[channel_index],
         charged=channels.cost[channel_index],
         valid=~dup & ~stale,
@@ -616,7 +616,7 @@ def _cancel_one(
         audience=channels.audience[channel_index],
         source=c.ev.channel[i],
         vintage=c.ev.scope[i],
-        config_id=jnp.asarray(0, I64),
+        config_id=jnp.asarray(0 if c.ev.config is None else c.ev.config[i], I64),
         cost=channels.cost[channel_index] * spent,
         charged=channels.cost[channel_index] * spent,
         valid=has,
@@ -955,6 +955,7 @@ def h_commit_start(c, ev, study, truth, root):
         scope=ev.scope,
         acquisition_id=ev.acquisition_id,
         program=0 if ev.program is None else ev.program,
+        **({} if ev.config is None else {"config": c.ledger.cm_config[mark]}),
         caps=caps,
     )
     return c2, _emit(n, slot), rec

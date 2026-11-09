@@ -203,10 +203,14 @@ class Trace(eqx.Module):
 
 def commitment_leaves(caps):
     """The commitment table of an empty ledger: no leaves unless commitments are on."""
+    # the admission configuration of each commitment slot: present with a timeline, and
+    # of size zero while commitments are off
+    config = {"cm_config": jnp.zeros(caps.n_commitments, I64)} if caps.configs else {}
     if not caps.commitments:
-        return {}
+        return config
     k = jnp.zeros(caps.n_commitments, I64)
     return {
+        **config,
         "cm_state": k,
         "cm_lane": k,
         "cm_program": k,

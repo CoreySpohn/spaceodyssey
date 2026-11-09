@@ -416,6 +416,13 @@ def _commit_observe(c, eff, e, ok, study):
         bundle_extra = {
             "bundle": jnp.where(bundled, c.n_dec * caps.max_bundles + ordinal, -1)
         }
+    config_extra = {}
+    config = jnp.asarray(0, I64)
+    if caps.configs:
+        # the asset's configuration at admission: its switch ticks at or before now
+        ticks = study.assets.config_switch_ticks[study.assets.lane_asset[lane]]
+        config = (ticks <= t).sum().astype(I64)
+        config_extra = {"config": config}
     gen = c.ledger.lane_gen[lane] + first.astype(I64)
     subject = eff.subject[e]
     acquisition_index = c.acquisition_counts[subject]
@@ -456,6 +463,11 @@ def _commit_observe(c, eff, e, ok, study):
                 "ledger.cm_count": led.cm_count.at[program, lane].add(
                     future.astype(I64)
                 ),
+                **(
+                    {"ledger.cm_config": put(led.cm_config, config)}
+                    if caps.configs
+                    else {}
+                ),
             },
         )
         c1 = enqueue(
@@ -476,6 +488,7 @@ def _commit_observe(c, eff, e, ok, study):
             scope=c.phase,
             acquisition_id=c.next_sid,
             program=program,
+            **config_extra,
             caps=caps,
         )
     if caps.awards:
@@ -523,6 +536,7 @@ def _commit_observe(c, eff, e, ok, study):
         acquisition_id=c.next_sid,
         program=program,
         **bundle_extra,
+        **config_extra,
         caps=caps,
     )
 

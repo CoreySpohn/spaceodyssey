@@ -41,6 +41,7 @@ CAP_FIELDS = (
     "balance_quantum",
     "max_bundles",
     "max_bundle_size",
+    "max_config_switches",
 )
 STUDY_FIELDS = ("key_version",)
 CHANNEL_FIELDS = ("pricing", "surcharge", "failure_kind", "refund_deadline_ticks")
@@ -120,6 +121,7 @@ def test_a_nondefault_optional_field_is_written_and_round_trips():
         balance_quantum=0.5,
         max_bundles=2,
         max_bundle_size=3,
+        max_config_switches=4,
     )
     study = toy.survey_1(caps=caps, key_version=2)
     doc = _doc(study)
@@ -132,6 +134,7 @@ def test_a_nondefault_optional_field_is_written_and_round_trips():
         0.5,
         2,
         3,
+        4,
     ]
     text = _text(study)
     loaded = load_study(text, TOY_KINDS)
@@ -152,6 +155,7 @@ def test_a_missing_optional_field_loads_at_its_default():
         0,
         False,
         1.0,
+        0,
         0,
         0,
     ]

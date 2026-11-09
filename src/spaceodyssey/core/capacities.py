@@ -83,6 +83,14 @@ class Capacities:
     # ordinals per decision and members per bundle; both zero (off) at the default.
     max_bundles: int = dataclasses.field(default=0, metadata=OPTIONAL)
     max_bundle_size: int = dataclasses.field(default=0, metadata=OPTIONAL)
+    # Configuration timeline: switch ticks held per asset (the padded width of
+    # `AssetTable.config_switch_ticks`); zero (off) at the default.
+    max_config_switches: int = dataclasses.field(default=0, metadata=OPTIONAL)
+
+    @property
+    def configs(self) -> bool:
+        """Whether a configuration timeline is on (assets declare switch ticks)."""
+        return self.max_config_switches > 0
 
     @property
     def bundles(self) -> bool:
@@ -131,6 +139,7 @@ class Capacities:
         for name, value in (
             ("max_bundles", self.max_bundles),
             ("max_bundle_size", self.max_bundle_size),
+            ("max_config_switches", self.max_config_switches),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
