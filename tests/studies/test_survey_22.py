@@ -8,15 +8,11 @@ target record: the fingerprints, which hold only integer content, and the views 
 full, whose payload and belief columns carry the floats the table moves.
 """
 
-from types import SimpleNamespace
-
-import jax
 import jax.random as jr
 import numpy as np
 import pytest
 
-from spaceodyssey.core import HostExecutor
-from spaceodyssey.core.enums import EventKind, Purpose, RecordStatus
+from spaceodyssey.core.enums import Purpose, RecordStatus
 from spaceodyssey.studies.survey_22 import (
     FINDER,
     N_PURPOSES,
@@ -24,6 +20,12 @@ from spaceodyssey.studies.survey_22 import (
     TICKS,
     TrajectoryWorldSource,
     survey_22,
+)
+from tests.studies.trajectory_helpers import (
+    first_release,
+    run_one,
+    same_view,
+    views_before,
 )
 
 pytestmark = pytest.mark.slow(
@@ -41,46 +43,6 @@ def _truths(study):
     a = study.world_source.draw(key, study.caps)
     b = TrajectoryWorldSource(salts=TABLE_SALT).draw(key, study.caps)
     return root, a, b
-
-
-def _run(study, truth, root):
-    views = []
-    run = HostExecutor().run(study, truth, root, N_STEPS, view_log=views)
-    trace = run.trace
-    steps = np.flatnonzero(np.asarray(trace.handled) & np.asarray(trace.wake))
-    assert len(steps) == len(views)
-    return SimpleNamespace(run=run, truth=truth, steps=steps, views=views)
-
-
-def _target_first_release(run):
-    """The step that first releases a record of the target channel."""
-    t = run.run.trace
-    hit = (
-        np.asarray(t.handled)
-        & (np.asarray(t.kind) == EventKind.RELEASE)
-        & (np.asarray(t.channel) == TARGET)
-    )
-    return int(np.flatnonzero(hit)[0])
-
-
-def _same_view(x, y):
-    leaves = zip(jax.tree.leaves(x), jax.tree.leaves(y), strict=True)
-    return all(np.array_equal(p, q) for p, q in leaves)
-
-
-def views_before_first_release(a, b):
-    """Compare the policy views before the first release of a target record.
-
-    Returns `(fingerprints equal, full views equal, decisions compared)` over every
-    step before that release; the full comparison covers the floats the fingerprint
-    leaves out.
-    """
-    step = _target_first_release(a)
-    assert step == _target_first_release(b)
-    fa, fb = (np.asarray(r.run.trace.snapshot_fp)[:step] for r in (a, b))
-    early = [i for i, s in enumerate(a.steps) if s < step]
-    full = all(_same_view(a.views[i], b.views[i]) for i in early)
-    return bool(np.array_equal(fa, fb)), full, len(early)
 
 
 def positions(result, channel):
@@ -101,7 +63,7 @@ def runs():
     for name, leaky in (("clean", False), ("leaky", True)):
         study = survey_22(leaky=leaky)
         root, a, b = _truths(study)
-        out[name] = (_run(study, a, root), _run(study, b, root))
+        out[name] = (run_one(study, a, root, N_STEPS), run_one(study, b, root, N_STEPS))
     return out
 
 
@@ -120,11 +82,13 @@ def test_the_swap_moves_the_target_and_no_view_before_its_release(runs):
     for p, r in ((pa, a), (pb, b)):
         want = np.interp(starts, np.asarray(TICKS), np.asarray(r.truth.table.values))
         np.testing.assert_allclose(p, want, rtol=0, atol=1e-12)
-    same_fp, same_view, n_decisions = views_before_first_release(a, b)
-    assert same_fp and same_view and n_decisions >= 1
+    step = first_release(a, TARGET)
+    assert step == first_release(b, TARGET)
+    same_fp, full, n_decisions = views_before(a, b, step)
+    assert same_fp and full and n_decisions >= 1
     # not vacuous: once a target record is released, the full views differ
-    late = [i for i, s in enumerate(a.steps) if s >= _target_first_release(a)]
-    assert late and not all(_same_view(a.views[i], b.views[i]) for i in late)
+    late = [i for i, s in enumerate(a.steps) if s >= step]
+    assert late and not all(same_view(a.views[i], b.views[i]) for i in late)
 
 
 def test_a_finder_that_releases_the_position_at_tick_zero_breaks_the_invariance(runs):
@@ -142,7 +106,9 @@ def test_a_finder_that_releases_the_position_at_tick_zero_breaks_the_invariance(
         assert len(row) == 1 and int(log.released_tick[row[0]]) == 0
         np.testing.assert_allclose(finder, [r.truth.table.at(0)], rtol=0, atol=1e-12)
     assert not np.array_equal(positions(a, FINDER)[1], positions(b, FINDER)[1])
-    same_fp, same_view, n_decisions = views_before_first_release(a, b)
-    assert not same_view and n_decisions >= 1
+    step = first_release(a, TARGET)
+    assert step == first_release(b, TARGET)
+    same_fp, full, n_decisions = views_before(a, b, step)
+    assert not full and n_decisions >= 1
     # the fingerprint holds integers only, so it cannot see the leaked float
     assert same_fp
