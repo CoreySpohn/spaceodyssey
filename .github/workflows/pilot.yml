@@ -146,9 +146,9 @@ jobs:
           # The quick-tier selection and workers of ci.yml. Cold tests exceed their
           # laptop budgets by design, so the budget plugin only reports here; a
           # failing test is reported in the log and does not stop the measurement.
-          # radis writes its user config on first import; do it once here so two
+          # radis writes its user config on first read (newer releases load it lazily); read it once here so two
           # workers do not race on a half-written file during collection.
-          python -c "import radis"
+          python -c "import radis; radis.config['OLDEST_COMPATIBLE_VERSION']" && test -s ~/radis.json
           pytest tests/ -m "not slow" -n 2 --dist loadfile -ra --tb=short \
             -p no:cacheprovider --timeout=900 --durations=40 --durations-min=0 \
             --testbudget-mode report --junitxml=junit-quick-cold.xml \

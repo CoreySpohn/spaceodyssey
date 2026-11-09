@@ -97,9 +97,9 @@ jobs:
         run: |
           # Two workers, one file each: the quick tier is compile-bound and a
           # single process runs about 3x slower here than on a laptop.
-          # radis writes its user config on first import; do it once here so two
+          # radis writes its user config on first read (newer releases load it lazily); read it once here so two
           # workers do not race on a half-written file during collection.
-          python -c "import radis"
+          python -c "import radis; radis.config['OLDEST_COMPATIBLE_VERSION']" && test -s ~/radis.json
           pytest tests/ -m "not slow" -n 2 --dist loadfile -ra --tb=short \
             --timeout=300 --fail-slow=60s \
             --durations=15 --durations-min=1.0 \
@@ -225,9 +225,9 @@ jobs:
           fi
           # The golden pins run in their own job (below), so a slow tier that
           # overruns its limit cannot take them with it. Three workers, one file
-          # each (four vCPUs, about 4.3 GB peak per worker); radis writes its config on first import,
+          # each (four vCPUs, about 4.3 GB peak per worker); radis writes its config on first read,
           # so do that once before the workers start.
-          python -c "import radis"
+          python -c "import radis; radis.config['OLDEST_COMPATIBLE_VERSION']" && test -s ~/radis.json
           pytest tests/ -m slow -n 3 --dist loadfile -ra --tb=short --timeout=900 \
             --ignore=tests/core/test_golden_histories.py \
             "${skip_gate[@]}" \
