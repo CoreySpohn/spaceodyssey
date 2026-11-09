@@ -12,6 +12,7 @@ actually showed the policy, with their semantic keys, and compares the award row
 from the run, or a proposal the committee should not have read, makes it fail.
 """
 
+import copy
 import dataclasses
 
 import equinox as eqx
@@ -19,13 +20,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from spaceodyssey.core import EventKind, Stage, enqueue
+from spaceodyssey.core import EventKind, HostExecutor, Stage, enqueue
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import (
     F64,
     I64,
-    AdmissionCode,
     Audience,
     Disposition,
     EffectKind,
@@ -358,13 +358,15 @@ class AllocatorRun:
     """One world of a run, as `replay_allocation` reads it.
 
     `decisions` is the `(view, effects)` of every executed decision, as the policy saw
-    and answered them; `carry` and `trace` are the world's final state and trace.
+    and answered them; `carry` and `trace` are the world's final state and trace, and
+    `root` and `truth` are what the world was run from (the replay re-executes it).
     """
 
     carry: object
     trace: object
     decisions: tuple
     root: object
+    truth: object = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -530,74 +532,90 @@ def allocation_failures(n_assets, n_resources, awards, allocates):
     ]
 
 
-def observation_failures(log, admitted):
-    """How the admitted `Observe` requests differ from the observation records.
+@dataclasses.dataclass(frozen=True)
+class Reference:
+    """The core's own answer for a run: the host re-execution of its study."""
 
-    `admitted` lists `(channel id, subject, tick, occupancy)` for each `Observe` effect
-    the trace shows admitted. A request occupies its lane from its tick for the
-    channel's occupancy, so it owns exactly the measurement records on its channel and
-    subject that start inside that span. Each admitted request must own one record and
-    each record must belong to one request, so swapping two outcomes leaves a request
-    with no record and a record with no request.
+    carry: object
+    trace: object
+
+
+def reference_execution(study, run, committee=None):
+    """Re-execute the run's world on the host executor with the same committee.
+
+    The study, the root and the truth are the run's own, so the core decides every
+    admission and writes every record again; `replay_allocation` compares them with the
+    recorded ones. Compute this once per run and pass it to each replay.
     """
-    kept = np.asarray(log.valid) & (np.asarray(log.kind) == toy.RECORD_MEASUREMENT)
-    records = list(
-        zip(
-            np.asarray(log.channel)[kept].tolist(),
-            np.asarray(log.subject)[kept].tolist(),
-            np.asarray(log.start_tick)[kept].tolist(),
-            strict=True,
-        )
-    )
+    committee = ToyCommittee() if committee is None else committee
+    committee = copy.deepcopy(committee)
+    if hasattr(committee, "hold"):
+        committee.hold(run.carry)
+    n_steps = int(np.asarray(run.trace.handled).shape[0])
+    result = HostExecutor().run(study, run.truth, run.root, n_steps, service=committee)
+    return Reference(result.carry, result.trace)
 
-    def owns(request, record):
-        channel, subject, tick, span = map(int, request)
-        return record[:2] == (channel, subject) and tick <= record[2] < tick + span
 
+RECORD_COLUMNS = ("channel", "subject", "start_tick", "end_tick", "available_tick")
+
+
+def _record_rows(log, kinds):
+    """Each valid `kinds` record as a tuple, in log order."""
+    keep = np.asarray(log.valid) & np.isin(np.asarray(log.kind), kinds)
+    columns = [
+        np.asarray(log.kind)[keep],
+        *(np.asarray(getattr(log, c))[keep] for c in RECORD_COLUMNS),
+    ]
+    pay = np.asarray(log.payload)[keep]
+    return [
+        (*(int(c[i]) for c in columns), tuple(pay[i].tolist()))
+        for i in range(int(keep.sum()))
+    ]
+
+
+def reference_failures(carry, trace, ref):
+    """How a recorded run differs from the core's re-execution of it.
+
+    Every handled decision must request the same effects and receive the same
+    admission codes, every measurement and award record must be the same, and the
+    ledger's granted totals must agree. An outcome or record changed after the fact,
+    dropped or repeated, is a difference.
+    """
     fails = []
-    for r in admitted:
-        n = sum(owns(r, rec) for rec in records)
-        if n != 1:
-            fails.append(f"admitted Observe {tuple(map(int, r))} owns {n} records")
-    for rec in records:
-        n = sum(owns(r, rec) for r in admitted)
-        if n != 1:
-            fails.append(f"record {rec} belongs to {n} admitted Observe requests")
+    steps = np.flatnonzero(np.asarray(trace.handled) & np.asarray(trace.wake))
+    rsteps = np.flatnonzero(np.asarray(ref.trace.handled) & np.asarray(ref.trace.wake))
+    if len(steps) != len(rsteps):
+        return [f"{len(steps)} decisions against {len(rsteps)} on re-execution"]
+    for name in ("tick", "eff_kind", "admit_code"):
+        got = np.asarray(getattr(trace, name))[steps]
+        want = np.asarray(getattr(ref.trace, name))[rsteps]
+        for d in np.flatnonzero((got != want).reshape(len(steps), -1).any(axis=1)):
+            fails.append(f"decision {d}: {name} differs from the re-execution")
+    kinds = (toy.RECORD_MEASUREMENT, AWARD_KIND_INDEX)
+    if _record_rows(carry.log, kinds) != _record_rows(ref.carry.log, kinds):
+        fails.append("the measurement and award records differ from the re-execution")
+    if not np.array_equal(
+        np.asarray(carry.ledger.granted), np.asarray(ref.carry.ledger.granted)
+    ):
+        fails.append("the ledger's granted totals differ from the re-execution")
     return fails
 
 
-def funds_failures(code, available, cost):
-    """How an `Observe` outcome differs from the program funds the replay recomputed.
-
-    An admitted request needs `available >= cost`. A refused one must carry the
-    `NO_FUNDS` code and `available < cost`: it is not refused for another reason this
-    study never produces, and not refused while the funds were there.
-    """
-    short = available < cost
-    if code == int(AdmissionCode.OK):
-        return ["admitted without the funds"] if short else []
-    if code != int(AdmissionCode.NO_FUNDS):
-        return [f"refused with code {code}, not NO_FUNDS"]
-    return [] if short else ["refused for funds although they were there"]
-
-
-def replay_allocation(study, run, committee=None):
+def replay_allocation(study, run, committee=None, reference=None):
     """Replay the committee and the policy on the run's own decision views.
 
     For each executed decision it checks that the proposals and awards in the view are
     the records released to the policy by then, reruns the policy on the view with the
     key of that decision, and compares its effects, its draw and its retained `Allocate`
-    rows with the run. Each replayed `Allocate` is given the admission code the window
-    rule implies (one open window per row) and compared with the trace. For each `Query`
-    it reruns the committee on the view that asked. After the walk it compares those
-    answers with the award records in the log, checks that each recorded `Allocate`
-    follows its award, and checks the ledger's granted totals against the admitted
-    awards. Each replayed `Observe` that the trace shows admitted must own one
-    measurement record that starts within its occupancy, and its outcome must agree
-    with the program funds the replay rebuilds from the awards and the earlier charges
-    (program rows hold no credit of their own); each replayed `Query`, `Wait` and
-    `Stop` must be admitted.
-    Returns a `ReplayReport`; it never raises on a mismatch.
+    rows with the run. For each `Query` it reruns the committee on the view that asked.
+    After the walk it compares those answers with the award records in the log and
+    checks that each recorded `Allocate` follows its award.
+
+    The replay does not work out admission outcomes or measurement records itself. It
+    compares the run's admission codes, measurement and award records and granted
+    totals with the host re-execution of the same study (`reference_execution`, which
+    the caller may pass in as `reference` to share it between replays), so the core
+    decides every outcome. Returns a `ReplayReport`; it never raises on a mismatch.
     """
     committee = ToyCommittee() if committee is None else committee
     if hasattr(committee, "hold"):
@@ -610,6 +628,10 @@ def replay_allocation(study, run, committee=None):
     if len(steps) != len(run.decisions):
         message = f"{len(run.decisions)} views for {len(steps)} decisions"
         return ReplayReport((message,), 0, 0, 0)
+    if reference is None:
+        if run.truth is None:
+            return ReplayReport(("the run holds no truth to re-execute",), 0, 0, 0)
+        reference = reference_execution(study, run, committee)
     log = carry.log
     rows = np.flatnonzero(
         np.asarray(log.valid) & (np.asarray(log.kind) == committee.kind)
@@ -618,8 +640,6 @@ def replay_allocation(study, run, committee=None):
     released = release_steps(trace, len(np.asarray(log.kind)))
     fails, asked, allocates = [], [], []
     pstate = jnp.zeros(caps.n_pstate, F64)
-    open_until, window, admitted = {}, {}, []
-    granted = np.zeros((caps.n_assets + caps.n_programs + 1, caps.n_resources))
     previous, ordinal = None, 0
     for d, (step, (view, taken)) in enumerate(zip(steps, run.decisions, strict=True)):
         tick = int(trace.tick[step])
@@ -667,44 +687,6 @@ def replay_allocation(study, run, committee=None):
                 and kept == (start, until, row)
             ):
                 fails.append(f"decision {d} slot {slot}: the trace row differs")
-            opened = open_until.get(row, -1) > tick
-            want = AdmissionCode.FORBIDDEN if opened else AdmissionCode.OK
-            if int(trace.admit_code[step, slot]) != int(want):
-                fails.append(f"decision {d} slot {slot}: the admission code differs")
-            if not opened:
-                open_until[row] = until
-                window[row] = (start, until, np.asarray(eff.amount[slot]).copy())
-                granted[row] += np.asarray(eff.amount[slot])
-        for slot in np.flatnonzero(np.asarray(eff.kind) == EffectKind.OBSERVE):
-            code = int(trace.admit_code[step, slot])
-            ci = int(eff.channel_index[slot])
-            row = caps.n_assets + int(eff.program[slot])
-            start, until, left = window.get(row, (0, 0, np.zeros(caps.n_resources)))
-            charge = np.asarray(study.channels.charge)[ci]
-            available = left[PROGRAM_COLUMN] if start <= tick < until else 0.0
-            fails += [
-                f"decision {d} slot {slot}: {m}"
-                for m in funds_failures(code, available, charge[PROGRAM_COLUMN])
-            ]
-            if code == int(AdmissionCode.OK):
-                if start <= tick < until:
-                    left[PROGRAM_COLUMN] -= charge[PROGRAM_COLUMN]
-                admitted.append(
-                    (
-                        int(study.channels.id[ci]),
-                        int(eff.subject[slot]),
-                        tick,
-                        int(study.channels.occupancy_ticks[ci]),
-                    )
-                )
-        for slot in np.flatnonzero(
-            np.isin(
-                np.asarray(eff.kind),
-                (int(EffectKind.QUERY), int(EffectKind.WAIT), int(EffectKind.STOP)),
-            )
-        ):
-            if int(trace.admit_code[step, slot]) != int(AdmissionCode.OK):
-                fails.append(f"decision {d} slot {slot}: the admission code differs")
         if (kinds == EffectKind.QUERY).any():
             q = int(np.argmax(kinds == EffectKind.QUERY))
             request = Request(
@@ -718,13 +700,11 @@ def replay_allocation(study, run, committee=None):
                 group=int(taken.group[q]),
             )
             asked.append((request, view))
-    fails += observation_failures(carry.log, admitted)
+    fails += reference_failures(carry, trace, reference)
     fails += award_failures(committee, asked, recorded, layout)
     fails += allocation_failures(
         caps.n_assets, caps.n_resources, [r for r, _ in recorded], allocates
     )
-    if not np.allclose(np.asarray(carry.ledger.granted), granted):
-        fails.append("the ledger's granted totals differ from the admitted awards")
     return ReplayReport(tuple(fails), len(steps), len(asked), len(allocates))
 
 
@@ -736,14 +716,15 @@ __all__ = [
     "AllocatorRun",
     "CarryCommittee",
     "ProposalRecords",
+    "Reference",
     "ReplayReport",
     "ToyCommittee",
     "allocation_failures",
     "allocator_registry",
     "allocator_study",
     "award_failures",
-    "funds_failures",
-    "observation_failures",
+    "reference_execution",
+    "reference_failures",
     "release_steps",
     "released_rows",
     "replay_allocation",

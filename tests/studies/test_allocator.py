@@ -243,38 +243,6 @@ def test_awards_must_be_visible_to_the_policy_as_recorded():
     assert failures(_award(0, 9.0, 4.0))  # the view's award is not the logged one
 
 
-def test_admitted_observations_must_match_the_observation_records():
-    rows = [(M, 10, 0, 510), (M, 11, 1, 210), (P, 50, 0, 80), (A, 0, 0, 200)]
-    log = SimpleNamespace(
-        kind=np.asarray([r[0] for r in rows]),
-        channel=np.asarray([r[1] for r in rows]),
-        subject=np.asarray([r[2] for r in rows]),
-        start_tick=np.asarray([r[3] for r in rows]),
-        valid=np.asarray([True, True, True, True]),
-    )
-    both = [(10, 0, 500, 100), (11, 1, 200, 150)]
-    assert al.observation_failures(log, both) == []
-    assert al.observation_failures(log, both[:1])  # a record with no admission
-    assert al.observation_failures(log, [*both, (12, 0, 500, 50)])  # no record
-    assert al.observation_failures(log, [*both, both[0]])  # one record, two
-    assert al.observation_failures(log, [*both, (10, 0, 450, 100)])  # shared record
-    assert al.observation_failures(
-        log, [(10, 0, 200, 100), (11, 1, 500, 150)]
-    )  # swapped
-    gone = SimpleNamespace(**{**vars(log), "valid": np.asarray([True, False] * 2)})
-    assert al.observation_failures(gone, both)  # an invalid row is no record
-
-
-def test_an_observation_outcome_must_agree_with_the_funds():
-    ok, short = int(AdmissionCode.OK), int(AdmissionCode.NO_FUNDS)
-    other = int(AdmissionCode.FORBIDDEN)
-    assert al.funds_failures(ok, 1.0, 1.0) == []
-    assert al.funds_failures(ok, 0.5, 1.0)  # admitted without the funds
-    assert al.funds_failures(short, 0.5, 1.0) == []
-    assert al.funds_failures(short, 1.0, 1.0)  # refused with the funds there
-    assert al.funds_failures(other, 0.5, 1.0)  # another refusal code
-
-
 # ------------------------------------------------------------------ slow: study runs
 
 
@@ -309,6 +277,7 @@ def _run(executor, proposals=al.DEFAULT_PROPOSALS, committee="toy", monkeypatch=
         index_world(result.trace, 0),
         acted.decisions[0],
         roots[0],
+        jax.tree_util.tree_map(lambda x: x[0], truths),
     )
     return run, service, result
 
@@ -464,15 +433,19 @@ def _flip_admission(run):
 def test_replay_fails_when_the_run_is_altered():
     run, _, _ = _run("host")
     study = _study()
+    ref = al.reference_execution(study, run)
+    assert al.replay_allocation(study, run, reference=ref).ok
     for k in (0, 1):
-        report = al.replay_allocation(study, _drop_award(run, k))
+        report = al.replay_allocation(study, _drop_award(run, k), reference=ref)
         assert not report.ok and report.n_awards == 2, k
     for which in range(4):
-        assert not al.replay_allocation(study, _drop_allocate(run, which)).ok, which
+        assert not al.replay_allocation(
+            study, _drop_allocate(run, which), reference=ref
+        ).ok, which
         assert _follows_awards(_drop_allocate(run, which)), which
     for field in FIELDS:
         altered = _corrupt(run, EffectKind.ALLOCATE, field)
-        assert not al.replay_allocation(study, altered).ok, field
+        assert not al.replay_allocation(study, altered, reference=ref).ok, field
         assert _follows_awards(altered), field
     # every other effect the policy emitted is compared with the replayed one too
     for kind, field in (
@@ -484,15 +457,17 @@ def test_replay_fails_when_the_run_is_altered():
         (EffectKind.STOP, "scope"),
     ):
         altered = _corrupt(run, kind, field)
-        assert not al.replay_allocation(study, altered).ok, (kind, field)
+        assert not al.replay_allocation(study, altered, reference=ref).ok, (kind, field)
     # an award the policy was never shown, as the log records it
     for field, value in (("audience", int(Audience.OBSERVER)), ("released_tick", -1)):
-        report = al.replay_allocation(study, _set_award(run, field, value))
+        report = al.replay_allocation(
+            study, _set_award(run, field, value), reference=ref
+        )
         assert not report.ok, field
-    assert not al.replay_allocation(study, _flip_admission(run)).ok
+    assert not al.replay_allocation(study, _flip_admission(run), reference=ref).ok
     # a release that names a log slot past the end of the log is a failed report
     for slot in (len(np.asarray(run.carry.log.kind)), 10**6):
-        report = al.replay_allocation(study, _set_slot(run, slot))
+        report = al.replay_allocation(study, _set_slot(run, slot), reference=ref)
         assert not report.ok, slot
     # a committee that read more than the view cannot reproduce the recorded awards
     assert not al.replay_allocation(study, run, al.CarryCommittee()).ok
