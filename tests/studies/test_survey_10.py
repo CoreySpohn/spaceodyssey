@@ -76,20 +76,26 @@ def _study(requests=None, releases=None):
     return al.allocator_study(tuple(tuple(p) for p in proposals))
 
 
-def _run(executor, study, committee):
+def _run(executor, study, committee, *, reference=True):
+    """A run, and (unless `reference` is false) the host re-execution of its study."""
     truths, roots = worlds(1, study.caps)
     acted = run_with_actions(executor, study, truths, roots, N_STEPS, service=committee)
     result = acted.result
+    run = al.AllocatorRun(
+        jax.tree_util.tree_map(lambda x: x[0], result.carry),
+        index_world(result.trace, 0),
+        acted.decisions[0],
+        roots[0],
+        jax.tree_util.tree_map(lambda x: x[0], truths),
+    )
     return SimpleNamespace(
         study=study,
         service=committee,
         result=result,
-        run=al.AllocatorRun(
-            jax.tree_util.tree_map(lambda x: x[0], result.carry),
-            index_world(result.trace, 0),
-            acted.decisions[0],
-            roots[0],
-        ),
+        run=run,
+        ref=al.reference_execution(study, run, type(committee)())
+        if reference
+        else None,
     )
 
 
@@ -106,7 +112,7 @@ def _carry_run(executor, study):
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(host_service, "_snapshot_for", spy)
-        return _run(executor, study, committee)
+        return _run(executor, study, committee, reference=False)
 
 
 def _runs(executor):
@@ -384,6 +390,52 @@ def _drop_measurement(r):
     )
 
 
+def _repeat_measurement(r):
+    """Copy the first measurement record into a free log row."""
+    log = r.carry.log
+    valid = np.asarray(log.valid)
+    (first, *_) = np.flatnonzero(
+        valid & (np.asarray(log.kind) == toy.RECORD_MEASUREMENT)
+    )
+    free = int(np.flatnonzero(~valid)[0])
+    rows = valid.shape[0]
+
+    def copy(x):
+        x = np.asarray(x)
+        if x.ndim and x.shape[0] == rows:
+            x = x.copy()
+            x[free] = x[first]
+        return x
+
+    again = jax.tree_util.tree_map(copy, log)
+    return dataclasses.replace(r, carry=eqx.tree_at(lambda c: c.log, r.carry, again))
+
+
+def _swap_codes(r, kind_a, kind_b):
+    """Give the first `kind_a` request the code of the first `kind_b` request."""
+    t = r.trace
+    code = np.asarray(t.admit_code).copy()
+    eff = np.asarray(t.eff_kind)
+
+    def first(kind):
+        step = int(np.flatnonzero((eff == kind).any(1))[0])
+        return step, int(np.flatnonzero(eff[step] == kind)[0])
+
+    a, b = first(kind_a), first(kind_b)
+    code[a] = int(AdmissionCode.FORBIDDEN)
+    code[b] = int(AdmissionCode.NO_FUNDS)
+    return dataclasses.replace(r, trace=eqx.tree_at(lambda x: x.admit_code, t, code))
+
+
+def _bend_granted(r):
+    """Add one to the ledger's granted total of the first program."""
+    granted = np.asarray(r.carry.ledger.granted).copy()
+    granted[2, al.PROGRAM_COLUMN] += 1.0
+    return dataclasses.replace(
+        r, carry=eqx.tree_at(lambda c: c.ledger.granted, r.carry, granted)
+    )
+
+
 def _bend_proposal(r, index):
     """Change the request of the recorded proposal scripted at `index`."""
     log = r.carry.log
@@ -401,7 +453,8 @@ def test_replay_reproduces_the_run_and_fails_without_a_recorded_award(runs):
     """(d) The recorded run replays exactly; dropping one recorded award fails."""
     base = runs.base
     study, run = base.study, base.run
-    report = al.replay_allocation(study, run)
+    ref = base.ref
+    report = al.replay_allocation(study, run, reference=ref)
     assert report.ok, report.failures
     _positive(
         decisions=report.n_decisions,
@@ -420,7 +473,7 @@ def test_replay_reproduces_the_run_and_fails_without_a_recorded_award(runs):
     ]
     # either recorded award dropped: the committee's answer finds no record
     for k in (0, 1):
-        dropped = al.replay_allocation(study, _drop_award(run, k))
+        dropped = al.replay_allocation(study, _drop_award(run, k), reference=ref)
         assert not dropped.ok and dropped.n_awards == 2, k
         assert any(m.startswith("query") for m in dropped.failures), k
     # the Allocate effects and the admission outcomes are compared too
@@ -438,8 +491,20 @@ def test_replay_reproduces_the_run_and_fails_without_a_recorded_award(runs):
         ("trace recipient", _bend_trace(run, "alloc_recipient")),
         ("recorded proposal", _bend_proposal(run, 0)),
         ("measurement record dropped", _drop_measurement(run)),
+        ("granted total", _bend_granted(run)),
+        ("measurement record repeated", _repeat_measurement(run)),
+        (
+            "swapped query and wait codes",
+            _swap_codes(run, EffectKind.QUERY, EffectKind.WAIT),
+        ),
     ):
-        assert not al.replay_allocation(study, edited).ok, name
+        assert not al.replay_allocation(study, edited, reference=ref).ok, name
+    # without a precomputed reference the replay re-executes the study itself, and the
+    # re-execution does not read the run's trace: an altered outcome is still found
+    altered = _flip_admission(run, EffectKind.ALLOCATE)
+    own = al.reference_execution(study, altered)
+    assert np.array_equal(own.trace.admit_code, ref.trace.admit_code)
+    assert not al.replay_allocation(study, altered).ok
     # a committee that read the carry cannot reproduce the recorded awards
     assert not al.replay_allocation(study, run, al.CarryCommittee()).ok
     _replay_refused_observations(runs)
@@ -450,12 +515,12 @@ def _replay_refused_observations(runs):
     refused, ok = int(AdmissionCode.NO_FUNDS), OK
     early = runs.early
     assert _admitted(early, EffectKind.OBSERVE) == [refused, ok, refused, ok]
-    assert al.replay_allocation(early.study, early.run).ok
+    assert al.replay_allocation(early.study, early.run, reference=early.ref).ok
     mixed = runs.mixed
     assert _awards(mixed)[:, 3:5].tolist() == MIXED_AMOUNTS
     codes = _admitted(mixed, EffectKind.OBSERVE)
     assert codes == [refused, ok, ok, ok]
-    report = al.replay_allocation(mixed.study, mixed.run)
+    report = al.replay_allocation(mixed.study, mixed.run, reference=mixed.ref)
     assert report.ok, report.failures
     _positive(refusals=codes.count(refused), admissions=codes.count(ok))
     study, run = mixed.study, mixed.run
@@ -466,7 +531,56 @@ def _replay_refused_observations(runs):
         ("admitted though refused", {0: ok}),
     ):
         edited = _set_observe_codes(run, edit)
-        assert not al.replay_allocation(study, edited).ok, name
+        assert not al.replay_allocation(study, edited, reference=mixed.ref).ok, name
+
+
+def _edge_studies():
+    """Three data variants of the default study that exercise other admission rules."""
+    base = al.allocator_study()
+    proposals = [list(q) for q in al.DEFAULT_PROPOSALS]
+    proposals[PENDING + 1][2] = HUGE  # rounds the other award to zero
+    return {
+        "outside validity": al.allocator_study(tuple(map(tuple, proposals))),
+        "transition equal to occupancy": al.allocator_study(
+            transition_ticks=base.assets.transition_ticks.at[0].set(100)
+        ),
+        "asset budget short": al.allocator_study(budget=base.budget.at[0, 0].set(0)),
+    }
+
+
+@pytest.mark.medium(reason="three host runs that share the default program, replayed")
+def test_edge_rules_replay_and_their_outcomes_cannot_be_changed(host_runs):
+    """Legitimate refusals and boundary cases replay; changing an outcome fails."""
+    assert host_runs.base.ref is not None
+    refusals = {int(AdmissionCode.NO_FUNDS), int(AdmissionCode.OUTSIDE_VALIDITY)}
+    for name, study in _edge_studies().items():
+        r = _run("host", study, al.ToyCommittee())
+        assert not bool(r.run.carry.violation), name
+        report = al.replay_allocation(study, r.run, reference=r.ref)
+        assert report.ok, (name, report.failures)
+        codes = _admitted(r, EffectKind.OBSERVE)
+        _positive(**{name: len(codes)})
+        # every outcome is the core's: each refusal made admitted and each admission
+        # refused for another reason must be rejected
+        for n, code in enumerate(codes):
+            other = int(AdmissionCode.FORBIDDEN) if code == OK else OK
+            edited = _set_observe_codes(r.run, {n: other})
+            assert not al.replay_allocation(study, edited, reference=r.ref).ok, (
+                name,
+                n,
+            )
+        if name == "outside validity":
+            assert int(AdmissionCode.OUTSIDE_VALIDITY) in codes, codes
+            swapped = {
+                n: AdmissionCode.NO_FUNDS
+                for n, c in enumerate(codes)
+                if c == AdmissionCode.OUTSIDE_VALIDITY
+            }
+            edited = _set_observe_codes(r.run, swapped)
+            assert not al.replay_allocation(study, edited, reference=r.ref).ok
+        if name == "asset budget short":
+            assert int(AdmissionCode.NO_FUNDS) in codes, codes
+        assert set(codes) - {OK} <= refusals, (name, codes)
 
 
 @pytest.mark.medium(

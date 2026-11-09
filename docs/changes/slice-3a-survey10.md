@@ -5,8 +5,10 @@ orphan: true
 # Slice 3a survey 10: a time-allocation committee
 
 Survey 10 adds one test file, `tests/studies/test_survey_10.py`, and changes no core file, no
-golden and no pin. It reuses `spaceodyssey.studies.allocator` unchanged: the toy committee, the
-level-3 allocation policy, the carry-reading control and `replay_allocation`.
+golden and no pin. It reuses the toy committee, the level-3 allocation policy and the
+carry-reading control of `spaceodyssey.studies.allocator`. Review of the first version showed that
+the study-side replay could not be trusted to re-derive the core's admission rules, so
+`replay_allocation` changed design (see Core changes).
 
 The file keeps one module-scoped run store per executor. It runs the production allocator study:
 the default run, a run with the observer-only request raised to 1000, a run with the unreleased
@@ -40,17 +42,24 @@ count it relies on is asserted nonzero.
   `(0, 200, 450, 8, 4)` and `(1, 500, 750, 6, 6)`. Dropping either recorded award fails the replay
   with a query failure. Each of these fails it too: removing a recorded `Allocate`, changing one
   amount, flipping the admission code of an `Allocate`, `Observe`, `Query`, `Wait` or `Stop`,
-  changing the amount,
-  window start, window end or recipient retained in the trace for an `Allocate`, changing a
-  recorded proposal, dropping a measurement record, and replaying with the carry-reading committee.
+  swapping two outcomes, changing the amount, window start, window end or recipient retained in the
+  trace for an `Allocate`, changing a recorded proposal, dropping a measurement record, repeating
+  one, and replaying with the carry-reading committee.
 - **Refused observations.** A run releases the unreleased proposal at tick 180 and raises the
   program-0 request written at tick 400 from 2 to 20. Program 0 then holds 0.5 at the first query
   and 2.5 at the second, so its first `Observe` (cost 1) is refused `NO_FUNDS` and its second is
   admitted; the awards are (0.5, 11.25) and (2.5, 9.25), worked out by hand like the others. That
   run shares the early-release program, so it compiles nothing. Its replay passes, and each of
-  these corruptions fails it: swapping the two outcomes, changing `NO_FUNDS` to `FORBIDDEN`,
-  marking an admitted request refused, and marking the refused one admitted. The early-release
-  run, which has two legitimate refusals, replays clean as well.
+  these corruptions fails it: swapping two outcomes, changing `NO_FUNDS` to `FORBIDDEN`, marking
+  an admitted request refused, and marking the refused one admitted. The early-release run, which
+  has two legitimate refusals, replays clean as well.
+- **Other admission rules.** Three data variants of the default study replay clean on the host, and
+  changing any one `Observe` outcome in each fails the replay: an award that rounds to zero, which
+  makes an `Observe` refuse with `OUTSIDE_VALIDITY` (relabelling it `NO_FUNDS` fails); a transition
+  time equal to the occupancy; and an asset budget of zero, which refuses with `NO_FUNDS`. They
+  share the default program, so they add no compile. A surcharge study that refunds was not made a
+  test: its refund flag is static, so it needs a program of its own, and the funds rule it
+  exercises is the core's, which the replay no longer re-derives.
 - **Production process.** All default-structure runs use the production `ProposalRecords`, with
   static release ticks, not a substitute.
 - **Parity.** The host and compiled runs have equal histories, query ticks, awards and `Allocate`
@@ -58,16 +67,19 @@ count it relies on is asserted nonzero.
 
 ## Core changes
 
-None. `src/spaceodyssey/core` is untouched. Reviews found that `replay_allocation` first checked
-admission outcomes only for `Allocate` effects, and then reconciled `Observe` outcomes only as
-counts. `src/spaceodyssey/studies/allocator.py` now reconciles each one. An admitted `Observe` must
-own exactly one measurement record that starts inside its own occupancy on its channel and subject,
-and every record must belong to exactly one admitted request (`observation_failures`), so swapped
-outcomes leave a request without a record. An outcome must also agree with the program funds the
-replay rebuilds from the awards (window open at the tick, minus earlier charges): an admitted
-request needs the funds, and a refusal must be `NO_FUNDS` with the funds short (`funds_failures`;
-program rows hold no credit of their own in this study). Each replayed `Query`, `Wait` and `Stop`
-must be admitted.
+None. `src/spaceodyssey/core` is untouched. Reviews found that `replay_allocation` re-derived the
+core's admission outcomes in study code (funds, occupancy and window rules), and each round found
+another rule it got wrong. It no longer does. `src/spaceodyssey/studies/allocator.py` keeps the
+checks that are the study's own: view visibility, the policy rerun on each recorded view with its
+key (effects, draw, retained `Allocate` rows), the committee rerun per `Query`, reconciliation of
+the award records with the answers, each `Allocate` following its award, and for these the run
+now carries its root and truth. For outcomes and records it asks the core. `reference_execution`
+runs the same study again on the host executor with the run's root and truth and a copy of the
+same committee, and `reference_failures` requires that the re-executed trace gives the same
+effects and admission codes for every handled decision, that the measurement and award records in
+the log are equal, and that the ledger's granted totals are equal. A caller may compute the
+reference once and pass it to many replays. The helpers `observation_failures` and
+`funds_failures` are deleted.
 
 ## Evidence
 
@@ -78,48 +90,54 @@ must be admitted.
 | (c) | carry-committee awards (2), queries (2), toy awards (2) |
 | (d) | decisions, awards (2), allocations (4), admitted `Allocate` (4), admitted `Observe` (4) |
 
-Mutants of the real code, each run as a temporary edit and reverted; the file passes (9 tests) on
-the real code. Fifteen mutants from an independent review all fail the file except one:
+Mutants of the real code, each run as a temporary edit and reverted, against the survey file and
+`test_allocator.py` (24 tests, with the slow ones on). Every mutant fails the suite except where
+marked:
 
 | Mutant | Killed by |
 |---|---|
-| committee handed the observer snapshot | (a), (b), (d) |
+| committee handed the observer snapshot | (a), (b), (d), edge rules |
 | committee totals keyed by the wrong program | (b), (d) |
-| `Allocate` keyed to the wrong program | (a), (b), (d) |
-| `Allocate` window bounds swapped | (a), (b), (d) |
-| amount rounding nearest | (b) |
-| amount rounding ceiling | (b) |
-| replay skips the admission comparison | (d) |
-| replay assumes every `Allocate` is admitted | survives |
-| static release ticks use the write ticks | (a), (b), (d) |
+| `Allocate` keyed to the wrong program | (a), (b), (d), edge rules |
+| `Allocate` window bounds swapped | (a), (b), (d), edge rules |
+| amount rounding nearest | (b), (d) |
+| amount rounding ceiling | (b), (d), edge rules |
+| replay skips the award reconciliation | (d) |
 | replay skips the retained trace check | (d) |
 | replay skips the recorded-proposal check | (d) |
-| replay skips award reconciliation | (d) |
+| static release ticks use the write ticks | (a), (b), (d) |
 | carry committee reads the masked view | (c), (d) |
-| every proposal addressed to the policy | (a), (b), (d) |
+| every proposal addressed to the policy | (a), (b), (d), edge rules |
 | every proposal released at write time | (a), (b), (d) |
+| replay skips the reference comparison | (d), edge rules |
+| replay ignores the reference's admission codes | (d), edge rules |
+| replay ignores the reference's measurement records | (d) |
+| replay compares only award records with the reference | (d) |
+| replay ignores the reference's granted totals | (d), through the granted-total corruption |
+| the reference is the run's own trace and log, not a re-execution | (d), through the replay with no precomputed reference |
+| the re-execution uses a different root | (d), edge rules |
 
-Nine mutants of the replay reconciliation, added after a second review, are all killed:
-skipping the observation reconciliation (survey, (d)); counting records on the wrong channel,
-letting an admitted request own no record, or letting a record belong to two requests (the
-`observation_failures` unit test, and (d) for the channel); skipping the `Query`, `Wait` or `Stop`
-admission check (each only by (d)); skipping the funds check, and rejecting every refused
-`Observe` (both by (d), through the refused-observation runs).
-
-The survivor stays alive because no study produces a refused `Allocate`: the two award windows
-(200 to 450 and 500 to 750) never overlap, and the window length and query ticks are constants of
-the toy committee and policy, not data. 
+Two mutants were first survivors in this round and are killed by additions: the granted-total
+check (no test altered the ledger) and the reference taken from the run itself (the fixtures hand
+the replay a reference equal to an honest run). The earlier mutants that targeted
+`observation_failures`, `funds_failures` and the `Allocate`, `Query`, `Wait` and `Stop` admission
+derivations no longer apply, since those are deleted. The earlier survivor, a replay that assumes
+every `Allocate` is admitted, is now killed: core's re-execution supplies the admission code, and
+flipping one fails.
 
 ## Tiers and cost
 
-All five tests are medium with a stated reason. Cold, with caches off, the survey file alone takes
-about 31 s (9 passed, 274 programs, budget 326). The host tests alone take about 16 s and the
-compiled tests about 17 s; each fixture is about 12.6 s (host) and 13.4 s (compiled), and the eager
-replays add about 2 s each.
+All six tests are medium with a stated reason. Cold, with caches off, the survey file takes about
+42 s (10 passed, 311 programs, budget 368, zero violations). Each fixture is about 14 s per
+executor, which now includes a host re-execution of each study structure (the default structure
+and the early-release one) for the reference; the eager replays add 3 to 5 s each, and the three
+edge runs, which share the default program, take about 4.6 s together. `test_allocator.py` with
+its slow tests takes 25 s (14 passed, 337 programs, budget 361, zero violations).
 
 ## Notes
 
 - The slow tests in `test_allocator.py` stay. The slow early-release perturbation test replays a
   run with legitimate refusals, which no other test did before the refused-observation run of
   survey 10; the survey now covers that too, but both are kept. The slow control and the perturbation
-  test also perturb each proposal in its own run, as survey 10 does.
+  test also perturb each proposal in its own run, as survey 10 does. The two unit tests of the
+  deleted helpers are removed.
