@@ -45,8 +45,8 @@ codec round-trip it exactly, and is it absent when its feature is off.
   balance, quantum, balance-row or query-refusal field, in the policy view or the observer
   view.
 - **Re-baselines named by the slice spec.** The three tests that asserted `Allocate` answers
-  `UNSUPPORTED` keep that assertion for a study without awards, as the control, and now also
-  admit a valid `Allocate` with awards on and check the credited row; the agenda-level test
+  `UNSUPPORTED` keep that assertion for a study without awards, as the control, and beside
+  each a test admits a valid `Allocate` with awards on and checks the credited row; the agenda-level test
   asserts level 1 stays forbidden and level 3 admits it.
 
 ## Corrections

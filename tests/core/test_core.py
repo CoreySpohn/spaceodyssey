@@ -114,15 +114,16 @@ def test_settle_exactly_once():
 
 
 def test_unsupported_effect_refused_without_change():
-    """Fails if Allocate changes an awards-off carry or fails to credit a valid awards-
-    on recipient.
-    """
+    """Fails if Allocate changes an awards-off carry."""
     c0 = carry0()
     c2, code = admit_j(c0, effects_of(EffectKind.ALLOCATE), STUDY)
     r = sch.tree_equal_report(c0, c2)
     assert int(code[0]) == AdmissionCode.UNSUPPORTED
     assert r["max_abs"] == 0 and r["max_int_diff"] == 0
 
+
+def test_an_awards_on_allocate_credits_its_recipient():
+    """Fails if a valid awards-on Allocate is refused or credits the wrong row."""
     from tests.core.award_helpers import award_study
 
     enabled = award_study((), (), caps_extra={"snapshot_balances": True})
