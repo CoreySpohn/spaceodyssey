@@ -243,6 +243,23 @@ def test_awards_must_be_visible_to_the_policy_as_recorded():
     assert failures(_award(0, 9.0, 4.0))  # the view's award is not the logged one
 
 
+def test_admitted_observations_must_match_the_observation_records():
+    rows = [(M, 10, 0), (M, 11, 1), (P, 50, 0), (A, 0, 0)]  # kind, channel, subject
+    log = SimpleNamespace(
+        kind=np.asarray([r[0] for r in rows]),
+        channel=np.asarray([r[1] for r in rows]),
+        subject=np.asarray([r[2] for r in rows]),
+        valid=np.asarray([True, True, True, True]),
+    )
+    both = {(10, 0): 1, (11, 1): 1}
+    assert al.observation_failures(log, both) == []
+    assert al.observation_failures(log, {(10, 0): 1})  # a record with no admission
+    assert al.observation_failures(log, {**both, (12, 0): 1})  # no record
+    assert al.observation_failures(log, {**both, (10, 0): 2})  # one record, two
+    gone = SimpleNamespace(**{**vars(log), "valid": np.asarray([True, False] * 2)})
+    assert al.observation_failures(gone, both)  # an invalid row is no record
+
+
 # ------------------------------------------------------------------ slow: study runs
 
 

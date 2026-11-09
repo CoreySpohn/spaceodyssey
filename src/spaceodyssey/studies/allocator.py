@@ -530,6 +530,30 @@ def allocation_failures(n_assets, n_resources, awards, allocates):
     ]
 
 
+def observation_failures(log, admitted):
+    """How the admitted `Observe` requests differ from the observation records.
+
+    `admitted` maps `(channel id, subject)` to the number of `Observe` effects the trace
+    shows admitted; each admitted request starts exactly one measurement record on that
+    channel and subject, and a refused one starts none.
+    """
+    kept = np.asarray(log.valid) & (np.asarray(log.kind) == toy.RECORD_MEASUREMENT)
+    pairs = zip(
+        np.asarray(log.channel)[kept].tolist(),
+        np.asarray(log.subject)[kept].tolist(),
+        strict=True,
+    )
+    recorded = {}
+    for pair in pairs:
+        recorded[pair] = recorded.get(pair, 0) + 1
+    return [
+        f"channel {c} subject {u}: {admitted.get((c, u), 0)} admitted Observe "
+        f"requests for {recorded.get((c, u), 0)} records"
+        for c, u in sorted(admitted.keys() | recorded.keys())
+        if admitted.get((c, u), 0) != recorded.get((c, u), 0)
+    ]
+
+
 def replay_allocation(study, run, committee=None):
     """Replay the committee and the policy on the run's own decision views.
 
@@ -541,7 +565,9 @@ def replay_allocation(study, run, committee=None):
     it reruns the committee on the view that asked. After the walk it compares those
     answers with the award records in the log, checks that each recorded `Allocate`
     follows its award, and checks the ledger's granted totals against the admitted
-    awards. Returns a `ReplayReport`; it never raises on a mismatch.
+    awards. Each replayed `Observe` that the trace shows admitted must have started one
+    measurement record, and each replayed `Query`, `Wait` and `Stop` must be admitted.
+    Returns a `ReplayReport`; it never raises on a mismatch.
     """
     committee = ToyCommittee() if committee is None else committee
     if hasattr(committee, "hold"):
@@ -562,7 +588,7 @@ def replay_allocation(study, run, committee=None):
     released = release_steps(trace, len(np.asarray(log.kind)))
     fails, asked, allocates = [], [], []
     pstate = jnp.zeros(caps.n_pstate, F64)
-    open_until = {}
+    open_until, admitted = {}, {}
     granted = np.zeros((caps.n_assets + caps.n_programs + 1, caps.n_resources))
     previous, ordinal = None, 0
     for d, (step, (view, taken)) in enumerate(zip(steps, run.decisions, strict=True)):
@@ -618,6 +644,22 @@ def replay_allocation(study, run, committee=None):
             if not opened:
                 open_until[row] = until
                 granted[row] += np.asarray(eff.amount[slot])
+        for slot in np.flatnonzero(np.asarray(eff.kind) == EffectKind.OBSERVE):
+            code = int(trace.admit_code[step, slot])
+            key = (
+                int(study.channels.id[int(eff.channel_index[slot])]),
+                int(eff.subject[slot]),
+            )
+            if code == int(AdmissionCode.OK):
+                admitted[key] = admitted.get(key, 0) + 1
+        for slot in np.flatnonzero(
+            np.isin(
+                np.asarray(eff.kind),
+                (int(EffectKind.QUERY), int(EffectKind.WAIT), int(EffectKind.STOP)),
+            )
+        ):
+            if int(trace.admit_code[step, slot]) != int(AdmissionCode.OK):
+                fails.append(f"decision {d} slot {slot}: the admission code differs")
         if (kinds == EffectKind.QUERY).any():
             q = int(np.argmax(kinds == EffectKind.QUERY))
             request = Request(
@@ -631,6 +673,7 @@ def replay_allocation(study, run, committee=None):
                 group=int(taken.group[q]),
             )
             asked.append((request, view))
+    fails += observation_failures(carry.log, admitted)
     fails += award_failures(committee, asked, recorded, layout)
     fails += allocation_failures(
         caps.n_assets, caps.n_resources, [r for r, _ in recorded], allocates
@@ -654,6 +697,7 @@ __all__ = [
     "allocator_registry",
     "allocator_study",
     "award_failures",
+    "observation_failures",
     "release_steps",
     "released_rows",
     "replay_allocation",
