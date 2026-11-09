@@ -21,7 +21,6 @@ dependencies = [
     "equinox>=0.13.2",
     "jax>=0.9.0",
     "jaxlib>=0.9.0",
-    "scipy>=1.13",
     "numpy>=2.1.2",
     "photomancy>=0.3",
     "planit-py>=0.2.0",
@@ -110,7 +109,6 @@ physical = [
 ]
 retrieval = ["exojax>=2.5"]
 optics = ["physicaloptix>=2.3"]
-viz = ["eyepiece>=0.16.0", "matplotlib>=3.11"]
 dev = ["pre-commit>=3.6"]
 test = [
     "pytest>=8.0",
@@ -122,10 +120,11 @@ test = [
     "pytest-fail-slow>=0.1.0",
     "ineedvalidation>=1.1",
     "hwoutils>=1.14.0",
-    "spaceodyssey[physical,viz]>=0.0.1",
+    "spaceodyssey[physical]>=0.0.1",
     "yippy>=2.12.0",
     "astropy>=6.0",
     "mpmath>=1.3",
+    "scipy>=1.13",
     "coronalyze>=1.2",
 ]
 docs = [
@@ -134,8 +133,7 @@ docs = [
     "sphinx-book-theme>=1.1.3",
     "sphinx>=7.3.7",
     "ipython>=8.18",
-    "matplotlib>=3.11",
-    "spaceodyssey[viz]>=0.0.1",
+    "spaceodyssey>=0.0.1",
 ]
 
 [tool.ruff.lint]
@@ -181,18 +179,6 @@ markers = [
 library = "spaceodyssey"
 
 [tool.ineedvalidation.defaults]
-"tests/test_analytic.py" = { case = "yield-estimator", evidence = "code-verification" }
-"tests/test_replicates.py" = { case = "yield-estimator", evidence = "code-verification" }
-"tests/test_rng.py" = { case = "yield-estimator", evidence = "code-verification" }
-"tests/test_dist.py" = { case = "yield-estimator", evidence = "code-verification" }
-"tests/test_metrics.py" = { case = "yield-estimator", evidence = "code-verification" }
-"tests/test_profile.py" = { case = "claim-profile", evidence = "code-verification" }
-"tests/test_claim_outcome.py" = { case = "claim-profile", evidence = "code-verification" }
-"tests/test_truth.py" = { case = "truth-model", evidence = "code-verification" }
-"tests/test_plan.py" = { case = "plan-summary", evidence = "code-verification" }
-"tests/test_viz_package.py" = { case = "visualization", evidence = "code-verification" }
-"tests/test_viz_extract.py" = { case = "visualization", evidence = "code-verification" }
-"tests/test_viz_plots.py" = { case = "visualization", evidence = "code-verification" }
 "tests/" = { case = "mission-loop", evidence = "code-verification" }
 
 [tool.testbudget]
@@ -254,6 +240,7 @@ require_tier_reason = true
 "tests/core/test_corpus_invariants.py" = 2703
 "tests/core/test_declarations_match_run.py" = 84
 "tests/core/test_derived_corrections.py" = 252
+"tests/core/test_digest.py" = 15
 "tests/core/test_draws.py" = 254
 "tests/core/test_epoch_relation.py" = 165
 "tests/core/test_executors.py" = 308
@@ -334,31 +321,13 @@ require_tier_reason = true
 "tests/studies/test_survey_9.py" = 173
 "tests/studies/test_survey_helpers.py" = 27
 "tests/studies/test_toy.py" = 39
-"tests/test_analytic.py" = 47
 "tests/test_ci_summary.py" = 10
-"tests/test_claim_outcome.py" = 71
-"tests/test_data.py" = 40
-"tests/test_dist.py" = 79
 "tests/test_docs_names.py" = 10
-"tests/test_gaussian_rectangle.py" = 400
-"tests/test_habitable_zone_parity.py" = 14
-"tests/test_inputs.py" = 43
 "tests/test_internal_refs_guard.py" = 10
-"tests/test_metrics.py" = 10
 "tests/test_package.py" = 10
-"tests/test_plan.py" = 114
 "tests/test_planit_adapter.py" = 252
-"tests/test_policy.py" = 10
-"tests/test_profile.py" = 56
 "tests/test_public_api.py" = 10
-"tests/test_replicates.py" = 120
-"tests/test_rng.py" = 17
 "tests/test_slice3a_gate.py" = 283
-"tests/test_truth.py" = 297
-"tests/test_universe.py" = 13
-"tests/test_viz_extract.py" = 100
-"tests/test_viz_package.py" = 10
-"tests/test_viz_plots.py" = 94
 
 [tool.deptry]
 known_first_party = ["spaceodyssey"]

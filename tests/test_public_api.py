@@ -20,11 +20,6 @@ def test_all_names_are_public_objects():
         assert not inspect.ismodule(getattr(spaceodyssey, name)), name
 
 
-def test_certified_yield_is_reporting_function():
-    """The root entry point shares the reporting implementation."""
-    assert spaceodyssey.certified_yield is spaceodyssey.reporting.certified_yield
-
-
 @pytest.mark.parametrize(
     "name",
     [
@@ -49,10 +44,16 @@ def test_certified_yield_is_reporting_function():
         "GaussianProfileCertifier",
         "SnrThreshold",
         "ToyGaussianCertifier",
+        "certified_yield",
+        "CertifiedYield",
+        "PlanSummary",
+        "Truth",
+        "Profile",
+        "Universe",
     ],
 )
 def test_legacy_names_are_gone(name):
-    """Fails if a name of the removed mission-loop API is exported again."""
+    """Fails if a name of a removed API is exported again."""
     assert not hasattr(spaceodyssey, name)
     assert name not in spaceodyssey.__all__
 

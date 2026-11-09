@@ -27,17 +27,17 @@ TOP_LEVEL_DOCS = ("README.md", "SECURITY.md")
 EXTRA_PATTERNS = (r"spaceodyssey\.(?:analytic|expected|mc)\b",)
 # What a scan of this repository must reach.
 SENTINELS = ("README.md", "docs/architecture.md", "docs/core.md")
-SOURCE_SENTINELS = ("src/spaceodyssey/__init__.py", "src/spaceodyssey/dist.py")
+SOURCE_SENTINELS = ("src/spaceodyssey/__init__.py", "src/spaceodyssey/core/study.py")
 
 
 def doc_files(root: Path = REPO) -> list[Path]:
-    """The README and every doc under docs/, except the change records."""
+    """The README and every doc under docs/."""
     paths = [root / name for name in TOP_LEVEL_DOCS if (root / name).exists()]
     for path in sorted((root / "docs").rglob("*")):
         if not path.is_file() or path.suffix not in DOC_SUFFIXES:
             continue
         parts = path.relative_to(root).parts
-        if SKIP_DIRS & set(parts) or parts[:2] == ("docs", "changes"):
+        if SKIP_DIRS & set(parts):
             continue
         paths.append(path)
     return [p for p in paths if p.name not in SELF]
@@ -121,7 +121,7 @@ def _make_root(tmp_path, extra):
         "docs/architecture.md": "arch\n",
         "docs/core.md": "core\n",
         "src/spaceodyssey/__init__.py": '"""Package."""\n',
-        "src/spaceodyssey/dist.py": '"""Distributions."""\n',
+        "src/spaceodyssey/core/study.py": '"""Distributions."""\n',
         **extra,
     }
     for name, text in files.items():
@@ -139,7 +139,7 @@ def _make_root(tmp_path, extra):
         ("README.md", "call run_mission(...)"),
         ("docs/guide.md", "the spaceodyssey.mc engine"),
         ("docs/diagram.d2", "label: 'MissionSpec, seam registries'"),
-        ("src/spaceodyssey/dist.py", '"""Engines use the Registry."""\n'),
+        ("src/spaceodyssey/core/study.py", '"""Engines use the Registry."""\n'),
         ("src/spaceodyssey/extra.py", 'def f():\n    """Calls run_mission."""\n'),
         (
             "src/spaceodyssey/method.py",
@@ -179,7 +179,7 @@ def test_scan_passes_clean_docs_and_requires_coverage(tmp_path):
 def test_no_legacy_imports():
     """Fails if any source, test, doc, notebook or config refers to a deleted module.
 
-    Change records under ``docs/changes`` name deleted modules on purpose and
+    Change records under ``changes`` name deleted modules on purpose and
     their prose is exempt; Python and notebook code there is still scanned.
     """
     assert scan_repo(REPO) == {}
@@ -222,15 +222,15 @@ VIOLATIONS = {
     "src/spaceodyssey/relative_pkg.py": "from . import build\n",
     "docs/guide.md": "```python\nfrom spaceodyssey.engines import analytic\n```\n",
     "docs/root.md": "```python\nfrom spaceodyssey import build, core\n```\n",
-    "docs/changes/broken.py": "import spaceodyssey.registry\n",
-    "docs/changes/pyproject.toml": (
+    "changes/broken.py": "import spaceodyssey.registry\n",
+    "changes/pyproject.toml": (
         "[project.entry-points.'spaceodyssey.core']\n"
         "'reg@1' = 'spaceodyssey.registry:Registry'\n"
     ),
-    "docs/changes/broken.yaml": "target: spaceodyssey.registry:Registry\n",
-    "docs/changes/broken.yml": "target: spaceodyssey.registry:Registry\n",
-    "docs/changes/broken.cfg": "target = spaceodyssey.registry:Registry\n",
-    "docs/changes/broken.ipynb": json.dumps(
+    "changes/broken.yaml": "target: spaceodyssey.registry:Registry\n",
+    "changes/broken.yml": "target: spaceodyssey.registry:Registry\n",
+    "changes/broken.cfg": "target = spaceodyssey.registry:Registry\n",
+    "changes/broken.ipynb": json.dumps(
         {
             "cells": [
                 {"cell_type": "code", "source": ["import spaceodyssey.loop\n"]},
@@ -272,9 +272,9 @@ def test_scan_ignores_history_prose_and_valid_imports(tmp_path):
         tmp_path,
         {
             **SENTINEL_FILES,
-            "docs/changes/history.md": "`spaceodyssey.registry` was removed.\n",
-            "docs/changes/history.rst": "spaceodyssey.registry was removed.\n",
-            "docs/changes/history.txt": "spaceodyssey.registry was removed.\n",
+            "changes/history.md": "`spaceodyssey.registry` was removed.\n",
+            "changes/history.rst": "spaceodyssey.registry was removed.\n",
+            "changes/history.txt": "spaceodyssey.registry was removed.\n",
             "tests/test_ok.py": (
                 "from spaceodyssey import core\nfrom spaceodyssey.core import study\n"
                 "import spaceodyssey\nspaceodyssey.core\n"

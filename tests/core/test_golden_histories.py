@@ -1,11 +1,12 @@
 """Golden content hashes of every conformance corpus history, on both executors.
 
 `golden_histories.json` maps `case/executor/world` to the SHA-256 digests
-(`spaceodyssey.inputs.digest`) of the integer and floating-point parts of that world's
-canonical history (`canonical_history`, as the shared corpus run store records it).
+(`spaceodyssey.core.digest.digest`) of the integer and floating-point parts of
+that world's canonical history (`canonical_history`, as the shared corpus run
+store records it).
 Any change to any history, by one bit, fails here. A deliberate change regenerates
 the manifest with `SPACEODYSSEY_WRITE_GOLDEN=1` and names every moved entry in a
-change record under `docs/changes/`.
+change record under `changes/`.
 
 `golden_pin.json` freezes the manifest as it stood at a recorded commit, with the
 snapshot fingerprints of every corpus run and the history digests of a small fault
@@ -30,8 +31,8 @@ import numpy as np
 import pytest
 
 from spaceodyssey.core.conformance import EXECUTORS
+from spaceodyssey.core.digest import digest
 from spaceodyssey.core.enums import EventKind, RecordStatus
-from spaceodyssey.inputs import digest
 from tests.core.conformance_helpers import (
     N_WORLDS,
     fault_run,

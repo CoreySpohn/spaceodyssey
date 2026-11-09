@@ -201,20 +201,6 @@ def drop_shared_runs():
         _release_freed_memory()
 
 
-@pytest.fixture
-def save_viz_png():
-    """Save a small smoke-test image only when explicitly requested."""
-
-    def save(result, name):
-        directory = os.environ.get("SPACEODYSSEY_VIZ_PNG_DIR")
-        if directory:
-            path = Path(directory)
-            path.mkdir(parents=True, exist_ok=True)
-            result.fig.savefig(path / f"{name}.png", dpi=70)
-
-    return save
-
-
 # Files that exercise expensive program variants, with the reason each is slow. Use one
 # pytest process per file when enforcing the memory budget; `-m "not slow"` excludes
 # them. The default collection keeps every check.

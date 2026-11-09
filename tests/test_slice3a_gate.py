@@ -988,11 +988,12 @@ OTHER_TASKS = {
         ),
     ),
 }
+# History names the records under their old directory, `docs/changes/`.
 SURVEY_FILES = (
-    "changes/slice-3a-survey8.md",
-    "changes/slice-3a-survey9.md",
-    "changes/slice-3a-survey10.md",
-    "changes/slice-3a-survey11.md",
+    "docs/changes/slice-3a-survey8.md",
+    "docs/changes/slice-3a-survey9.md",
+    "docs/changes/slice-3a-survey10.md",
+    "docs/changes/slice-3a-survey11.md",
     "tests/studies/test_survey_8.py",
     "tests/studies/test_survey_9.py",
     "tests/studies/test_survey_10.py",
@@ -1145,7 +1146,7 @@ def test_k4_control_a_survey_commit_that_touches_the_core_is_flagged():
     """
     history = {
         "aaa": ["tests/studies/test_survey_9.py", CORE + "transaction.py"],
-        "bbb": ["tests/studies/test_survey_10.py", "changes/slice-3a-survey10.md"],
+        "bbb": ["tests/studies/test_survey_10.py", "docs/changes/slice-3a-survey10.md"],
         "ccc": [CORE + "carry.py"],
     }
     touching, n_survey = survey_commits_touching_the_core(history)

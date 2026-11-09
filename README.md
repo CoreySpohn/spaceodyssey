@@ -10,20 +10,23 @@
 
 # spaceodyssey
 
-**spaceodyssey** supports astronomical analysis and observing campaigns: multi-visit observing programs with inference in the loop. Its JAX-based campaign core runs closed-loop mission simulations and estimates exoplanet yields. It ties together the full suite of HWO direct imaging simulation tools:
+**spaceodyssey** supports astronomical analysis and observing campaigns: multi-visit observing programs with inference in the loop. Its JAX-based transaction core simulates a campaign as discrete events against a private simulated world, and a document codec writes and reads studies as JSON. Physical adapters connect it to the HWO direct imaging simulation tools:
 
-- **[yippy](https://github.com/CoreySpohn/yippy)** — Coronagraph performance modeling
-- **[orbix](https://github.com/CoreySpohn/orbix)** — Orbital dynamics and target scheduling
-- **[coronagraphoto](https://github.com/CoreySpohn/coronagraphoto)** — Image simulation for coronagraphic observations
-- **[coronalyze](https://github.com/CoreySpohn/coronalyze)** — Post-processing and SNR analysis
-- **planit-py**: Action and observing-context vocabulary
+- **[yippy](https://github.com/CoreySpohn/yippy)**: coronagraph performance data
+- **[orbix](https://github.com/CoreySpohn/orbix)**: orbits and keepout geometry
+- **[skyscapes](https://github.com/CoreySpohn/skyscapes)**: astrophysical scenes
+- **[jaxedith](https://github.com/CoreySpohn/jaxedith)**: count rates and summary radiometry
+- **[photomancy](https://github.com/CoreySpohn/photomancy)**: priors and posteriors
+- **planit-py**: action and observing-context vocabulary
+
+The physical adapters need the `physical` extra.
 
 ## Key Features
 
-*   **Mission Simulation**: End-to-end simulation pipelines from target selection through observation and analysis
-*   **Yield Estimation**: Detection completeness and exoplanet yield calculations
-*   **Integration Orchestration**: Unified interface across the HWO simulation suite
-*   **JAX-Native**: Array-based scientific state and composable simulation components
+*   **Transaction core**: `spaceodyssey.core` orders events, admits effects, accounts for resources and keeps simulated truth apart from what a policy can see
+*   **Two executors**: a host executor and a compiled executor that scans over steps and batches worlds with `vmap`, on the same transaction rules
+*   **Study documents**: `spaceodyssey.codec` dumps and loads studies through registered, versioned kinds, with checkpoint and resume for long runs
+*   **JAX-native**: array-based scientific state and composable simulation components
 
 ## Installation
 
@@ -44,7 +47,9 @@ pip install spaceodyssey
 ## Quick Start
 
 ```python
-import spaceodyssey
+from spaceodyssey import codec, core
+
+print(core.HostExecutor.__name__, codec.load_study.__name__)
 ```
 
 ## Documentation

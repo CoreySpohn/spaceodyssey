@@ -14,8 +14,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PACKAGE = "spaceodyssey"
 
-# Modules removed with the legacy spec, registry and wiring closure. A submodule
-# of a deleted package counts as deleted too.
+# Modules removed with the legacy spec, registry, wiring and certified-yield
+# closure. A submodule of a deleted package counts as deleted too.
 DELETED_MODULES = frozenset(
     {
         "account",
@@ -25,14 +25,28 @@ DELETED_MODULES = frozenset(
         "certify",
         "context",
         "contracts",
+        "data",
+        "dist",
         "engines",
+        "errors",
+        "gaussian",
         "gaussian_profile",
         "io",
         "loop",
+        "metrics",
+        "observe",
+        "plan",
+        "profile",
+        "profiles",
         "registry",
+        "reporting",
+        "rng",
         "seams",
         "spec",
         "testing",
+        "truth",
+        "universe",
+        "viz",
         "wiring",
     }
 )
@@ -263,8 +277,10 @@ def _notebook_code(text: str) -> str:
 
 
 def is_history(rel: Path) -> bool:
-    """Historical prose that names deleted modules on purpose: change records."""
-    return rel.parts[:2] == ("docs", "changes") and rel.suffix in PROSE_SUFFIXES
+    """Historical prose that names deleted modules on purpose: records and changelog."""
+    return rel.as_posix() == "CHANGELOG.md" or (
+        rel.parts[:1] == ("changes",) and rel.suffix in PROSE_SUFFIXES
+    )
 
 
 def scan_repo(root: Path, *, min_python: int = MIN_PYTHON_FILES, sentinels=SENTINELS):
