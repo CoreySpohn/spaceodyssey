@@ -4,8 +4,8 @@ orphan: true
 
 # Slice 3a S7: completeness audit of pre-flight, codec and the re-baselines
 
-S7 adds tests only, plus one docstring correction. It changes no source behavior, no golden
-and no pin. The audit compared the finding registry before the slice (21 in-memory codes now,
+S7 adds tests, one docstring correction and one loader correction. It changes no history, no
+golden and no pin. The audit compared the finding registry before the slice (21 in-memory codes now,
 against ten before) and every field the slice added, and asked of each: does an in-memory
 pre-flight test trigger it, does a JSON pre-flight test locate it at its pointer, does the
 codec round-trip it exactly, and is it absent when its feature is off.
@@ -35,7 +35,8 @@ codec round-trip it exactly, and is it absent when its feature is off.
 - **Run documents.** The allocator recipe (process, policy, committee binding) and its
   record registry round-trip with kind order, columns, widths and audiences intact, and one
   run recipe per feature (programs, refunds, awards, commitments, balances, key version 2)
-  is dumped, loaded and re-dumped to identical JSON. The loaded study equals the original on
+  is dumped, loaded and re-dumped to identical JSON, in `test_run_document_features.py`, a
+  medium file that runs in the quick tier. The loaded study equals the original on
   every leaf and static field, and the original and the loaded recipe execute to identical
   host histories (the key-version recipe draws on asset 1, so its history depends on the key
   version).
@@ -57,22 +58,24 @@ codec round-trip it exactly, and is it absent when its feature is off.
   the S5 record says, no X002 window field existed: X002 flags channel refund declarations,
   which S3a gated, and an award study was refused by X001, which S5 lifted. There was nothing
   further to lift.
+- The document loader refused an explicit null capacity only when it validated the whole
+  table, so the finding pointed at `/study/caps`. It now refuses the null at the field, and
+  the finding points at `/study/caps/<name>`. No capacity is nullable, so no valid document
+  changes.
 
 ## Cost
 
-The ten touched test files (`tests/codec/test_optional_fields.py`,
-`test_preflight_json.py`, `test_run_document.py`, `test_run_document_runs.py` and
-`tests/core/test_admission_rules.py`, `test_agenda_levels.py`, `test_core.py`,
-`test_preflight.py`, `test_slice3_guard.py`, `test_snapshot_balances.py`) run cold with
-caches off in 128 s at two workers: 721 tests, 2271 programs, peak 4.2 GB, no budget
-violation. The command, from the repository root:
+The touched test files and the whole of `tests/codec` (the loader changed) run cold with
+caches off in 144 s at two workers, slow tests included: 808 tests, 2741 programs, peak
+2.9 GB, no budget violation. The command, from the repository root:
 
 ```
 SPACEODYSSEY_JAX_CACHE=off compute-run --threads 4 --mem 14336 -- uv run python -m pytest \
-  <the ten files> -n 2 --dist loadfile -p no:cacheprovider --budget-json s7.json
+  <the touched test files> tests/codec -m "" -n 2 --dist loadfile -p no:cacheprovider
 ```
 
-The run-document file gained the executed-history comparison: six features, each a small
-plan study run twice on the host (3 to 5 s cold each), so its program budget rose from 575 to
-702 (601 programs measured, `ceil(601 * 1.15) + 10`). The three re-baselines each compile one
-admission step of a small awards study, inside the unit budget.
+The six feature recipes live in their own medium file so the quick tier runs them: each is a
+small plan study run twice on the host, 3 to 5 s cold, and the file compiles 225 programs
+alone and 228 in the full codec run (budget 273, `ceil(228 * 1.15) + 10`). The run-document
+file keeps its budget of 575. The three re-baselines each compile one admission step of a
+small awards study, inside the unit budget.
