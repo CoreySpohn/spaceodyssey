@@ -60,8 +60,11 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
 
+      # Restore and save are separate steps so a run that fails (an over-budget
+      # cold run after a core change, say) still saves what it compiled.
       - name: Restore the JAX compile cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: jax-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           # Restore the root, including main and both pytest worker directories.
           path: .jax_cache
@@ -119,6 +122,13 @@ jobs:
           python .github/scripts/ci_summary.py junit-quick.xml --title "Quick tier" \
             --budget-seconds 540 --require-tier medium \
             --baseline .github/budget/quick_baseline.json --max-increase-seconds 60
+
+      - name: Save the JAX compile cache
+        if: always() && steps.jax-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .jax_cache
+          key: ${{ steps.jax-cache.outputs.cache-primary-key }}
 
   docs:
     name: Docs with executed examples
@@ -188,7 +198,9 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore the JAX compile cache
+        id: jax-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .jax_cache
           key: jax-slow-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
@@ -229,6 +241,13 @@ jobs:
       - name: Job summary
         if: always()
         run: python .github/scripts/ci_summary.py junit-slow.xml --title "Slow tier" --allow-skips
+
+      - name: Save the JAX compile cache
+        if: always() && steps.jax-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .jax_cache
+          key: ${{ steps.jax-cache.outputs.cache-primary-key }}
 
   goldens:
     name: Golden pins
