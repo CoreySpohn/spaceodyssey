@@ -29,6 +29,7 @@ from spaceodyssey.core.ledger import _resource_rows, charge_parts
 from spaceodyssey.core.lift import lifting_jit
 from spaceodyssey.core.records import (
     AWARD_COLUMNS,
+    BUNDLE_COLUMNS,
     REFUND_COLUMNS,
     Record,
     derived_rows,
@@ -44,9 +45,10 @@ def _emit(n, slot):
     return StepEmit(n_written=jnp.asarray(n, I64), last_slot=jnp.asarray(slot, I64))
 
 
-# the columns a log row always has; `program` is present only with several programs
-# and the refund and award columns only while refunds or awards are on
-_OPTIONAL_ROW = ("program", *REFUND_COLUMNS, *AWARD_COLUMNS)
+# the columns a log row always has; `program` is present only with several programs,
+# the refund and award columns only while refunds or awards are on and the bundle
+# column only while bundles are
+_OPTIONAL_ROW = ("program", *REFUND_COLUMNS, *AWARD_COLUMNS, *BUNDLE_COLUMNS)
 _ROW_FIELDS = tuple(
     f for f in dataclasses.fields(Record) if f.name not in _OPTIONAL_ROW
 )
@@ -117,8 +119,18 @@ def _program_field(ev):
     return {} if ev.program is None else {"program": ev.program}
 
 
+def _bundle_field(ev):
+    """The record's bundle column, copied from a row that holds one (else nothing)."""
+    return {} if ev.bundle is None else {"bundle": ev.bundle}
+
+
 def h_done(c, ev, study, truth, root):
-    """Settle one completed occupancy exactly once: realize, log, queue its Release."""
+    """Settle one completed occupancy exactly once: realize, log, queue its Release.
+
+    The members of a bundle each settle on their own Done row; they share the lane's
+    generation, so none is stale, and the lane stays busy (`lane_busy_until`) until the
+    last member ends.
+    """
     caps, channels = study.caps, study.channels
     channel_index = ev.channel_index
     stale = ev.gen != c.ledger.lane_gen[ev.lane]
@@ -143,6 +155,7 @@ def h_done(c, ev, study, truth, root):
         acquisition_id=ev.acquisition_id,
         revision=jnp.asarray(0, I64),
         **_program_field(ev),
+        **_bundle_field(ev),
         released_tick=jnp.asarray(-1, I64),
         accepted_tick=jnp.asarray(-1, I64),
         superseded_by=jnp.asarray(-1, I64),
@@ -489,7 +502,62 @@ def _cancel_lane(
     by_program=False,
     slot=None,
 ):
-    """Cancel a live occupancy and refund its unused cost.
+    """Cancel a live occupancy (every member of a bundle) and refund its unused cost.
+
+    With bundles on, cancelling a member settles every pending member of its bundle in
+    a loop bounded by `Capacities.max_bundle_size`, each with its own partial record
+    and refund; the lane's generation moves once. The returned count is the records
+    written, the slot the last one's and the record the first member's.
+    """
+    c1, n, slot_out, rec, bundle_id = _cancel_one(
+        c, study, truth, root, lane, enable, status, refund, program, by_program, slot
+    )
+    caps = study.caps
+    if not caps.bundles:
+        return c1, n, slot_out, rec
+
+    def member(_, state):
+        c, n, last = state
+        c, wrote, slot_k, _rec, _ = _cancel_one(
+            c,
+            study,
+            truth,
+            root,
+            lane,
+            enable & (bundle_id >= 0),
+            status,
+            refund,
+            program,
+            by_program,
+            None,
+            bundle=bundle_id,
+        )
+        return c, n + wrote, jnp.where(wrote > 0, slot_k, last)
+
+    c2, n2, slot2 = lax.fori_loop(1, caps.max_bundle_size, member, (c1, n, slot_out))
+    return c2, n2, slot2, rec
+
+
+def _cancel_one(
+    c,
+    study,
+    truth,
+    root,
+    lane,
+    enable,
+    status,
+    refund,
+    program=None,
+    by_program=False,
+    slot=None,
+    bundle=None,
+):
+    """Cancel one live occupancy and refund its unused cost.
+
+    `bundle`, the id of a bundle whose first member was just cancelled, selects another
+    pending member of it and leaves the lane's generation and busy window alone.
+    Returns the carry, the count of records written, their slot, the record and the
+    bundle id of the row cancelled.
 
     Live-cancel path: invalidate the lane's pending Done row, write the partial record
     at the elapsed fraction, refund the unused cost, free the lane. With `refund` false
@@ -510,6 +578,8 @@ def _cancel_lane(
             c.ev.valid & (c.ev.kind == EventKind.COMMIT_START) & (c.ev.slot == slot),
             pend,
         )
+    if bundle is not None:
+        pend = pend & (c.ev.bundle == bundle)
     if c.ev.program is not None and program is not None:
         pend = pend & (~by_program | (c.ev.program == program))
     has = enable & pend.any()
@@ -551,6 +621,7 @@ def _cancel_lane(
         charged=channels.cost[channel_index] * spent,
         valid=has,
         **({} if c.ev.program is None else {"program": c.ev.program[i]}),
+        **({} if c.ev.bundle is None else {"bundle": c.ev.bundle[i]}),
     )
     if caps.refunds:
         charge, fixed, pricing = charge_parts(study, channel_index)
@@ -568,8 +639,11 @@ def _cancel_lane(
         credit = jnp.where(has, charge - kept, 0.0)
     else:
         credit = jnp.where(has, channels.cost[channel_index] * (1.0 - spent), 0.0)
-    # the lane is freed only by cancelling what occupies it
+    # the lane is freed only by cancelling what occupies it; the later members of a
+    # bundle leave the generation and the window to the first
     occupied = has & ~reserved if named else has
+    if bundle is not None:
+        occupied = jnp.asarray(False)
     c1 = _tree_set(
         c,
         **{
@@ -607,7 +681,8 @@ def _cancel_lane(
     c2, slot = write_log(c1, rec, caps)
     written = c2.n_log > c1.n_log
     c3 = _release_row(c2, written, rec, slot, channels.audience[channel_index], study)
-    return c3, written.astype(I64), slot, rec
+    bundle_id = None if c.ev.bundle is None else jnp.where(has, c.ev.bundle[i], -1)
+    return c3, written.astype(I64), slot, rec, bundle_id
 
 
 def h_cancel(c, ev, study, truth, root):

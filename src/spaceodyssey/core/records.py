@@ -243,6 +243,9 @@ class Record(eqx.Module):
     # debit (the rule is NONE for a debit made outside a window), I64[R] each.
     award_rules: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
     award_tos: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    # The bundle the acquisition was admitted in (`decision * max_bundles + ordinal`, -1
+    # for none); present only while bundles are on, and visible to every audience.
+    bundle: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
 
 
 def record_none(caps):
@@ -259,6 +262,7 @@ def record_none(caps):
         payload=jnp.zeros(caps.payload_width, F64),
         valid=jnp.asarray(False),
         program=z if caps.n_programs > 1 else None,
+        bundle=jnp.asarray(-1, I64) if caps.bundles else None,
         **(
             dict(
                 nonrefundable=jnp.zeros(caps.n_resources, F64),
@@ -307,6 +311,7 @@ class RecordLog(eqx.Module):
     award_gens: jax.Array | None  # I64[L, R], present only with awards
     award_rules: jax.Array | None  # I64[L, R], present only with awards
     award_tos: jax.Array | None  # I64[L, R], present only with awards
+    bundle: jax.Array | None  # I64[L], present only with bundles
     # Pedigree of a product row, I64[L, product_width]: audience, refit status, row
     # count and the revision set as (channel, acquisition index, revision) triples. It
     # is not a `Record` field: only a refresh writes it; every other row holds zeros.
@@ -330,6 +335,7 @@ def log_columns(log):
 
 REFUND_COLUMNS = ("nonrefundable", "refund_index", "award_gen")
 AWARD_COLUMNS = ("award_gens", "award_rules", "award_tos")
+BUNDLE_COLUMNS = ("bundle",)
 
 
 def empty_log(caps):
@@ -358,6 +364,7 @@ def empty_log(caps):
         award_tos=jnp.zeros((caps.n_log, caps.n_resources), I64)
         if caps.awards
         else None,
+        bundle=jnp.full(caps.n_log, -1, I64) if caps.bundles else None,
     )
 
 
@@ -387,7 +394,7 @@ def write_log(carry, rec, caps):
     col = carry.log.program
     if col is not None:
         col = col.at[s].set(jnp.where(ok, rec.program, col[s]))
-    for name in (*REFUND_COLUMNS, *AWARD_COLUMNS):
+    for name in (*REFUND_COLUMNS, *AWARD_COLUMNS, *BUNDLE_COLUMNS):
         old = getattr(carry.log, name)
         cols[name] = (
             None
@@ -486,6 +493,7 @@ _NOT_INT = (
     "program",
     *REFUND_COLUMNS,
     *AWARD_COLUMNS,
+    *BUNDLE_COLUMNS,
 )
 RECORD_INT_FIELDS = tuple(
     f.name for f in dataclasses.fields(Record) if f.name not in _NOT_INT

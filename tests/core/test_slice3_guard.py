@@ -214,6 +214,8 @@ def test_the_slice_3a_capacities_default_to_off():
         "n_commitments",
         "snapshot_balances",
         "balance_quantum",
+        "max_bundles",
+        "max_bundle_size",
     ]
 
 

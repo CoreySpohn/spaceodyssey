@@ -68,6 +68,7 @@ CANONICAL_FIELDS = {
         "decision",
         "valid",
         "program",
+        "bundle",
     ),
     "carry.log": (
         "kind",
@@ -103,6 +104,7 @@ CANONICAL_FIELDS = {
         "award_gens",
         "award_rules",
         "award_tos",
+        "bundle",
     ),
     "carry.ledger": (
         "balance",
@@ -158,6 +160,7 @@ CANONICAL_FIELDS = {
         "decision",
         "valid",
         "program",
+        "bundle",
     ),
     "carry.refresh": (
         "kind",
@@ -183,6 +186,7 @@ CANONICAL_FIELDS = {
         "decision",
         "valid",
         "program",
+        "bundle",
     ),
     "trace": (
         "handled",
@@ -243,6 +247,11 @@ def refunds_on(carry):
     return carry.log.refund_index is not None
 
 
+def bundles_on(carry):
+    """Whether the carry holds the bundle ids (the event table has the column)."""
+    return carry.ev.bundle is not None
+
+
 def balances_on(carry):
     """Whether the carry holds the balance snapshot (its refused-request leaf)."""
     return carry.query_refused is not None
@@ -278,6 +287,10 @@ CONDITIONAL_FIELDS = {
     "carry.log.refund_index": refunds_on,
     "carry.log.award_gen": refunds_on,
     "carry.ledger.refund_ignored": refunds_on,
+    "carry.ev.bundle": bundles_on,
+    "carry.log.bundle": bundles_on,
+    "carry.request.bundle": bundles_on,
+    "carry.refresh.bundle": bundles_on,
     "trace.program": programs_on,
     "carry.query_refused": balances_on,
     "carry.ledger.win_state": awards_on,

@@ -550,6 +550,55 @@ def programs(study: Study):
     return out
 
 
+def bundles(study: Study):
+    """B001: a bundle a policy declares that admission would refuse.
+
+    A declared member is `(ordinal, lane, group, program, start offset)`; members that
+    share an ordinal are one bundle. It needs bundles on, an ordinal below
+    `max_bundles`, no more members than `max_bundle_size`, one lane, one admission
+    group and one program, and an immediate start (offset 0).
+    """
+    out = []
+    caps = study.caps
+
+    def flag(i, j, why):
+        out.append(
+            Finding(
+                FindingCode.B001,
+                ERROR,
+                f"policy[{i}]",
+                f"bundle member {j} {why}",
+                "give a bundle ordinal below max_bundles, at most max_bundle_size "
+                "members on one lane, group and program, and an immediate start",
+                subject="policy",
+                index=i,
+                member="bundles",
+                entry=(j,),
+            )
+        )
+
+    for i, policy in enumerate(study.agenda.policies):
+        opener = {}  # ordinal -> (index, lane, group, program) of its first member
+        size = {}
+        for j, (ordinal, lane, group, program, offset) in enumerate(
+            declaration_of(policy).bundles
+        ):
+            opened = opener.setdefault(ordinal, (j, lane, group, program))
+            size[ordinal] = size.get(ordinal, 0) + 1
+            top = caps.max_bundles - 1
+            if not caps.bundles:
+                flag(i, j, "is declared while max_bundles is 0")
+            elif not 0 <= ordinal <= top:
+                flag(i, j, f"names ordinal {ordinal}, outside 0 to {top}")
+            elif (lane, group, program) != opened[1:]:
+                flag(i, j, f"differs from member {opened[0]} in lane, group or program")
+            elif offset != 0:
+                flag(i, j, f"starts {offset} ticks after its decision")
+            elif size[ordinal] > caps.max_bundle_size:
+                flag(i, j, f"exceeds the {caps.max_bundle_size} members a bundle holds")
+    return out
+
+
 def awards(study: Study):
     """W001: an award window a policy declares that cannot be admitted.
 
@@ -723,6 +772,7 @@ def preflight(
         *stops(study),
         *programs(study),
         *awards(study),
+        *bundles(study),
         *channels(study),
         *components(study, context),
     ]

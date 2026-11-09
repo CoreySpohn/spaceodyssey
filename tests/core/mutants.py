@@ -50,7 +50,10 @@ def _step_with_table(carry, ev, study, truth, root, table):
     )
 
 
-_cancel = _clone(handlers._cancel_lane, _realize_rec=_mutant_realize)
+_cancel = _clone(
+    handlers._cancel_lane,
+    _cancel_one=_clone(handlers._cancel_one, _realize_rec=_mutant_realize),
+)
 MUTANT_HANDLERS = (
     handlers.h_none,
     _clone(handlers.h_done, _realize_rec=_mutant_realize),
@@ -250,7 +253,10 @@ def _asset_realize(c, study, truth, root, base, fraction):
     )
 
 
-_asset_cancel = _clone(handlers._cancel_lane, _realize_rec=_asset_realize)
+_asset_cancel = _clone(
+    handlers._cancel_lane,
+    _cancel_one=_clone(handlers._cancel_one, _realize_rec=_asset_realize),
+)
 ASSET_KEY_HANDLERS = (
     handlers.h_none,
     _clone(handlers.h_done, _realize_rec=_asset_realize),
