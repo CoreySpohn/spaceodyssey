@@ -2,20 +2,21 @@
 
 A level-3 array policy asks the toy committee a `Query` at two fixed ticks; the
 committee answers with an award record read from the masked snapshot, and the policy
-turns each award into `Allocate` effects. One module-scoped run store holds, for each
-executor, the default run and four runs of the same study structure that differ in
-data only (proposal values and release ticks are traced numbers, so none of them
-compiles again):
+turns each award into `Allocate` effects. The study is the production allocator study.
+One module-scoped run store holds, for each executor, the default run and the runs that
+differ from it in data only (proposal requests are traced numbers, so they share its
+program), and one run that releases a proposal early, which has a program of its own
+(release ticks are static in `ProposalRecords`):
 
-- `perturbed`: the observer-only proposal and the proposal still unreleased at both
-  queries are made enormous (a);
+- `observer`, `unreleased`: the observer-only proposal, and the proposal still
+  unreleased at both queries, each made enormous in its own run (a);
 - `early`: the unreleased proposal is released before the first query (b);
-- `carry_base`, `carry_perturbed`: the carry-reading committee on the default and on
-  the perturbed script (c).
+- `carry_base`, `carry_observer`, `carry_unreleased`: the carry-reading committee on
+  the default script and on each perturbation (c).
 
 Every assertion reads those runs, and each count it relies on must be nonzero. Study
-runs are medium tests (the Slice 2b budget, K6): compiling the study once per executor
-dominates, and the replay of (d) is eager.
+runs are medium tests (the Slice 2b budget, K6): compiling the study twice per
+executor dominates, and the replay of (d) is eager.
 """
 
 import dataclasses
@@ -27,9 +28,8 @@ import numpy as np
 import pytest
 
 from spaceodyssey.core import RunStatus
-from spaceodyssey.core.enums import I64, AdmissionCode, Audience, EffectKind
+from spaceodyssey.core.enums import AdmissionCode, Audience, EffectKind
 from spaceodyssey.core.executors.base import index_world
-from spaceodyssey.core.lift import traced
 from spaceodyssey.studies import allocator as al
 from tests.core.helpers import worlds
 from tests.studies.survey_helpers import run_with_actions, same_histories
@@ -41,41 +41,31 @@ FIELDS = ("amount", "window_from", "window_until", "recipient", "program", "rema
 HUGE = 1000.0
 EARLY = 180  # the unreleased proposal reaches the policy before the first query at 200
 LAST_QUERY = al.QUERY_TICKS[-1]
-SEALED = tuple(  # the proposals no award may read: observer-only, or unreleased
-    i
-    for i, p in enumerate(al.DEFAULT_PROPOSALS)
-    if p[3] == Audience.OBSERVER or p[4] > LAST_QUERY
+# proposal rows are identified by their scripted index (the acquisition index), never
+# by value: the observer-only proposal, and the one unreleased through both queries
+OBSERVER = next(
+    i for i, p in enumerate(al.DEFAULT_PROPOSALS) if p[3] == Audience.OBSERVER
 )
-PENDING = next(i for i in SEALED if al.DEFAULT_PROPOSALS[i][4] > LAST_QUERY)
+PENDING = next(i for i, p in enumerate(al.DEFAULT_PROPOSALS) if p[4] > LAST_QUERY)
+# first-principles awards, whole quarters rounded down from a pool of 12
+# default, round 0: requests 6 and 3 -> 12 * 6/9 = 8 and 12 * 3/9 = 4
+# default, round 1: requests 8 and 8 -> 6 and 6
+# early, round 0: requests 6 and 3 + 90 = 93 -> 12 * 6/99 = 0.727 -> 0.5,
+#   12 * 93/99 = 11.27 -> 11.25 (nearest or ceiling would give 0.75 and 11.5)
+# early, round 1: requests 8 and 98 -> 12 * 8/106 = 0.906 -> 0.75,
+#   12 * 98/106 = 11.09 -> 11
+DEFAULT_AMOUNTS = [[8.0, 4.0], [6.0, 6.0]]
+EARLY_AMOUNTS = [[0.5, 11.25], [0.75, 11.0]]
 
 
-class Proposals(al.ProposalRecords):
-    """`ProposalRecords` with the release ticks traced, so a release is data."""
-
-    releases: tuple[int, ...] = eqx.field(
-        default=(), metadata=traced(I64, sequence=True)
-    )
-
-
-def _study(values=None, releases=None):
-    """The allocator study; `values` and `releases` replace the script's numbers."""
-    study = al.allocator_study()
-    old = study.process
-    fields = {f.name: getattr(old, f.name) for f in dataclasses.fields(old)}
-    fields["values"] = tuple(values) if values is not None else old.values
-    fields["releases"] = tuple(releases) if releases is not None else old.releases
-    return dataclasses.replace(study, process=Proposals(**fields))
-
-
-def _script(index, *, value=None, release=None):
-    values = [p[2] for p in al.DEFAULT_PROPOSALS]
-    releases = [p[4] for p in al.DEFAULT_PROPOSALS]
-    if value is not None:
-        for i in np.atleast_1d(index):
-            values[i] = value
+def _study(*, request=None, index=None, release=None):
+    """The allocator study; one proposal's request or release tick may be replaced."""
+    proposals = [list(p) for p in al.DEFAULT_PROPOSALS]
+    if request is not None:
+        proposals[index][2] = request
     if release is not None:
-        releases[index] = release
-    return _study(values, releases)
+        proposals[index][4] = release
+    return al.allocator_study(tuple(tuple(p) for p in proposals))
 
 
 def _run(executor, study, committee):
@@ -112,13 +102,17 @@ def _carry_run(executor, study):
 
 
 def _runs(executor):
-    sealed = _script(list(SEALED), value=HUGE)
+    observer = _study(request=HUGE, index=OBSERVER)
+    pending = _study(request=HUGE, index=PENDING)
+    toy = al.ToyCommittee
     return SimpleNamespace(
-        base=_run(executor, _study(), al.ToyCommittee()),
-        perturbed=_run(executor, sealed, al.ToyCommittee()),
-        early=_run(executor, _script(PENDING, release=EARLY), al.ToyCommittee()),
+        base=_run(executor, _study(), toy()),
+        observer=_run(executor, observer, toy()),
+        unreleased=_run(executor, pending, toy()),
+        early=_run(executor, _study(index=PENDING, release=EARLY), toy()),
         carry_base=_carry_run(executor, _study()),
-        carry_perturbed=_carry_run(executor, sealed),
+        carry_observer=_carry_run(executor, observer),
+        carry_unreleased=_carry_run(executor, pending),
     )
 
 
@@ -176,10 +170,13 @@ def _admitted(r, kind):
     return np.asarray(t.admit_code)[live].tolist()
 
 
-def _proposal_rows(r, *, request):
+def _proposal_row(r, index):
+    """The log row of the proposal scripted at `index`."""
     log = r.run.carry.log
-    keep = np.asarray(log.valid) & (np.asarray(log.kind) == P)
-    return np.flatnonzero(keep & (np.asarray(log.payload)[:, 0] == request))
+    hit = np.asarray(log.valid) & (np.asarray(log.kind) == P)
+    hit &= np.asarray(log.acquisition_index) == index
+    (row,) = np.flatnonzero(hit)
+    return int(row)
 
 
 def _viewed(r, request, *, until=None):
@@ -198,83 +195,82 @@ def _viewed(r, request, *, until=None):
 # ------------------------------------------------------------------------- the tests
 
 
-@pytest.mark.medium(
-    reason="one study compiled once per executor, five runs on it: 9.3 s cold, shared"
-)
+REASON = "two programs per executor, seven runs: about 15 s cold fixture, shared"
+
+
+@pytest.mark.medium(reason=REASON)
 def test_awards_ignore_unreleased_and_observer_only_proposals(runs):
     """(a) Perturbing a proposal the policy never sees leaves the awards identical."""
-    base, moved = runs.base, runs.perturbed
+    base = runs.base
     assert base.study.agenda.levels.tolist() == [3]
     assert base.result.history(0).status == RunStatus.COMPLETE
     reference = _awards(base)
-    log = moved.run.carry.log
-    rows = _proposal_rows(moved, request=HUGE)
-    n_observer = int((np.asarray(log.audience)[rows] == int(Audience.OBSERVER)).sum())
-    n_unreleased = int((np.asarray(log.released_tick)[rows] > LAST_QUERY).sum())
     _positive(
         queries=len(base.service.requests),
         awards=reference.shape[0],
-        perturbed_rows=len(rows),
-        observer_only_rows=n_observer,
-        unreleased_rows=n_unreleased,
         views=len(base.run.decisions),
-        allocates=len(_allocates(moved)),
-        views_after_the_last_query=_viewed(base, 90.0),
     )
-    assert [q.tick for q in moved.service.requests] == list(al.QUERY_TICKS)
-    assert np.array_equal(_awards(moved), reference)
-    assert _allocates(moved) == _allocates(base)
-    assert _follow(moved) == []
-    # the huge request is in the log but in no view before the last query; the
-    # observer-only one is in no view at all, and the unreleased one is viewed only
-    # after both queries
-    assert _viewed(moved, 40.0) == 0
-    assert _viewed(moved, HUGE, until=LAST_QUERY) == 0
-    assert _viewed(moved, HUGE) > 0
-    assert _viewed(base, 90.0, until=LAST_QUERY) == 0 and _viewed(base, 90.0) > 0
+    assert [q.tick for q in base.service.requests] == list(al.QUERY_TICKS)
+    for name, index in (("observer", OBSERVER), ("unreleased", PENDING)):
+        moved = getattr(runs, name)
+        log = moved.run.carry.log
+        row = _proposal_row(moved, index)
+        assert np.asarray(log.payload)[row, 0] == HUGE
+        if name == "observer":
+            sealed = np.asarray(log.audience)[row] == int(Audience.OBSERVER)
+        else:
+            sealed = np.asarray(log.released_tick)[row] > LAST_QUERY
+        _positive(
+            sealed_row=int(sealed),
+            requests=len(moved.service.requests),
+            allocates=len(_allocates(moved)),
+        )
+        assert [q.tick for q in moved.service.requests] == list(al.QUERY_TICKS)
+        assert np.array_equal(_awards(moved), reference), name
+        assert _allocates(moved) == _allocates(base), name
+        assert _follow(moved) == [], name
+        assert _viewed(moved, HUGE, until=LAST_QUERY) == 0, name
+    # the observer-only request is in no policy view; the unreleased one reaches the
+    # views only after both queries (so a view could have shown it)
+    assert _viewed(runs.observer, HUGE) == 0
+    assert _viewed(runs.unreleased, HUGE) > 0
 
 
-@pytest.mark.medium(reason="reads the five-run store, 9.3 s cold fixture shared")
+@pytest.mark.medium(reason=REASON)
 def test_releasing_a_proposal_moves_the_award_the_expected_way(runs):
     """(b) Releasing the unreleased proposal early raises its program's share."""
     base, early = runs.base, runs.early
     ref, new = _awards(base), _awards(early)
-    asked = al.DEFAULT_PROPOSALS[PENDING]
-    program = asked[1]
-    other = 1 - program
+    program = al.DEFAULT_PROPOSALS[PENDING][1]
     _positive(awards=len(ref), moved_awards=len(new), allocates=len(_allocates(early)))
-    assert new.shape == ref.shape
-    # the first award, from the proposals released by tick 200 plus the early one
-    totals = np.zeros(2)
-    for i, (tick, prog, request, audience, release) in enumerate(al.DEFAULT_PROPOSALS):
-        release = EARLY if i == PENDING else release
-        if audience == Audience.POLICY and max(tick, release) <= al.QUERY_TICKS[0]:
-            totals[prog] += request
-    want = al.split_pool(totals)
-    assert new[0, 3:5].tolist() == want.tolist()
+    assert ref[:, 3:5].tolist() == DEFAULT_AMOUNTS
+    assert new[:, 3:5].tolist() == EARLY_AMOUNTS
+    for award in (*ref, *new):
+        assert award[3:5].sum() <= al.POOL
     assert new[0, 3 + program] > ref[0, 3 + program]
-    assert new[0, 3 + other] < ref[0, 3 + other]
-    assert not np.array_equal(new, ref)
+    assert new[0, 4 - program] < ref[0, 4 - program]
     assert _follow(early) == []
     assert _admitted(early, EffectKind.ALLOCATE) == [OK] * 4
     granted = np.asarray(early.run.carry.ledger.granted)[2:4, al.PROGRAM_COLUMN]
     assert granted.tolist() == new[:, 3:5].sum(axis=0).tolist()
 
 
-@pytest.mark.medium(reason="reads the five-run store, 9.3 s cold fixture shared")
+@pytest.mark.medium(reason=REASON)
 def test_a_committee_reading_the_carry_fails_the_perturbation(runs):
-    """(c) The carry-reading committee's awards move under the same perturbation."""
-    base, moved = runs.carry_base, runs.carry_perturbed
-    toy = _awards(runs.base)
+    """(c) The carry-reading committee's awards move under each perturbation."""
+    base = runs.carry_base
     _positive(
         carry_awards=len(_awards(base)),
-        perturbed_awards=len(_awards(moved)),
-        queries=len(moved.service.requests),
+        queries=len(base.service.requests),
+        toy_awards=len(_awards(runs.base)),
     )
-    assert not np.array_equal(_awards(moved), _awards(base))  # fails (a)
+    for name in ("carry_observer", "carry_unreleased"):
+        moved = getattr(runs, name)
+        assert len(_awards(moved)) == len(_awards(base)), name
+        assert not np.array_equal(_awards(moved), _awards(base)), name  # fails (a)
+        assert _awards(moved)[0, 3:5].tolist() != _awards(base)[0, 3:5].tolist(), name
     # it reads the sealed proposals even unperturbed, so it disagrees with the toy
-    assert not np.array_equal(_awards(base), toy)
-    assert _awards(moved)[0, 3:5].tolist() != _awards(base)[0, 3:5].tolist()
+    assert not np.array_equal(_awards(base), _awards(runs.base))
 
 
 def _drop_award(r, k):
@@ -324,20 +320,43 @@ def _bend_allocate(r):
     return _edit_effects(r, edit)
 
 
-def _flip_admission(r):
+def _flip_admission(r, kind):
+    """Mark the first admitted `kind` request refused in the trace."""
     t = r.trace
-    step = int(
-        np.flatnonzero((np.asarray(t.eff_kind) == EffectKind.ALLOCATE).any(1))[0]
-    )
-    slot = int(np.flatnonzero(np.asarray(t.eff_kind)[step] == EffectKind.ALLOCATE)[0])
+    step = int(np.flatnonzero((np.asarray(t.eff_kind) == kind).any(1))[0])
+    slot = int(np.flatnonzero(np.asarray(t.eff_kind)[step] == kind)[0])
     code = np.asarray(t.admit_code).copy()
     code[step, slot] = int(AdmissionCode.FORBIDDEN)
     return dataclasses.replace(r, trace=eqx.tree_at(lambda x: x.admit_code, t, code))
 
 
-@pytest.mark.medium(
-    reason="replays the five-run store eagerly: 1.7 s call, 9.3 s fixture shared"
-)
+def _bend_trace(r, field):
+    """Add one to a field of the first retained `Allocate` row of the trace."""
+    t = r.trace
+    step = int(
+        np.flatnonzero((np.asarray(t.eff_kind) == EffectKind.ALLOCATE).any(1))[0]
+    )
+    slot = int(np.flatnonzero(np.asarray(t.eff_kind)[step] == EffectKind.ALLOCATE)[0])
+    column = np.asarray(getattr(t, field)).copy()
+    column[(step, slot) + ((al.PROGRAM_COLUMN,) if column.ndim == 3 else ())] += 1
+    return dataclasses.replace(
+        r, trace=eqx.tree_at(lambda x: getattr(x, field), t, column)
+    )
+
+
+def _bend_proposal(r, index):
+    """Change the request of the recorded proposal scripted at `index`."""
+    log = r.carry.log
+    hit = np.asarray(log.valid) & (np.asarray(log.kind) == P)
+    (row,) = np.flatnonzero(hit & (np.asarray(log.acquisition_index) == index))
+    payload = np.asarray(log.payload).copy()
+    payload[row, 0] += 1.0
+    return dataclasses.replace(
+        r, carry=eqx.tree_at(lambda c: c.log.payload, r.carry, payload)
+    )
+
+
+@pytest.mark.medium(reason="replays the store eagerly: about 2 s call, shared fixture")
 def test_replay_reproduces_the_run_and_fails_without_a_recorded_award(runs):
     """(d) The recorded run replays exactly; dropping one recorded award fails."""
     base = runs.base
@@ -368,7 +387,13 @@ def test_replay_reproduces_the_run_and_fails_without_a_recorded_award(runs):
     for name, edited in (
         ("allocate removed", _drop_allocate(run)),
         ("allocate amount", _bend_allocate(run)),
-        ("admission code", _flip_admission(run)),
+        ("allocate admission", _flip_admission(run, EffectKind.ALLOCATE)),
+        ("observe admission", _flip_admission(run, EffectKind.OBSERVE)),
+        ("trace amount", _bend_trace(run, "alloc_amount")),
+        ("trace window start", _bend_trace(run, "alloc_from")),
+        ("trace window end", _bend_trace(run, "alloc_until")),
+        ("trace recipient", _bend_trace(run, "alloc_recipient")),
+        ("recorded proposal", _bend_proposal(run, 0)),
     ):
         assert not al.replay_allocation(study, edited).ok, name
     # a committee that read the carry cannot reproduce the recorded awards
@@ -376,11 +401,11 @@ def test_replay_reproduces_the_run_and_fails_without_a_recorded_award(runs):
 
 
 @pytest.mark.medium(
-    reason="reads both executors' stores, 18.5 s cold for the two builds"
+    reason="reads both executors' stores: the two builds, about 27 s cold"
 )
 def test_both_executors_make_the_same_awards(host_runs, compiled_runs):
     """The host and compiled runs agree on histories, requests and awards."""
-    for name in ("base", "perturbed", "early"):
+    for name in ("base", "observer", "unreleased", "early"):
         host, comp = getattr(host_runs, name), getattr(compiled_runs, name)
         assert same_histories(host.result, comp.result, 1), name
         assert [q.tick for q in host.service.requests] == [
