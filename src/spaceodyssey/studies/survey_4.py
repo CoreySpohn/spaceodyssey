@@ -17,6 +17,13 @@ row of a target is one more measurement of it, so with `k` precursor rows of one
 target and `n_obs` observations the value is `(n_obs + k) // 2` (for `k <= n_obs`)
 against `n_obs // 2` without: the precursor helps, the toy's sign.
 
+The full survey adds a radial-velocity follow-up on a second asset. `survey_4_rv` gives
+the downstream study a fourth channel, `RV_CHANNEL`, on lane 2 (asset 1, with its own
+lane and transition), and `RVFollowUpPolicy` asks for one observation on it at its
+first decision, of the target its summary holds the fewest measurements of, together
+with the first observation of the campaign. The precursor therefore steers which target
+the second asset follows up.
+
 `without_precursor` pads every row of a table (the same shape, nothing imported), so
 the runs with and without the precursor share one compiled program;
 `zero_information` turns every row into an auxiliary row of value 0, which the toy
@@ -41,6 +48,7 @@ PRODUCERS = {UPSTREAM_CHANNEL: PRECURSOR_CHANNEL}  # upstream channel to downstr
 SUBJECTS = {1: 0}  # the upstream run's planet 1 is the downstream's target 0
 TARGETS = (0, 1)
 OBSERVE_CHANNEL = 10
+RV_CHANNEL = 61  # the downstream's own RV channel, on lane 2 (asset 1)
 N_OBSERVATIONS = 4
 
 
@@ -144,8 +152,47 @@ def survey_4(table, **overrides):
     return dataclasses.replace(study, objective=LeastKnownValue())
 
 
+class RVFollowUpPolicy(LeastKnownPolicy):
+    """`LeastKnownPolicy` that also observes its first target on the RV channel.
+
+    At decision 0 the second effect row asks for an observation of the same subject on
+    `rv_channel`, in the same admission group, so the first asset and the RV asset are
+    admitted together. Later decisions behave as in `LeastKnownPolicy`.
+    """
+
+    rv_channel: int = eqx.field(default=RV_CHANNEL, static=True)
+
+    def declare(self):
+        """Observe and the closing campaign drain."""
+        return super().declare()
+
+    def decide(self, pstate, view, study, key):
+        """The base decision, plus the RV row at decision 0."""
+        eff, pstate, u = super().decide(pstate, view, study, key)
+        rv = jnp.argmax(study.channels.id == self.rv_channel).astype(I64)
+        first = view.n_dec == 0
+        kind = eff.kind.at[1].set(jnp.where(first, EffectKind.OBSERVE, eff.kind[1]))
+        eff = dataclasses.replace(
+            eff,
+            kind=kind,
+            channel_index=eff.channel_index.at[1].set(rv),
+            subject=eff.subject.at[1].set(eff.subject[0]),
+        )
+        return eff, pstate, u
+
+
+def survey_4_rv(table, **overrides):
+    """The downstream survey with an RV channel on asset 1's lane and its follow-up."""
+    caps = overrides.pop("caps", None) or Capacities(n_channels=4)
+    overrides.setdefault("policies", (RVFollowUpPolicy(),))
+    study = survey_4(table, caps=caps, **overrides)
+    ids = study.channels.id.at[3].set(RV_CHANNEL)
+    return eqx.tree_at(lambda s: s.channels.id, study, ids)
+
+
 SURVEY_4_KINDS = {
     ("policy", "survey_4.least_known", 1): LeastKnownPolicy,
+    ("policy", "survey_4.rv_follow_up", 1): RVFollowUpPolicy,
     ("objective", "survey_4.least_known_value", 1): LeastKnownValue,
 }
 """The kind references of the survey's policy and value, for `dump_study`."""
@@ -155,13 +202,16 @@ __all__ = [
     "N_OBSERVATIONS",
     "PRECURSOR_CHANNEL",
     "PRODUCERS",
+    "RV_CHANNEL",
     "SUBJECTS",
     "SURVEY_4_KINDS",
     "TARGETS",
     "LeastKnownPolicy",
     "LeastKnownValue",
+    "RVFollowUpPolicy",
     "export_precursor",
     "survey_4",
+    "survey_4_rv",
     "survey_4_upstream",
     "without_precursor",
     "zero_information",

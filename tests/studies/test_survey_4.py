@@ -1,5 +1,8 @@
 """Survey 4, RV precursor: exported upstream, imported downstream, lineage verified.
 
+The full survey also has the downstream's own RV channel on asset 1's lane, which the
+precursor steers (the last test).
+
 The merge-time guard is a unit test with no executor compile: a small synthetic
 upstream log (with a correction) is exported, the table is stored as a file-backed
 document and its lineage verified, the import's tick-0 events are handled eagerly,
@@ -47,16 +50,18 @@ from spaceodyssey.studies.premission import PREMISSION_KINDS
 from spaceodyssey.studies.survey_4 import (
     N_OBSERVATIONS,
     PRECURSOR_CHANNEL,
+    RV_CHANNEL,
     SURVEY_4_KINDS,
     TARGETS,
     export_precursor,
     survey_4,
+    survey_4_rv,
     survey_4_upstream,
     without_precursor,
     zero_information,
 )
 from tests.codec.test_document import TOY_KINDS
-from tests.core.helpers import worlds
+from tests.core.helpers import one_world, worlds
 from tests.studies.survey_helpers import run_on, same_histories
 
 OBS, POL = int(Audience.OBSERVER), int(Audience.POLICY)
@@ -397,3 +402,45 @@ def test_the_epoch_relation_holds_with_an_exported_precursor():
         assert result.detail["n_before_start"] == N_WORLDS * 2
         assert result.detail["n_views"] == N_WORLDS * (N_OBSERVATIONS + 1)
         assert result.detail["n_records"] == N_WORLDS * (2 + N_OBSERVATIONS)
+
+
+@pytest.mark.slow(reason="two host runs of the RV study, one new structure, 4 s cold")
+def test_the_rv_channel_admits_on_the_second_assets_lane_and_follows_the_precursor():
+    """B8 row 4 (full). Fails if the RV channel on lane 2 (asset 1) is not admitted
+    with the first asset's observation in decision 0's group, starts on another
+    transition than lane 2's own (5 ticks), is not charged to asset 1, or ignores the
+    precursor: the RV follow-up must go to the target the precursor does not cover
+    with it and to the first target without it, and the value with the precursor must
+    be higher. Counted: one RV record per run, and the imported rows in the run with
+    the precursor only.
+    """
+    table = export_precursor(LOG, UPSTREAM.content_hash).table
+    covered = int(table.source.subject[0])
+    out = {}
+    for name, tb in (("with", table), ("without", without_precursor(table))):
+        study = survey_4_rv(tb)
+        assert (
+            preflight(study, context=PreflightContext(upstream_document=UPSTREAM)) == []
+        )
+        truth, root = one_world(caps=study.caps)
+        run = HostExecutor().run(study, truth, root, N_STEPS)
+        log, trace = run.carry.log, run.trace
+        rv = np.flatnonzero(
+            np.asarray(log.valid) & (np.asarray(log.channel) == RV_CHANNEL)
+        )
+        first = np.flatnonzero(np.asarray(trace.handled) & np.asarray(trace.wake))[0]
+        assert np.asarray(trace.admit_code)[first].tolist() == [0, 0]
+        (i,) = rv
+        lane = int(np.asarray(study.channels.lane)[3])
+        assert lane == 2 and int(study.assets.lane_asset[lane]) == 1
+        assert int(log.start_tick[i]) == int(study.assets.transition_ticks[lane]) == 5
+        assert float(run.carry.ledger.debited[1, 0]) == 1.0  # the RV record's cost
+        imported = np.asarray(log.valid) & (
+            np.asarray(log.channel) == PRECURSOR_CHANNEL
+        )
+        assert imported.sum() == (table.n_rows if name == "with" else 0)
+        value = int(study.objective.evaluate(run.carry, study))
+        assert value == _least_known(log)
+        out[name] = (int(log.subject[i]), value)
+    assert out["with"][0] == 1 - covered and out["without"][0] == covered
+    assert out["with"][1] > out["without"][1]
