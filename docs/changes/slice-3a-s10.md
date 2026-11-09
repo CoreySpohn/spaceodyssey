@@ -4,7 +4,7 @@
 A10 as one command. It does not alias other tests. It holds an explicit inventory: for each
 rule and each acceptance item, the exact canonical test ids that carry the evidence,
 mutant checks included. One test runs the whole inventory once in a child pytest process
-(`python -m pytest <ids> -m "" -n 0 -q -p no:cacheprovider --budget-json ... --junitxml ...`).
+(`python -m pytest <ids> -m "" -n 0 -q -p no:cacheprovider --budget-json ... --junitxml ... -o xfail_strict=true --timeout 900`).
 The child gets the parent environment without any `PYTEST_*` variable, so a marker or
 keyword filter, a disabled plugin or xdist settings in `PYTEST_ADDOPTS` cannot reach it,
 while `SPACEODYSSEY_JAX_CACHE` and the JAX settings still do. A completeness check
@@ -15,17 +15,17 @@ child's budget file: the budget plugin must have loaded in enforce mode, with no
 violation and a record for every module of the inventory. The junit parser counts each
 node id once, so a duplicated entry adds nothing. Every listed id must be collected and
 pass with the listed number of cases. A missing id,
-a skip, an xfail, a failure or a different case count fails the gate and names the rule.
+a skip, an xfail, a test that passes under a non-strict xfail (the child runs with `xfail_strict=true`, so it fails), a failure or a different case count fails the gate and names the rule.
 
 What no test held is built in the gate file next to its mutant (pin bytes, K3 ratio
 check, K4, the K7 wiring, three K1 mutants). A recorder registered for the module checks
 that each of those ran and passed in the parent process. The last test checks that every
 rule and item has a listed check, that every own check passed, and that `MUTANT_CHECKS`
-holds exactly the twelve mutant labels the spec names (`SPEC_MUTANTS`), each mapped to an
+holds exactly the twelve mutant labels of the slice's acceptance list (`SPEC_MUTANTS`), each mapped to an
 inventory id that ran and passed in the child run or to an own check that passed.
 
-The whole file is marked slow in `tests/conftest.py` (`SLOW_FILES`), like the Slice 2b
-gate, because it reruns the golden histories, four mutant runs and the acceptance files.
+The whole file is marked slow in `tests/conftest.py` (`SLOW_FILES`), like the earlier
+premission-slice gate, because it reruns the golden histories, four mutant runs and the acceptance files.
 The quick tier deselects it.
 
 ## Cold run
@@ -34,8 +34,8 @@ One process, `SPACEODYSSEY_JAX_CACHE=off`, four threads, through `compute-run`.
 
 | Measure | Value |
 |---|---|
-| Wall time, gate alone | 400.2 s (18 tests); the one child run of the inventory took 376.1 s for 819 cases |
-| Peak footprint | 2.2 GiB sampled by `compute-run` (child run: 1.0 GiB peak resident, 0 budget violations) |
+| Wall time, gate alone | 434.3 s (18 tests); the one child run of the inventory took about 404 s for 826 cases |
+| Peak footprint | 2.7 GiB sampled by `compute-run` (0 budget violations in the gate and in the child run) |
 | Gate file module programs | 237 measured |
 | Budget entry | `tests/test_slice3a_gate.py = 283` in `[tool.testbudget.module_compile_budget_by_file]`, ceil(237 * 1.15) + 10 |
 
@@ -53,10 +53,10 @@ when the mutant is caught, so a passing gate means the mutant failed the rule.
 |---|---|---|---|
 | K1 earlier slices stay true | golden digests of all 116 histories, fingerprints and their evidence, fault fixture, corpus hashes and schema versions, pin commit; live runs must yield every world key | each pin file is byte-identical to the blob of its capture commit; no commit after the pins touched a pin file | asset-key change moves `phase_switch` floats; always-on empty leaf moves fingerprint and history ints; changed `N_TIES` moves `baseline`; lane closure on a fault breaks the fault pin; one-bit digest change and a changed study miss their pins |
 | K2 conservation | every account on every case, forged balances, every award scenario and remainder rule, refund across expiry and re-award, paired forged expiry | none | whole-charge refund, second receipt credit, old award's refund credited to the newer award, paired expiry omission |
-| K3 step cost | none (measured on the CI runner by `pilot.yml`) | wiring (13 handlers, the probe's extra pass still runs, workflow input); the recorded CI figures and their ratio; the limit check | the extra handler pass per step costs 1.439 and 1.531 times the plain step inside its own job, above the 1.10 limit; a probe whose extra pass is removed fails the wiring check |
+| K3 step cost | none (measured by `pilot.yml` in one job for both trees) | wiring (13 handlers, the probe's extra pass still runs, the pair step and its exit status in the workflow); the same-job record or its pending state; the limit check | the extra handler pass per step costs 1.439 and 1.531 times the plain step inside its own job in earlier runs, above the 1.10 limit; a probe whose extra pass is removed fails the wiring check |
 | K4 a survey needs no core patch | none | every core commit listed under a task; each task record names the exact path and cites a core test; no survey commit touches the core | a synthetic history with a survey commit that edits the core is flagged; an unlisted commit and loose naming are caught |
-| K5 the Q22 frame | domain-word and import lints over the core and their fixtures | none | each denied token and import fixture |
-| K6 truth and release discipline | refund view under a private event, survey 8 policy stop, survey 10 awards ignore unreleased and observer-only, a release moves the award | none | visible internal `refund_of`, truth-reading committee, removed policy stop |
+| K5 the domain-word frame | domain-word and import lints over the core and their fixtures | none | each denied token and import fixture |
+| K6 truth and release discipline | refund view under a private event, the policy view unchanged under an observer-only release and a private event's identity hidden in the policy fold, survey 8 policy stop, survey 10 awards ignore unreleased and observer-only, a release moves the award | none | visible internal `refund_of`, truth-reading committee, removed policy stop |
 | K7 quick-tier time | the summary script over its limits, the step's budget flags | wiring: no advisory baseline, 540 s ceiling, medium tests counted, plugin enforcing; the child run's budget file shows the plugin loaded and enforcing | measured on the runner (below) |
 | K8 action replay | survey 10 replay of awards, `Allocate` effects and admission outcomes on both executors; the allocator check | none | dropping one award from the log |
 
@@ -72,7 +72,7 @@ Each item runs canonical ids in the child run, so a skipped, missing or short fi
 |---|---|
 | A1 charge components | the six charging tests by exact id (nine cases) |
 | A2 refunds | all of `tests/core/test_refund.py` (deadline, cause, identity and release rules, and the deadline and release mutants); the window-refund matrix in `tests/core/test_awards.py` (late refunds disposed by the charging window, wrong-row and wrong-acquisition refunds, receipts that apply nothing, refunds before and after expiry, refund across an expiry and re-award) |
-| A3 awards | every award scenario, every remainder rule, survey 10 release moves the award; window admission (grant opens the window, refusals outside and at the end tick, no balances, award onto an open window, re-award at the expiry tick); boundary ordering (window end event, completion before window end, expiry tie after a refresh); stale expiry after a re-award, and a pending acquisition at the expiry |
+| A3 awards | every award scenario, every remainder rule, survey 10 release moves the award; window admission (grant opens the window, refusals outside and at the end tick, no balances, award onto an open window, re-award at the expiry tick); boundary ordering (window end event, completion before window end, expiry tie after a refresh); stale expiry after a re-award, and a pending acquisition at the expiry; the host and compiled executors making the same history of an award, a completion after the expiry still settling, and the three allocator-study slow tests that carry `Allocate` admission (the committee on the host, on both executors, and the altered-run replay) |
 | A4 frozen horizon | all of `tests/core/test_frozen_horizon.py` |
 | A5 programs and Stop | all of `tests/core/test_programs.py`; the twelve `stop_*` golden pins (own check) |
 | A6 conservation | every account on every case |
@@ -86,60 +86,79 @@ it runs on a pull request-sized change.
 
 ## K4 attribution
 
-The range is the last S0 commit to HEAD: 53 non-merge commits touch `core/`. Each is
-listed under the task whose record describes it. The spec allows feature tasks only. Two
-other tasks changed the core inside the range: Slice 2b (its records, judged by the 2b
-gate) and the compile-speed work (bit-identical, so the K1 pins are its evidence). Their
+The range runs from the last S0 commit to `K4_END`, `ad113d3`, the last commit before this task, so a later commit cannot widen or break it: 53 non-merge commits touch `core/`. Each is
+listed under the task whose record describes it. The slice allows feature tasks only. Two
+other tasks changed the core inside the range: the earlier premission work (its records, judged by its own gate) and the compile-speed work (bit-identical, so the K1 pins are its evidence). Their
 commits are attributed by their own task records, with K1 as the evidence; that is a
 stated scope note, not an exception the gate hides.
 
 The gate fails on a commit no list names, a stale entry, a record that cites no existing
-`tests/core/test_*.py` file, and any touched core path that the record of its task does
+`tests/core/test_*.py` file that some commit of the range changed, and any touched core path that the record of its task does
 not name exactly (the full repository path, not a module name, a directory, or a path
 with a different prefix or suffix such as `.bak`). To meet
 that, each responsible record now carries a "Core paths changed (K4)" section with the
 exact paths and the core tests that cover them: `slice-3a-s1`, `slice-3a-s2`,
 `slice-3a-s3a`, `slice-3a-s4`, `slice-3a-s5`, `slice-3a-s5b`, `slice-3a-s6`,
-`slice-2b-r6` (for the Slice 2b commits R1 to R6) and `compile-speed-c` (for the
+`slice-2b-r6` (for the earlier premission commits R1 to R6) and `compile-speed-c` (for the
 compile-speed commits). No survey commit (surveys 8 to 11, records and tests) touches
 `core/`; the negative control runs the same discovery on a synthetic history that holds a
 survey commit that edits the core.
 
-Limit: the commit-to-task table is hand-listed in the gate, so a new core commit needs an
-entry and a record update, by design.
+Limits. The commit-to-task table is hand-listed in the gate, so a new core commit needs an
+entry and a record update, by design. The cited-test check does not tie the cited file to
+the task's own commits: the first task's tests landed in other commits, so a stronger
+tie would fail it. A record could therefore cite a core test that another task changed;
+that part is a code-review concern.
 
 ## K3 and K7
 
-K3 is measured on GitHub runners by `pilot.yml` (report-only). Two runs were dispatched
-together, so the runners were comparable in time:
+### K3: pending a same-job measurement
 
-| Run | Commit | Handlers | Plain per-step minimum | Extra-pass mutant | Mutant ratio (same job) |
-|---|---|---|---|---|---|
-| 42584020950 | 97753d5 (S0 end) | 11 | 244.11 us | 355.99 us | 1.439 |
-| 42584023997 | b851654 (s10-gate) | 13 | 181.28 us | 277.31 us | 1.531 |
+K3 is pending a same-job measurement. No figure in this record decides it yet.
 
-K3 ratio: 181.28 / 244.11 = 0.743 against the 1.10 limit, so K3 passes. Caveat: the two
-plain figures come from separate jobs on separate runners, which differ by more than the
-10 percent limit from run to run (the S0 record measured that spread), so the ratio
-carries runner noise. It is far enough below the limit that the noise does not change the
-verdict. The evidence that the probe can see a regression is the mutant ratio inside
-each job: the calibrated extra-pass mutant costs 1.439 and 1.531 times the plain step
-measured next to it, above 1.10 in both jobs.
+The earlier measurement does not decide it either. Two runs were dispatched together, but
+each is a separate job on a separate runner. Runner speed differs from job to job by more
+than the 10 percent limit, so the quotient of their plain figures (181.28 / 244.11 =
+0.743) is dominated by that difference, and K3 has no statistical power from it. An
+earlier version of this record called the 0.743 a large margin; that framing was wrong
+and is withdrawn. The two runs are kept as context only:
 
-The mutant ratio is the one the probe printed. The probe measures its own plain step in
-the mutant invocation, so dividing the two table figures gives 1.458 and 1.529, close to
-the printed ratios and above 1.10 either way; the gate accepts a printed ratio within
-0.05 of the quotient and requires both to exceed the limit.
+| Run | Commit | Handlers | Plain per-step minimum | Extra-pass mutant | Mutant ratio (same job) | Cold first call, plain | Cold first call, mutant |
+|---|---|---|---|---|---|---|---|
+| 42584020950 | 97753d5 (S0 end) | 11 | 244.11 us | 355.99 us | 1.439 | 11.59 s | 14.279 s |
+| 42584023997 | b851654 (s10-gate) | 13 | 181.28 us | 277.31 us | 1.531 | 9.632 s | 10.592 s |
 
-The gate holds both runs as data (`K3_RUNS`) and fails if a figure is missing from this
-record, if a recorded mutant ratio is far from its two figures or does not exceed the
-limit, if the thirteen-handler step costs more than 1.10 times the eleven-handler step,
-or if the probe's `ExtraPassExecutor.transition` no longer runs the extra
-select-and-handle pass (an ast check, so a neutralized mutant fails the wiring test).
-The probe `tools/step_cost.py` takes `--baseline-per-step-us` and exits 1 when the plain
-per-step minimum exceeds the baseline by more than 1.10; `pilot.yml` takes the input
-`baseline_per_step_min_us`. The gate cannot re-measure on a runner; a re-measurement
-means dispatching the workflow again and updating `K3_RUNS` and this table.
+What those runs still show is the sensitivity of the probe: inside each job the
+calibrated extra-pass mutant costs 1.439 and 1.531 times the plain step measured next to
+it, above 1.10. The printed mutant ratio comes from the probe's own plain step in the
+mutant invocation, so dividing the two table figures gives 1.458 and 1.529; the gate
+accepts a printed ratio within 0.05 of the quotient (for the recorded same-job figures)
+and requires both to exceed the limit.
+
+The same-job measurement is `tools/step_cost_pair.py`, run by `pilot.yml` after the
+cold medium tests. The workflow checks out the S0 end commit (97753d5, the input
+`k3_base_ref`) into `base-tree` and runs, for five rounds, the base tree's own
+`tools/step_cost.py --mutant` against the base tree's package and then this tree's
+`tools/step_cost.py --mutant` against this tree's package, each in a fresh process with
+the same repeats (30). Each tree is therefore measured with its own copy of the probe,
+not the final tool pointed at the base package; the two copies differ only in the
+removed typed-baseline option. The ratio is computed in the job: the final tree's lowest
+per-step minimum over the base tree's, with the per-round ratios printed as well; the
+step exits 1 above 1.10, and its output is a JSON file shown in the job summary. Cold
+compile of the step is reported separately from the per-step cost (the cold first calls
+in the table above, per-round in the JSON).
+
+When the run exists the gate takes the figures from `K3_SAME_JOB` (run id, base and final
+commits, rounds, both minima, the ratio, both mutant ratios): it requires the ratio to
+follow from the two minima, to be at most 1.10, and both mutant ratios to exceed 1.10, and
+it requires the figures in this record. Until then it requires this record to say
+"pending a same-job measurement" and prints that on every run. The gate also fails if the
+thirteen-handler step table is not the one K3 is judged at, if the probe's
+`ExtraPassExecutor.transition` no longer runs the extra select-and-handle pass (an ast
+check), if the pair tool stops alternating the trees, or if the workflow loses the pair
+step, the base checkout or the exit status of a measurement (`set -o pipefail` before a
+pipe into `tee`, which would otherwise hide a failed measurement). The gate cannot
+re-measure on a runner.
 
 K7 is enforced by the quick-tier step in `ci.yml`: the summary runs without
 `--advisory-baseline`, with the 540 s ceiling, with medium tests counted
@@ -152,12 +171,25 @@ carry the run id and the time.
 
 ## Slow nightly tier
 
-Section 7 asks for the status of the slow tier. The scheduled `CI` runs on main, newest
-first: 2026-11-08 (run 42489079500) cancelled during the slow tier after about 13
-minutes; 2026-11-07 (42379525028) cancelled; 2026-11-06 (42239283717) cancelled;
-2026-11-05 (42055076555) failed. No scheduled run in that window completed green, so there
-is no successful slow-tier run to cite. The gate does not depend on the nightly: it runs
-its own slow evidence.
+Scheduled `CI` runs on main, newest first: 2026-11-08 (run 42489079500) cancelled during
+the slow tier after about 13 minutes; 2026-11-07 (42379525028) cancelled; 2026-11-06
+(42239283717) cancelled; 2026-11-05 (42055076555) failed. No scheduled run in that window
+completed green, so there is no successful slow-tier run to cite. The gate does not
+depend on the nightly: it runs its own slow evidence.
+
+Whether the gate fits the nightly. The slow job runs `pytest tests/ -m slow --timeout=900`
+with a 90-minute job limit. The gate's child run is about 370 s on a laptop and about
+1100 s at the runner's three-fold slowdown, and pytest-timeout charges a fixture's setup
+to the first test that uses it, so the default 900 s would kill the gate in its child
+fixture on a runner. The gate file therefore carries (when `pytest-timeout` is installed, as CI does through the `test` extra) a `timeout` mark of 2400 s on every
+test (above three times the child's cold time with margin; a check asserts the relation),
+and the child gets its own `--timeout 900` per case, as the nightly gives each test. The
+nightly also runs every inventory test a second time on its own, in the job's normal
+pass over the slow tests; that duplicate cost is accepted and not engineered around.
+
+Manual dispatch of the slow tier: the `CI` workflow (`ci.yml`) has a `workflow_dispatch`
+trigger with one input, `tier`, a choice of `not slow` (the default), `slow` or `all`.
+To run the slow tier on this branch, dispatch `CI` on ref `s10-gate` with `tier=slow`.
 
 ## Known limits of a node id inventory
 

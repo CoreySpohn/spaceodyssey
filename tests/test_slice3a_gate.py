@@ -16,28 +16,30 @@ checks that each of those ran and passed in this process.
   a pinned value.
 - K2, conservation: the independent reconciliation holds on every scenario, refunds
   across expiry and re-award included, and the forged and mutant books fail it.
-- K3, step cost: measured on GitHub runners by `pilot.yml` (two runs, recorded in
-  `K3_RUNS` and the S10 record); the gate checks the recorded ratio against 1.10, that
-  the recorded mutant ratio exceeds it, and that the probe's extra pass still runs.
+- K3, step cost: measured by `pilot.yml` in one job for the base tree and this tree
+  (`K3_SAME_JOB` and the S10 record; pending until that run exists); the gate checks
+  the recorded ratio against 1.10, that the recorded mutant ratios exceed it, and that
+  the probe's extra pass still runs.
 - K4, a survey needs no core patch: every `core/` commit after S0 is listed under a
   task, the task record names each exact path the commit touched and cites a core test,
   and no survey commit touches the core.
-- K5, the Q22 frame: the domain-word and import lints pass over the core.
+- K5, the domain-word frame: the domain-word and import lints pass over the core.
 - K6, truth and release discipline, and K8, action replay: survey 8 and 10 controls,
   refund views, the replay and the allocator check.
 - K7, quick-tier time: enforced by the CI step; the gate checks the step and prints a
   manual-read line carrying the last measured figure.
 
-Which commits K4 judges. The range runs from the last S0 commit to HEAD. A core commit
-is listed under the task whose record describes it: a 3a feature task (S1 to S6), or two
-other tasks that changed the core in the range, Slice 2b and the compile-speed work,
-which are attributed by their own task records with K1 as their evidence. A core commit
-that no list names, a stale entry, a path the record does not name exactly, or a record
-with no core test fails.
+Which commits K4 judges. The range runs from the last S0 commit to `K4_END`. A core
+commit is listed under the task whose record describes it: a 3a feature task (S1 to
+S6), or two other tasks that changed the core in the range, the earlier premission work
+and the compile-speed work, which are attributed by their own task records with K1 as
+their evidence. A core commit that no list names, a stale entry, a path the record does
+not name exactly, or a record with no core test fails.
 """
 
 import ast
 import collections
+import importlib.util
 import json
 import os
 import re
@@ -64,7 +66,16 @@ from tests.core.conformance_helpers import N_WORLDS
 from tests.core.conformance_helpers import runs as corpus_runs
 from tests.core.corpus import CORPUS_BY_NAME
 
-pytestmark = pytest.mark.clear_caches_between_tests
+# The child run is about 370 s on a laptop and about three times that on a runner, and
+# pytest-timeout charges the child fixture's setup to the first test that uses it, so
+# the gate tests carry a limit above the nightly job's default of 900 s.
+GATE_TIMEOUT_S = 2400
+CHILD_TIMEOUT_S = 900
+# CI installs pytest-timeout (the `test` extra); a checkout without it runs untimed.
+HAS_TIMEOUT = importlib.util.find_spec("pytest_timeout") is not None
+pytestmark = [pytest.mark.clear_caches_between_tests]
+if HAS_TIMEOUT:
+    pytestmark.append(pytest.mark.timeout(GATE_TIMEOUT_S))
 
 REPO = Path(__file__).resolve().parents[1]
 CHANGES = REPO / "docs/changes"
@@ -136,6 +147,9 @@ _K6 = {
     S10 + "test_awards_ignore_unreleased_and_observer_only_proposals": 2,
     S10 + "test_releasing_a_proposal_moves_the_award_the_expected_way": 2,
     S10 + "test_a_committee_reading_the_carry_fails_the_perturbation": 2,
+    # the snapshot views stay the same when a private event is inserted
+    "tests/core/test_core.py::test_observer_only_release_leaves_policy_view_unchanged": 1,  # noqa: E501
+    "tests/core/test_audience_firewall.py::test_policy_fold_hides_private_event_identity": 1,  # noqa: E501
 }
 _K7 = {
     G2B + "test_k6_k7_the_quick_tier_step_enforces_the_budgets": 1,
@@ -190,6 +204,14 @@ _ACCEPT = {
         AWARDS
         + "test_a_completion_at_the_expiry_tick_is_handled_before_the_window_end": 1,
         AWARDS + "test_the_expiry_tie_ranks_after_a_same_tick_refresh": 1,
+        # the host and compiled executors make the same history of an award
+        AWARDS + "test_the_host_and_compiled_executors_make_the_same_history": 1,
+        # Allocate admission on both executors, in the allocator study
+        ALLOC + "test_the_committee_answers_the_policy_on_the_host": 1,
+        ALLOC + "test_the_committee_answers_on_both_executors": 1,
+        ALLOC + "test_replay_fails_when_the_run_is_altered": 1,
+        # a completion after the expiry still settles
+        AWARDS + "test_an_acquisition_that_completes_after_expiry_still_settles": 1,
         # stale expiry
         AWARDS + "test_a_stale_expiry_after_a_re_award_changes_nothing": 1,
         AWARDS
@@ -236,7 +258,7 @@ OWN = {
     },
     "K3": {
         "test_k3_the_step_cost_measurement_is_wired_for_the_final_table": 1,
-        "test_k3_the_recorded_ci_measurement_is_within_the_limit_and_the_mutant_is_not": 1,  # noqa: E501
+        "test_k3_the_same_job_ratio_is_recorded_or_k3_is_marked_pending": 1,
         "test_k3_the_ratio_check_separates_the_limit": 1,
         "test_k3_k7_manual_reads": 1,
     },
@@ -266,7 +288,9 @@ MUTANT_CHECKS = {
     + "test_mutant_a_refund_of_the_whole_charge_fails_conservation",
     "K2 credit an old award's refund to a newer award": AWARDS
     + "test_mutant_crediting_an_old_awards_refund_to_the_newer_award_fails",
-    "K3 an extra handler pass per step": "test_k3_the_recorded_ci_measurement_is_within_the_limit_and_the_mutant_is_not",  # noqa: E501
+    "K3 an extra handler pass per step": (
+        "test_k3_the_same_job_ratio_is_recorded_or_k3_is_marked_pending"
+    ),
     "K4 a core edit in a survey commit": "test_k4_control_a_survey_commit_that_touches_the_core_is_flagged",  # noqa: E501
     "K6 a truth-reading committee": S10
     + "test_a_committee_reading_the_carry_fails_the_perturbation",
@@ -276,8 +300,9 @@ MUTANT_CHECKS = {
     + "test_replay_reproduces_the_run_and_fails_without_a_recorded_award",
 }
 
-# The twelve mutants the spec names, one label each. The meta test requires exactly
-# these labels in `MUTANT_CHECKS`, each tied to a check that ran and passed.
+# The twelve mutants of the slice's acceptance list, one label each. The meta test
+# requires exactly these labels in `MUTANT_CHECKS`, each tied to a check that ran and
+# passed.
 SPEC_MUTANTS = (
     "K1 an asset-key change for asset 1",
     "K1 an always-on empty leaf",
@@ -297,12 +322,27 @@ SPEC_MUTANTS = (
 # from the job summary (CI time cannot be measured from inside pytest).
 K7_RUN = {"commit": "ad113d3", "run_id": 42576344367, "wall_s": 391.2, "tests": 2681}
 K7_CEILING_S = 540
-# K3, measured by `pilot.yml` on GitHub runners (report-only), two jobs dispatched
-# together: the plain per-step minimum of the S0 end commit (eleven handlers) and of the
-# slice's head commit (thirteen handlers), each with the calibrated extra-pass mutant
-# measured inside its own job. The two plain figures come from separate jobs, so their
-# ratio carries runner noise; the mutant ratio inside a job is the sensitivity evidence.
-K3_RUNS = {
+# K3 is judged by one same-job measurement: `pilot.yml` measures the base tree (the
+# eleven-handler table of the S0 end commit) and this tree in one job, interleaved, and
+# prints their ratio (`tools/step_cost_pair.py`). It is pending until that run exists:
+# set `K3_SAME_JOB` to the run's figures (keys below) and the gate then holds the ratio
+# to the limit. The two runs in `K3_EARLIER_RUNS` came from separate jobs on separate
+# runners, whose speed differs by more than the limit, so their plain figures are not
+# compared. They are kept as context: the extra-pass mutant ratio inside each job shows
+# the probe resolves a regression, and the cold first calls are the compile times.
+K3_SAME_JOB = None
+K3_SAME_JOB_KEYS = (
+    "run_id",
+    "base_commit",
+    "final_commit",
+    "rounds",
+    "base_per_step_min_us",
+    "final_per_step_min_us",
+    "ratio",
+    "base_mutant_ratio",
+    "final_mutant_ratio",
+)
+K3_EARLIER_RUNS = {
     "base": {
         "run_id": 42584020950,
         "commit": "97753d5",
@@ -310,6 +350,8 @@ K3_RUNS = {
         "per_step_min_us": 244.11,
         "mutant_per_step_min_us": 355.99,
         "mutant_ratio": 1.439,
+        "cold_s": 11.59,
+        "mutant_cold_s": 14.279,
     },
     "final": {
         "run_id": 42584023997,
@@ -318,10 +360,13 @@ K3_RUNS = {
         "per_step_min_us": 181.28,
         "mutant_per_step_min_us": 277.31,
         "mutant_ratio": 1.531,
+        "cold_s": 9.632,
+        "mutant_cold_s": 10.592,
     },
 }
 K3_LIMIT = 1.10  # the final table may cost at most 10 percent more per step
 STEP_COST = REPO / "tools/step_cost.py"
+STEP_PAIR = REPO / "tools/step_cost_pair.py"
 PILOT = REPO / ".github/workflows/pilot.yml"
 S0_RECORD = CHANGES / "slice-3a-s0.md"
 S10_RECORD = CHANGES / "slice-3a-s10.md"
@@ -439,6 +484,11 @@ def child_command(ids, xml, budget):
         str(budget),
         "--junitxml",
         str(xml),
+        # a test that passes under a non-strict xfail must fail, not pass quietly
+        "-o",
+        "xfail_strict=true",
+        # each case gets its own limit, sized for a runner about three times slower
+        *(["--timeout", str(CHILD_TIMEOUT_S)] if HAS_TIMEOUT else []),
     ]
 
 
@@ -537,6 +587,12 @@ def test_the_child_runs_with_a_clean_environment_and_the_budget_plugin(child):
     cmd = child_command(["a"], "j.xml", "b.json")[3:]
     assert cmd[cmd.index("-m") + 1] == "" and cmd[cmd.index("-n") + 1] == "0"
     assert "--budget-json" in cmd and "--junitxml" in cmd
+    assert cmd[cmd.index("-o") + 1] == "xfail_strict=true"
+    if HAS_TIMEOUT:
+        assert int(cmd[cmd.index("--timeout") + 1]) == CHILD_TIMEOUT_S
+        marks = [m for m in pytestmark if getattr(m, "name", "") == "timeout"]
+        assert marks and marks[0].args == (GATE_TIMEOUT_S,)
+    assert GATE_TIMEOUT_S >= 3 * 1.1 * 376  # the child's cold time at the runner's pace
     budget = json.loads(child["budget"].read_text())
     assert budget["mode"] == "enforce" and budget["module_mode"] == "enforce"
     assert budget["violations"] == []
@@ -618,9 +674,15 @@ def test_k1_mutant_an_asset_key_change_moves_a_pinned_history(monkeypatch):
     the float payloads, move (float digests are platform dependent, so the mutant is
     compared with the unchanged run on the same machine).
     """
+    # the mutant table covers handlers 0 to 8 with RESULT stubbed out; the study
+    # must handle only event kinds it covers, or the mutant would run the wrong handler
+    covered = set(range(len(mutants.ASSET_KEY_HANDLERS))) - {int(core.EventKind.RESULT)}
     pinned = _pin()["histories"]
     runs = _corpus_history("phase_switch")
     control = _digests(runs)
+    for key, run in runs.items():
+        handled = {kind for _, _, kind in run.history.events}
+        assert handled <= covered, (key, sorted(handled - covered))
     for key, got in control.items():
         assert got["ints"] == pinned[key]["ints"], key
         assert (runs[key].history.ints["channel"] == 12).any(), key  # asset 1 measured
@@ -674,20 +736,12 @@ def test_k1_mutant_a_changed_n_ties_moves_a_pinned_history():
 # ---- K3 and K7 ---------------------------------------------------------------------
 
 
-def _step_cost_function(name):
-    """A function of the probe, compiled alone (importing the probe sets JAX flags)."""
-    tree = ast.parse(STEP_COST.read_text())
-    node = next(
-        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name
-    )
-    limit = next(
-        n.value.value
-        for n in tree.body
-        if isinstance(n, ast.Assign) and n.targets[0].id == "K3_LIMIT"
-    )
-    scope = {"K3_LIMIT": limit}
-    exec(compile(ast.Module([node], []), str(STEP_COST), "exec"), scope)
-    return scope[name]
+def _pair_tool():
+    """The same-job comparison tool, loaded by path (it does not import JAX)."""
+    spec = importlib.util.spec_from_file_location("step_cost_pair", STEP_PAIR)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _extra_pass_calls():
@@ -710,10 +764,11 @@ def _extra_pass_calls():
 
 def test_k3_the_step_cost_measurement_is_wired_for_the_final_table():
     """Fails if the table is not the thirteen-handler table K3 is judged at, if the
-    probe, its calibrated mutant (which must still run the extra select-and-handle
-    pass), its baseline check or the workflow that runs them on the CI runner is gone.
+    probe or its calibrated mutant (which must still run the extra select-and-handle
+    pass) is gone, or if the pilot workflow does not measure the base tree and this
+    tree in one job with the exit status of each measurement kept.
     """
-    assert len(HANDLERS) == 13 == K3_RUNS["final"]["handlers"]
+    assert len(HANDLERS) == 13
     kinds = {k.name for k in core.EventKind}
     assert {"WINDOW_END", "COMMIT_START"} <= kinds
     probe = STEP_COST.read_text()
@@ -721,48 +776,79 @@ def test_k3_the_step_cost_measurement_is_wired_for_the_final_table():
     calls = _extra_pass_calls()
     assert calls.count("transition") == 1
     assert "select_next" in calls and "step" in calls and "where_tree" in calls
-    assert "--baseline-per-step-us" in probe and "SystemExit(1)" in probe
+    assert "--baseline-per-step-us" not in probe  # no typed-in baseline
+    pair = STEP_PAIR.read_text()
+    assert "base_runs.append(run_probe(" in pair
+    assert "final_runs.append(run_probe(" in pair
+    assert "for _ in range(args.rounds)" in pair and "SystemExit(1)" in pair
     workflow = PILOT.read_text()
     assert "tools/step_cost.py --mutant" in workflow
-    assert (
-        "--baseline-per-step-us" in workflow and "baseline_per_step_min_us" in workflow
-    )
+    assert "tools/step_cost_pair.py --base-tree base-tree" in workflow
+    assert "path: base-tree" in workflow and "k3_base_ref" in workflow
+    assert "baseline_per_step_min_us" not in workflow
+    # a pipe keeps the status of its last command unless pipefail is set
+    for line in workflow.splitlines():
+        if "| tee step_cost" in line:
+            head = workflow[: workflow.index(line)]
+            assert head.rstrip().rsplit("\n", 1)[-1].strip() == "set -o pipefail" or (
+                "set -o pipefail" in head.rsplit("- name:", 1)[-1]
+            ), line
 
 
-def test_k3_the_recorded_ci_measurement_is_within_the_limit_and_the_mutant_is_not():
-    """Fails if a recorded figure is missing from the S10 record, if the 13-handler
-    plain step costs more than 1.10 times the 11-handler one, if a recorded mutant
-    ratio is far from its two figures, or if the recorded mutant ratio does not exceed
-    the limit (the calibrated mutant must be caught by the probe).
+def test_k3_the_same_job_ratio_is_recorded_or_k3_is_marked_pending():
+    """Fails if the same-job record has a missing key, a ratio that does not follow
+    from its two figures, a ratio over 1.10, a mutant ratio that does not exceed 1.10,
+    or figures absent from the S10 record. While no same-job run exists the record must
+    say K3 is pending a same-job measurement. The earlier separate-job runs are context:
+    their mutant ratios must exceed the limit and their figures stay in the record.
     """
-    verdict = _step_cost_function("verdict")
-    base, final = K3_RUNS["base"], K3_RUNS["final"]
     record = S10_RECORD.read_text()
-    for run in (base, final):
-        for key in ("run_id", "commit", "per_step_min_us", "mutant_per_step_min_us"):
+    for run in K3_EARLIER_RUNS.values():
+        for key in ("run_id", "commit", "per_step_min_us", "mutant_ratio", "cold_s"):
             assert str(run[key]) in record, key
-        assert str(run["mutant_ratio"]) in record
-        mutant = verdict(run["mutant_per_step_min_us"], run["per_step_min_us"])
-        # the printed ratio uses the plain step the mutant invocation measured itself
-        assert abs(mutant["ratio"] - run["mutant_ratio"]) < 0.05
-        assert not mutant["within_limit"] and run["mutant_ratio"] > K3_LIMIT
-    cost = verdict(final["per_step_min_us"], base["per_step_min_us"])
-    assert cost["within_limit"] and cost["ratio"] <= K3_LIMIT, cost
-    assert str(cost["ratio"]) in record
+        assert str(run["mutant_cold_s"]) in record
+        assert run["mutant_ratio"] > K3_LIMIT
+    same = K3_SAME_JOB
+    if same is None:
+        assert "pending a same-job measurement" in record
+        return
+    assert set(K3_SAME_JOB_KEYS) <= set(same), sorted(set(K3_SAME_JOB_KEYS) - set(same))
+    assert (
+        round(same["final_per_step_min_us"] / same["base_per_step_min_us"], 3)
+        == (same["ratio"])
+    )
+    assert same["ratio"] <= K3_LIMIT, same["ratio"]
+    assert same["base_mutant_ratio"] > K3_LIMIT
+    assert same["final_mutant_ratio"] > K3_LIMIT
+    for key in ("run_id", "ratio", "base_per_step_min_us", "final_per_step_min_us"):
+        assert str(same[key]) in record, key
+    assert "pending a same-job measurement" not in record
 
 
 def test_k3_the_ratio_check_separates_the_limit():
-    """Fails if the baseline check passes a step over the limit or fails one within it,
-    or if the limit is not 1.10.
+    """Fails if the same-job comparison passes a final tree over 1.10 times the base,
+    fails one within it, or compares anything but the lowest minimum of each tree.
     """
-    verdict = _step_cost_function("verdict")
-    assert K3_LIMIT == 1.10
-    assert verdict(100.0, 100.0)["within_limit"]
-    assert verdict(110.0, 100.0)["within_limit"]
-    assert not verdict(111.0, 100.0)["within_limit"]
-    for run in K3_RUNS.values():
-        mutant = verdict(run["mutant_per_step_min_us"], run["per_step_min_us"])
-        assert not mutant["within_limit"]
+    pair = _pair_tool()
+    assert pair.LIMIT == K3_LIMIT == 1.10
+
+    def runs(minima):
+        return [
+            {
+                "handlers": 11,
+                "plain": {"per_step_min_us": m, "cold_s": 1.0},
+                "mutant": {"per_step_min_us": 1.5 * m, "cold_s": 1.0},
+                "mutant_ratio": 1.5,
+            }
+            for m in minima
+        ]
+
+    base = runs([100.0, 120.0])
+    assert pair.compare(base, runs([110.0, 150.0]))["within_limit"]
+    assert not pair.compare(base, runs([111.0, 111.0]))["within_limit"]
+    # the lowest minimum of each tree: one noisy round does not decide the ratio
+    noisy = pair.compare(base, runs([300.0, 105.0]))
+    assert noisy["ratio"] == 1.05 and noisy["within_limit"]
 
 
 def test_k7_the_quick_tier_step_enforces_the_ceiling_with_medium_tests_counted():
@@ -779,19 +865,23 @@ def test_k7_the_quick_tier_step_enforces_the_ceiling_with_medium_tests_counted()
 
 def test_k3_k7_manual_reads(capsys):
     """Prints the K3 and K7 figures the gate reads from the CI runner, and fails if
-    the S10 record does not carry the K7 run or still calls K3 pending.
+    the S10 record does not carry the K7 run.
     """
-    run, base, final = K7_RUN, K3_RUNS["base"], K3_RUNS["final"]
-    ratio = round(final["per_step_min_us"] / base["per_step_min_us"], 3)
+    run, same = K7_RUN, K3_SAME_JOB
     with capsys.disabled():
-        print(
-            f"\nK3 CI read: pilot runs {base['run_id']} ({base['commit']}, "
-            f"{base['handlers']} handlers, {base['per_step_min_us']} us per step) and "
-            f"{final['run_id']} ({final['commit']}, {final['handlers']} handlers, "
-            f"{final['per_step_min_us']} us): ratio {ratio} against {K3_LIMIT}; "
-            f"extra-pass mutant {base['mutant_ratio']} and {final['mutant_ratio']} "
-            "inside their own jobs."
-        )
+        if same is None:
+            print(
+                "\nK3 pending a same-job measurement: dispatch .github/workflows/"
+                "pilot.yml and record its run id, ratio and mutant ratios in "
+                "K3_SAME_JOB and the S10 record."
+            )
+        else:
+            print(
+                f"\nK3 same-job read: run {same['run_id']}, ratio {same['ratio']} "
+                f"against {K3_LIMIT} over {same['rounds']} rounds; extra-pass mutant "
+                f"{same['base_mutant_ratio']} (base) and {same['final_mutant_ratio']} "
+                "(final)."
+            )
         print(
             f"K7 manual read: warm CI run {run['run_id']} of {run['commit']}, quick "
             f"tier {run['wall_s']} s over {run['tests']} tests, ceiling "
@@ -799,12 +889,14 @@ def test_k3_k7_manual_reads(capsys):
         )
     record = S10_RECORD.read_text()
     assert str(run["run_id"]) in record and str(run["wall_s"]) in record
-    assert "pending CI measurement" not in record
 
 
 # ---- K4 ----------------------------------------------------------------------------
 
 S0_END = "97753d57564770664fca3b73c26840d0681dacf2"
+# the last commit before the gate task: the range the attribution covers ends here, so
+# a later commit cannot widen or break it
+K4_END = "ad113d30d7e4d2721e718133844c9694da2c0a1d"
 
 # task -> (records that describe it, the core commits it owns, by short sha)
 TASKS = {
@@ -848,7 +940,8 @@ TASKS = {
 }
 # Work of other tasks that touched the core in the range, with the records that say so.
 OTHER_TASKS = {
-    # Slice 2b R1 to R3, judged by the 2b gate; the paths are in its records
+    # the earlier premission work (R1 to R3), judged by its own gate; the paths are in
+    # its records
     "Slice 2b": (
         tuple(sorted(p.stem for p in CHANGES.glob("slice-2b-*.md"))),
         (
@@ -909,9 +1002,11 @@ def _owners():
 
 
 def _core_commits():
-    """Every non-merge commit from the last S0 commit to HEAD that touches the core."""
+    """Every non-merge commit from the last S0 commit to the K4 end that touches the
+    core.
+    """
     return _git(
-        "rev-list", "--no-merges", f"{S0_END}..HEAD", "--", CORE.rstrip("/")
+        "rev-list", "--no-merges", f"{S0_END}..{K4_END}", "--", CORE.rstrip("/")
     ).split()
 
 
@@ -933,16 +1028,26 @@ def _mentions(text, path):
     return bool(re.search(pattern, text))
 
 
-def _core_test_cited(text):
-    """Whether a record cites an existing `tests/core/test_*.py` file."""
+def _touched_in_range():
+    """Every path any commit of the range changed."""
+    return {p for paths in commit_paths().values() for p in paths}
+
+
+def _core_test_cited(text, touched):
+    """Whether a record cites an existing `tests/core/test_*.py` file that some commit
+    of the range changed. The check does not tie the file to the task's own commits (a
+    task whose tests landed in another commit would fail that), so a record could cite a
+    core test of another task; reviewers read that part.
+    """
     cited = re.findall(r"tests/core/test_\w+\.py", text)
-    return any((REPO / path).exists() for path in cited)
+    return any((REPO / path).exists() and path in touched for path in cited)
 
 
-def unattributed(owners, commits, text_of):
+def unattributed(owners, commits, text_of, touched=None):
     """Problems with the attribution: commits no task lists, stale entries, tasks whose
     records cite no core test, and exact core paths a record does not name.
     """
+    touched = _touched_in_range() if touched is None else touched
     found = []
     for sha in commits:
         if sha not in owners:
@@ -953,7 +1058,7 @@ def unattributed(owners, commits, text_of):
         if sha not in commits
     ]
     for task in {owners[s] for s in commits if s in owners}:
-        if not _core_test_cited(text_of(task)):
+        if not _core_test_cited(text_of(task), touched):
             found.append(f"the {task} record cites no tests/core test file")
     found += unnamed_paths(owners, commits, text_of)
     return found
@@ -976,14 +1081,14 @@ def _text_of(task):
 
 
 def commit_paths():
-    """Paths touched by each non-merge commit from the last S0 commit to HEAD."""
+    """Paths touched by each non-merge commit from the last S0 commit to the K4 end."""
     out = _git(
         "log",
         "--no-merges",
         "--no-renames",
         "--name-only",
         "--format=@@%H",
-        f"{S0_END}..HEAD",
+        f"{S0_END}..{K4_END}",
     )
     commits, sha = {}, None
     for line in out.splitlines():
