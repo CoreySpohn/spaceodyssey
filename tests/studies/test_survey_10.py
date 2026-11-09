@@ -20,7 +20,6 @@ executor dominates, and the replay of (d) is eager.
 """
 
 import dataclasses
-from types import SimpleNamespace
 
 import equinox as eqx
 import jax
@@ -76,8 +75,8 @@ def _study(requests=None, releases=None):
     return al.allocator_study(tuple(tuple(p) for p in proposals))
 
 
-def _run(executor, study, committee, *, reference=True):
-    """A run, and (unless `reference` is false) the host re-execution of its study."""
+def _run(executor, study, committee):
+    """A run of `study` on `executor`."""
     truths, roots = worlds(1, study.caps)
     acted = run_with_actions(executor, study, truths, roots, N_STEPS, service=committee)
     result = acted.result
@@ -88,15 +87,24 @@ def _run(executor, study, committee, *, reference=True):
         roots[0],
         jax.tree_util.tree_map(lambda x: x[0], truths),
     )
-    return SimpleNamespace(
-        study=study,
-        service=committee,
-        result=result,
-        run=run,
-        ref=al.reference_execution(study, run, type(committee)())
-        if reference
-        else None,
-    )
+    return _Run(study, committee, result, run)
+
+
+class _Run:
+    """A run of one study, with the host re-execution of it made on first use."""
+
+    def __init__(self, study, committee, result, run):
+        self.study, self.service, self.result, self.run = study, committee, result, run
+        self.kept = None
+
+    @property
+    def ref(self):
+        """The reference execution of the run (the host re-run of its study)."""
+        if self.kept is None:
+            self.kept = al.reference_execution(
+                self.study, self.run, type(self.service)()
+            )
+        return self.kept
 
 
 def _carry_run(executor, study):
@@ -112,33 +120,52 @@ def _carry_run(executor, study):
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(host_service, "_snapshot_for", spy)
-        return _run(executor, study, committee, reference=False)
+        return _run(executor, study, committee)
 
 
-def _runs(executor):
-    observer = _study({OBSERVER: HUGE})
-    pending = _study({PENDING: HUGE})
-    toy = al.ToyCommittee
-    return SimpleNamespace(
-        base=_run(executor, _study(), toy()),
-        observer=_run(executor, observer, toy()),
-        unreleased=_run(executor, pending, toy()),
-        early=_run(executor, _study(releases={PENDING: EARLY}), toy()),
-        mixed=_run(executor, _study({LATE: 20.0}, releases={PENDING: EARLY}), toy()),
-        carry_base=_carry_run(executor, _study()),
-        carry_observer=_carry_run(executor, observer),
-        carry_unreleased=_carry_run(executor, pending),
-    )
+class _Runs:
+    """The runs of one executor, each built on first use and then kept.
+
+    A test pays only for the runs it reads, so a fresh process running one test does
+    not build the rest.
+    """
+
+    def __init__(self, executor):
+        self.executor = executor
+        self.kept = {}
+
+    def __getattr__(self, name):
+        if name not in self.kept:
+            self.kept[name] = self._build(name)
+        return self.kept[name]
+
+    def _build(self, name):
+        toy_ = al.ToyCommittee
+        observer = _study({OBSERVER: HUGE})
+        pending = _study({PENDING: HUGE})
+        early = _study(releases={PENDING: EARLY})
+        mixed = _study({LATE: 20.0}, releases={PENDING: EARLY})
+        make = {
+            "base": lambda: _run(self.executor, _study(), toy_()),
+            "observer": lambda: _run(self.executor, observer, toy_()),
+            "unreleased": lambda: _run(self.executor, pending, toy_()),
+            "early": lambda: _run(self.executor, early, toy_()),
+            "mixed": lambda: _run(self.executor, mixed, toy_()),
+            "carry_base": lambda: _carry_run(self.executor, _study()),
+            "carry_observer": lambda: _carry_run(self.executor, observer),
+            "carry_unreleased": lambda: _carry_run(self.executor, pending),
+        }
+        return make[name]()
 
 
 @pytest.fixture(scope="module")
 def host_runs():
-    return _runs("host")
+    return _Runs("host")
 
 
 @pytest.fixture(scope="module")
 def compiled_runs():
-    return _runs("compiled")
+    return _Runs("compiled")
 
 
 @pytest.fixture(scope="module", params=("host", "compiled"))
@@ -345,22 +372,26 @@ def _flip_admission(r, kind):
     return dataclasses.replace(r, trace=eqx.tree_at(lambda x: x.admit_code, t, code))
 
 
-def _observe_slots(r):
-    """The `(step, slot)` of every requested `Observe`, in decision order."""
+def _slots(r, kind):
+    """The `(step, slot)` of every requested `kind` effect, in decision order."""
     t = r.trace
-    kind = np.asarray(t.eff_kind) == EffectKind.OBSERVE
-    kind &= np.asarray(t.handled)[:, None]
-    return [tuple(map(int, x)) for x in np.argwhere(kind)]
+    hit = np.asarray(t.eff_kind) == kind
+    hit &= np.asarray(t.handled)[:, None]
+    return [tuple(map(int, x)) for x in np.argwhere(hit)]
 
 
-def _set_observe_codes(r, codes):
-    """Replace the admission code of the n-th `Observe` request for each `n: code`."""
+def _set_codes(r, kind, codes):
+    """Replace the admission code of the n-th `kind` request for each `n: code`."""
     t = r.trace
     column = np.asarray(t.admit_code).copy()
-    slots = _observe_slots(r)
+    slots = _slots(r, kind)
     for n, code in codes.items():
         column[slots[n]] = int(code)
     return dataclasses.replace(r, trace=eqx.tree_at(lambda x: x.admit_code, t, column))
+
+
+def _set_observe_codes(r, codes):
+    return _set_codes(r, EffectKind.OBSERVE, codes)
 
 
 def _bend_trace(r, field):
@@ -427,6 +458,30 @@ def _swap_codes(r, kind_a, kind_b):
     return dataclasses.replace(r, trace=eqx.tree_at(lambda x: x.admit_code, t, code))
 
 
+def _bend_record(r, kind, column, by=1):
+    """Add `by` to a column of the first valid log row of `kind`."""
+    log = r.carry.log
+    (row, *_) = np.flatnonzero(np.asarray(log.valid) & (np.asarray(log.kind) == kind))
+    values = np.asarray(getattr(log, column)).copy()
+    values[row] += by
+    return dataclasses.replace(
+        r, carry=eqx.tree_at(lambda c: getattr(c.log, column), r.carry, values)
+    )
+
+
+def _bend_payload(r, by):
+    """Add `by` to the first payload column of the first measurement record."""
+    log = r.carry.log
+    (row, *_) = np.flatnonzero(
+        np.asarray(log.valid) & (np.asarray(log.kind) == toy.RECORD_MEASUREMENT)
+    )
+    payload = np.asarray(log.payload).copy()
+    payload[row, 0] += by
+    return dataclasses.replace(
+        r, carry=eqx.tree_at(lambda c: c.log.payload, r.carry, payload)
+    )
+
+
 def _bend_granted(r):
     """Add one to the ledger's granted total of the first program."""
     granted = np.asarray(r.carry.ledger.granted).copy()
@@ -446,6 +501,21 @@ def _bend_proposal(r, index):
     return dataclasses.replace(
         r, carry=eqx.tree_at(lambda c: c.log.payload, r.carry, payload)
     )
+
+
+# the log columns of each record kind that the replay must compare with the re-execution
+RECORD_COLUMNS = {
+    "measurement": (
+        "channel",
+        "status",
+        "program",
+        "audience",
+        "released_tick",
+        "acquisition_index",
+        "acquisition_id",
+    ),
+    "award": ("status", "program", "acquisition_index", "audience", "released_tick"),
+}
 
 
 @pytest.mark.medium(reason="replays the store eagerly: about 2 s call, shared fixture")
@@ -492,6 +562,12 @@ def test_replay_reproduces_the_run_and_fails_without_a_recorded_award(runs):
         ("recorded proposal", _bend_proposal(run, 0)),
         ("measurement record dropped", _drop_measurement(run)),
         ("granted total", _bend_granted(run)),
+        *(
+            (f"{label} {column}", _bend_record(run, kind, column))
+            for label, kind in (("measurement", toy.RECORD_MEASUREMENT), ("award", A))
+            for column in RECORD_COLUMNS[label]
+        ),
+        ("measurement payload beyond the go band", _bend_payload(run, 1e-9)),
         ("measurement record repeated", _repeat_measurement(run)),
         (
             "swapped query and wait codes",
@@ -499,6 +575,9 @@ def test_replay_reproduces_the_run_and_fails_without_a_recorded_award(runs):
         ),
     ):
         assert not al.replay_allocation(study, edited, reference=ref).ok, name
+    # a one-ULP float difference is inside the go band: not a failure
+    nudged = _bend_payload(run, np.spacing(1.0))
+    assert al.replay_allocation(study, nudged, reference=ref).ok
     # without a precomputed reference the replay re-executes the study itself, and the
     # re-execution does not read the run's trace: an altered outcome is still found
     altered = _flip_admission(run, EffectKind.ALLOCATE)
@@ -507,11 +586,12 @@ def test_replay_reproduces_the_run_and_fails_without_a_recorded_award(runs):
     assert not al.replay_allocation(study, altered).ok
     # a committee that read the carry cannot reproduce the recorded awards
     assert not al.replay_allocation(study, run, al.CarryCommittee()).ok
-    _replay_refused_observations(runs)
 
 
-def _replay_refused_observations(runs):
+@pytest.mark.medium(reason="the early and mixed host runs and their re-executions")
+def test_legitimate_refusals_replay_and_each_outcome_is_the_cores(host_runs):
     """Legitimate refusals replay; each outcome is reconciled with its own request."""
+    runs = host_runs
     refused, ok = int(AdmissionCode.NO_FUNDS), OK
     early = runs.early
     assert _admitted(early, EffectKind.OBSERVE) == [refused, ok, refused, ok]
@@ -535,23 +615,24 @@ def _replay_refused_observations(runs):
 
 
 def _edge_studies():
-    """Three data variants of the default study that exercise other admission rules."""
+    """Four data variants of the default study that exercise other admission rules."""
     base = al.allocator_study()
     proposals = [list(q) for q in al.DEFAULT_PROPOSALS]
-    proposals[PENDING + 1][2] = HUGE  # rounds the other award to zero
+    proposals[4][2] = HUGE  # the request of one program swamps the other's award
+    permitted = sum(1 << int(k) for k in EffectKind if k != EffectKind.ALLOCATE)
     return {
         "outside validity": al.allocator_study(tuple(map(tuple, proposals))),
         "transition equal to occupancy": al.allocator_study(
             transition_ticks=base.assets.transition_ticks.at[0].set(100)
         ),
         "asset budget short": al.allocator_study(budget=base.budget.at[0, 0].set(0)),
+        "allocate forbidden": al.allocator_study(permitted_effects=(permitted,)),
     }
 
 
-@pytest.mark.medium(reason="three host runs that share the default program, replayed")
-def test_edge_rules_replay_and_their_outcomes_cannot_be_changed(host_runs):
+@pytest.mark.medium(reason="four host runs that share the default program, replayed")
+def test_edge_rules_replay_and_their_outcomes_cannot_be_changed():
     """Legitimate refusals and boundary cases replay; changing an outcome fails."""
-    assert host_runs.base.ref is not None
     refusals = {int(AdmissionCode.NO_FUNDS), int(AdmissionCode.OUTSIDE_VALIDITY)}
     for name, study in _edge_studies().items():
         r = _run("host", study, al.ToyCommittee())
@@ -561,14 +642,19 @@ def test_edge_rules_replay_and_their_outcomes_cannot_be_changed(host_runs):
         codes = _admitted(r, EffectKind.OBSERVE)
         _positive(**{name: len(codes)})
         # every outcome is the core's: each refusal made admitted and each admission
-        # refused for another reason must be rejected
-        for n, code in enumerate(codes):
-            other = int(AdmissionCode.FORBIDDEN) if code == OK else OK
-            edited = _set_observe_codes(r.run, {n: other})
-            assert not al.replay_allocation(study, edited, reference=r.ref).ok, (
-                name,
-                n,
-            )
+        # refused for another reason must be rejected, for Observe and Allocate alike
+        for kind in (EffectKind.OBSERVE, EffectKind.ALLOCATE):
+            for n, code in enumerate(_admitted(r, kind)):
+                other = int(AdmissionCode.FORBIDDEN) if code == OK else OK
+                edited = _set_codes(r.run, kind, {n: other})
+                assert not al.replay_allocation(study, edited, reference=r.ref).ok, (
+                    name,
+                    kind,
+                    n,
+                )
+        if name == "allocate forbidden":
+            forbidden = [int(AdmissionCode.FORBIDDEN)] * 4
+            assert _admitted(r, EffectKind.ALLOCATE) == forbidden
         if name == "outside validity":
             assert int(AdmissionCode.OUTSIDE_VALIDITY) in codes, codes
             swapped = {
@@ -588,7 +674,7 @@ def test_edge_rules_replay_and_their_outcomes_cannot_be_changed(host_runs):
 )
 def test_both_executors_make_the_same_awards(host_runs, compiled_runs):
     """The host and compiled runs agree on histories, requests and awards."""
-    for name in ("base", "observer", "unreleased", "early"):
+    for name in ("base", "early", "mixed"):
         host, comp = getattr(host_runs, name), getattr(compiled_runs, name)
         assert same_histories(host.result, comp.result, 1), name
         assert [q.tick for q in host.service.requests] == [
