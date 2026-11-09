@@ -35,6 +35,20 @@ python, x64, backend) is compared separately: a mismatch is refused (C003) unles
 passes the override flag, and an override is written into every later manifest. A directory
 that already holds a checkpoint is refused without `resume` (C008).
 
+The service and the wake function are identified by their qualified names only. A change in
+the body of either under the same name is not seen, and neither is a change in the body of the
+refit boundary beyond its recorded binding (kind, version and model hash). Hashing a callable
+would tie the identity to the bytecode of one Python build, so the limitation is stated here
+instead. For the same reason the dependency fingerprint keeps the installed spaceodyssey
+version string as it is, including a development suffix, and resuming across a code change
+that moves the version requires the override flag.
+
+The identity also records whether the host run keeps a policy view log and an effects log. A
+resume that drops a log the saved run kept would leave a silent gap in it, so it is refused
+(C002). One difference is allowed on purpose: a run saved with no service that stopped on a
+pending request (status `AWAITING`) may be resumed with a service, because the answer is what
+it waited for. A run that never raised a request is unaffected by the difference.
+
 ## Boundaries, and what "exactly once" rests on
 
 - Host: after acquisition (a handled `DONE` that wrote a record), after each refit install
@@ -68,7 +82,20 @@ ignores empty rows, and it is exact (zero ulps).
 
 ## Decisions the spec did not make
 
-- A pointer that is missing while generations exist is refused rather than guessed (C005).
+- A pointer that is missing while generations exist is refused rather than guessed (C005, and
+  the message says `recover=True` loads the newest generation that verifies). The exception is
+  a first save that died before its pointer committed: such a directory carries a `PENDING`
+  marker, written before the first generation and removed after the first pointer commit, and
+  loads as empty. The marker is what tells a crash from a deleted pointer.
+- Retention counts only generations that have a manifest, so a half-written generation left
+  by a crash never costs the last complete one its place. A run clears manifest-less
+  generation directories when it begins.
+- `resume=True` on a directory with no checkpoint is refused (C010) instead of starting
+  fresh. A directory whose first save never committed counts as empty, so it is started
+  without `resume`.
+- `bucket=` with `checkpoint=` is refused: the chunked driver the checkpoint selects has no
+  bucketed program.
+- The host manifest `steps` counts every step of the run, including those restored.
 - The host `run_worlds` refuses a checkpoint: a host checkpoint holds one world.
 - An undumpable study is refused with C001, and a non-core class needs a kinds mapping on the
   sink.
@@ -89,9 +116,9 @@ way, so it is not built.
 
 ## Tests
 
-The store and identity layer: `tests/codec/test_checkpoint_store.py`, 43 tests, unit tier, 1.2 s.
+The store and identity layer: `tests/codec/test_checkpoint_store.py`, 49 tests, unit tier, 1.3 s.
 
-Medium, `tests/core/test_resume.py`, eight tests:
+Medium, `tests/core/test_resume.py`, twelve tests (the first eight below, then one each for the manifest step count, the bucket refusal, and a pending request on each executor):
 
 - host resume is the uninterrupted run (trace and carry bit equal);
 - compiled resume is the chunked run (carry bit equal, canonical history exact);
@@ -108,7 +135,7 @@ writing a chunk, a manifest and the pointer rename, each resumed to the bit-equa
 uninterrupted run.
 
 Runner time: the slow tier adds about 47 s, inside the 90 s allowance. The medium tests add
-about 55 s in total.
+about 105 s in total.
 
 ## Checks at merge
 
