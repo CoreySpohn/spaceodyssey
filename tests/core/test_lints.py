@@ -545,3 +545,60 @@ def test_allowance_count_and_rule_are_enforced(tmp_path):
     assert stale_allowances(root, wrong_rule) == [key]
     twice = {key: Allowance("test", ("dynamic-getattr",), "walk", 2)}
     assert stale_allowances(root, twice) == [key]
+
+
+@pytest.mark.parametrize(
+    ("filename", "source", "rule"),
+    [
+        ("sample.py", 'if name == "survey_1":\n    pass\n', "survey-name"),
+        ("sample.py", 'if "survey 25" in names:\n    pass\n', "survey-name"),
+        ("sample.py", "if study.name == other:\n    pass\n", "study.name"),
+        (
+            "handlers.py",
+            "if isinstance(study.channel_model, ToyPhotometry):\n    pass\n",
+            "study-kind",
+        ),
+        (
+            "handlers.py",
+            "if builtins.isinstance(study.channel_model, ToyPhotometry):\n    pass\n",
+            "study-kind",
+        ),
+        (
+            "transaction.py",
+            "if isinstance(policy, CustomPolicy):\n    pass\n",
+            "study-kind",
+        ),
+        (
+            "transaction.py",
+            "from spaceodyssey.studies.toy import ToyPhotometry as Channel\n"
+            "if isinstance(model, Channel):\n    pass\n",
+            "study-kind",
+        ),
+        (
+            "handlers.py",
+            "policy = study.agenda.policies[0]\n"
+            "if isinstance(policy, CustomPolicy):\n    pass\n",
+            "study-kind",
+        ),
+    ],
+    ids=[
+        "survey-literal",
+        "survey-membership",
+        "study-name",
+        "handler-kind",
+        "qualified-kind",
+        "transaction-kind",
+        "import-alias",
+        "local-study-alias",
+    ],
+)
+def test_dispatch_is_reported_with_its_rule_and_line(tmp_path, filename, source, rule):
+    """Fails if one branch on a study name or kind is missed, or reported at another
+    line or under another rule, in the file names the core uses.
+    """
+    from tests.core.gate_helpers import study_branches
+
+    path = tmp_path / filename
+    path.write_text(source, encoding="ascii")
+    line = source.count("\n", 0, source.index("if ")) + 1
+    assert study_branches(tmp_path) == [(path, line, rule)]

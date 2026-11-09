@@ -20,4 +20,4 @@ def test_ints_exact_and_floats_in_the_go_band(case):
 
 
 def test_tolerance_bands_are_ordered():
-    assert GO_TOLERANCE < KILL_TOLERANCE == 1e-9
+    assert GO_TOLERANCE == 1e-12 and KILL_TOLERANCE == 1e-9

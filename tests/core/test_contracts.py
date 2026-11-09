@@ -132,22 +132,6 @@ def test_integer_vocabularies():
     assert int(core.Audience.OBSERVER | core.Audience.POLICY) == 3
 
 
-@pytest.mark.parametrize("ids", [[], [0], [0, 0], [0, 2]])
-def test_gate_rejects_missing_duplicate_or_wrong_worlds(monkeypatch, ids):
-    from types import SimpleNamespace
-
-    from tests import test_slice1_gate as gate
-
-    returned = [SimpleNamespace(world=world) for world in ids]
-    monkeypatch.setattr(gate, "runs", lambda *args: returned)
-    checks = [
-        SimpleNamespace(name=name, passed=True) for name in gate.EXPECTED_INVARIANTS
-    ]
-    monkeypatch.setattr(gate, "check_run", lambda run: checks)
-    with pytest.raises(AssertionError, match="world"):
-        gate.test_corpus_invariants("K3", gate.CORPUS_BY_NAME["baseline"], "host")
-
-
 @pytest.mark.parametrize("annotation", [object, typing.Any, Callable, int | object])
 def test_composed_agenda_escape_is_rejected(monkeypatch, annotation):
     from spaceodyssey.core.study import Agenda
@@ -179,8 +163,8 @@ def test_draw_control_rejects_nan_only_corruption(monkeypatch, executor, mutant)
     import equinox as eqx
     import jax.numpy as jnp
 
-    from tests import test_slice1_gate as gate
     from tests.core import mutants as m
+    from tests.core import test_draws
 
     policy = mutant == "policy"
     host, scan = (
@@ -213,37 +197,12 @@ def test_draw_control_rejects_nan_only_corruption(monkeypatch, executor, mutant)
     monkeypatch.setattr(host, "run", corrupt(core.HostExecutor.run))
     monkeypatch.setattr(scan, "run", corrupt(core.CompiledExecutor.run))
     with pytest.raises(AssertionError, match="finite"):
-        gate.test_negative_decision_count_keys(executor, mutant)
-
-
-def test_gate_rejects_broken_replay(monkeypatch):
-    from tests import test_slice1_gate as gate
-    from tests.core import test_replay_log
-
-    check = getattr(gate, "test_replay_acceptance", None)
-    assert callable(check), "gate must run A2 replay"
-    monkeypatch.setattr(
-        test_replay_log,
-        "replay_belief",
-        lambda study, carry, trace: study.observer.init(study.caps),
-    )
-    with pytest.raises(AssertionError):
-        check("A2", gate.CORPUS_BY_NAME["baseline"])
-
-
-@pytest.mark.parametrize(
-    "name, check_id",
-    [("test_fork_acceptance", "A3"), ("test_latency_acceptance", "A4")],
-)
-def test_gate_runs_fork_and_latency(name, check_id):
-    from tests import test_slice1_gate as gate
-
-    check = getattr(gate, name, None)
-    assert callable(check), f"gate must run {check_id}"
-    assert any(
-        mark.name == "parametrize" and check_id in mark.args[1]
-        for mark in check.pytestmark
-    )
+        if policy:
+            test_draws.test_decision_count_policy_key_mutant_is_caught(executor)
+        elif executor == "scan":
+            test_draws.test_mutant_key_with_n_dec_is_caught()
+        else:
+            test_draws.test_mutant_is_caught_on_the_host_executor_too()
 
 
 @pytest.mark.parametrize("policy", [False, True])

@@ -220,8 +220,6 @@ def save_viz_png():
 # them. The default collection keeps every check.
 GATE = "gate or corpus file"
 SLOW_FILES = {
-    "test_slice1_gate.py": GATE,
-    "test_slice2b_gate.py": "reruns the golden histories, reads the commit history",
     "test_slice3a_gate.py": "reruns goldens and four mutant runs, reads the history",
     "test_observer_kit_runs.py": "observer kit on runs, one executor compile alone",
     "test_refresh_runs.py": "refresh runs compile the chunked driver per executor",
@@ -283,7 +281,3 @@ def pytest_collection_modifyitems(config, items):
         if BUDGET_SCALE != 1 and not item.get_closest_marker("time_budget"):
             seconds = BUDGET_SCALE * budget.tier_budget_s(tier)
             item.add_marker(pytest.mark.time_budget(seconds))
-        if item.path.name == "test_slice1_gate.py":
-            # with `-n 2 --dist loadgroup` each worker compiles one executor family
-            family = "compiled" if "compiled" in item.name else "host"
-            item.add_marker(pytest.mark.xdist_group(family))

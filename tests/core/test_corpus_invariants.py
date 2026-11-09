@@ -1,13 +1,20 @@
 """Every invariant over every corpus case on both executors, with planted failures."""
 
 import dataclasses
+import types
 
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from spaceodyssey.core import EventKind, HostExecutor, histories_equal, index_world
+from spaceodyssey.core import (
+    Audience,
+    EventKind,
+    HostExecutor,
+    histories_equal,
+    index_world,
+)
 from spaceodyssey.core.conformance import (
     EXECUTORS,
     INVARIANTS,
@@ -18,6 +25,7 @@ from spaceodyssey.core.conformance import (
     public_events,
     run_case,
 )
+from spaceodyssey.core.conformance.invariants import no_scorer_column_in_snapshot
 from tests.core import record_helpers as rh
 from tests.core.conformance_helpers import runs
 from tests.core.corpus import CORPUS, CORPUS_BY_NAME
@@ -26,13 +34,96 @@ from tests.core.leak_helpers import leaky_wake
 pytestmark = pytest.mark.clear_caches_between_tests
 
 
+# Independent list: removing an invariant from check_run must break this file.
+EXPECTED_INVARIANTS = (
+    "order_keys_monotone",
+    "exactly_once_settlement",
+    "one_fold_per_acquisition",
+    "no_violation",
+    "balance_conserved",
+    "unique_acquisition_id",
+    "dense_acquisition_index",
+    "release_not_before_available",
+    "no_scorer_column_in_snapshot",
+    "no_extra_wakes_under_private_events",
+    "refit_inputs_equal_revision_set",
+    "installs_match_product_rows",
+)
+
+# Independent of the runner: the corpus runs two worlds, numbered from zero.
+EXPECTED_WORLDS = (0, 1)
+
+# Independent of the study: the payload columns only the scorer may read, by record
+# kind index (1 is the toy measurement, whose second column is the raw noise variate;
+# 3 is the catalog record of its case). Every other column is readable by everyone.
+SCORER_ONLY_COLUMNS = {"default": {1: (1,)}, "catalog_record": {1: (1,), 3: (1,)}}
+N_KINDS, N_COLUMNS = 4, 4
+
+
+def reference_layout(name):
+    """The layout that judges snapshots, written here and not read from the study."""
+    table = np.full((N_KINDS, N_COLUMNS), 7, dtype=np.int64)
+    for kind, columns in SCORER_ONLY_COLUMNS.get(
+        name, SCORER_ONLY_COLUMNS["default"]
+    ).items():
+        table[kind, list(columns)] = int(Audience.SCORER)
+    return types.SimpleNamespace(payload_audience=table)
+
+
+def corpus_failures(corpus_runs, name):
+    """(world, failed results) of corpus runs judged against the independent layout."""
+    out = []
+    for run in corpus_runs:
+        run = dataclasses.replace(run, reference_caps=reference_layout(name))
+        results = check_run(run)
+        assert tuple(result.name for result in results) == EXPECTED_INVARIANTS
+        out.append((run.world, failures_of(results)))
+    return out
+
+
 @pytest.mark.parametrize("executor", EXECUTORS)
 @pytest.mark.parametrize("case", CORPUS, ids=lambda c: c.name)
 def test_corpus_invariants(case, executor):
-    for run in runs(case.name, executor):
-        results = check_run(run)
-        assert [r.name for r in results] == [f.__name__ for f in INVARIANTS]
-        assert not failures_of(results), (case.name, executor, run.world, results)
+    """Fails if an invariant leaves check_run, a corpus case runs other worlds than 0
+    and 1, or a run fails an invariant judged against the independent snapshot layout.
+    """
+    corpus_runs = runs(case.name, executor)
+    worlds = sorted(run.world for run in corpus_runs)
+    assert worlds == list(EXPECTED_WORLDS), (
+        f"world IDs {worlds} differ from the expected {list(EXPECTED_WORLDS)}",
+        case.name,
+        executor,
+    )
+    for world, failures in corpus_failures(corpus_runs, case.name):
+        assert not failures, (case.name, executor, world, failures)
+
+
+@pytest.mark.parametrize("executor", EXECUTORS)
+def test_the_snapshot_invariant_names_a_hidden_column_a_layout_shows(executor):
+    """Fails if a layout that shows a hidden column passes the snapshot invariant, or
+    the clean baseline run fails it.
+    """
+    run = runs("baseline", executor)[0]
+    assert no_scorer_column_in_snapshot(run).passed
+    broken = dataclasses.replace(
+        run, study=rh.with_leaking_layout(run.study), reference_caps=run.study.caps
+    )
+    result = no_scorer_column_in_snapshot(broken)
+    assert result.name == "no_scorer_column_in_snapshot"
+    assert not result.passed and "snapshot shows a hidden column" in result.diagnostic
+
+
+@pytest.mark.parametrize("numbers", [[], [0], [0, 0], [0, 2]])
+def test_the_corpus_check_rejects_missing_duplicate_or_wrong_worlds(
+    monkeypatch, numbers
+):
+    """Fails if a corpus run set with missing, repeated or renumbered worlds passes."""
+    returned = [types.SimpleNamespace(world=world) for world in numbers]
+    monkeypatch.setitem(globals(), "runs", lambda *args: returned)
+    checks = [types.SimpleNamespace(name=n, passed=True) for n in EXPECTED_INVARIANTS]
+    monkeypatch.setitem(globals(), "check_run", lambda run: checks)
+    with pytest.raises(AssertionError, match="world"):
+        test_corpus_invariants(CORPUS_BY_NAME["baseline"], "host")
 
 
 @pytest.mark.parametrize("executor", EXECUTORS)

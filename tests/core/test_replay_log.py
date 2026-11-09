@@ -19,6 +19,11 @@ from spaceodyssey.core.records import write_log
 from spaceodyssey.studies import toy
 from tests.core.corpus import CORPUS, CORPUS_BY_NAME
 from tests.core.helpers import N_STEPS_CORPUS, advance_j, one_world, service_of, worlds
+from tests.core.mutants import (
+    initial_belief_replay,
+    live_belief_replay,
+    log_order_replay,
+)
 
 # A refresh case's belief comes from installs, not release folds: `replay_belief`
 # folds only, so `replay_run` replays those cases (below).
@@ -71,6 +76,29 @@ def test_replay_reproduces_belief_bitwise(case):
 
 def test_replay_depends_on_the_log():
     assert replay_follows_the_log()
+
+
+@pytest.mark.parametrize("name", ["baseline", "revision"])
+def test_a_replay_that_ignores_the_run_fails(name):
+    """Fails if a replay that folds nothing still matches the live belief."""
+    assert not replay_matches_live(CORPUS_BY_NAME[name], initial_belief_replay)
+
+
+def test_a_replay_that_returns_the_live_belief_fails_the_log_edit():
+    """Fails if the log-edit check cannot tell a replay that returns the live belief
+    (equal by construction) from one that follows the log.
+    """
+    assert replay_matches_live(CORPUS_BY_NAME["baseline"], live_belief_replay)
+    assert not replay_follows_the_log(live_belief_replay)
+    assert not replay_follows_the_log(initial_belief_replay)
+
+
+def test_a_replay_in_log_order_fails_the_release_order_check():
+    """Fails if a replay that folds the first logged revision passes as one that
+    folds the first released.
+    """
+    assert reordered_replay_matches()
+    assert not reordered_replay_matches(log_order_replay)
 
 
 def test_replay_returns_a_belief():

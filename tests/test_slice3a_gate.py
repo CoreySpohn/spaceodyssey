@@ -58,8 +58,7 @@ from spaceodyssey.core.conformance import corpus as conformance_corpus
 from spaceodyssey.core.conformance import run_case
 from spaceodyssey.core.executors.base import canonical_history
 from spaceodyssey.core.handlers import HANDLERS
-from tests import conftest
-from tests import test_slice2b_gate as gate_2b
+from tests import conftest, pin_helpers
 from tests.core import mutants
 from tests.core import test_golden_histories as golden
 from tests.core.conformance_helpers import N_WORLDS
@@ -80,8 +79,8 @@ if HAS_TIMEOUT:
 REPO = Path(__file__).resolve().parents[1]
 CHANGES = REPO / "docs/changes"
 CORE = "src/spaceodyssey/core/"
-_git = gate_2b._git
-_resolve = gate_2b._resolve
+_git = pin_helpers.git
+_resolve = pin_helpers.resolve
 
 GOLD = "tests/core/test_golden_histories.py::"
 CODEC = "tests/codec/test_premission_codec.py::"
@@ -94,7 +93,7 @@ LINTS = "tests/core/test_lints.py::"
 S8 = "tests/studies/test_survey_8.py::"
 S10 = "tests/studies/test_survey_10.py::"
 ALLOC = "tests/studies/test_allocator.py::"
-G2B = "tests/test_slice2b_gate.py::"
+CISUM = "tests/test_ci_summary.py::"
 
 # rule -> {canonical test id: number of cases that must pass}. A function id runs every
 # case of it; a file id runs every test of the file.
@@ -151,10 +150,7 @@ _K6 = {
     "tests/core/test_core.py::test_observer_only_release_leaves_policy_view_unchanged": 1,  # noqa: E501
     "tests/core/test_audience_firewall.py::test_policy_fold_hides_private_event_identity": 1,  # noqa: E501
 }
-_K7 = {
-    G2B + "test_k6_k7_the_quick_tier_step_enforces_the_budgets": 1,
-    G2B + "test_k6_k7_the_summary_script_fails_over_its_limits": 4,
-}
+_K7 = {CISUM + "test_the_summary_script_fails_over_its_limits": 4}
 _K8 = {
     S10 + "test_replay_reproduces_the_run_and_fails_without_a_recorded_award": 2,
     ALLOC + "test_dropping_a_recorded_award_fails_the_check": 1,
@@ -621,8 +617,10 @@ def _pin():
 def _blob_at_capture(path):
     """The pin file as committed by the capture commit that last wrote it."""
     rel = str(path.relative_to(REPO))
-    log = _git("log", "--format=%H", f"{gate_2b.PIN_SOURCE}..HEAD", "--", rel).split()
-    captures = [c for c in log if c in gate_2b.PIN_CAPTURES]
+    log = _git(
+        "log", "--format=%H", f"{pin_helpers.PIN_SOURCE}..HEAD", "--", rel
+    ).split()
+    captures = [c for c in log if c in pin_helpers.PIN_CAPTURES]
     assert captures, rel
     return subprocess.run(
         ["git", "cat-file", "blob", f"{captures[0]}:{rel}"],
@@ -637,7 +635,7 @@ def test_k1_every_pin_file_is_the_blob_of_its_capture_commit(child):
     for instance because a test loader regenerated it. It runs after the child run,
     so a pin rewritten by that run is seen.
     """
-    for path in (gate_2b.GOLDEN_PIN, gate_2b.HASH_PIN):
+    for path in (pin_helpers.GOLDEN_PIN, pin_helpers.HASH_PIN):
         assert path.read_bytes() == _blob_at_capture(path), path.name
     assert len(_pin()["histories"]) == golden.N_PINNED > 0
 
@@ -646,23 +644,25 @@ def test_k1_no_commit_after_the_pins_touched_a_pin_file():
     """Fails if a pin names another source commit, or if any commit from the pins'
     capture to HEAD, other than the two capture commits, changed a pin file.
     """
-    assert json.loads(gate_2b.GOLDEN_PIN.read_text())["source_commit"] == (
-        gate_2b.PIN_SOURCE
+    assert json.loads(pin_helpers.GOLDEN_PIN.read_text())["source_commit"] == (
+        pin_helpers.PIN_SOURCE
     )
-    assert json.loads(gate_2b.HASH_PIN.read_text())["source_commit"] == (
-        gate_2b.PIN_SOURCE
+    assert json.loads(pin_helpers.HASH_PIN.read_text())["source_commit"] == (
+        pin_helpers.PIN_SOURCE
     )
     touched = set(
         _git(
             "log",
             "--format=%H",
-            f"{gate_2b.PIN_SOURCE}..HEAD",
+            f"{pin_helpers.PIN_SOURCE}..HEAD",
             "--",
-            str(gate_2b.GOLDEN_PIN.relative_to(REPO)),
-            str(gate_2b.HASH_PIN.relative_to(REPO)),
+            str(pin_helpers.GOLDEN_PIN.relative_to(REPO)),
+            str(pin_helpers.HASH_PIN.relative_to(REPO)),
         ).split()
     )
-    assert touched == gate_2b.PIN_CAPTURES, sorted(touched - gate_2b.PIN_CAPTURES)
+    assert touched == pin_helpers.PIN_CAPTURES, sorted(
+        touched - pin_helpers.PIN_CAPTURES
+    )
 
 
 def _corpus_history(name):
@@ -865,7 +865,7 @@ def test_k7_the_quick_tier_step_enforces_the_ceiling_with_medium_tests_counted()
     """Fails if the quick-tier CI step runs the summary advisory only, drops the
     540 s ceiling or the medium tier, or if the budget plugin is not enforcing.
     """
-    step = gate_2b._quick_summary_step()[1]
+    step = pin_helpers.quick_summary_step()[1]
     assert "--advisory-baseline" not in step
     assert f"--budget-seconds {K7_CEILING_S}" in step
     assert "--require-tier medium" in step

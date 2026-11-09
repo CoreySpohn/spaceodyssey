@@ -1,20 +1,25 @@
-"""No document or published docstring names a deleted module or interface (gate B5)."""
+"""No file, document or published docstring names a deleted module or interface."""
 
 import ast
+import json
 import re
 from pathlib import Path
 
 import pytest
 
-from tests.test_slice2_gate import (
+from tests.legacy_scan import (
     DELETED_MODULES,
     DELETED_NAMES,
     DELETED_ROOT_NAMES,
+    MIN_PYTHON_FILES,
     PACKAGE,
     REPO,
     SELF,
     SKIP_DIRS,
+    scan_repo,
+    walk_repo,
 )
+from tests.legacy_scan import SENTINELS as SCAN_SENTINELS
 
 DOC_SUFFIXES = {".md", ".rst", ".txt", ".d2", ".svg", ".ipynb"}
 TOP_LEVEL_DOCS = ("README.md", "SECURITY.md")
@@ -169,3 +174,143 @@ def test_scan_passes_clean_docs_and_requires_coverage(tmp_path):
     (tmp_path / "empty" / "src" / PACKAGE).mkdir(parents=True)
     with pytest.raises(AssertionError):
         scan_docs(tmp_path / "empty")
+
+
+def test_no_legacy_imports():
+    """Fails if any source, test, doc, notebook or config refers to a deleted module.
+
+    Change records under ``docs/changes`` name deleted modules on purpose and
+    their prose is exempt; Python and notebook code there is still scanned.
+    """
+    assert scan_repo(REPO) == {}
+
+
+def _write(root: Path, files: dict[str, str]) -> None:
+    for name, text in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
+SENTINEL_FILES = {
+    "pyproject.toml": "[project]\nname = 'x'\n",
+    "src/spaceodyssey/__init__.py": '__all__ = ["core"]\n',
+    "src/spaceodyssey/core/study.py": "",
+    "docs/architecture.md": "",
+    "tests/conftest.py": "",
+}
+
+VIOLATIONS = {
+    "tests/test_plain.py": "import spaceodyssey.registry\n",
+    "tests/test_from.py": "from spaceodyssey.spec import MissionSpec\n",
+    "tests/test_package.py": "from spaceodyssey import registry\n",
+    "tests/test_root_name.py": "from spaceodyssey import Ledger, Mission, run\n",
+    "tests/test_root_attribute.py": "import spaceodyssey\nspaceodyssey.Mission\n",
+    "tests/test_alias_attribute.py": "import spaceodyssey as so; so.Mission\n",
+    "tests/test_module_attribute.py": (
+        "import spaceodyssey\nspaceodyssey.registry.REGISTRY\n"
+    ),
+    "tests/test_alias_module_attribute.py": (
+        "import spaceodyssey as so\nso.registry.REGISTRY\n"
+    ),
+    "tests/test_alias_function_attribute.py": "import spaceodyssey as so\nso.run\n",
+    "tests/test_string.py": (
+        "import importlib\nimportlib.import_module('spaceodyssey.wiring')\n"
+    ),
+    "src/spaceodyssey/relative.py": "from .registry import REGISTRY\n",
+    "src/spaceodyssey/core/relative_up.py": "from ..loop import step\n",
+    "src/spaceodyssey/relative_pkg.py": "from . import build\n",
+    "docs/guide.md": "```python\nfrom spaceodyssey.engines import analytic\n```\n",
+    "docs/root.md": "```python\nfrom spaceodyssey import build, core\n```\n",
+    "docs/changes/broken.py": "import spaceodyssey.registry\n",
+    "docs/changes/pyproject.toml": (
+        "[project.entry-points.'spaceodyssey.core']\n"
+        "'reg@1' = 'spaceodyssey.registry:Registry'\n"
+    ),
+    "docs/changes/broken.yaml": "target: spaceodyssey.registry:Registry\n",
+    "docs/changes/broken.yml": "target: spaceodyssey.registry:Registry\n",
+    "docs/changes/broken.cfg": "target = spaceodyssey.registry:Registry\n",
+    "docs/changes/broken.ipynb": json.dumps(
+        {
+            "cells": [
+                {"cell_type": "code", "source": ["import spaceodyssey.loop\n"]},
+                {"cell_type": "markdown", "source": ["spaceodyssey.registry"]},
+            ]
+        }
+    ),
+    "pyproject.toml": (
+        "[project.entry-points.'spaceodyssey.core']\n"
+        "'reg@1' = 'spaceodyssey.registry:Registry'\n"
+    ),
+    "missing/pyproject.toml": (
+        "[project.entry-points.'spaceodyssey.core']\n"
+        "'gone@1' = 'spaceodyssey.core.missing:Thing'\n"
+    ),
+    "root-name/pyproject.toml": (
+        "[project.entry-points.'spaceodyssey.core']\n"
+        "'mission@1' = 'spaceodyssey:Mission'\n"
+    ),
+    "root-module/pyproject.toml": (
+        "[project.entry-points.'spaceodyssey.core']\n"
+        "'reg@1' = 'spaceodyssey:registry.REGISTRY'\n"
+    ),
+    "root-script/pyproject.toml": "[project.scripts]\nrun = 'spaceodyssey:run'\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(VIOLATIONS))
+def test_scan_catches_each_form(tmp_path, name):
+    """Fails if the full scan misses one form of reference (negative control)."""
+    _write(tmp_path, {**SENTINEL_FILES, name: VIOLATIONS[name]})
+    found = scan_repo(tmp_path, min_python=1)
+    assert name in found, found
+
+
+def test_scan_ignores_history_prose_and_valid_imports(tmp_path):
+    """Fails if the scan flags change-record prose or imports that still exist."""
+    _write(
+        tmp_path,
+        {
+            **SENTINEL_FILES,
+            "docs/changes/history.md": "`spaceodyssey.registry` was removed.\n",
+            "docs/changes/history.rst": "spaceodyssey.registry was removed.\n",
+            "docs/changes/history.txt": "spaceodyssey.registry was removed.\n",
+            "tests/test_ok.py": (
+                "from spaceodyssey import core\nfrom spaceodyssey.core import study\n"
+                "import spaceodyssey\nspaceodyssey.core\n"
+                "import spaceodyssey as so\nso.core\nso.__version__\n"
+                "import spaceodyssey.core as core\ncore.run\n"
+                "other.Mission\n"
+            ),
+            "src/spaceodyssey/core/sibling.py": "from . import study\n",
+            "valid/pyproject.toml": (
+                "[project.entry-points.'spaceodyssey.core']\n"
+                "'core@1' = 'spaceodyssey:core.study'\n"
+                "'study@1' = 'spaceodyssey.core.study:Study'\n"
+                "'external@1' = 'other:Mission'\n"
+            ),
+        },
+    )
+    assert scan_repo(tmp_path, min_python=1) == {}
+
+
+def test_scan_requires_coverage(tmp_path):
+    """Fails if an absent root or a thin scan can pass."""
+    with pytest.raises(AssertionError, match="did not reach"):
+        scan_repo(_empty_root(tmp_path), min_python=1)
+    _write(tmp_path / "thin", SENTINEL_FILES)
+    with pytest.raises(AssertionError, match="Python files"):
+        scan_repo(tmp_path / "thin", min_python=50)
+
+
+def _empty_root(tmp_path):
+    root = tmp_path / "empty"
+    (root / "src" / PACKAGE).mkdir(parents=True)
+    return root
+
+
+def test_repo_scan_reaches_this_repository():
+    """Fails if the real scan stops reading the repository's own files."""
+    scanned = {rel.as_posix() for _, rel in walk_repo(REPO)}
+    assert set(SCAN_SENTINELS) <= scanned
+    assert sum(r.endswith(".py") for r in scanned) >= MIN_PYTHON_FILES
