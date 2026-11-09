@@ -63,17 +63,18 @@ def timeline(*ticks):
     return jnp.asarray([row, [PAD] * CAPS.max_config_switches], I64)
 
 
-def config_study(script, plans=(), switches=timeline(SWITCH)):
+def config_study(script, plans=(), switches=None):
     """The toy study on `CAPS` with the scripted policy and the given timeline."""
+    switches = timeline(SWITCH) if switches is None else switches
     policy = ScriptedCommitments(script=script, plan=plans)
     study = toy.survey_1(caps=CAPS, policies=(policy,), config_switch_ticks=switches)
     return dataclasses.replace(study, channel_model=ToyConfigPhotometry())
 
 
 # Lane 1 starts an observation at once that a Cancel after the switch ends; lane 0 holds
-# a commitment admitted at 0 that starts at 150; a decision at 120 cancels, then observes
-# on asset 1; one at 130 observes on lane 1 again (admitted after the switch) and one at
-# 175, when the asset 1 observation ends, cancels that one.
+# a commitment admitted at 0 that starts at 150; a decision at 120 cancels, then
+# observes on asset 1; one at 130 observes on lane 1 again (admitted after the switch)
+# and one at 175, when the asset 1 observation ends, cancels that one.
 MIXED = (
     observe(0, 0, 11, 0),
     observe(0, 0, 10, 0),
