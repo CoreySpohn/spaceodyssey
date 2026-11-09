@@ -16,9 +16,9 @@ checks that each of those ran and passed in this process.
   a pinned value.
 - K2, conservation: the independent reconciliation holds on every scenario, refunds
   across expiry and re-award included, and the forged and mutant books fail it.
-- K3, step cost: measured on the CI runner by `pilot.yml`; the gate checks the
-  measurement is wired, that the ratio check fails the calibrated mutant, and prints a
-  manual-read line. It is pending CI measurement.
+- K3, step cost: measured on GitHub runners by `pilot.yml` (two runs, recorded in
+  `K3_RUNS` and the S10 record); the gate checks the recorded ratio against 1.10, that
+  the recorded mutant ratio exceeds it, and that the probe's extra pass still runs.
 - K4, a survey needs no core patch: every `core/` commit after S0 is listed under a
   task, the task record names each exact path the commit touched and cites a core test,
   and no survey commit touches the core.
@@ -78,6 +78,7 @@ RUNDOC = "tests/codec/test_run_document_runs.py::"
 CONS = "tests/core/test_conservation.py::"
 AWARDS = "tests/core/test_awards.py::"
 REFUND = "tests/core/test_refund.py::"
+CHARGING = "tests/core/test_charging.py::"
 LINTS = "tests/core/test_lints.py::"
 S8 = "tests/studies/test_survey_8.py::"
 S10 = "tests/studies/test_survey_10.py::"
@@ -145,17 +146,54 @@ _K8 = {
     ALLOC + "test_dropping_a_recorded_award_fails_the_check": 1,
 }
 _ACCEPT = {
-    "A1": {"tests/core/test_charging.py": 9},
+    "A1": {
+        CHARGING + "test_a_halfway_cancel_retains_what_the_pricing_mode_spends": 4,
+        CHARGING + "test_without_refunds_the_cost_is_debited_and_no_column_exists": 1,
+        CHARGING + "test_charge_parts_reads_the_cost_when_refunds_are_off": 1,
+        CHARGING
+        + "test_charge_parts_adds_the_surcharge_only_to_a_surcharge_channel": 1,
+        CHARGING + "test_the_default_charge_is_the_cost": 1,
+        CHARGING + "test_mutant_a_cancel_that_credits_the_surcharge_is_caught": 1,
+    },
     "A2": {
-        REFUND + "test_a_receipt_credits_the_remainder_without_the_surcharge": 1,
-        REFUND
-        + "test_the_remainder_of_a_completed_acquisition_excludes_its_surcharge": 1,
+        # the refund file whole: deadline, cause, identity and release rules, and the
+        # mutants for the deadline and the release
+        "tests/core/test_refund.py": 24,
+        # the window-refund matrix
+        AWARDS + "test_a_late_refund_is_disposed_by_the_window_that_charged_it": 8,
+        AWARDS + "test_a_refund_of_five_to_a_row_left_always_keeps_its_balance": 1,
+        AWARDS + "test_a_refund_after_the_expiry_is_replayed_and_conserves": 1,
+        AWARDS + "test_a_refund_before_the_expiry_is_replayed_and_conserves": 1,
+        AWARDS + "test_a_refund_to_the_wrong_row_after_expiry_is_caught": 1,
+        AWARDS + "test_a_refund_credited_to_another_programs_row_is_caught": 1,
+        AWARDS
+        + "test_a_refund_routed_to_another_acquisition_in_both_places_is_caught": 1,
+        AWARDS + "test_receipts_that_apply_nothing_do_not_fail_conservation": 4,
         AWARDS + "test_a_refund_across_an_expiry_and_a_re_award_conserves": 1,
     },
     "A3": {
         AWARDS + "test_every_award_scenario_conserves_the_balance": 11,
         AWARDS + "test_each_remainder_rule_settles_the_unspent_balance": 4,
         S10 + "test_releasing_a_proposal_moves_the_award_the_expected_way": 2,
+        # window admission
+        AWARDS + "test_an_allocate_grants_the_amount_and_opens_the_window": 1,
+        AWARDS + "test_an_observation_outside_the_window_is_refused": 1,
+        AWARDS + "test_an_observation_at_the_tick_the_window_ends_is_refused": 1,
+        AWARDS + "test_the_window_refuses_without_balances_in_the_snapshot": 1,
+        AWARDS
+        + "test_an_award_onto_an_open_window_is_forbidden_and_changes_nothing": 1,
+        AWARDS
+        + "test_a_new_award_at_the_expiry_tick_is_admitted_after_the_old_window_ends": 1,  # noqa: E501
+        # boundary ordering
+        AWARDS + "test_a_window_end_event_exists_only_once_an_award_is_issued": 1,
+        AWARDS + "test_the_window_end_is_an_analyze_stage_neutral_tie_event": 1,
+        AWARDS
+        + "test_a_completion_at_the_expiry_tick_is_handled_before_the_window_end": 1,
+        AWARDS + "test_the_expiry_tie_ranks_after_a_same_tick_refresh": 1,
+        # stale expiry
+        AWARDS + "test_a_stale_expiry_after_a_re_award_changes_nothing": 1,
+        AWARDS
+        + "test_a_pending_acquisition_at_the_expiry_is_replayed_without_its_record": 1,
     },
     "A4": {"tests/core/test_frozen_horizon.py": 59},
     "A5": {"tests/core/test_programs.py": 22},
@@ -164,10 +202,14 @@ _ACCEPT = {
     "A8": {
         "tests/core/test_preflight.py": 160,
         "tests/codec/test_preflight_json.py": 160,
+        # optional-field round trips with populated refund, award and commitment columns
+        "tests/codec/test_optional_fields.py": 65,
+        "tests/codec/test_run_document_features.py": 6,
     },
     "A9": {
         S8 + "test_a_policy_stops_the_dry_asset_and_the_other_asset_is_unaffected": 1,
         "tests/studies/test_survey_9.py": 6,
+        S8 + "test_both_executors_make_the_same_history_for_the_dry_asset_study": 1,
         S10 + "test_both_executors_make_the_same_awards": 1,
         "tests/studies/test_survey_11.py": 9,
     },
@@ -194,7 +236,8 @@ OWN = {
     },
     "K3": {
         "test_k3_the_step_cost_measurement_is_wired_for_the_final_table": 1,
-        "test_k3_the_ratio_check_fails_the_calibrated_mutant": 1,
+        "test_k3_the_recorded_ci_measurement_is_within_the_limit_and_the_mutant_is_not": 1,  # noqa: E501
+        "test_k3_the_ratio_check_separates_the_limit": 1,
         "test_k3_k7_manual_reads": 1,
     },
     "K4": {
@@ -205,6 +248,7 @@ OWN = {
     },
     "K7": {
         "test_k7_the_quick_tier_step_enforces_the_ceiling_with_medium_tests_counted": 1,
+        "test_the_child_runs_with_a_clean_environment_and_the_budget_plugin": 1,
     },
     "A5": {"test_a5_the_twelve_stop_goldens_are_pinned": 1},
 }
@@ -222,7 +266,7 @@ MUTANT_CHECKS = {
     + "test_mutant_a_refund_of_the_whole_charge_fails_conservation",
     "K2 credit an old award's refund to a newer award": AWARDS
     + "test_mutant_crediting_an_old_awards_refund_to_the_newer_award_fails",
-    "K3 an extra handler pass per step": "test_k3_the_ratio_check_fails_the_calibrated_mutant",  # noqa: E501
+    "K3 an extra handler pass per step": "test_k3_the_recorded_ci_measurement_is_within_the_limit_and_the_mutant_is_not",  # noqa: E501
     "K4 a core edit in a survey commit": "test_k4_control_a_survey_commit_that_touches_the_core_is_flagged",  # noqa: E501
     "K6 a truth-reading committee": S10
     + "test_a_committee_reading_the_carry_fails_the_perturbation",
@@ -232,10 +276,51 @@ MUTANT_CHECKS = {
     + "test_replay_reproduces_the_run_and_fails_without_a_recorded_award",
 }
 
+# The twelve mutants the spec names, one label each. The meta test requires exactly
+# these labels in `MUTANT_CHECKS`, each tied to a check that ran and passed.
+SPEC_MUTANTS = (
+    "K1 an asset-key change for asset 1",
+    "K1 an always-on empty leaf",
+    "K1 a changed N_TIES",
+    "K1 lane closure on FAULT by default",
+    "K2 omit the expiry debit and its counter together",
+    "K2 refund a nonrefundable surcharge",
+    "K2 credit an old award's refund to a newer award",
+    "K3 an extra handler pass per step",
+    "K4 a core edit in a survey commit",
+    "K6 a truth-reading committee",
+    "K6 a visible internal refund_of",
+    "K8 drop one award from the log",
+)
+
 # The last warm quick-tier run of the slice's head commit on the CI runner, read by hand
 # from the job summary (CI time cannot be measured from inside pytest).
 K7_RUN = {"commit": "ad113d3", "run_id": 42576344367, "wall_s": 391.2, "tests": 2681}
 K7_CEILING_S = 540
+# K3, measured by `pilot.yml` on GitHub runners (report-only), two jobs dispatched
+# together: the plain per-step minimum of the S0 end commit (eleven handlers) and of the
+# slice's head commit (thirteen handlers), each with the calibrated extra-pass mutant
+# measured inside its own job. The two plain figures come from separate jobs, so their
+# ratio carries runner noise; the mutant ratio inside a job is the sensitivity evidence.
+K3_RUNS = {
+    "base": {
+        "run_id": 42584020950,
+        "commit": "97753d5",
+        "handlers": 11,
+        "per_step_min_us": 244.11,
+        "mutant_per_step_min_us": 355.99,
+        "mutant_ratio": 1.439,
+    },
+    "final": {
+        "run_id": 42584023997,
+        "commit": "b851654",
+        "handlers": 13,
+        "per_step_min_us": 181.28,
+        "mutant_per_step_min_us": 277.31,
+        "mutant_ratio": 1.531,
+    },
+}
+K3_LIMIT = 1.10  # the final table may cost at most 10 percent more per step
 STEP_COST = REPO / "tools/step_cost.py"
 PILOT = REPO / ".github/workflows/pilot.yml"
 S0_RECORD = CHANGES / "slice-3a-s0.md"
@@ -256,12 +341,18 @@ def _function(nodeid):
 def passed_counts(root, ids):
     """Number of passed cases for each id, from a junit file, and the other outcomes.
 
-    A skip, an xfail (reported as a skip), a failure or an error is an outcome other
-    than passed.
+    Each case is counted once by its full node id (class name and test name with its
+    parameters): a duplicated entry in the file adds nothing. A skip, an xfail (reported
+    as a skip), a failure or an error is an outcome other than passed.
     """
     passed, other = collections.Counter(), collections.Counter()
+    seen = set()
     for case in ET.parse(root).getroot().iter("testcase"):
-        module, name = case.get("classname"), case.get("name").split("[")[0]
+        key = (case.get("classname"), case.get("name"))
+        if key in seen:
+            continue
+        seen.add(key)
+        module, name = key[0], key[1].split("[")[0]
         bad = any(case.find(t) is not None for t in ("skipped", "failure", "error"))
         for nodeid in ids:
             fn = _function(nodeid)
@@ -275,7 +366,9 @@ def inventory_problems(inventory, passed, other):
     problems = []
     for rule, entries in inventory.items():
         for nodeid, n in entries.items():
-            if other[nodeid] or passed[nodeid] != n:
+            if n < 1:
+                problems.append(f"{rule}: {nodeid} lists {n} cases; a check must run")
+            elif other[nodeid] or passed[nodeid] != n:
                 problems.append(
                     f"{rule}: {nodeid} passed {passed[nodeid]} of {n} cases"
                     f" ({other[nodeid]} skipped, failed or errored)"
@@ -283,33 +376,95 @@ def inventory_problems(inventory, passed, other):
     return problems
 
 
-@pytest.fixture(scope="module")
-def child(tmp_path_factory):
-    """One child pytest run of every inventory id: its junit counts and exit code."""
-    ids = sorted({i for entries in INVENTORY.values() for i in entries})
-    xml = tmp_path_factory.mktemp("inventory") / "junit.xml"
-    cmd = [
+_DEF_LINES = {}
+
+
+def _line(module, function):
+    """Line of a module-level test function in its file (large if it is not there)."""
+    if module not in _DEF_LINES:
+        tree = ast.parse((REPO / module).read_text())
+        _DEF_LINES[module] = {
+            n.name: n.lineno for n in tree.body if isinstance(n, ast.FunctionDef)
+        }
+    return _DEF_LINES[module].get(function, 10**9)
+
+
+def ordered(ids):
+    """The ids as the child should run them: files together, in the order of the file.
+
+    The program budgets and the compile caches are judged per file in file order, so
+    functions of one file run contiguously in the order they are written. An id that
+    names a whole file covers the functions listed for that file.
+    """
+    modules = {}
+    for nodeid in set(ids):
+        modules.setdefault(nodeid.split("::")[0], set()).add(nodeid)
+    out = []
+    for module in sorted(modules):
+        group = modules[module]
+        if module in group:
+            out.append(module)
+        else:
+            out += sorted(group, key=lambda i: _line(module, i.split("::")[1]))
+    return out
+
+
+def child_env(environ=None):
+    """The environment of the child run: the parent's, without any pytest control.
+
+    `PYTEST_ADDOPTS` (marker or keyword filters, disabled plugins, xdist settings),
+    `PYTEST_PLUGINS`, `PYTEST_DISABLE_PLUGIN_AUTOLOAD` and the xdist worker variables
+    would change what the child runs without changing its command. Everything else
+    stays, so `SPACEODYSSEY_JAX_CACHE` and the JAX settings apply to the child.
+    """
+    environ = os.environ if environ is None else environ
+    return {k: v for k, v in environ.items() if not k.startswith("PYTEST_")}
+
+
+def child_command(ids, xml, budget):
+    """The child's command line: every option that matters is stated here."""
+    return [
         sys.executable,
         "-m",
         "pytest",
         *ids,
         "-m",
         "",
+        "-n",
+        "0",
         "-q",
         "-p",
         "no:cacheprovider",
+        "--budget-json",
+        str(budget),
+        "--junitxml",
+        str(xml),
     ]
+
+
+@pytest.fixture(scope="module")
+def child(tmp_path_factory):
+    """One child pytest run of every inventory id: its junit counts and exit code."""
+    ids = sorted({i for entries in INVENTORY.values() for i in entries})
+    folder = tmp_path_factory.mktemp("inventory")
+    xml, budget = folder / "junit.xml", folder / "budget.json"
     run = subprocess.run(
-        [*cmd, "--junitxml", str(xml)],
+        child_command(ordered(ids), xml, budget),
         cwd=REPO,
-        env=dict(os.environ),
+        env=child_env(),
         capture_output=True,
         text=True,
         check=False,
     )
     assert xml.exists(), run.stdout[-3000:] + run.stderr[-1000:]
     passed, other = passed_counts(xml, ids)
-    return {"passed": passed, "other": other, "code": run.returncode, "out": run.stdout}
+    return {
+        "passed": passed,
+        "other": other,
+        "code": run.returncode,
+        "out": run.stdout,
+        "budget": budget,
+    }
 
 
 class _Outcomes:
@@ -343,6 +498,32 @@ def test_inventory_every_listed_check_was_collected_and_passed(child):
     problems = inventory_problems(INVENTORY, child["passed"], child["other"])
     assert problems == [], "\n".join(problems)
     assert child["code"] == 0, child["out"][-3000:]
+
+
+def test_the_child_runs_with_a_clean_environment_and_the_budget_plugin(child):
+    """Fails if a pytest control variable can reach the child, if its command does not
+    state the marker, worker and budget options, or if the budget plugin was not loaded
+    and enforcing in the child run: its `--budget-json` file must exist, be in enforce
+    mode with no violation and hold a record for every module of the inventory.
+    """
+    leaky = {
+        "PYTEST_ADDOPTS": "-m 'not slow' -p no:hwoutils.testbudget.plugin",
+        "PYTEST_PLUGINS": "x",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTEST_XDIST_WORKER": "gw1",
+        "PYTEST_XDIST_WORKER_COUNT": "2",
+        "SPACEODYSSEY_JAX_CACHE": "off",
+    }
+    assert child_env(leaky) == {"SPACEODYSSEY_JAX_CACHE": "off"}
+    cmd = child_command(["a"], "j.xml", "b.json")[3:]
+    assert cmd[cmd.index("-m") + 1] == "" and cmd[cmd.index("-n") + 1] == "0"
+    assert "--budget-json" in cmd and "--junitxml" in cmd
+    budget = json.loads(child["budget"].read_text())
+    assert budget["mode"] == "enforce" and budget["module_mode"] == "enforce"
+    assert budget["violations"] == []
+    ran = {r["nodeid"].split("::")[0] for r in budget["records"]}
+    wanted = {i.split("::")[0] for entries in INVENTORY.values() for i in entries}
+    assert wanted <= ran, sorted(wanted - ran)
 
 
 def _pin():
@@ -490,36 +671,79 @@ def _step_cost_function(name):
     return scope[name]
 
 
+def _extra_pass_calls():
+    """Names called by `ExtraPassExecutor.transition` in the probe, from its source."""
+    tree = ast.parse(STEP_COST.read_text())
+    cls = next(
+        n
+        for n in tree.body
+        if isinstance(n, ast.ClassDef) and n.name == "ExtraPassExecutor"
+    )
+    method = next(
+        n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "transition"
+    )
+    return [
+        n.func.id
+        for n in ast.walk(method)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    ]
+
+
 def test_k3_the_step_cost_measurement_is_wired_for_the_final_table():
     """Fails if the table is not the thirteen-handler table K3 is judged at, if the
-    probe, its calibrated mutant, its baseline check or the workflow that runs them on
-    the CI runner is gone, or if the S0 record lost the mutant's measured excess.
+    probe, its calibrated mutant (which must still run the extra select-and-handle
+    pass), its baseline check or the workflow that runs them on the CI runner is gone.
     """
-    assert len(HANDLERS) == 13
+    assert len(HANDLERS) == 13 == K3_RUNS["final"]["handlers"]
     kinds = {k.name for k in core.EventKind}
     assert {"WINDOW_END", "COMMIT_START"} <= kinds
     probe = STEP_COST.read_text()
     assert "class ExtraPassExecutor" in probe and "block_until_ready" in probe
+    calls = _extra_pass_calls()
+    assert calls.count("transition") == 1
+    assert "select_next" in calls and "step" in calls and "where_tree" in calls
     assert "--baseline-per-step-us" in probe and "SystemExit(1)" in probe
     workflow = PILOT.read_text()
     assert "tools/step_cost.py --mutant" in workflow
     assert (
         "--baseline-per-step-us" in workflow and "baseline_per_step_min_us" in workflow
     )
-    record = S0_RECORD.read_text()
-    assert "1.48" in record and "1.51" in record  # the mutant beats the 1.10 limit
 
 
-def test_k3_the_ratio_check_fails_the_calibrated_mutant():
-    """Fails if the baseline check passes the extra-handler-pass mutant, which costs
-    1.48 to 1.51 times the plain step (S0 record), or fails a step within the limit.
+def test_k3_the_recorded_ci_measurement_is_within_the_limit_and_the_mutant_is_not():
+    """Fails if a recorded figure is missing from the S10 record, if the 13-handler
+    plain step costs more than 1.10 times the 11-handler one, if a recorded mutant
+    ratio is far from its two figures, or if the recorded mutant ratio does not exceed
+    the limit (the calibrated mutant must be caught by the probe).
     """
     verdict = _step_cost_function("verdict")
+    base, final = K3_RUNS["base"], K3_RUNS["final"]
+    record = S10_RECORD.read_text()
+    for run in (base, final):
+        for key in ("run_id", "commit", "per_step_min_us", "mutant_per_step_min_us"):
+            assert str(run[key]) in record, key
+        assert str(run["mutant_ratio"]) in record
+        mutant = verdict(run["mutant_per_step_min_us"], run["per_step_min_us"])
+        # the printed ratio uses the plain step the mutant invocation measured itself
+        assert abs(mutant["ratio"] - run["mutant_ratio"]) < 0.05
+        assert not mutant["within_limit"] and run["mutant_ratio"] > K3_LIMIT
+    cost = verdict(final["per_step_min_us"], base["per_step_min_us"])
+    assert cost["within_limit"] and cost["ratio"] <= K3_LIMIT, cost
+    assert str(cost["ratio"]) in record
+
+
+def test_k3_the_ratio_check_separates_the_limit():
+    """Fails if the baseline check passes a step over the limit or fails one within it,
+    or if the limit is not 1.10.
+    """
+    verdict = _step_cost_function("verdict")
+    assert K3_LIMIT == 1.10
     assert verdict(100.0, 100.0)["within_limit"]
     assert verdict(110.0, 100.0)["within_limit"]
-    for ratio in (1.48, 1.51):
-        assert not verdict(100.0 * ratio, 100.0)["within_limit"]
     assert not verdict(111.0, 100.0)["within_limit"]
+    for run in K3_RUNS.values():
+        mutant = verdict(run["mutant_per_step_min_us"], run["per_step_min_us"])
+        assert not mutant["within_limit"]
 
 
 def test_k7_the_quick_tier_step_enforces_the_ceiling_with_medium_tests_counted():
@@ -535,15 +759,19 @@ def test_k7_the_quick_tier_step_enforces_the_ceiling_with_medium_tests_counted()
 
 
 def test_k3_k7_manual_reads(capsys):
-    """Prints the two numbers the gate cannot measure, and fails if the S10 record
-    does not carry the K7 figure it prints or marks K3 as pending.
+    """Prints the K3 and K7 figures the gate reads from the CI runner, and fails if
+    the S10 record does not carry the K7 run or still calls K3 pending.
     """
-    run = K7_RUN
+    run, base, final = K7_RUN, K3_RUNS["base"], K3_RUNS["final"]
+    ratio = round(final["per_step_min_us"] / base["per_step_min_us"], 3)
     with capsys.disabled():
         print(
-            "\nK3 manual read: dispatch .github/workflows/pilot.yml with "
-            "baseline_per_step_min_us set to the eleven-handler per-step minimum "
-            "measured in the same job; the plain run must stay within 1.10 times it."
+            f"\nK3 CI read: pilot runs {base['run_id']} ({base['commit']}, "
+            f"{base['handlers']} handlers, {base['per_step_min_us']} us per step) and "
+            f"{final['run_id']} ({final['commit']}, {final['handlers']} handlers, "
+            f"{final['per_step_min_us']} us): ratio {ratio} against {K3_LIMIT}; "
+            f"extra-pass mutant {base['mutant_ratio']} and {final['mutant_ratio']} "
+            "inside their own jobs."
         )
         print(
             f"K7 manual read: warm CI run {run['run_id']} of {run['commit']}, quick "
@@ -552,7 +780,7 @@ def test_k3_k7_manual_reads(capsys):
         )
     record = S10_RECORD.read_text()
     assert str(run["run_id"]) in record and str(run["wall_s"]) in record
-    assert "pending CI measurement" in record
+    assert "pending CI measurement" not in record
 
 
 # ---- K4 ----------------------------------------------------------------------------
@@ -682,7 +910,8 @@ def _record_text(names):
 
 def _mentions(text, path):
     """Whether a record names a core path exactly, as the full repository path."""
-    return bool(re.search(r"(?<![\w/.])" + re.escape(path) + r"(?![\w])", text))
+    pattern = r"(?<![\w/.-])" + re.escape(path) + r"(?!\w|[./-]\w)"
+    return bool(re.search(pattern, text))
 
 
 def _core_test_cited(text):
@@ -805,6 +1034,10 @@ def test_k4_control_an_unlisted_commit_and_an_unnamed_path_are_caught():
     exact = lambda task: "tests/core/test_lints.py " + " ".join(_core_paths(dropped))  # noqa: E731
     assert unnamed_paths(owners, [dropped], exact) == []
     assert any("not named" in p for p in unattributed(owners, [dropped], loose))
+    full = _core_paths(dropped)[0]
+    assert _mentions(f"`{full}`, then", full) and _mentions(f"see {full}.", full)
+    for other in (full + ".bak", full + "c", "x/" + full, "pre-" + full, full + "-old"):
+        assert not _mentions(other, full), other
     nothing = lambda task: "no paths here"  # noqa: E731
     assert any("cites no" in p for p in unattributed(owners, [dropped], nothing))
 
@@ -837,6 +1070,7 @@ def test_zz_every_rule_item_and_mutant_has_a_check_that_ran_and_passed(child, ou
         assert INVENTORY.get(rule) or OWN.get(rule), f"{rule} has no check"
     own = {name: n for entries in OWN.values() for name, n in entries.items()}
     for name, n in own.items():
+        assert n >= 1 and callable(globals().get(name)), name
         assert outcomes.passed[name] == n and not outcomes.other[name], name
     inventory = {i for entries in INVENTORY.values() for i in entries}
     for label, check in MUTANT_CHECKS.items():
@@ -845,11 +1079,5 @@ def test_zz_every_rule_item_and_mutant_has_a_check_that_ran_and_passed(child, ou
         else:
             assert check in inventory, label
             assert child["passed"][check] > 0 and not child["other"][check], label
-    assert {label.split()[0] for label in MUTANT_CHECKS} == {
-        "K1",
-        "K2",
-        "K3",
-        "K4",
-        "K6",
-        "K8",
-    }
+    assert len(set(SPEC_MUTANTS)) == len(SPEC_MUTANTS) == 12
+    assert set(MUTANT_CHECKS) == set(SPEC_MUTANTS)
