@@ -219,3 +219,76 @@ def test_existing_checkpoint_needs_resume_and_the_same_run(tmp_path):
             resume=True,
         )
     assert err.value.code == CheckpointCode.C002
+
+
+def refused(code, run):
+    with pytest.raises(CheckpointError) as err:
+        run()
+    assert err.value.code == code
+
+
+@pytest.mark.medium(reason="host and compiled refresh runs, about 20 s cold")
+def test_resume_refuses_a_changed_truth_study_chunk_or_boundary(tmp_path):
+    """Fails if a checkpoint is resumed against a different truth, study, chunk size
+    or refit boundary (each is part of the run identity), or if a changed run is
+    refused with a code other than C002. Each refusal is checked against a run that
+    resumes cleanly with nothing changed.
+    """
+    study, truth, root = host_args()
+    HostExecutor().run(
+        study, truth, root, 10, refit=rh.masked(), checkpoint=sink(tmp_path / "h")
+    )
+
+    def host(study=study, truth=truth, refit=None):
+        return HostExecutor().run(
+            study,
+            truth,
+            root,
+            5,
+            refit=refit or rh.masked(),
+            checkpoint=sink(tmp_path / "h"),
+            resume=True,
+        )
+
+    other_truth = jax.tree_util.tree_map(lambda x: x + 1, truth)
+    refused(CheckpointCode.C002, lambda: host(truth=other_truth))
+    refused(CheckpointCode.C002, lambda: host(study=rh.refresh_study(110)))
+    refused(CheckpointCode.C002, lambda: host(refit=rh.host_loop()))
+    host()  # unchanged, the same directory resumes
+
+    study, truths, roots = compiled_args(1)
+
+    def compiled(chunk):
+        return CompiledExecutor().run(
+            study,
+            truths,
+            roots,
+            10,
+            refit=rh.masked(),
+            chunk=chunk,
+            checkpoint=sink(tmp_path / "c"),
+            resume=chunk == CHUNK + 1,
+        )
+
+    compiled(CHUNK)
+    refused(CheckpointCode.C002, lambda: compiled(CHUNK + 1))
+
+
+@pytest.mark.medium(reason="host refresh run, about 8 s cold")
+def test_a_checkpointed_run_keeps_a_hold_where_a_plain_run_drops_it(tmp_path):
+    """Fails if a checkpointed run drops the hold the budget ended with (the
+    drop_hold mutant), which would lose the pending refresh on resume and move the
+    history; the plain run must still drop it.
+    """
+    study, truth, root = host_args()
+    plain = HostExecutor().run(study, truth, root, HOLD_BUDGET, refit=rh.masked())
+    kept = HostExecutor().run(
+        study,
+        truth,
+        root,
+        HOLD_BUDGET,
+        refit=rh.masked(),
+        checkpoint=sink(tmp_path),
+    )
+    assert not bool(plain.carry.refresh.valid)
+    assert bool(kept.carry.refresh.valid)
