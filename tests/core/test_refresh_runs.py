@@ -187,9 +187,10 @@ def test_dedup_computes_once_when_rows_match():
 
 @functools.cache
 def _mutation_pair():
-    # Two programs, refunds, awards, commitments and balances shown, so the program,
-    # refund, award, commitment and refused-request leaves are held too: every
-    # conditional leaf is exercised (a producer naming no program charges program 0).
+    # Two programs, refunds, awards, commitments, bundles and balances shown, so the
+    # program, refund, award, commitment, bundle and refused-request leaves are held:
+    # every conditional leaf is exercised (a producer naming no program charges
+    # program 0).
     caps = Capacities(
         rows_per_subject=8,
         refit_lanes=2,
@@ -198,6 +199,8 @@ def _mutation_pair():
         snapshot_balances=True,
         awards=True,
         n_commitments=2,
+        max_bundles=1,
+        max_bundle_size=2,
     )
     # 20 steps: a refresh has run and an event is still pending (60 drains the queue).
     h, c = run_pair(refresh_study(100, caps=caps), 20, 2, 7)

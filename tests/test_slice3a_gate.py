@@ -218,10 +218,10 @@ _ACCEPT = {
     "A6": {CONS + "test_every_account_agrees_after_pricing_cancels_and_refunds": 5},
     "A7": {"tests/core/test_snapshot_balances.py": 54},
     "A8": {
-        "tests/core/test_preflight.py": 160,
+        "tests/core/test_preflight.py": 175,
         "tests/codec/test_preflight_json.py": 160,
         # optional-field round trips with populated refund, award and commitment columns
-        "tests/codec/test_optional_fields.py": 65,
+        "tests/codec/test_optional_fields.py": 71,
         "tests/codec/test_run_document_features.py": 6,
     },
     "A9": {
