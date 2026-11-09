@@ -116,9 +116,7 @@ def test_mutant_a_cancel_that_credits_the_surcharge_is_caught(monkeypatch):
     """Mutant: the cancel credit ignores the fixed part, so 93 becomes 95.5 or more."""
     old = "kept = (charge - fixed) * part + fixed"
     new = "kept = (charge - fixed) * part"
-    monkeypatch.setattr(
-        handlers, "_cancel_lane", mutate(handlers._cancel_lane, old, new)
-    )
+    monkeypatch.setattr(handlers, "_cancel_one", mutate(handlers._cancel_one, old, new))
     jax.clear_caches()
     try:
         kw = MATRIX["surcharge"][0]

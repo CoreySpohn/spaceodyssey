@@ -189,6 +189,9 @@ class EffectTable(eqx.Module):
     # of its lane that starts then), present only while commitments are on. A start at
     # or before the decision tick is an immediate activity (a live cancel for a Cancel).
     start_tick: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    # The bundle ordinal of an Observe row within its decision, -1 for none: rows of one
+    # group that share an ordinal run as one bundle. Present only while bundles are on.
+    bundle: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
 
 
 def effects_none(caps):
@@ -200,7 +203,15 @@ def effects_none(caps):
         program=z if caps.n_programs > 1 else None,
         **award_columns(caps),
         **start_columns(caps),
+        **bundle_columns(caps),
     )
+
+
+def bundle_columns(caps):
+    """The bundle-ordinal column of an empty effect table: only with bundles on."""
+    if not caps.bundles:
+        return {}
+    return {"bundle": jnp.full(caps.n_effects, -1, I64)}
 
 
 def start_columns(caps):
@@ -287,6 +298,11 @@ def snapshot_view(carry, audience, caps):
         cols["program"] = jnp.where(shown, log.program, 0)[order]
     else:
         cols["program"] = None
+    # a bundle id is derived from the decision index and an ordinal, which every
+    # audience of the row can read
+    cols["bundle"] = (
+        None if log.bundle is None else jnp.where(vis, log.bundle, 0)[order]
+    )
     for name in REFUND_COLUMNS:
         col = getattr(log, name)
         if col is None:
@@ -372,10 +388,10 @@ def conditional_view_leaves(view):
 
     The pedigree the view shows (a width-0 column when the refresh protocol is off) and
     the program column (absent with one program), the refund index and award generation
-    (absent without refunds), then the balance row names, the integer balance and the
-    last refused request (absent unless balances are on; the float is a multiple of the
-    integer's quantum and is not hashed). A feature that adds a leaf to the view lists
-    it here.
+    (absent without refunds), the bundle id (absent without bundles), then the balance
+    row names, the integer balance and the last refused request (absent unless balances
+    are on; the float is a multiple of the integer's quantum and is not hashed). A
+    feature that adds a leaf to the view lists it here.
     """
     program = () if view.log.program is None else (view.log.program,)
     # the refund columns that are integers; the amount is a float and is not hashed
@@ -385,7 +401,8 @@ def conditional_view_leaves(view):
     balance = (
         () if view.balance_q is None else (view.balance_rows, view.balance_q)
     ) + (() if view.query_refused is None else (view.query_refused,))
-    return (view.log.product, *program, *refunds, *balance)
+    bundle = () if view.log.bundle is None else (view.log.bundle,)
+    return (view.log.product, *program, *refunds, *bundle, *balance)
 
 
 def snapshot_fingerprint(view, layout):
@@ -425,6 +442,7 @@ OPTIONAL_EFFECT_FIELDS = (
     "remainder",
     "realloc_to",
     "start_tick",
+    "bundle",
 )
 EFFECT_FIELDS = tuple(
     f.name

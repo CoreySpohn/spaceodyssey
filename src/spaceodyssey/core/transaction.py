@@ -36,6 +36,7 @@ from spaceodyssey.core.ledger import (
 from spaceodyssey.core.lift import lifting_jit
 from spaceodyssey.core.snapshot import (
     award_columns,
+    bundle_columns,
     snapshot_fingerprint,
     snapshot_view,
     start_columns,
@@ -258,6 +259,13 @@ def _with_start_column(effects, caps):
     return dataclasses.replace(effects, **start_columns(caps))
 
 
+def _with_bundle_column(effects, caps):
+    """The effect table with a bundle-ordinal column, -1 (none) where none was given."""
+    if effects.bundle is not None:
+        return effects
+    return dataclasses.replace(effects, **bundle_columns(caps))
+
+
 def _check_rows(effects, caps, source=""):
     """Refuse an effect table whose row count is not `caps.n_effects`.
 
@@ -276,6 +284,7 @@ def _check_rows(effects, caps, source=""):
         ("disruptive", effects.disruptive),
         ("program", effects.program),
         ("start_tick", effects.start_tick),
+        ("bundle", effects.bundle),
     )
     for name, column in columns:
         if column is None:
@@ -385,7 +394,29 @@ def _commit_observe(c, eff, e, ok, study):
     program = _program_of(eff, e, caps)
     rows = _resource_rows(study, lane, program)
     cols = jnp.arange(caps.n_resources)
-    gen = c.ledger.lane_gen[lane] + ok_now.astype(I64)
+    bundle_extra = {}
+    busy = done_t
+    first = ok_now
+    if caps.bundles:
+        # a bundle is one occupancy of the lane: its first row bumps the generation and
+        # the later rows take it, and the lane stays busy until the longest member ends
+        ordinal = eff.bundle[e]
+        bundled = (eff.kind[e] == EffectKind.OBSERVE) & (ordinal >= 0)
+        rows_of = (
+            (eff.kind == EffectKind.OBSERVE)
+            & (eff.bundle == ordinal)
+            & (eff.group == eff.group[e])
+        )
+        first = ok_now & ~(
+            bundled & jnp.any(rows_of & (jnp.arange(caps.n_effects) < e))
+        )
+        busy = jnp.where(
+            bundled, jnp.maximum(c.ledger.lane_busy_until[lane], done_t), done_t
+        )
+        bundle_extra = {
+            "bundle": jnp.where(bundled, c.n_dec * caps.max_bundles + ordinal, -1)
+        }
+    gen = c.ledger.lane_gen[lane] + first.astype(I64)
     subject = eff.subject[e]
     acquisition_index = c.acquisition_counts[subject]
     c1 = _tree_set(
@@ -398,7 +429,7 @@ def _commit_observe(c, eff, e, ok, study):
                 jnp.where(ok, charge_parts(study, channel_index)[0], 0.0)
             ),
             "ledger.lane_busy_until": c.ledger.lane_busy_until.at[lane].set(
-                jnp.where(ok_now, done_t, c.ledger.lane_busy_until[lane])
+                jnp.where(ok_now, busy, c.ledger.lane_busy_until[lane])
             ),
             "ledger.lane_gen": c.ledger.lane_gen.at[lane].set(gen),
             "acquisition_counts": c.acquisition_counts.at[subject].add(ok.astype(I64)),
@@ -491,6 +522,7 @@ def _commit_observe(c, eff, e, ok, study):
         scope=c.phase,
         acquisition_id=c.next_sid,
         program=program,
+        **bundle_extra,
         caps=caps,
     )
 
@@ -609,6 +641,8 @@ def _group_code(c, eff, member, study):
         return lane, program, rows, cost
 
     lanes, programs, rows, cost = jax.vmap(inputs)(idx)
+    if caps.bundles:
+        bundled = (eff.kind == EffectKind.OBSERVE) & (eff.bundle >= 0)
     n_members = member.astype(I64).sum()
     room = ((~c.ev.valid).sum() >= n_members) & (c.next_sid + n_members <= caps.max_sid)
     if caps.commitments:
@@ -635,6 +669,25 @@ def _group_code(c, eff, member, study):
             + channels.occupancy_ticks[ci]
         )
         clash = jnp.any(member & (idx < f) & (lanes == lanes[f]))
+        if caps.bundles:
+            # rows of f's bundle share a lane on purpose; a bundle that mixes groups,
+            # lanes or programs, is too large, names an ordinal out of range or starts
+            # later is unsupported
+            mine = bundled & bundled[f] & (eff.bundle == eff.bundle[f])
+            clash = jnp.any(member & (idx < f) & (lanes == lanes[f]) & ~mine)
+            unsupported = bundled[f] & (
+                jnp.any(
+                    mine
+                    & (
+                        (eff.group != eff.group[f])
+                        | (lanes != lanes[f])
+                        | (programs != programs[f])
+                    )
+                )
+                | (mine.sum() > caps.max_bundle_size)
+                | (eff.bundle[f] >= caps.max_bundles)
+                | (_start_of(eff, f, caps, t) > t)
+            )
 
         def add(g, demand):
             return demand + jnp.where(member[g] & (rows[g] == rows[f]), cost[g], 0.0)
@@ -704,6 +757,9 @@ def _group_code(c, eff, member, study):
             )
             conds.insert(3, outside)
             codes_.insert(3, AdmissionCode.OUTSIDE_VALIDITY)
+        if caps.bundles:
+            conds.insert(0, unsupported)
+            codes_.insert(0, AdmissionCode.UNSUPPORTED)
         code = jnp.select(conds, codes_, AdmissionCode.OK).astype(I64)
         return jnp.where(member[f], code, AdmissionCode.OK)
 
@@ -969,6 +1025,8 @@ def admit(carry, effects, study, snapshot_fp=None):
         supported = supported | (effects.kind == EffectKind.ALLOCATE)
     if study.caps.commitments:
         effects = _with_start_column(effects, study.caps)
+    if study.caps.bundles:
+        effects = _with_bundle_column(effects, study.caps)
     phase = phase_at(carry, study)
     mask = _phase_mask(_tree_set(carry, phase=phase), study)
     mixed = None

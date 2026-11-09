@@ -79,6 +79,15 @@ class Capacities:
     # The unit the policy's integer balance view counts in; read only while
     # `snapshot_balances` is on.
     balance_quantum: float = dataclasses.field(default=1.0, metadata=OPTIONAL)
+    # Bundles: observations that share one lane, one start and one busy window. Bundle
+    # ordinals per decision and members per bundle; both zero (off) at the default.
+    max_bundles: int = dataclasses.field(default=0, metadata=OPTIONAL)
+    max_bundle_size: int = dataclasses.field(default=0, metadata=OPTIONAL)
+
+    @property
+    def bundles(self) -> bool:
+        """Whether bundles are on (a decision may name bundle ordinals)."""
+        return self.max_bundles > 0
 
     @property
     def commitments(self) -> bool:
@@ -119,6 +128,17 @@ class Capacities:
         n_commit = self.n_commitments
         if isinstance(n_commit, bool) or not isinstance(n_commit, int) or n_commit < 0:
             raise ValueError("n_commitments must be a nonnegative integer")
+        for name, value in (
+            ("max_bundles", self.max_bundles),
+            ("max_bundle_size", self.max_bundle_size),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
+        if (self.max_bundles > 0) != (self.max_bundle_size > 0):
+            raise ValueError(
+                "max_bundles and max_bundle_size are both positive (bundles on) or "
+                "both zero"
+            )
         if not isinstance(self.awards, bool):
             raise ValueError("awards must be a bool")
         if not isinstance(self.refunds, bool):
