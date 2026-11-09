@@ -1,13 +1,16 @@
 """Executors host."""
 
+import typing
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+from spaceodyssey.core import checkpoint as ckpt
 from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.carry import empty_trace, init_carry
-from spaceodyssey.core.enums import Audience
+from spaceodyssey.core.enums import Audience, EventKind
 from spaceodyssey.core.executors.base import AbstractExecutor, RunResult, index_world
 from spaceodyssey.core.lift import lift_traced
 from spaceodyssey.core.refresh import answer_refresh
@@ -35,6 +38,14 @@ _fin = eqx.filter_jit(finish_trace)
 _fp = eqx.filter_jit(decision_fingerprint)
 
 
+class _Saved(typing.NamedTuple):
+    """How much of the run the last checkpoint already holds."""
+
+    rows: int
+    views: int
+    effects: int
+
+
 class HostExecutor(AbstractExecutor):
     """Run the shared transaction in a host loop."""
 
@@ -59,6 +70,8 @@ class HostExecutor(AbstractExecutor):
         effects_log=None,
         service=None,
         refit=None,
+        checkpoint=None,
+        resume=False,
     ):
         """Python loop over steps; the decision stage may use a Python-form policy.
 
@@ -69,20 +82,45 @@ class HostExecutor(AbstractExecutor):
         pending and the run reports `RunStatus.AWAITING`. A refresh checkpoint the
         transaction reaches is answered the same way through `refit` (an
         `AbstractRefitBoundary`), in the iteration that held it.
+
+        With a `checkpoint` (a `CheckpointSink`) the run saves after each acquisition
+        (a handled `DONE` that wrote a record), after each refit it installs, and at
+        its end. `resume` continues from what the sink holds: the held refresh
+        checkpoint or request is answered first, the saved trace rows come back in
+        front of the new ones, and `n_steps` is a fresh budget for this call. A budget
+        that ends with a refresh checkpoint held keeps the hold (no `drop_hold`) and
+        the result reports `RunStatus.TRUNCATED_AT_HOLD`. With `resume` false a sink
+        that already holds a checkpoint is refused.
         """
         require_x64()
+        given = study
         study = lift_traced(study)
         adv = lambda c, r, s, t: self.advance(c, r, s, t, wake_fn=wake_fn)  # noqa: E731
         dec, adm, close, fin = self.decide, _adm, _close, _fin
         carry = _init(study, truths)
         caps = study.caps
         layout = study.observer.layout(caps)
-        if n_steps == 0:
+        prefix = None
+        if checkpoint is not None:
+            carry, prefix = self._begin(
+                checkpoint,
+                (given, truths, roots),
+                (study, carry, wake_fn, policy_form, service, refit),
+                (view_log, effects_log, resume),
+            )
+            if service is not None:
+                carry = answer_pending(carry, study, service)
+            if refit is not None:
+                carry = answer_refresh(
+                    carry, roots, study, refit, can_finish=n_steps > 0, keep=True
+                )
+        elif n_steps == 0:
             trace = jax.tree_util.tree_map(
                 lambda x: jnp.empty((0, *x.shape), dtype=x.dtype), empty_trace(caps)
             )
             return RunResult(carry, trace, layout, roots)
         traces = []
+        saved = _Saved(0, len(view_log or ()), len(effects_log or ()))
         for step in range(n_steps):
             carry, trace, wake = adv(carry, roots, study, truths)
             if bool(wake):
@@ -119,19 +157,116 @@ class HostExecutor(AbstractExecutor):
             traces.append(fin(trace, eff, codes, u, wake, carry, study, fp))
             if service is not None:
                 carry = answer_pending(carry, study, service)
+            boundary = None
+            if checkpoint is not None:
+                row = traces[-1]
+                if (
+                    bool(row.handled)
+                    and int(row.kind) == EventKind.DONE
+                    and int(row.n_written) > 0
+                ):
+                    boundary = ckpt.AFTER_ACQUISITION
             if refit is not None:
+                had = bool(carry.refresh.valid)
                 carry = answer_refresh(
-                    carry, roots, study, refit, can_finish=step + 1 < n_steps
+                    carry,
+                    roots,
+                    study,
+                    refit,
+                    can_finish=step + 1 < n_steps,
+                    keep=checkpoint is not None,
                 )
-        return RunResult(
+                if checkpoint is not None and had and not bool(carry.refresh.valid):
+                    boundary = ckpt.AFTER_INFERENCE
+            if boundary is not None and checkpoint.wants(boundary):
+                saved = self._save(
+                    checkpoint, boundary, carry, traces, saved, view_log, effects_log
+                )
+        held = None
+        if checkpoint is not None:
+            held = jnp.asarray(refit is not None and bool(carry.refresh.valid))
+            end = ckpt.AT_HOLD if bool(held) else ckpt.FINAL
+            if len(traces) > saved.rows and checkpoint.wants(end):
+                self._save(checkpoint, end, carry, traces, saved, view_log, effects_log)
+        trace = (
+            jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces)
+            if traces
+            else None
+        )
+        if prefix is not None:
+            trace = jax.tree_util.tree_map(
+                jnp.asarray, ckpt.concat_rows(prefix, trace, 0)
+            )
+        elif trace is None:
+            trace = jax.tree_util.tree_map(
+                lambda x: jnp.empty((0, *x.shape), dtype=x.dtype), empty_trace(caps)
+            )
+        return RunResult(carry, trace, layout, roots, held)
+
+    def _begin(self, checkpoint, ids, parts, logs):
+        """Open the sink: the state to continue from, and the saved trace rows."""
+        given, truths, roots = ids
+        study, carry, wake_fn, policy_form, service, refit = parts
+        view_log, effects_log, resume = logs
+        caps = study.caps
+        templates = {"carry": carry, "trace": empty_trace(caps)}
+        if view_log is not None:
+            templates["view"] = jax.tree_util.tree_map(
+                np.asarray,
+                eqx.filter_jit(snapshot_view)(carry, Audience.POLICY, caps),
+            )
+        if effects_log is not None:
+            templates["effects"] = effects_none(caps)
+        config = {
+            "executor": "host",
+            "row_axis": 0,
+            "policy_form": policy_form,
+            "wake_fn": ckpt.callable_name(wake_fn),
+            "service": None if service is None else ckpt.callable_name(type(service)),
+            "refit": None if refit is None else ckpt.binding_record(refit),
+        }
+        got = checkpoint.begin(
+            given, truths, roots, config=config, templates=templates, resume=resume
+        )
+        if got is None:
+            return carry, None
+        if view_log is not None:
+            view_log.extend(got.view_rows)
+        if effects_log is not None:
+            effects_log.extend(got.effect_rows)
+        return jax.tree_util.tree_map(jnp.asarray, got.carry), got.trace
+
+    def _save(self, checkpoint, boundary, carry, traces, saved, view_log, effects_log):
+        """Publish the carry and the rows produced since the last save."""
+        new = traces[saved.rows :]
+        rows = (
+            jax.tree_util.tree_map(
+                lambda *xs: np.stack([np.asarray(x) for x in xs]), *new
+            )
+            if new
+            else None
+        )
+        views = tuple(view_log[saved.views :]) if view_log is not None else ()
+        effects = tuple(effects_log[saved.effects :]) if effects_log is not None else ()
+        checkpoint.save(
+            boundary,
             carry,
-            jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces),
-            layout,
-            roots,
+            rows,
+            len(traces),
+            view_rows=views,
+            effect_rows=effects,
+        )
+        return _Saved(
+            len(traces), saved.views + len(views), saved.effects + len(effects)
         )
 
     def run_worlds(self, study, truths, roots, n_steps, **kw):
         """Run each world of a batch in turn and stack the results on a world axis."""
+        if kw.get("checkpoint") is not None:
+            raise ValueError(
+                "a host checkpoint holds one world: call run once per world, each "
+                "with its own sink, or use the compiled executor for a batch"
+            )
         runs = [
             self.run(study, index_world(truths, w), roots[w], n_steps, **kw)
             for w in range(roots.shape[0])

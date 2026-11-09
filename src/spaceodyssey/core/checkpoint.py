@@ -207,6 +207,18 @@ def differing_parts(saved, now):
     return sorted(k for k in set(saved) | set(now) if saved.get(k) != now.get(k))
 
 
+def callable_name(obj):
+    """A stable name for a function or class, for the run configuration."""
+    return f"{getattr(obj, '__module__', '')}.{getattr(obj, '__qualname__', repr(obj))}"
+
+
+def binding_record(boundary):
+    """The configuration a refit boundary adds to a run identity: its `binding()`."""
+    out = dict(boundary.binding())
+    out["model_hash"] = int(out["model_hash"])
+    return {"class": callable_name(type(boundary)), **out}
+
+
 def concat_rows(prefix, rows, axis):
     """Join two stacked trace pytrees along the row axis; either may be `None`."""
     if prefix is None:

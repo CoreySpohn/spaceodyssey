@@ -650,6 +650,9 @@ class RunResult(eqx.Module):
     trace: Trace
     layout: BeliefLayout = eqx.field(static=True)
     roots: jax.Array | None = None
+    # per world: the run saves checkpoints and its budget ended with a refresh
+    # checkpoint held (kept, not dropped); absent (no leaf) for every other run
+    held_by_budget: jax.Array | None = None
 
     def __iter__(self):
         """Iterate over the carry and trace."""
@@ -658,7 +661,11 @@ class RunResult(eqx.Module):
     @property
     def status(self):
         """`RunStatus` codes, one per world of a batched run."""
-        return run_status(self.carry)
+        status = run_status(self.carry)
+        if self.held_by_budget is None:
+            return status
+        held = jnp.asarray(self.held_by_budget) & (status == RunStatus.AWAITING)
+        return jnp.where(held, RunStatus.TRUNCATED_AT_HOLD, status).astype(I64)
 
     @property
     def complete(self):

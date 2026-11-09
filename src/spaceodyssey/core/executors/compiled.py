@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
+from spaceodyssey.core import checkpoint as ckpt
 from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.carry import empty_trace, init_carry
 from spaceodyssey.core.enums import I64
@@ -110,6 +111,8 @@ class CompiledExecutor(AbstractExecutor):
         refit=None,
         chunk=32,
         bucket=None,
+        checkpoint=None,
+        resume=False,
     ):
         """Run a batch of worlds for a fixed number of steps.
 
@@ -132,16 +135,38 @@ class CompiledExecutor(AbstractExecutor):
         compiling its own. Steps past `n_steps` are not taken and the trace is cut to
         `n_steps` rows: the carry and trace are the default path's, bit for bit. The
         default (`bucket=None`) is the unchanged scan.
+
+        With a `checkpoint` (a `CheckpointSink`) the chunked driver is used and the run
+        saves at the end of every chunk (after each refit install, `inference`; at the
+        end, `final`, or `hold` when a budget ended with a refresh checkpoint held). The
+        boundaries are chunk ends and holds: there is no per-event boundary inside a
+        compiled scan. `resume` continues from the sink: held checkpoints and requests
+        are answered first, once, and `n_steps` is a fresh budget for this call. A
+        resumed run equals the uninterrupted run at the same `chunk`, not the single
+        scan, and `chunk` is part of the run identity.
         """
         require_x64()
+        given = study
         study = lift_traced(study)
         if bucket is not None and (
             isinstance(bucket, bool) or not isinstance(bucket, int) or bucket <= 0
         ):
             raise ValueError(f"bucket must be a positive int, not {bucket!r}")
-        if service is not None or int(study.refresh.every_ticks) > 0:
+        if (
+            checkpoint is not None
+            or service is not None
+            or (int(study.refresh.every_ticks) > 0)
+        ):
             return self._run_hosted(
-                study, truths, roots, n_steps, wake_fn, service, refit, chunk
+                study,
+                truths,
+                roots,
+                n_steps,
+                wake_fn,
+                service,
+                refit,
+                chunk,
+                (checkpoint, resume, given),
             )
         if bucket is not None and n_steps > 0:
             rows = -(-n_steps // bucket) * bucket
@@ -158,34 +183,152 @@ class CompiledExecutor(AbstractExecutor):
         return self.run(study, truths, roots, n_steps, **kw)
 
     def _run_hosted(
-        self, study, truths, roots, n_steps, wake_fn, service, refit, chunk
+        self, study, truths, roots, n_steps, wake_fn, service, refit, chunk, ck=None
     ):
+        checkpoint, resume, given = ck or (None, False, None)
         carries = _init_worlds(study, truths)
         n_worlds = roots.shape[0]
         left = jnp.full(n_worlds, n_steps, I64)
         traces = []
+        prefix, saved = None, 0
+        if checkpoint is not None:
+            carries, prefix = self._begin(
+                checkpoint,
+                (given, truths, roots),
+                (study, carries),
+                resume,
+                (wake_fn, service, refit, chunk),
+            )
+            if service is not None:
+                carries = self._answer_requests(carries, study, service)
+            if refit is not None:
+                carries = answer_refreshes(
+                    carries, roots, study, refit, left, keep=True
+                )
         while True:
+            if checkpoint is not None and self._all_finished(
+                carries, left, service, refit
+            ):
+                break
             carries, left, trace = _scan_chunk(
                 self, study, carries, truths, roots, left, wake_fn, chunk
             )
             traces.append(trace)
             if service is not None:
-                for w in np.flatnonzero(np.asarray(carries.request.valid)):
-                    answered = answer_pending(index_world(carries, w), study, service)
-                    carries = _put_world(carries, w, answered)
+                carries = self._answer_requests(carries, study, service)
+            had = np.asarray(carries.refresh.valid)
             if refit is not None:
-                carries = answer_refreshes(carries, roots, study, refit, left)
-            # a world frozen on something nobody answers cannot go on
-            stuck = (np.asarray(carries.request.valid) & (service is None)) | (
-                np.asarray(carries.refresh.valid) & (refit is None)
-            )
-            finished = (
-                np.asarray(carries.done | carries.idle | carries.stalled)
-                | np.asarray(carries.overflow)
-                | (np.asarray(left) <= 0)
-                | stuck
-            )
-            if finished.all():
+                carries = answer_refreshes(
+                    carries, roots, study, refit, left, keep=checkpoint is not None
+                )
+            installed = bool((had & ~np.asarray(carries.refresh.valid)).any())
+            finished = self._all_finished(carries, left, service, refit)
+            if checkpoint is not None:
+                boundary = (
+                    (
+                        ckpt.AT_HOLD
+                        if bool(np.asarray(carries.refresh.valid).any())
+                        else ckpt.FINAL
+                    )
+                    if finished
+                    else ckpt.AFTER_INFERENCE
+                    if installed
+                    else ckpt.AT_CHUNK
+                )
+                if checkpoint.wants(boundary):
+                    new = jax.tree_util.tree_map(
+                        lambda *xs: np.concatenate([np.asarray(x) for x in xs], 1),
+                        *traces[saved:],
+                    )
+                    rows = sum(int(t.handled.shape[1]) for t in traces)
+                    checkpoint.save(
+                        boundary,
+                        carries,
+                        new,
+                        rows + (0 if prefix is None else _rows(prefix)),
+                    )
+                    saved = len(traces)
+            if finished:
                 break
-        trace = jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=1), *traces)
-        return RunResult(carries, trace, study.observer.layout(study.caps), roots)
+        if traces:
+            trace = jax.tree_util.tree_map(
+                lambda *xs: jnp.concatenate(xs, axis=1), *traces
+            )
+        else:
+            trace = jax.tree_util.tree_map(
+                lambda x: jnp.empty((n_worlds, 0, *x.shape), x.dtype),
+                empty_trace(study.caps),
+            )
+        if prefix is not None:
+            trace = jax.tree_util.tree_map(
+                jnp.asarray, ckpt.concat_rows(prefix, trace, 1)
+            )
+        held = None
+        if checkpoint is not None:
+            held = (
+                carries.refresh.valid
+                if refit is not None
+                else jnp.zeros(n_worlds, bool)
+            )
+        return RunResult(carries, trace, study.observer.layout(study.caps), roots, held)
+
+    @staticmethod
+    def _answer_requests(carries, study, service):
+        """Answer the pending request of each world that holds one."""
+        for w in np.flatnonzero(np.asarray(carries.request.valid)):
+            answered = answer_pending(index_world(carries, w), study, service)
+            carries = _put_world(carries, w, answered)
+        return carries
+
+    @staticmethod
+    def _all_finished(carries, left, service, refit):
+        """Whether no world can take another step in this call."""
+        # a world frozen on something nobody answers cannot go on
+        stuck = (np.asarray(carries.request.valid) & (service is None)) | (
+            np.asarray(carries.refresh.valid) & (refit is None)
+        )
+        # a kept hold has no budget to pay for its completion step
+        waiting = np.asarray(carries.refresh.valid) & (np.asarray(left) <= 0)
+        done = (
+            np.asarray(carries.done | carries.idle | carries.stalled)
+            | np.asarray(carries.overflow)
+            | (np.asarray(left) <= 0)
+            | stuck
+            | waiting
+        )
+        return bool(done.all())
+
+    def _begin(self, checkpoint, ids, parts, resume, how):
+        """Open the sink: the batched carry to continue from, and the saved rows."""
+        given, truths, roots = ids
+        study, carries = parts
+        wake_fn, service, refit, chunk = how
+        n_worlds = roots.shape[0]
+        row = jax.tree_util.tree_map(
+            lambda x: np.broadcast_to(np.asarray(x), (n_worlds, *np.shape(x))),
+            empty_trace(study.caps),
+        )
+        config = {
+            "executor": "compiled",
+            "row_axis": 1,
+            "chunk": int(chunk),
+            "wake_fn": ckpt.callable_name(wake_fn),
+            "service": None if service is None else ckpt.callable_name(type(service)),
+            "refit": None if refit is None else ckpt.binding_record(refit),
+        }
+        got = checkpoint.begin(
+            given,
+            truths,
+            roots,
+            config=config,
+            templates={"carry": carries, "trace": row},
+            resume=resume,
+        )
+        if got is None:
+            return carries, None
+        return jax.tree_util.tree_map(jnp.asarray, got.carry), got.trace
+
+
+def _rows(trace):
+    """Row count of a stacked batched trace."""
+    return int(jax.tree_util.tree_leaves(trace)[0].shape[1])
