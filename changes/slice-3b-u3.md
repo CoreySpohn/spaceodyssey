@@ -35,6 +35,15 @@ program, its histories, its fingerprints and its document hashes.
 - Pre-flight: `Declaration.bundles` as `(ordinal, lane, group, program, start offset)` per
   member and finding code `B001` for a declared bundle admission would refuse.
 
+## Known limits
+
+- The `B001` check merges declared members by ordinal across a whole policy declaration
+  (`Declaration.bundles` has no decision index), but a run scopes a bundle id to one decision.
+  A policy that reuses ordinal 0 on lane A in one decision and lane B in another is flagged
+  although the run admits both; declare a distinct ordinal per bundle shape to avoid it.
+- A run treats any negative ordinal as not bundled (-1 is the usual value). The check flags a
+  declared negative ordinal as out of range.
+
 ## Tests
 
 `tests/core/test_bundles.py` (15 tests, one shared compiled structure with programs,
@@ -45,7 +54,7 @@ refunds, awards, commitments and bundles on):
 | members start together on one transition, share a bundle id, ids differ across decisions | medium (7 s, shared fixture) |
 | lane frees only at the last member's Done (a decision at 45 is refused, the one at 55 starts) | medium (7 s, shared fixture) |
 | shorter member committed second leaves the busy window at the longer end; one generation on both Done rows (both orders) | unit |
-| one transition charge for the bundle | unit |
+| one transition in ticks for the bundle (Done rows at 45 and 55) | unit |
 | six refusals (lanes, groups, programs, ordinal, size, future start), carry untouched | unit |
 | cancel settles every pending member, with programs, refunds and an award window | medium (7 s, shared fixture) |
 | cancel after the short member completed settles only the long one | medium (7 s, shared fixture) |

@@ -557,6 +557,13 @@ def bundles(study: Study):
     share an ordinal are one bundle. It needs bundles on, an ordinal below
     `max_bundles`, no more members than `max_bundle_size`, one lane, one admission
     group and one program, and an immediate start (offset 0).
+
+    A declaration carries no decision index, so members are merged by ordinal across the
+    whole policy declaration, while the run scopes a bundle to one decision: a policy
+    that reuses an ordinal on different lanes in different decisions is flagged here
+    although the run admits both. Declare one distinct ordinal per bundle shape to
+    avoid it. The run treats any negative ordinal as not bundled; this check flags a
+    declared negative ordinal as out of range.
     """
     out = []
     caps = study.caps
