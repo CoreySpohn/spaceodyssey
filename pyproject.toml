@@ -315,6 +315,7 @@ require_tier_reason = true
 "tests/studies/test_survey_18.py" = 236
 "tests/studies/test_survey_19.py" = 244
 "tests/studies/test_survey_2.py" = 439
+"tests/studies/test_survey_22.py" = 84
 "tests/studies/test_survey_25.py" = 254
 "tests/studies/test_survey_2_calibration.py" = 89
 "tests/studies/test_survey_2_ofti.py" = 226
