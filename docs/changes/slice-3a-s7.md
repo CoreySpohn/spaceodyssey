@@ -35,11 +35,14 @@ codec round-trip it exactly, and is it absent when its feature is off.
 - **Run documents.** The allocator recipe (process, policy, committee binding) and its
   record registry round-trip with kind order, columns, widths and audiences intact, and one
   run recipe per feature (programs, refunds, awards, commitments, balances, key version 2)
-  is dumped, loaded and re-dumped to identical JSON. Executed histories of those recipes are
-  not compared here; the feature tests and the goldens compare histories.
+  is dumped, loaded and re-dumped to identical JSON. The loaded study equals the original on
+  every leaf and static field, and the original and the loaded recipe execute to identical
+  host histories (the key-version recipe draws on asset 1, so its history depends on the key
+  version).
 - **Conditional leaves.** Each feature alone (refunds, awards, commitments, balances) adds
   exactly its own leaves and no other feature's, and with balances off the snapshot holds no
-  balance, quantum or balance-row field, in the policy view or the observer view.
+  balance, quantum, balance-row or query-refusal field, in the policy view or the observer
+  view.
 - **Re-baselines named by the slice spec.** The three tests that asserted `Allocate` answers
   `UNSUPPORTED` keep that assertion for a study without awards, as the control, and now also
   admit a valid `Allocate` with awards on and check the credited row; the agenda-level test
@@ -57,6 +60,19 @@ codec round-trip it exactly, and is it absent when its feature is off.
 
 ## Cost
 
-The touched files run cold with caches off in 51 s at two workers (559 tests, 1537
-programs), with no budget violation. No new test runs a study; the three re-baselines each
-compile one admission step of a small awards study, inside the unit budget.
+The ten touched test files (`tests/codec/test_optional_fields.py`,
+`test_preflight_json.py`, `test_run_document.py`, `test_run_document_runs.py` and
+`tests/core/test_admission_rules.py`, `test_agenda_levels.py`, `test_core.py`,
+`test_preflight.py`, `test_slice3_guard.py`, `test_snapshot_balances.py`) run cold with
+caches off in 128 s at two workers: 721 tests, 2271 programs, peak 4.2 GB, no budget
+violation. The command, from the repository root:
+
+```
+SPACEODYSSEY_JAX_CACHE=off compute-run --threads 4 --mem 14336 -- uv run python -m pytest \
+  <the ten files> -n 2 --dist loadfile -p no:cacheprovider --budget-json s7.json
+```
+
+The run-document file gained the executed-history comparison: six features, each a small
+plan study run twice on the host (3 to 5 s cold each), so its program budget rose from 575 to
+702 (601 programs measured, `ceil(601 * 1.15) + 10`). The three re-baselines each compile one
+admission step of a small awards study, inside the unit budget.
