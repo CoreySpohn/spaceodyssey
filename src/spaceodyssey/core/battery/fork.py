@@ -24,6 +24,7 @@ from spaceodyssey.core.keys import (
     draw_key,
     policy_key,
 )
+from spaceodyssey.core.kinds import realize_row
 from spaceodyssey.core.records import Record, log_columns, record_none
 
 # Purposes addressed by record identity; a policy draw is keyed by decision instead.
@@ -101,16 +102,9 @@ def _keyed_draw(study, truth, root, log, i, branch):
         branch=branch,
         coupling=study.coupling,
     )
-    value, variate = study.channel_model.realize(
-        truth,
-        rec.subject,
-        rec.channel_index,
-        jnp.asarray(1.0, F64),
-        key,
-        study.design,
-        study.channels,
-    )
-    return np.asarray([value, variate])
+    row = realize_row(study, truth, rec, jnp.asarray(1.0, F64), key)
+    width = 2 if study.channel_model.version == 1 else study.caps.payload_width
+    return np.asarray(row)[:width]
 
 
 def fork_check(
@@ -203,7 +197,7 @@ def _records(w, study, truth, root, trunk, side, at, branch, counts):
             continue
         index = key[1]
         want = _keyed_draw(study, truth, root, trunk.log, i, 0)
-        if not bits_equal(pay_t[i][:2], want):
+        if not bits_equal(pay_t[i][: len(want)], want):
             out.append(f"world {w}: trunk record {key} is not the draw of its keys")
         j = on_side.get(key)
         if j is None:
@@ -228,6 +222,6 @@ def _records(w, study, truth, root, trunk, side, at, branch, counts):
                 f"declares {'shared' if shares else 'separate'}"
             )
         want = _keyed_draw(study, truth, root, side.log, j, branch)
-        if not bits_equal(pay_s[j][:2], want):
+        if not bits_equal(pay_s[j][: len(want)], want):
             out.append(f"world {w}: forked record {key} is not its keyed draw")
     return out

@@ -281,6 +281,7 @@ require_tier_reason = true
 "tests/core/test_program_size.py" = 102
 "tests/core/test_programs.py" = 388
 "tests/core/test_query_ordering.py" = 354
+"tests/core/test_realize_context.py" = 152
 "tests/core/test_record_kinds.py" = 58
 "tests/core/test_record_statuses.py" = 194
 "tests/core/test_refresh.py" = 190

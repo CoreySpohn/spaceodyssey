@@ -7,16 +7,41 @@ declared spectral matrix, used wherever a test needs a concrete model.
 
 from typing import ClassVar
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 from photomancy.priors import Uniform
 
+from spaceodyssey.core.kinds import AbstractChannelModel
 from spaceodyssey.errors import UnsupportedOperator
 from spaceodyssey.plan import CertificationOutcome, _check_values
 from spaceodyssey.profile import Profile
 from spaceodyssey.truth import AbstractTruthModel, ObservedData, PriorSet, _plan_masks
+
+
+class ToyEpochPhotometry(AbstractChannelModel):
+    """A version-2 toy channel model: its row records when the exposure started.
+
+    The row is `[start_tick, 3 * start_tick + 1, z]` with `z` a standard normal draw
+    from the key, so the first two columns are a known function of the context and
+    the third keeps the draw sensitive to the key.
+    """
+
+    version: int = eqx.field(default=2, kw_only=True)
+
+    @classmethod
+    def migrate(cls, from_version, params):
+        """A version-1 document carries no field this model needs to change."""
+        return params
+
+    def realize(
+        self, truth, subject, channel_index, fraction, key, design, channels, *, context
+    ):
+        """Return the full payload row."""
+        start = context.start_tick.astype(jnp.float64)
+        return jnp.stack([start, 3.0 * start + 1.0, jr.normal(key, dtype=jnp.float64)])
 
 
 def check_predictive(pred, *, key, n: int = 4096) -> None:

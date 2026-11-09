@@ -231,14 +231,73 @@ class AbstractDesign(eqx.Module):
     version: int = eqx.field(default=1, kw_only=True)
 
 
+class RealizeContext(eqx.Module):
+    """What a version-2 channel model knows about the record it realizes.
+
+    Every field is read from the record being realized, so the handlers and the fork
+    battery build the same context from the same row.
+    """
+
+    start_tick: jax.Array
+    end_tick: jax.Array
+    acquisition_index: jax.Array
+    fraction: jax.Array
+
+    @classmethod
+    def from_record(cls, rec, fraction):
+        """The context of the record `rec` realized at occupancy `fraction`."""
+        return cls(
+            start_tick=jnp.asarray(rec.start_tick, I64),
+            end_tick=jnp.asarray(rec.end_tick, I64),
+            acquisition_index=jnp.asarray(rec.acquisition_index, I64),
+            fraction=jnp.asarray(fraction, F64),
+        )
+
+
 class AbstractChannelModel(eqx.Module):
-    """Realization contract for a channel's payload."""
+    """Realization contract for a channel's payload.
+
+    Version 1 `realize(truth, subject, channel_index, fraction, key, design,
+    channels)` returns `(value, variate)`; the core writes value, variate and
+    fraction into the first three payload columns. Version 2 adds a keyword-only
+    `context` (a `RealizeContext`) and returns the whole payload row, a one
+    dimensional array no wider than the payload; the core pads it with zeros.
+    """
 
     version: int = eqx.field(default=1, kw_only=True)
 
     def realize(self, truth, subject, channel_index, fraction, key, design, channels):
         """Return a realized payload and its random variate."""
         raise NotImplementedError
+
+
+def realize_row(study, truth, rec, fraction, key):
+    """The payload row a record holds, realized by the study's channel model.
+
+    The branch is on the static `version`, so a version-1 model keeps its call and
+    its compiled program. `rec` supplies the subject, channel and context.
+    """
+    model = study.channel_model
+    args = (truth, rec.subject, rec.channel_index, fraction, key)
+    width = study.caps.payload_width
+    if model.version == 1:
+        meas, z = model.realize(*args, study.design, study.channels)
+        return jnp.zeros(width, F64).at[0].set(meas).at[1].set(z).at[2].set(fraction)
+    row = jnp.asarray(
+        model.realize(
+            *args,
+            study.design,
+            study.channels,
+            context=RealizeContext.from_record(rec, fraction),
+        ),
+        F64,
+    )
+    if row.ndim != 1 or row.shape[0] > width:
+        raise ValueError(
+            f"a version-2 realize returns a 1-D row of at most {width} columns, "
+            f"not shape {row.shape}"
+        )
+    return jnp.zeros(width, F64).at[: row.shape[0]].set(row)
 
 
 class AbstractObjective(eqx.Module):

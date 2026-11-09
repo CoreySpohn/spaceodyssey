@@ -24,6 +24,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.events import empty_event_row, enqueue, requeue, where_tree
 from spaceodyssey.core.keys import asset_coordinate, draw_key, fold_key
+from spaceodyssey.core.kinds import realize_row
 from spaceodyssey.core.ledger import _resource_rows, charge_parts
 from spaceodyssey.core.lift import lifting_jit
 from spaceodyssey.core.records import (
@@ -107,17 +108,8 @@ def _realize_rec(c, study, truth, root, base, fraction):
         branch=study.fork.branch_of(base.acquisition_index),
         coupling=study.coupling,
     )
-    meas, z = study.channel_model.realize(
-        truth,
-        base.subject,
-        base.channel_index,
-        fraction,
-        key,
-        study.design,
-        study.channels,
-    )
-    payload = jnp.zeros(study.caps.payload_width, F64).at[0].set(meas).at[1].set(z)
-    return dataclasses.replace(base, payload=payload.at[2].set(fraction))
+    payload = realize_row(study, truth, base, fraction, key)
+    return dataclasses.replace(base, payload=payload)
 
 
 def _program_field(ev):
