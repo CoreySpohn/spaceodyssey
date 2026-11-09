@@ -321,6 +321,7 @@ require_tier_reason = true
 "tests/studies/test_survey_5.py" = 207
 "tests/studies/test_survey_5_static.py" = 88
 "tests/studies/test_survey_6.py" = 199
+"tests/studies/test_survey_7.py" = 128
 "tests/studies/test_survey_8.py" = 148
 "tests/studies/test_survey_9.py" = 173
 "tests/studies/test_survey_helpers.py" = 27
