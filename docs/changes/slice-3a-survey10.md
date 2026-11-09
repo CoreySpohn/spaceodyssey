@@ -53,13 +53,21 @@ count it relies on is asserted nonzero.
   these corruptions fails it: swapping two outcomes, changing `NO_FUNDS` to `FORBIDDEN`, marking
   an admitted request refused, and marking the refused one admitted. The early-release run, which
   has two legitimate refusals, replays clean as well.
-- **Other admission rules.** Three data variants of the default study replay clean on the host, and
-  changing any one `Observe` outcome in each fails the replay: an award that rounds to zero, which
-  makes an `Observe` refuse with `OUTSIDE_VALIDITY` (relabelling it `NO_FUNDS` fails); a transition
-  time equal to the occupancy; and an asset budget of zero, which refuses with `NO_FUNDS`. They
-  share the default program, so they add no compile. A surcharge study that refunds was not made a
-  test: its refund flag is static, so it needs a program of its own, and the funds rule it
-  exercises is the core's, which the replay no longer re-derives.
+- **Other admission rules.** Four data variants of the default study replay clean on the host, and
+  changing any one `Observe` or `Allocate` outcome in each fails the replay: an award that swamps
+  the other, which makes an `Observe` refuse with `OUTSIDE_VALIDITY` (relabelling it `NO_FUNDS`
+  fails); a transition time equal to the occupancy; an asset budget of zero, which refuses with
+  `NO_FUNDS`; and a permission set that leaves out `Allocate`, which gives four legitimate
+  `FORBIDDEN` `Allocate` outcomes (marking one admitted fails). They share the default program, so
+  they add no compile. A surcharge study that refunds was not made a test: its refund flag is
+  static, so it needs a program of its own, and the funds rule it exercises is the core's, which
+  the replay no longer re-derives.
+- **Record metadata.** The replay compares every column of every valid measurement and award row
+  with the re-execution (the core's own column list), integers and flags exactly and floats within
+  the executor go tolerance of 1e-12. Each of these fails it: a measurement's channel, status,
+  program, audience, release stamp, acquisition index or acquisition id changed, an award's status,
+  program, acquisition index, audience or release stamp changed, and a measurement payload moved by
+  1e-9. A one-ULP payload change replays clean.
 - **Production process.** All default-structure runs use the production `ProposalRecords`, with
   static release ticks, not a substitute.
 - **Parity.** The host and compiled runs have equal histories, query ticks, awards and `Allocate`
@@ -111,28 +119,34 @@ marked:
 | every proposal released at write time | (a), (b), (d) |
 | replay skips the reference comparison | (d), edge rules |
 | replay ignores the reference's admission codes | (d), edge rules |
-| replay ignores the reference's measurement records | (d) |
-| replay compares only award records with the reference | (d) |
+| replay ignores the reference's measurement and award records | (d) |
+| replay skips each record column in turn (channel, status, program, audience, release stamp, identity) | (d), the record-metadata corruptions |
+| replay compares floats exactly | (d), the one-ULP control |
+| replay compares floats within 1e-3 | (d), the 1e-9 payload corruption |
+| replay treats every `Allocate` outcome as admitted | (d), edge rules (the refused-`Allocate` run) |
 | replay ignores the reference's granted totals | (d), through the granted-total corruption |
 | the reference is the run's own trace and log, not a re-execution | (d), through the replay with no precomputed reference |
 | the re-execution uses a different root | (d), edge rules |
 
-Two mutants were first survivors in this round and are killed by additions: the granted-total
-check (no test altered the ledger) and the reference taken from the run itself (the fixtures hand
-the replay a reference equal to an honest run). The earlier mutants that targeted
-`observation_failures`, `funds_failures` and the `Allocate`, `Query`, `Wait` and `Stop` admission
-derivations no longer apply, since those are deleted. The earlier survivor, a replay that assumes
-every `Allocate` is admitted, is now killed: core's re-execution supplies the admission code, and
-flipping one fails.
+Mutants in the last four rounds that first survived are killed by additions: the granted-total
+check (a ledger corruption), the reference taken from the run itself (a replay with no precomputed
+reference), skipping a record column (a corruption of each), exact-float comparison (a one-ULP
+control), and treating every `Allocate` as admitted. The last two survived the earlier
+design because the run had no refused `Allocate` and no float control; the permission-set variant
+now supplies four legitimate refusals, and flipping any of them fails. The earlier mutants that
+targeted `observation_failures`, `funds_failures` and the `Allocate`, `Query`, `Wait` and `Stop`
+admission derivations no longer apply, since those are deleted.
 
 ## Tiers and cost
 
-All six tests are medium with a stated reason. Cold, with caches off, the survey file takes about
-42 s (10 passed, 311 programs, budget 368, zero violations). Each fixture is about 14 s per
-executor, which now includes a host re-execution of each study structure (the default structure
-and the early-release one) for the reference; the eager replays add 3 to 5 s each, and the three
-edge runs, which share the default program, take about 4.6 s together. `test_allocator.py` with
-its slow tests takes 25 s (14 passed, 337 programs, budget 361, zero violations).
+All seven tests are medium with a stated reason. The runs of each executor are built on first use,
+so a test pays only for the runs it reads, and the reference of a run is made only when a test
+asks for it. Cold, with caches off, the whole survey file takes about 48 s (11 passed, 311
+programs, budget 368, zero violations). Each test alone in a fresh process, with its fixtures
+charged, takes at most 24.6 s (the executor parity test, which compiles both structures on both
+executors); the next are the compiled replay test at 17.7 s, the edge and early-release tests
+at 14 s, and the rest under 13 s. `test_allocator.py` with its slow tests takes 26 s (14 passed,
+337 programs, budget 361, zero violations).
 
 ## Notes
 
