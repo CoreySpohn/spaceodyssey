@@ -193,7 +193,9 @@ class RunStatus(IntEnum):
     stopped instead of looping within one tick. `OVERFLOW` names no capacity by
     itself; `Carry.overflow_mask` holds the `Capacity` bits. `AWAITING` means a
     request or a refresh checkpoint is still unanswered by the host, so nothing
-    after it ran.
+    after it ran. `TRUNCATED_AT_HOLD` means a run that saves checkpoints used up its
+    step budget with a refresh checkpoint held: the hold was kept, not dropped, and
+    the next call answers it first. A run without a checkpoint sink never reports it.
     """
 
     COMPLETE = 0
@@ -202,6 +204,7 @@ class RunStatus(IntEnum):
     STALLED = 3
     OVERFLOW = 4
     AWAITING = 5
+    TRUNCATED_AT_HOLD = 6
 
 
 class RefitStatus(IntEnum):

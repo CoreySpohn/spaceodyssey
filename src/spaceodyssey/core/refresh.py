@@ -510,16 +510,17 @@ def drop_hold(carry):
     return _tree_set(carry, refresh=blank_row(carry.refresh))
 
 
-def answer_refresh(carry, root, study, boundary, *, can_finish=True):
+def answer_refresh(carry, root, study, boundary, *, can_finish=True, keep=False):
     """Answer the held checkpoint of one world through `boundary`; returns the carry.
 
     Without budget for the completion transition (`can_finish` false) nothing is
-    installed and the hold is dropped.
+    installed and the hold is dropped, or kept where the run saves checkpoints
+    (`keep`), so a resume can answer it.
     """
     if not bool(carry.refresh.valid):
         return carry
     if not can_finish:
-        return drop_hold(carry)
+        return carry if keep else drop_hold(carry)
     request = _gather(carry, root, study)
     batch = jax.tree_util.tree_map(lambda x: x[None], request)
     result = boundary.refit_batch(study, batch)
@@ -527,11 +528,12 @@ def answer_refresh(carry, root, study, boundary, *, can_finish=True):
     return _commit(carry, request, one, study)
 
 
-def answer_refreshes(carries, roots, study, boundary, left=None):
+def answer_refreshes(carries, roots, study, boundary, left=None, keep=False):
     """Answer the held checkpoints of a batch of worlds in one boundary call.
 
     Worlds with no budget left (`left <= 0`) cannot pay for the completion
-    transition: their holds are dropped without an install.
+    transition: their holds are dropped without an install, or kept where the run
+    saves checkpoints (`keep`).
 
     The frozen worlds' requests are batched on a world axis (`MaskedBatchRefit` fills
     its lanes with them, with no Python loop over worlds); worlds that hold no
@@ -540,7 +542,7 @@ def answer_refreshes(carries, roots, study, boundary, left=None):
     held = np.asarray(carries.refresh.valid)
     if left is not None:
         broke = held & (np.asarray(left) <= 0)
-        if broke.any():
+        if broke.any() and not keep:
             carries = jax.vmap(lambda c, m: where_tree(m, drop_hold(c), c))(
                 carries, jnp.asarray(broke)
             )
