@@ -66,9 +66,16 @@ truth side's budget and `loglike_report` scores a row against a proposal's
 predicted budget. Every reported uncertainty comes from the row's own observables.
 `summary_kind` is the record kind, its payload columns and audiences read from the
 profile table; `calibration_id` digests the declarations a row was made under.
+
+`JaxedithSummaryChannel` is the version-2 channel model that writes those rows from
+an executed occupancy: the science interval and its epoch come from the record's own
+start and end ticks, so a delayed admission or a cancellation moves them, and a visit
+outside its certified window is a no-science row.
 """
 
+import concurrent.futures
 import dataclasses
+import functools
 import hashlib
 import math
 
@@ -77,8 +84,12 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.constants import nm2m, rad2arcsec, s2d
-from hwoutils.conversions import jy_to_photons_per_nm_per_m2, mag_to_flux_jy
+from hwoutils.constants import AU2m, Mearth2kg, Msun2kg, nm2m, rad2arcsec, s2d
+from hwoutils.conversions import (
+    jy_to_photons_per_nm_per_m2,
+    mag_to_flux_jy,
+    photons_per_nm_per_m2_to_jy,
+)
 from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 from jaxedith import (
@@ -103,6 +114,7 @@ from optixstuff import (
     SimplePrimary,
     YippyCoronagraph,
 )
+from orbix.equations.orbit import period_to_sma
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
 from photomancy.orbit.likelihoods import loglike_relative_astrom
@@ -110,12 +122,21 @@ from yippy import EqxCoronagraph, fetch_yip
 from yippy.datasets import CATALOG, DATA_RELEASE_TAG
 from yippy.performance import PROFILE_STEP_PIX
 
+from spaceodyssey.adapters.physical_context import (
+    Certificate,
+    PlannedVisit,
+    context_from_profile,
+    require_certified,
+)
 from spaceodyssey.adapters.physical_profile import (
+    FIRST_SUMMARY_V1,
     audience_flags,
     check_profile,
     load_profile,
     payload_column_names,
 )
+from spaceodyssey.core.enums import I64
+from spaceodyssey.core.kinds import AbstractChannelModel
 from spaceodyssey.core.records import PayloadColumn, RecordKind
 
 # The public response package, release and digest the summary path is pinned to.
@@ -1215,3 +1236,282 @@ def calibration_id(report, law):
     text = _canonical(declarations).encode("utf-8")
     digest = hashlib.blake2b(text, digest_size=CALIBRATION_ID_BYTES).digest()
     return int.from_bytes(digest, "big") or 1
+
+
+# -- Summary channel -----------------------------------------------------------------
+
+# Exozodi level the first profile passes explicitly (its `exozodi` convention).
+PROFILE_N_EXOZODI = 3.0
+
+
+class _ChannelAssets(eqx.Module):
+    """What a summary channel builds from its declarations, once per declaration set."""
+
+    report: SummaryReport
+    context: eqx.Module
+    law: ReportingLaw
+    nominal: dict
+    star_mass_kg: float
+    epoch_jd: float
+    calibration_id: int
+
+
+@functools.lru_cache(maxsize=4)
+def _channel_assets(profile, target, detector, n_time_nodes, n_exozodi, law):
+    """Build the report, observing context and nominal planet a channel realizes with.
+
+    The scene and the nominal planet come from the profile's target entry, the
+    summary path from the pinned response, and the true scene is the nominal one
+    (a declared simplification: the truth side differs from the model in the planet
+    only). Cached on the channel's plain declarations, so a study that is rebuilt or
+    reloaded shares one build.
+    """
+    from spaceodyssey.adapters.skyscapes import SceneSpec, build_star
+
+    entry = load_profile(profile)
+    spec = SceneSpec.from_profile(entry, target)
+    context = context_from_profile(entry)
+    epoch = entry["time"]["study_epoch_jd"]
+    photons = build_star(spec).spec_flux_density(spec.wavelength_nm, epoch)
+    scene = SummaryScene(
+        star_flux_density_jy=float(
+            photons_per_nm_per_m2_to_jy(photons, spec.wavelength_nm)
+        ),
+        dist_pc=spec.dist_pc,
+        star_mass_kg=spec.mass_msun * Msun2kg,
+        luminosity_lsun=spec.luminosity_lsun,
+        ra_deg=spec.ra_deg,
+        dec_deg=spec.dec_deg,
+        star_diameter_mas=spec.angular_diameter_mas,
+        n_exozodi=n_exozodi,
+    )
+    report = SummaryReport.from_yip(
+        DetectorSpec(*detector),
+        scene,
+        orbit_epoch_jd=epoch,
+        observatory=context.observatory,
+        n_time_nodes=n_time_nodes,
+    )
+    mp = spec.planet_mass_mearth * Mearth2kg
+    nominal = nominal_planet(
+        a_au=float(period_to_sma(spec.period_d, scene.star_mass_kg + mp)),
+        e=spec.ecc,
+        inclination_rad=math.radians(spec.inclination_deg),
+        W_rad=math.radians(spec.node_deg),
+        w_rad=math.radians(spec.omega_planet_deg),
+        tp_d=spec.tp_jd - epoch,
+        Rp_au=spec.planet_radius_m / AU2m,
+        Ag=spec.geometric_albedo,
+    )
+    nominal["Mp"] = jnp.asarray(mp)
+    law = ReportingLaw(*law)
+    return _ChannelAssets(
+        report=report,
+        context=context,
+        law=law,
+        nominal=nominal,
+        star_mass_kg=scene.star_mass_kg,
+        epoch_jd=epoch,
+        calibration_id=calibration_id(report, law),
+    )
+
+
+def _build_assets(*declarations):
+    """`_channel_assets`, built outside any trace the caller is in.
+
+    The first call may come while a program is being traced (a reloaded study builds
+    its channel at its first realization). Tracing state belongs to the thread, so
+    the build runs on a fresh one, where it is the ordinary eager build; the response
+    tables then equal an offline report's to the last bit, whichever call came first.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_channel_assets, *declarations).result()
+
+
+class JaxedithSummaryChannel(AbstractChannelModel):
+    """A version-2 channel model: one summary record per planned visit.
+
+    Channel `i` of the study is planned visit `i`. At realization the record's own
+    occupancy (`start_tick`, `end_tick` from the realize context, so a delayed
+    admission or a cancellation moves them) gives the executed science interval:
+    ``[start + settle, end]``, rechecked against the visit's certificate. The row is
+    `sample_report` of the true planet's budget over that interval, with the
+    planet-free limit of the nominal planet over the same interval, so the epoch is
+    the midpoint of the science interval and an interval outside the certified
+    window is a no-science row (`valid_science = 0`, occupancy still reported).
+    Nothing scales counts by the occupancy fraction: the realized science duration
+    is ``max(0, end - start - settle)`` ticks.
+
+    The model holds plain declarations only, so a study document stores it; the
+    report, the observing context and the nominal planet are built from them on
+    first use (the pinned response through yippy's hash-checked loader) and shared
+    by every model with the same declarations. `calibration` is the digest of what
+    that build declares; a build that differs raises instead of writing rows under
+    another calibration.
+
+    The truth must be a `PhysicalTruth` (photomancy's physical names, one entry per
+    subject); `subject` picks the entry. The payload is `SUMMARY_COLUMNS` wide.
+
+    Attributes:
+        profile: Profile label (`physical_profile`).
+        target: Profile target index of the host.
+        detector: `DetectorSpec` field values in field order.
+        n_time_nodes: Gauss-Legendre nodes over the science interval.
+        n_exozodi: Exozodi level in zodis.
+        law: ``(threshold, kappa, corr)`` of the `ReportingLaw`.
+        windows: Per channel, ``(window_start_tick, window_end_tick, outcome)`` of
+            the visit's `Certificate`.
+        calibration: The expected `calibration_id`.
+    """
+
+    version: int = eqx.field(default=2, kw_only=True)
+    profile: str = eqx.field(static=True)
+    target: int = eqx.field(static=True)
+    detector: tuple = eqx.field(static=True)
+    n_time_nodes: int = eqx.field(static=True)
+    n_exozodi: float = eqx.field(static=True)
+    law: tuple = eqx.field(static=True)
+    windows: tuple = eqx.field(static=True)
+    calibration: int = eqx.field(static=True)
+
+    def __check_init__(self):
+        """Refuse malformed declarations before anything is built."""
+        load_profile(self.profile)
+        if type(self.target) is not int or self.target < 0:
+            raise ValueError("target must be a nonnegative integer")
+        if type(self.n_time_nodes) is not int or self.n_time_nodes < 1:
+            raise ValueError("n_time_nodes must be a positive integer")
+        _finite("n_exozodi", self.n_exozodi, low=0.0)
+        DetectorSpec(*self.detector)
+        ReportingLaw(*self.law)
+        if not self.windows:
+            raise ValueError("a summary channel needs at least one planned visit")
+        for window in self.windows:
+            ok = len(window) == 3 and all(type(x) is int for x in window)
+            if not ok or window[1] < window[0]:
+                raise ValueError(f"a window is (start, end, outcome) ticks: {window!r}")
+        if type(self.calibration) is not int or self.calibration < 1:
+            raise ValueError("calibration must be a positive integer")
+
+    @classmethod
+    def from_plan(
+        cls,
+        visits,
+        *,
+        profile=FIRST_SUMMARY_V1,
+        detector=None,
+        law=None,
+        n_time_nodes=8,
+        n_exozodi=PROFILE_N_EXOZODI,
+        support=None,
+    ):
+        """The channel model of a plan: one channel per `PlannedVisit`.
+
+        Every visit is certified (`require_certified`, with `support` for the
+        response support when given) and an uncertified plan raises
+        `UncertifiedPlan`. The calibration digest is computed from the build.
+        """
+        visits = tuple(visits)
+        if not visits:
+            raise ValueError("a summary channel needs at least one planned visit")
+        targets = {v.target for v in visits}
+        if len(targets) != 1 or not all(isinstance(v, PlannedVisit) for v in visits):
+            raise ValueError("every planned visit must name the same target")
+        (target,) = targets
+        detector = dataclasses.astuple(detector or DetectorSpec.fixture())
+        law = law or ReportingLaw()
+        law = (law.threshold, law.kappa, law.corr)
+        args = (profile, target, detector, n_time_nodes, float(n_exozodi), law)
+        assets = _build_assets(*args)
+        certificates = require_certified(assets.context, visits, support)
+        windows = tuple(
+            (
+                int(c.window_start_tick),
+                int(c.window_end_tick),
+                int(c.outcome),
+            )
+            for c in certificates
+        )
+        return cls(
+            profile=profile,
+            target=target,
+            detector=detector,
+            n_time_nodes=n_time_nodes,
+            n_exozodi=float(n_exozodi),
+            law=law,
+            windows=windows,
+            calibration=assets.calibration_id,
+        )
+
+    def assets(self):
+        """The report, context, law and nominal planet this model realizes with."""
+        built = _build_assets(
+            self.profile,
+            self.target,
+            self.detector,
+            self.n_time_nodes,
+            self.n_exozodi,
+            self.law,
+        )
+        if built.calibration_id != self.calibration:
+            raise ValueError(
+                f"the channel was declared under calibration {self.calibration} but "
+                f"its declarations build calibration {built.calibration_id}"
+            )
+        return built
+
+    def realize(
+        self, truth, subject, channel_index, fraction, key, design, channels, *, context
+    ):
+        """The summary row of the executed science interval; `fraction` is unused."""
+        built = self.assets()
+        report, clock = built.report, built.context.clock
+        window = jnp.asarray(self.windows, I64)[channel_index]
+        certificate = Certificate(
+            target=jnp.asarray(self.target, I64),
+            window_start_tick=window[0],
+            window_end_tick=window[1],
+            outcome=window[2],
+        )
+        sci = built.context.realized_science(
+            certificate, context.start_tick, context.end_tick
+        )
+        valid = sci.valid_science > 0
+        # A no-science row still needs a finite budget to draw from; the row's flag
+        # and zero science time clear every science column.
+        frame_s = jnp.asarray(report.detector_spec.frame_time_s, jnp.float64)
+        interval = ScienceInterval(
+            sci.epoch_jd,
+            jnp.where(valid, clock.seconds(sci.science_ticks), frame_s),
+        )
+        planet = _truth_planet(truth, subject, built)
+        expected = report.budget(report.nominal, planet, interval)
+        reference = report.predict(planet_free(built.nominal), interval)
+        row = sample_report(
+            key,
+            built.law,
+            expected,
+            built.law.limit_counts(reference),
+            lod_arcsec=report.lod_arcsec,
+            time_d=sci.epoch_jd,
+            occupied_s=clock.seconds(sci.occupied_ticks),
+            calibration_id=built.calibration_id,
+            valid_science=valid,
+        )
+        return row.payload()
+
+
+def _truth_planet(truth, subject, built):
+    """The true planet of `subject` in photomancy's physical names."""
+    mp = truth.Mp_kg[subject]
+    return {
+        "a": period_to_sma(truth.period_d[subject], built.star_mass_kg + mp),
+        "e": truth.e[subject],
+        "cos_i": truth.cos_i[subject],
+        "W": truth.W_rad[subject],
+        "cos_w": truth.cos_w[subject],
+        "sin_w": truth.sin_w[subject],
+        "tp": truth.tp_jd[subject] - built.epoch_jd,
+        "Lambda": truth.Ag[subject] * truth.Rp_AU[subject] ** 2,
+        "Mp": mp,
+    }
