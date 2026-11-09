@@ -283,6 +283,7 @@ require_tier_reason = true
 "tests/core/test_replay_refresh_quick.py" = 230
 "tests/core/test_reserved_fields.py" = 106
 "tests/core/test_resume.py" = 206
+"tests/core/test_world_tables.py" = 192
 "tests/core/test_resume_compiled.py" = 301
 "tests/core/test_resume_kill.py" = 178
 "tests/core/test_revisions.py" = 253
