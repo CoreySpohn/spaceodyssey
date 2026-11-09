@@ -373,6 +373,8 @@ def _channel_row(channel, truth, channel_index, start, end, key):
         end_tick=end,
         acquisition_index=jnp.asarray(0, I64),
         fraction=jnp.asarray(1.0, F64),
+        config_id=jnp.asarray(0, I64),
+        ops_state=jnp.asarray(0, I64),
     )
     return channel.realize(
         truth, 0, channel_index, context.fraction, key, None, None, context=context

@@ -243,6 +243,7 @@ class RealizeContext(eqx.Module):
     acquisition_index: jax.Array
     fraction: jax.Array
     config_id: jax.Array
+    ops_state: jax.Array
 
     @classmethod
     def from_record(cls, rec, fraction):
@@ -253,6 +254,8 @@ class RealizeContext(eqx.Module):
             acquisition_index=jnp.asarray(rec.acquisition_index, I64),
             fraction=jnp.asarray(fraction, F64),
             config_id=jnp.asarray(rec.config_id, I64),
+            # the asset's ops state at admission; 0 where ops states are off
+            ops_state=jnp.asarray(0 if rec.ops is None else rec.ops, I64),
         )
 
 

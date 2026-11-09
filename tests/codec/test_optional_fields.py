@@ -42,6 +42,7 @@ CAP_FIELDS = (
     "max_bundles",
     "max_bundle_size",
     "max_config_switches",
+    "n_ops",
 )
 STUDY_FIELDS = ("key_version",)
 CHANNEL_FIELDS = ("pricing", "surcharge", "failure_kind", "refund_deadline_ticks")
@@ -63,6 +64,9 @@ AWARD_COLUMNS = (
 )
 EFFECT_OPTIONAL = ("program", *AWARD_COLUMNS, "start_tick", "bundle")
 BUNDLE_RECORD_FIELDS = ("bundle",)
+# the ops state of a record and the per-state costs of a channel table
+OPS_RECORD_FIELDS = ("ops",)
+OPS_CHANNEL_FIELDS = ("cost_by_ops",)
 
 
 def _text(study):
@@ -87,8 +91,11 @@ def test_the_optional_fields_are_the_ones_slice_3a_added():
         {("Capacities", n) for n in CAP_FIELDS}
         | {("Study", n) for n in STUDY_FIELDS}
         | {("EffectTable", n) for n in EFFECT_OPTIONAL}
-        | {("ChannelTable", n) for n in CHANNEL_FIELDS}
-        | {("Record", n) for n in RECORD_FIELDS + BUNDLE_RECORD_FIELDS}
+        | {("ChannelTable", n) for n in CHANNEL_FIELDS + OPS_CHANNEL_FIELDS}
+        | {
+            ("Record", n)
+            for n in RECORD_FIELDS + BUNDLE_RECORD_FIELDS + OPS_RECORD_FIELDS
+        }
     )
 
 
@@ -98,7 +105,7 @@ def test_the_encoder_omits_every_optional_field_at_its_default():
     assert not set(STUDY_FIELDS) & set(doc["study"])
     assert not set(CAP_FIELDS) & set(doc["study"]["caps"])
     assert "n_programs" in doc["study"]["caps"]  # a field with a default, not optional
-    assert not set(CHANNEL_FIELDS) & set(doc["study"]["channels"])
+    assert not set(CHANNEL_FIELDS + OPS_CHANNEL_FIELDS) & set(doc["study"]["channels"])
 
 
 def test_no_corpus_document_holds_an_optional_field():
@@ -107,7 +114,8 @@ def test_no_corpus_document_holds_an_optional_field():
         doc = _doc(case.make_study())
         assert not set(STUDY_FIELDS) & set(doc["study"]), case.name
         assert not set(CAP_FIELDS) & set(doc["study"]["caps"]), case.name
-        assert not set(CHANNEL_FIELDS) & set(doc["study"]["channels"]), case.name
+        channels = set(doc["study"]["channels"])
+        assert not set(CHANNEL_FIELDS + OPS_CHANNEL_FIELDS) & channels, case.name
 
 
 def test_a_nondefault_optional_field_is_written_and_round_trips():
@@ -122,6 +130,7 @@ def test_a_nondefault_optional_field_is_written_and_round_trips():
         max_bundles=2,
         max_bundle_size=3,
         max_config_switches=4,
+        n_ops=3,
     )
     study = toy.survey_1(caps=caps, key_version=2)
     doc = _doc(study)
@@ -135,6 +144,7 @@ def test_a_nondefault_optional_field_is_written_and_round_trips():
         2,
         3,
         4,
+        3,
     ]
     text = _text(study)
     loaded = load_study(text, TOY_KINDS)
@@ -158,6 +168,7 @@ def test_a_missing_optional_field_loads_at_its_default():
         0,
         0,
         0,
+        1,
     ]
     assert_same_pytree(study, loaded)
 

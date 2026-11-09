@@ -27,6 +27,7 @@ class FindingCode(StrEnum):
     W001 = "W001"  # an award window that is empty, out of range or overlaps another
     B001 = "B001"  # a bundle the study cannot admit as one occupancy of its lane
     S001 = "S001"  # a configuration timeline the study cannot read or stamp from
+    O001 = "O001"  # a per-state cost table the study cannot read or charge from
     W002 = "W002"  # a declared failure kind the policy cannot read
     T002 = "T002"  # a channel with no valid coincident order
     R001 = "R001"  # a channel declares a record kind the registry lacks

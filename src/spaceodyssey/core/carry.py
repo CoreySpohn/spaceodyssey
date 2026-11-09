@@ -206,6 +206,13 @@ def commitment_leaves(caps):
     # the admission configuration of each commitment slot: present with a timeline, and
     # of size zero while commitments are off
     config = {"cm_config": jnp.zeros(caps.n_commitments, I64)} if caps.configs else {}
+    # the same for the ops state, plus the state of each asset
+    if caps.ops:
+        config = {
+            **config,
+            "cm_ops": jnp.zeros(caps.n_commitments, I64),
+            "ops_state": jnp.zeros(caps.n_assets, I64),
+        }
     if not caps.commitments:
         return config
     k = jnp.zeros(caps.n_commitments, I64)

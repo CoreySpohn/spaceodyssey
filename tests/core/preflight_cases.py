@@ -201,6 +201,14 @@ def _timeline_study(ticks, switches=3):
 PAD = CONFIG_PAD
 
 
+def _ops_study(table, n_ops=2):
+    """`survey_1` with `n_ops` ops states and the given per-state cost table."""
+    study = toy.survey_1(caps=Capacities(n_ops=n_ops))
+    return _replace(
+        study, channels=dataclasses.replace(study.channels, cost_by_ops=table)
+    )
+
+
 def _commitment_study(policy=None, **columns):
     """`survey_1` with commitments on, the given asset columns and a stated policy."""
     study = toy.survey_1(caps=Capacities(n_commitments=2))
@@ -458,6 +466,17 @@ SEEDED = {
         lambda: _timeline_study(jnp.asarray([[PAD] * 3, [10, 2000, PAD]], I64)),
         None,
     ),
+    "ops_costs_without_capacity": (
+        C.O001,
+        lambda: _ops_study(jnp.ones((2, 3, 3)), n_ops=1),
+        None,
+    ),
+    "ops_costs_wrong_shape": (C.O001, lambda: _ops_study(jnp.ones((3, 3, 3))), None),
+    "ops_cost_negative": (
+        C.O001,
+        lambda: _ops_study(jnp.ones((2, 3, 3)).at[1, 2, 0].set(-1.0)),
+        None,
+    ),
     "frozen_horizon": (
         C.X002,
         lambda: _assets(freeze_ticks=jnp.asarray([5, 0], I64)),
@@ -542,6 +561,7 @@ CLEAN = {
         lambda: _timeline_study(jnp.asarray([[0, 500, PAD], [PAD, PAD, PAD]], I64)),
         (),
     ),
+    "ops_costs_declared": (lambda: _ops_study(jnp.ones((2, 3, 3))), ()),
     "charge_with_refunds": (
         lambda: _refund_channels(charge=2.0 * jnp.ones((3, 3))),
         (),

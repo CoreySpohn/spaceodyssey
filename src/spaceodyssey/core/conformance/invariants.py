@@ -192,16 +192,19 @@ def _balance_rows(study, lane, program=0):
     return (asset, owner, caps.n_balance_rows - 1)
 
 
-def _charge_totals(study):
+def _charge_totals(study, ops=0):
     """What an admission debits per channel and resource, read from the declarations.
 
     The cost, until the capacities hold refunds; then the charge plus the fixed part
-    of a SURCHARGE column. Written out here, not read from the ledger's own helper.
+    of a SURCHARGE column. With a per-state cost table the variable part is its row for
+    the asset's ops state at admission (`ops`). Written out here, not read from the
+    ledger's own helper.
     """
     ch = study.channels
+    by_ops = None if ch.cost_by_ops is None else np.asarray(ch.cost_by_ops)[ops]
     if not study.caps.refunds:
-        return np.asarray(ch.cost)
-    base = np.asarray(ch.charge)
+        return np.asarray(ch.cost) if by_ops is None else by_ops
+    base = np.asarray(ch.charge) if by_ops is None else by_ops
     if ch.pricing is None or ch.surcharge is None:
         return base
     fixed = np.asarray(ch.surcharge) * (
@@ -288,7 +291,7 @@ def _retained_net_spend(run, refunds=None):
     """
     study, c = run.study, run.carry
     spent = np.zeros(np.asarray(study.budget).shape)
-    log, cost = c.log, _charge_totals(study)
+    log = c.log
     charged = np.asarray(log.charged)
     refs = np.asarray(log.refund_of)
     valid = _valid_rows(run)
@@ -313,8 +316,10 @@ def _retained_net_spend(run, refunds=None):
     for i in _pending_settlements(run):
         program = 0 if ev.program is None else int(np.asarray(ev.program)[i])
         rows = _balance_rows(study, int(ev.lane[i]), program)
+        # a queued settlement is priced at the ops state it was admitted under
+        queued = _charge_totals(study, 0 if ev.ops is None else int(ev.ops[i]))
         for r, row in enumerate(rows):
-            spent[row, r] += float(cost[int(ev.channel_index[i]), r])
+            spent[row, r] += float(queued[int(ev.channel_index[i]), r])
     # a disruptive activation is debited from the asset's own row and has no record
     assets = study.assets
     used = np.asarray(c.ledger.disruptive_used)
@@ -335,6 +340,10 @@ def _refused_completions(run):
     """
     study, t = run.study, run.trace
     ids = np.asarray(study.channels.id).tolist()
+    if study.caps.ops and study.channels.cost_by_ops is not None:
+        raise NotImplementedError(
+            "a completion the log refused cannot be priced: the trace has no ops state"
+        )
     cost = _charge_totals(study)
     lost = np.zeros(np.asarray(study.budget).shape)
     refused = (
@@ -364,7 +373,6 @@ def _award_timeline(run):
     """
     study, c, t = run.study, run.carry, run.trace
     log, assets, ch = c.log, study.assets, study.channels
-    totals = _charge_totals(study)
     occupancy = np.asarray(ch.occupancy_ticks)
     transition = np.asarray(assets.transition_ticks)
     out, seq = [], 0
@@ -413,17 +421,18 @@ def _award_timeline(run):
             continue  # ignored, unmatched or held: it moves no money
         index = int(np.asarray(log.channel_index)[i])
         rows = _balance_rows(study, int(lane[i]), _log_program(log, i))
+        priced = _charge_totals(study, 0 if log.ops is None else int(log.ops[i]))
         start = int(np.asarray(log.start_tick)[i]) - int(transition[int(lane[i])])
         gens = tuple(
             None if col is None else np.asarray(col)[i]
             for col in (log.award_gens, log.award_rules, log.award_tos)
         )
         cancelled = int(status[i]) in (RecordStatus.PARTIAL, RecordStatus.CANCELLED)
-        debit = totals[index] if cancelled else charged[i]
+        debit = priced[index] if cancelled else charged[i]
         out.append((start, 3, seq, "debit", (rows, debit, gens)))
         seq += 1
         if cancelled:
-            back = np.maximum(totals[index] - charged[i], 0.0)
+            back = np.maximum(priced[index] - charged[i], 0.0)
             end = int(np.asarray(log.end_tick)[i])
             out.append((end, 3, seq, "credit", (rows, back, None)))
             seq += 1
@@ -434,7 +443,8 @@ def _award_timeline(run):
         rows = _balance_rows(study, int(ev.lane[i]), program)
         start = int(np.asarray(ev.tick)[i]) - int(occupancy[index])
         start -= int(transition[int(ev.lane[i])])
-        out.append((start, 3, seq, "debit", (rows, totals[index], None)))
+        queued = _charge_totals(study, 0 if ev.ops is None else int(ev.ops[i]))
+        out.append((start, 3, seq, "debit", (rows, queued[index], None)))
         seq += 1
     return sorted(out, key=lambda x: x[:3]), problems
 

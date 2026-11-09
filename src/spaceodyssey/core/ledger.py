@@ -32,6 +32,9 @@ class ChannelTable(eqx.Module):
     refund_deadline_ticks: jax.Array | None = dataclasses.field(
         default=None, metadata=OPTIONAL
     )
+    # F64[n_ops, C, R]: the cost of each channel per asset ops state, present only while
+    # the capacities hold ops states. Entry 0 is the cost at the nominal state.
+    cost_by_ops: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
 
 
 class Ledger(eqx.Module):
@@ -82,10 +85,17 @@ class Ledger(eqx.Module):
     # the configuration each commitment was admitted under (I64[K]), present only while
     # a configuration timeline is on (of size zero without commitments)
     cm_config: jax.Array | None = None
+    # the ops state of each asset (I64[A]) and the ops state each commitment was
+    # admitted under (I64[K]); present only while ops states are on
+    ops_state: jax.Array | None = None
+    cm_ops: jax.Array | None = None
 
 
-def charge_parts(study, channel_index):
+def charge_parts(study, channel_index, ops=0):
     """`(charge, fixed, pricing)` of a channel, each of one entry per resource.
+
+    With `cost_by_ops` declared, the variable part is `cost_by_ops[ops]`, the cost at
+    the asset's ops state when it was admitted, in place of `cost` and `charge`.
 
     `charge` is what an admission debits, `fixed` the part of it that is never
     refundable (a surcharge), `pricing` the column's `ChargePricing`. While the
@@ -93,11 +103,12 @@ def charge_parts(study, channel_index):
     column is OCCUPANCY, so a study without refunds computes as before.
     """
     ch = study.channels
+    priced = ch.cost_by_ops is not None
     if not study.caps.refunds:
-        cost = ch.cost[channel_index]
+        cost = ch.cost_by_ops[ops, channel_index] if priced else ch.cost[channel_index]
         zero = jnp.zeros_like(cost)
         return cost, zero, jnp.zeros(cost.shape, I64)
-    base = ch.charge[channel_index]
+    base = ch.cost_by_ops[ops, channel_index] if priced else ch.charge[channel_index]
     pricing = (
         jnp.zeros(base.shape, I64)
         if ch.pricing is None
@@ -108,6 +119,24 @@ def charge_parts(study, channel_index):
     )
     fixed = jnp.where(pricing == ChargePricing.SURCHARGE, extra, 0.0)
     return base + fixed, fixed, pricing
+
+
+def set_ops_state(carry, asset, state, caps, where=True):
+    """`carry` with the ops state of `asset` set to `state` where `where` holds.
+
+    This is how a process moves an asset between ops states from its `handle`;
+    admissions after it are priced at the new state, and occupancies admitted before it
+    keep the state they were admitted under. A state outside 0 to `n_ops - 1` is
+    clamped to it. A study with one ops state has no such leaf and the carry is
+    returned as it is.
+    """
+    if not caps.ops:
+        return carry
+    asset = jnp.asarray(asset, I64)
+    state = jnp.clip(jnp.asarray(state, I64), 0, caps.n_ops - 1)
+    held = carry.ledger.ops_state
+    new = held.at[asset].set(jnp.where(where, state, held[asset]))
+    return eqx.tree_at(lambda c: c.ledger.ops_state, carry, new)
 
 
 def _resource_rows(study, lane, program=0):

@@ -70,6 +70,7 @@ CANONICAL_FIELDS = {
         "program",
         "bundle",
         "config",
+        "ops",
     ),
     "carry.log": (
         "kind",
@@ -106,6 +107,7 @@ CANONICAL_FIELDS = {
         "award_rules",
         "award_tos",
         "bundle",
+        "ops",
     ),
     "carry.ledger": (
         "balance",
@@ -137,6 +139,8 @@ CANONICAL_FIELDS = {
         "cm_index",
         "cm_count",
         "cm_config",
+        "cm_ops",
+        "ops_state",
     ),
     "carry.request": (
         "kind",
@@ -164,6 +168,7 @@ CANONICAL_FIELDS = {
         "program",
         "bundle",
         "config",
+        "ops",
     ),
     "carry.refresh": (
         "kind",
@@ -191,6 +196,7 @@ CANONICAL_FIELDS = {
         "program",
         "bundle",
         "config",
+        "ops",
     ),
     "trace": (
         "handled",
@@ -261,6 +267,11 @@ def config_on(carry):
     return carry.ev.config is not None
 
 
+def ops_on(carry):
+    """Whether the carry holds asset ops states (the event rows have the column)."""
+    return carry.ev.ops is not None
+
+
 def balances_on(carry):
     """Whether the carry holds the balance snapshot (its refused-request leaf)."""
     return carry.query_refused is not None
@@ -304,6 +315,12 @@ CONDITIONAL_FIELDS = {
     "carry.request.config": config_on,
     "carry.refresh.config": config_on,
     "carry.ledger.cm_config": config_on,
+    "carry.ev.ops": ops_on,
+    "carry.log.ops": ops_on,
+    "carry.request.ops": ops_on,
+    "carry.refresh.ops": ops_on,
+    "carry.ledger.cm_ops": ops_on,
+    "carry.ledger.ops_state": ops_on,
     "trace.program": programs_on,
     "carry.query_refused": balances_on,
     "carry.ledger.win_state": awards_on,

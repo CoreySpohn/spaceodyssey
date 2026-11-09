@@ -74,6 +74,9 @@ class EventTable(eqx.Module):
     # ticks at or before the admission tick); absent unless the capacities hold a
     # configuration timeline.
     config: jax.Array | None = None
+    # The ops state of the asset when the row was admitted; absent unless the capacities
+    # hold more than one ops state.
+    ops: jax.Array | None = None
 
 
 def empty_events(caps):
@@ -85,6 +88,7 @@ def empty_events(caps):
         program=z if caps.n_programs > 1 else None,
         bundle=z if caps.bundles else None,
         config=z if caps.configs else None,
+        ops=z if caps.ops else None,
     )
 
 
@@ -102,6 +106,7 @@ def empty_event_row(caps=None):
         program=z if on else None,
         bundle=z if caps is not None and caps.bundles else None,
         config=z if caps is not None and caps.configs else None,
+        ops=z if caps is not None and caps.ops else None,
     )
 
 
@@ -151,6 +156,7 @@ def enqueue(
     program=0,
     bundle=-1,
     config=0,
+    ops=0,
     caps,
 ):
     """Add one row to the queue where `ok`, applying the micro placement rule.
@@ -184,6 +190,8 @@ def enqueue(
         extra["bundle"] = jnp.asarray(bundle, I64)
     if carry.ev.config is not None:
         extra["config"] = jnp.asarray(config, I64)
+    if carry.ev.ops is not None:
+        extra["ops"] = jnp.asarray(ops, I64)
     ev = _set_row(
         carry.ev,
         i,
@@ -278,5 +286,5 @@ def select_next(carry, caps):
 EVENT_INT_FIELDS = tuple(
     f.name
     for f in dataclasses.fields(EventTable)
-    if f.name not in ("valid", "program", "bundle", "config")
+    if f.name not in ("valid", "program", "bundle", "config", "ops")
 )

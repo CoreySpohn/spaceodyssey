@@ -156,6 +156,11 @@ def _check_balance_range(study):
                 ),
                 *(
                     []
+                    if channels.cost_by_ops is None
+                    else [np.ravel(np.asarray(channels.cost_by_ops, dtype=np.float64))]
+                ),
+                *(
+                    []
                     if channels.surcharge is None
                     else [np.ravel(np.asarray(channels.surcharge, dtype=np.float64))]
                 ),

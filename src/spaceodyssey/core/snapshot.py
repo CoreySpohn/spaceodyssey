@@ -303,6 +303,8 @@ def snapshot_view(carry, audience, caps):
     cols["bundle"] = (
         None if log.bundle is None else jnp.where(vis, log.bundle, 0)[order]
     )
+    # the ops state that priced a row is not part of the policy's view
+    cols["ops"] = None
     for name in REFUND_COLUMNS:
         col = getattr(log, name)
         if col is None:
