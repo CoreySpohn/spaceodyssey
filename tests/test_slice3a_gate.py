@@ -467,6 +467,19 @@ def child(tmp_path_factory):
     }
 
 
+# The gate's own bookkeeping tests, which `OWN` does not list.
+GATE_TESTS = (
+    "test_inventory_every_listed_check_was_collected_and_passed",
+    "test_zz_every_rule_item_and_mutant_has_a_check_that_ran_and_passed",
+)
+
+
+def _whole_module_selected(config):
+    """False when the run narrowed the module by keyword, deselection or node id."""
+    narrowed = config.getoption("keyword") or config.getoption("deselect")
+    return not narrowed and not any("::" in str(arg) for arg in config.args)
+
+
 class _Outcomes:
     """Passed cases of the checks of this file, recorded as they report."""
 
@@ -488,6 +501,12 @@ def outcomes(request):
     request.config.pluginmanager.register(recorder)
     yield recorder
     request.config.pluginmanager.unregister(recorder)
+    if _whole_module_selected(request.config):
+        required = {name for entries in OWN.values() for name in entries} | set(
+            GATE_TESTS
+        )
+        missing = sorted(required - set(recorder.passed))
+        assert not missing, f"gate checks that did not run and pass: {missing}"
 
 
 def test_inventory_every_listed_check_was_collected_and_passed(child):

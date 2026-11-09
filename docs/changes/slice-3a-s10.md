@@ -7,7 +7,10 @@ mutant checks included. One test runs the whole inventory once in a child pytest
 (`python -m pytest <ids> -m "" -n 0 -q -p no:cacheprovider --budget-json ... --junitxml ...`).
 The child gets the parent environment without any `PYTEST_*` variable, so a marker or
 keyword filter, a disabled plugin or xdist settings in `PYTEST_ADDOPTS` cannot reach it,
-while `SPACEODYSSEY_JAX_CACHE` and the JAX settings still do. A second test reads the
+while `SPACEODYSSEY_JAX_CACHE` and the JAX settings still do. A completeness check
+at the end of the module fails the run if any check of the gate did not run and pass
+(unless the run was narrowed with `-k`, `--deselect` or a node id), so deleting or
+disabling a gate test is seen. A second test reads the
 child's budget file: the budget plugin must have loaded in enforce mode, with no
 violation and a record for every module of the inventory. The junit parser counts each
 node id once, so a duplicated entry adds nothing. Every listed id must be collected and
@@ -31,7 +34,7 @@ One process, `SPACEODYSSEY_JAX_CACHE=off`, four threads, through `compute-run`.
 
 | Measure | Value |
 |---|---|
-| Wall time, gate alone | 388.5 s (18 tests); the one child run of the inventory took 364.5 s for 819 cases |
+| Wall time, gate alone | 400.2 s (18 tests); the one child run of the inventory took 376.1 s for 819 cases |
 | Peak footprint | 2.2 GiB sampled by `compute-run` (child run: 1.0 GiB peak resident, 0 budget violations) |
 | Gate file module programs | 237 measured |
 | Budget entry | `tests/test_slice3a_gate.py = 283` in `[tool.testbudget.module_compile_budget_by_file]`, ceil(237 * 1.15) + 10 |
