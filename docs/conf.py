@@ -41,7 +41,8 @@ nb_execution_raise_on_error = True
 
 copyright = "2026, Corey Spohn"
 author = "Corey Spohn"
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "jupyter_execute"]
+# Change records are build notes for reviewers, kept in the repository, not published.
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "jupyter_execute", "changes"]
 autodoc_typehints = "description"
 # AutoAPI already indexes fields; Napoleon should render their descriptions only.
 napoleon_use_ivar = True

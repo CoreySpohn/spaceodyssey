@@ -31,10 +31,3 @@ records
 :maxdepth: 1
 autoapi/index
 ```
-
-```{toctree}
-:hidden:
-:glob:
-
-changes/*
-```
