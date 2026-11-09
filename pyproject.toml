@@ -229,6 +229,7 @@ require_tier_reason = true
 "tests/core/test_awards.py" = 423
 "tests/core/test_battery_guards.py" = 208
 "tests/core/test_belief_layout.py" = 223
+"tests/core/test_bundles.py" = 250
 "tests/core/test_canonical_fields.py" = 78
 "tests/core/test_charging.py" = 169
 "tests/core/test_coincident_order.py" = 109
