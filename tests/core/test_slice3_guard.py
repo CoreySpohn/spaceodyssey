@@ -370,3 +370,7 @@ def test_each_feature_owns_only_its_expected_leaves(feature):
             assert (getattr(view, name) is not None) == (
                 feature == "balances" and audience == Audience.POLICY
             )
+        # the refusal counter is the snapshot's own leaf of the balances feature
+        assert (view.query_refused is not None) == (
+            feature == "balances" and audience == Audience.POLICY
+        )

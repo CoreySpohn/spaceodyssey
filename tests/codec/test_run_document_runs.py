@@ -31,16 +31,40 @@ from tests.codec.run_cases import (
     host_loop,
     refresh_run,
 )
-from tests.codec.test_document import TOY_KINDS
+from tests.codec.test_document import TOY_KINDS, assert_same_pytree
 from tests.core.helpers import worlds
+from tests.core.preflight_cases import DOC_KINDS
 from tests.core.refresh_helpers import CorruptInstall
 
 N_WORLDS = 2
 N_STEPS = 60
 N_CASE_STEPS = 40
+N_FEATURE_STEPS = 20
 HASH_PIN = Path(__file__).with_name("hash_pin.json")
 CAPTURE = os.environ.get("SPACEODYSSEY_CAPTURE_PIN", "")
 EXECUTORS = ("host", "compiled")
+
+
+# channel 12 sits on lane 2, which is on asset 1, so its draws carry a nonzero asset
+# coordinate under key version 2 and the history depends on the key version
+FEATURE_PLAN = ((0, 10), (1, 11), (0, 12), (1, 12))
+PLAN_DOC_KIND = ("policy", "test.doc_plan_policy", 1)
+
+
+class DocPolicy(toy.FixedPlanPolicy):
+    """A plan policy whose declared programs, awards and disruptive flag are data."""
+
+    programs: tuple = eqx.field(static=True, default=(), kw_only=True)
+    awards: tuple = eqx.field(static=True, default=(), kw_only=True)
+    disruptive: bool = eqx.field(static=True, default=False, kw_only=True)
+
+    def declare(self):
+        return dataclasses.replace(
+            super().declare(),
+            programs=self.programs,
+            awards=self.awards,
+            disruptive=self.disruptive,
+        )
 
 
 def _original(executor, refit):
@@ -226,17 +250,19 @@ def test_every_corpus_run_reloads_to_the_same_hash_and_history(case, executor):
         assert histories_equal(mine.history(w), reloaded.history(w)).ok
 
 
+@pytest.mark.medium(
+    reason="one study per feature run twice on the host, 3 to 5 s cold each"
+)
 @pytest.mark.parametrize(
     "feature",
     ["programs", "refunds", "awards", "commitments", "balances", "key_version"],
 )
 def test_an_enabled_feature_run_recipe_redumps_exactly(feature):
     """Fails if a valid enabled feature changes its study, registry or bindings on a
-    run document round trip.
+    run document round trip, if the loaded study differs from the original in any
+    leaf or static field, or if the loaded recipe executes to another history.
     """
-    from tests.core.preflight_cases import DOC_KINDS, DocPolicy
-
-    kinds = {**TOY_KINDS, **DOC_KINDS}
+    kinds = {**TOY_KINDS, **DOC_KINDS, PLAN_DOC_KIND: DocPolicy}
     caps = {
         "programs": Capacities(n_programs=2),
         "refunds": Capacities(refunds=True),
@@ -246,6 +272,7 @@ def test_an_enabled_feature_run_recipe_redumps_exactly(feature):
         "key_version": Capacities(),
     }[feature]
     policy = DocPolicy(
+        plan=FEATURE_PLAN,
         programs=(0, 1) if feature == "programs" else (),
         awards=((2, 10, 80),) if feature == "awards" else (),
         disruptive=feature == "commitments",
@@ -265,7 +292,7 @@ def test_an_enabled_feature_run_recipe_redumps_exactly(feature):
             study,
             assets=dataclasses.replace(
                 study.assets,
-                freeze_ticks=study.assets.freeze_ticks.at[0].set(5),
+                freeze_ticks=study.assets.freeze_ticks.at[1].set(5),
                 disruptive_resource=study.assets.disruptive_resource.at[1].set(1),
             ),
         )
@@ -285,3 +312,12 @@ def test_an_enabled_feature_run_recipe_redumps_exactly(feature):
         kinds=kinds,
     )
     assert again.to_json() == doc.to_json()
+    assert loaded.executor == "host"
+    assert loaded.service is None
+    assert not loaded.refit
+    assert_same_pytree(loaded.study, study)
+    truths, roots = make_worlds(study, 2)
+    mine = HostExecutor().run_worlds(study, truths, roots, N_FEATURE_STEPS)
+    theirs = loaded.execute(truths, roots, N_FEATURE_STEPS)
+    for w in range(2):
+        assert histories_equal(mine.history(w), theirs.history(w)).ok

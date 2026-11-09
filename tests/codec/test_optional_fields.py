@@ -149,6 +149,14 @@ def test_a_missing_optional_field_loads_at_its_default():
     assert_same_pytree(study, loaded)
 
 
+def _resolve(document, pointer):
+    """The value a JSON pointer names in a document; a missing step raises."""
+    node = document
+    for step in pointer.removeprefix("/").split("/"):
+        node = node[step]
+    return node
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
@@ -200,7 +208,9 @@ def test_an_explicit_null_balance_field_is_refused(name):
     doc["study"]["caps"][name] = None
     with pytest.raises(DocumentError) as err:
         load_study(json.dumps(doc), TOY_KINDS)
-    assert err.value.pointer.startswith("/study/caps")
+    # the capacity table is rejected as a whole, so the pointer names the table
+    assert err.value.pointer == "/study/caps"
+    assert _resolve(doc, err.value.pointer)[name] is None
 
 
 def test_a_required_field_still_cannot_be_missing():
@@ -412,16 +422,20 @@ def test_a_record_document_from_before_refunds_still_loads():
 def test_a_record_written_with_a_null_refund_column_is_refused(name):
     """Fails if an explicit null refund column is accepted as an omitted default."""
     node = {**_record_node(False), name: None}
-    with pytest.raises(DocumentError, match="at its default"):
+    with pytest.raises(DocumentError, match="at its default") as err:
         load_module.decode(node, ("record",), _RECORD_KINDS)
+    assert err.value.pointer == f"/record/{name}"
+    assert _resolve({"record": node}, err.value.pointer) is None
 
 
 @pytest.mark.parametrize("name", ["award_gens", "award_rules", "award_tos"])
 def test_a_record_written_with_a_null_award_identity_column_is_refused(name):
     """Control: the per-payer award identity is optional, and null is not omitted."""
     node = {**_record_node(False), name: None}
-    with pytest.raises(DocumentError, match="at its default"):
+    with pytest.raises(DocumentError, match="at its default") as err:
         load_module.decode(node, ("record",), _RECORD_KINDS)
+    assert err.value.pointer == f"/record/{name}"
+    assert _resolve({"record": node}, err.value.pointer) is None
 
 
 def test_a_populated_record_refund_columns_round_trip():
