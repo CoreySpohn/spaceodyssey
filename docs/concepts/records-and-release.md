@@ -49,7 +49,8 @@ def column(name, log=log, valid=valid):
 ```
 
 The study is the five-observation toy from [Getting started](../getting-started.md),
-run with its decision views kept.
+run with its decision views kept: the `view_log` argument of `run` fills a list with the
+view each decision was given, which the cells below read.
 
 ## A record has several clocks
 
@@ -67,7 +68,7 @@ record and checks them against that rule.
 ```{code-cell} python
 latency = int(study.channels.latency_ticks[0])
 ticks = ("start_tick", "end_tick", "available_tick", "released_tick", "accepted_tick")
-print("      ".join(ticks))
+print(" ".join(f"{t:>14s}" for t in ticks))
 for row in zip(*(column(t) for t in ticks)):
     print(" ".join(f"{t:>14d}" for t in row))
 
@@ -75,6 +76,10 @@ assert (column("available_tick") == column("end_tick") + latency).all()
 assert (column("released_tick") == column("available_tick")).all()
 assert (column("accepted_tick") == column("available_tick")).all()
 ```
+
+In this run `released_tick` and `accepted_tick` are equal in every row, because the
+channel releases to the policy and the observer together. They separate when the
+audiences differ, as the observer-only run below shows.
 
 ## A result exists before anyone can read it
 
@@ -108,14 +113,18 @@ quiet_log = quiet.carry.log
 quiet_valid = np.asarray(quiet_log.valid)
 
 print("observer count", np.asarray(quiet.carry.belief.n))
-print("policy count  ", np.asarray(quiet.carry.pbelief.n))
+print("policy count  ", np.asarray(quiet.carry.pbelief.n))  # pbelief: see below
 print("released tick ", np.asarray(quiet_log.released_tick)[quiet_valid])
 print("accepted tick ", np.asarray(quiet_log.accepted_tick)[quiet_valid])
 print("run complete  ", bool(quiet.complete))
 ```
 
-The observer folded one record at tick 130. The policy summary counted none, the
-release tick stayed at -1, and the run stopped early because nothing woke the policy
+The belief the observer holds is the full `belief`. The policy never sees it; it sees
+`pbelief`, the policy summary, a reduced copy that the carry (the full state of a run, see
+[Getting started](../getting-started.md)) updates only from records
+released to the policy. The observer folded one record and accepted it at tick 130. The
+policy summary counted none, the release tick stayed at -1 (so here `released_tick` and
+`accepted_tick` differ), and the run stopped early because nothing woke the policy
 again. An audience is part of what a study declares about its information, which is
 why `preflight` reads it.
 

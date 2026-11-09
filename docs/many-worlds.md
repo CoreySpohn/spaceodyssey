@@ -20,7 +20,8 @@ A single run is one draw of the sky and one draw of the measurement noise. What 
 campaign is worth is an average over many such draws. The compiled executor runs a
 whole batch of worlds in one program, so this page repeats the study from
 [Getting started](getting-started.md) over 512 worlds and compares the result with
-the host run.
+the host run. The result's `carry` is the full state of a run, as defined in
+[Getting started](getting-started.md); here it simply gains a leading world axis.
 
 ```{code-cell} python
 import time
@@ -53,10 +54,16 @@ one telescope and a plan of five observations, three of star 0 and two of star 1
 
 ## A batch of worlds needs a batch of truths and keys
 
-The world source draws one truth from one key. Splitting a root key gives one key per
+The world source draws one truth from one key. The toy world source draws each star's
+brightness uniformly between 0.5 and 1.5. Splitting a root key gives one key per
 world, and `vmap` turns the single draw into a batch whose leaves gain a leading
 world axis. The measurement noise needs its own keys, so each world carries a truth
 key and a separate root key.
+
+The key line in the cell below does this in three steps. `jr.split(key, n_worlds)`
+gives one key per world. Mapping `jr.split` over them splits each into two, which
+gives an array of shape (worlds, 2, key size). The transpose puts the pair index first,
+so unpacking gives `truth_keys` and `roots`, each with one key per world.
 
 ```{code-cell} python
 n_worlds = 512
@@ -71,8 +78,10 @@ print(truths.signal.shape, roots.shape)
 
 `run_worlds` takes the batch and returns a `RunResult` whose leaves all have the world
 axis in front. The first call compiles the program for this study and this batch
-size, so it is much slower than later calls. A second call with different truths reuses the
-program and only pays for the run.
+size, so it is much slower than later calls. A second call with different truths
+reuses the program and only pays for the run. JAX dispatches work asynchronously, so a
+call can return before the answer exists; `block_until_ready()` waits for it, which is
+what makes the timings honest.
 
 ```{code-cell} python
 executor = CompiledExecutor()
@@ -107,12 +116,31 @@ assert bool(result.complete.all())
 ## The average over worlds estimates the yield
 
 The objective scores one finished world, so `vmap` scores the batch. For this toy
-there is an estimate to compare with. A star measured $n$ times has a signal-to-noise
-ratio that is normal with unit standard deviation around $2 \sqrt{n}\, s$, where $s$
-is its true brightness and 0.5 is the noise level. It is detected when that ratio
-exceeds 3, which has probability $\Phi(2 \sqrt{n}\, s - 3)$, with $\Phi$ the normal
-cumulative distribution. Averaging over $s$ uniform on 0.5 to 1.5, for $n = 3$ and
-$n = 2$, and adding the two stars gives the expected number of detections per world.
+there is an estimate to compare with, and it takes two steps.
+
+First, a star measured $n$ times is detected with a probability that depends on its
+brightness. Its signal-to-noise ratio is normal with unit standard deviation, centered
+on $2\sqrt{n}\,s$ where $s$ is its true brightness (the 2 is one over the noise level
+0.5). It is detected when that ratio exceeds 3, so
+
+$$
+P(\text{detected} \mid s) = \Phi\!\left(2\sqrt{n}\,s - 3\right),
+$$
+
+with $\Phi$ the normal cumulative distribution. Read it as: a brighter star or more
+measurements move the center of the ratio above 3 and push the probability toward 1.
+
+Second, the expected number of detections averages that probability over the
+brightness and adds the two stars:
+
+$$
+\mathbb{E}[\text{detections}] = \sum_{n \in \{3,\,2\}} \int_{0.5}^{1.5}
+\Phi\!\left(2\sqrt{n}\,s - 3\right) ds .
+$$
+
+Read it as: the average of the detection probability over a star drawn uniformly on 0.5
+to 1.5, for the star measured three times plus the star measured twice. The cell
+evaluates the integral as a mean over a fine grid.
 
 ```{code-cell} python
 s = jnp.linspace(0.5, 1.5, 20001)
@@ -125,7 +153,8 @@ print(f"standard error of the batch mean {standard_error:.3f}")
 assert abs(float(scores.mean()) - expected) < 4 * standard_error
 ```
 
-The batch mean sits within a few standard errors of the estimate. One world cannot
+The assertion in the cell allows four standard errors, and the batch mean sits inside
+that. One world cannot
 show that, because a single world scores 0, 1 or 2.
 
 ## What stays the same: the history of each world
@@ -133,7 +162,7 @@ show that, because a single world scores 0, 1 or 2.
 The compiled executor and the host executor apply the same transaction rules, so a
 world's history does not depend on which one ran it. A history is the canonical
 account of a run: integers such as ticks, stages and counts agree exactly, and floats
-agree to within 1e-12. The cell reruns three of the worlds on the host executor and
+agree to within $10^{-12}$. The cell reruns three of the worlds on the host executor and
 compares each with its slice of the batch.
 
 ```{code-cell} python
@@ -151,7 +180,7 @@ Four things differ from the host run, and none of them changes a result.
 | Worlds | One per `run`; `run_worlds` loops. | One program over a leading world axis. |
 | Compilation | Each stage compiles on first use. | One program, compiled for the batch size and step budget. |
 | Policy | May be written with Python control flow (`decide_py`). | Must be array code with fixed shapes and no Python branch on a traced value. |
-| Inspection | Can collect each decision view as it runs. | Returns the final carry and the trace. |
+| Inspection | Can collect each decision view as it runs (`view_log`). | Returns the final carry and the trace, with no per-decision views. |
 
 The step budget and the number of worlds are shapes, so changing either recompiles.
 The study's capacities are shapes too. A budget that is too small shows up as a

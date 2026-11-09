@@ -20,6 +20,8 @@ A campaign is not a loop over targets. An exposure ends at some tick, its result
 arrives later, and a decision is made only when something wakes the policy. The core
 keeps a queue of events and handles one per step. When a decision asks for an
 observation, the core checks it before committing to it, and the check can refuse.
+The ledger and the carry named below are defined in
+[The ledger](ledger.md) and [Getting started](../getting-started.md).
 
 ```{code-cell} python
 import jax
@@ -68,7 +70,18 @@ show(result)
 ```
 
 The study is the five-observation toy from [Getting started](../getting-started.md).
-The table lists every event the run handled.
+The table lists every event the run handled, one row per step. Its columns are:
+
+| Column | What it shows |
+| --- | --- |
+| step | The index of the step, counting from 0. |
+| tick | The simulated time at which the event was handled. |
+| stage | Where in the tick the event ran, explained below. |
+| event | The kind of event: `DONE` (an exposure ended), `RELEASE` (a result was delivered), `WAIT` (the opening wake) or `STOP` (the campaign ends). |
+| decision | The effect the policy asked for, or `-` if the event did not wake it. |
+| admission | The result of the admission check on that effect (`OK` or a refusal), or `-`. |
+
+The table is built from the run's trace, which holds one row per step.
 
 ## A campaign is a queue of events, handled one per step
 
@@ -76,7 +89,9 @@ The table has twelve rows. Each of the five observations leaves two: a `DONE` ev
 when the exposure ends and the record is written, and a `RELEASE` event when the
 result reaches its readers. One more `WAIT` event at tick 0 is the opening wake that
 lets the policy make its first decision, and a final `STOP` event ends the campaign
-after the policy asked it to drain.
+after the policy asked to stop. The policy's stop asks to drain: it takes no new work
+and lets anything already in flight finish before the campaign ends. Here nothing is in
+flight at that moment, so the run ends at once.
 
 ```{code-cell} python
 handled = int(np.asarray(result.trace.handled).sum())
@@ -90,14 +105,27 @@ next decision happens at that release, so the cycle repeats every 130 ticks.
 
 ## Events at the same tick are ordered by stage
 
-A queued event carries a tick, a stage, a microstep and tie-breakers, and the core
-always handles the smallest. Within one tick the stages run in a fixed order: `SETTLE`
-(an occupancy ends), `RELEASE` (a result is delivered), `ANALYZE`, `DECIDE` and
-`ADMIT`. So a result can never be released before the exposure that made it has
-settled, even when both happen at the same tick.
+A queued event carries a tick and a stage, and the core always handles the smallest
+pair, tick first. Within one tick the stages run in a fixed order: `SETTLE` (an
+occupancy ends), `RELEASE` (a result is delivered), `ANALYZE`, `DECIDE` and `ADMIT`.
+Each event kind has its stage: a `DONE` event is handled at `SETTLE`, a `RELEASE`
+event at `RELEASE`, and the `WAIT` and `STOP` events at `ADMIT`, as the table shows.
+So a result can never be released before the exposure that made it has settled, even
+when both happen at the same tick. (Events that tie on both tick and stage are broken
+by further ordering keys that the core carries, which this toy never needs.)
+
+The `ANALYZE` and `DECIDE` stages are for analysis work between a release and the next
+decision, and for the decision itself. The toy does no analysis and folds its running
+mean as it reads records, so no event in these runs is handled at either stage; the
+policy's decision runs inside the step of the event that woke it.
 
 Setting the channel latency to zero makes an exposure end and its result arrive at the
 same tick. The table shows each pair in stage order, `DONE` first.
+
+The cell below changes one field of the study. A study is an immutable Equinox
+module, so it cannot be edited in place: `eqx.tree_at(where, study, new)` returns a
+copy in which the leaf picked out by `where` is replaced by `new`. Every variant of
+the toy in these pages is made this way.
 
 ```{code-cell} python
 no_latency = eqx.tree_at(lambda s: s.channels.latency_ticks, study, jnp.array([0]))
@@ -113,7 +141,11 @@ here.
 A step handles one event. If that event was released to the policy audience, the
 policy is woken, and in the same step it decides, its effects are admitted, and the
 decision is closed. The `decision` column shows what the policy asked for after each
-wake. Five wakes asked for `OBSERVE`, and the last asked for `STOP`.
+wake. The opening `WAIT` event and the first four releases each led to an `OBSERVE`,
+which is five in all, and the fifth release led to a `STOP`. The `WAIT` event is a
+different thing from the `WAIT` effect: the event is the opening wake the core queues
+at tick 0, and the effect is something a policy can ask for to do nothing until the
+next wake.
 
 An event the policy cannot read wakes nothing. The `DONE` rows have no decision,
 because the exposure ending is not visible to the policy. Only the release is.
@@ -121,9 +153,10 @@ because the exposure ending is not visible to the policy. Only the release is.
 ## Admission checks an effect before the campaign commits to it
 
 A decision returns effects, such as `OBSERVE`, `WAIT` or `STOP`. An observation is
-admitted only if its lane is open and free, the exposure ends inside the horizon, the
-asset and program budgets cover its cost and the event queue has room. The checks run
-in that order, the first failure names the refusal in the `admission` column, and a
+admitted only if its lane is open, the lane is free, the exposure ends inside the
+horizon, the budgets cover its cost and the event queue has room. The checks run in
+that order (the codes are `LANE_CLOSED`, `LANE_BUSY`, `HORIZON`, `NO_FUNDS` and
+`NO_SLOT`), the first failure names the refusal in the `admission` column, and a
 refused effect consumes nothing and writes no record.
 
 Shortening the horizon to 300 ticks shows one refusal. The third observation would
@@ -160,6 +193,6 @@ print(bool(result.complete), bool(refused.complete), bool(broke.complete))
 ## What this page established
 
 The core handles one event per step, in the order of tick, then stage. A release wakes
-the policy, which decides in that same step, and admission checks funds, lane, horizon
-and queue room before anything is committed. The next page follows one record from the
+the policy, which decides in that same step, and admission checks the lane, the horizon,
+the funds and the queue room, in that order, before anything is committed. The next page follows one record from the
 end of its exposure to the moment a reader can see it.

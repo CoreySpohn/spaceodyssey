@@ -56,8 +56,12 @@ Subclass `AbstractObserver` and write `fold(belief, rec, caps, key=None)`. The c
 calls it once for each record the observer accepts, with the belief so far and the
 record as a row of arrays. It returns the new belief. The default belief is a
 `MeanBelief`, with a per-subject `mean`, a per-subject count `n` and a small auxiliary
-array `aux`, so an observer that keeps that shape needs nothing else: the defaults
-supply `init`, the layout and the policy summary.
+array `aux`, so an observer that keeps that shape needs nothing else. The defaults
+supply `init` (the empty belief), the layout and the policy summary. The layout is the
+core's description of the observer's two belief types, the full belief held in the
+carry (the full state of a run, see [Getting started](../getting-started.md)) and the policy summary, a reduced copy that is the only belief a policy reads,
+together with the name of the count leaf. `I64` in the imports is the library's alias
+for the 64-bit integer dtype, used so the count keeps its type.
 
 `fold` sees every record the observer accepts, including kinds and statuses it does not
 use, so it must leave the belief unchanged for those rather than branch on them. The
@@ -91,8 +95,12 @@ class EwmaMean(AbstractObserver):
         )
 ```
 
-The belief carries a count because the core uses it: the fingerprint of every policy
-snapshot reads the count leaf, so the count must change exactly when the belief does.
+The belief carries a count because the core uses it. A snapshot fingerprint is a
+compact identifier of the snapshot a decision read, and the core uses it to tie a later
+request or result to the exact snapshot it came from. The fingerprint reads the count
+leaf, so the count must change exactly when the belief does. If the belief could change
+while the count stayed put, two different snapshots would carry the same fingerprint
+and the tie would no longer be reliable.
 
 ## The observer goes into the study
 
@@ -149,9 +157,12 @@ print(np.array_equal(np.asarray(rebuilt.mean), np.asarray(result.carry.belief.me
 ## The conformance kit checks that no record is folded twice
 
 The kit in `spaceodyssey.core.conformance` runs generic checks on any observer.
-`check_folded_once` takes a batched run and delivers one accepted record a second time,
-and passes only if the belief does not change and the core flags the duplicate. A
-fold that is not idempotent in this sense would double count a measurement.
+`check_folded_once(study, run, truths, roots)` takes the study, a batched run of it and
+the truths and keys that run used. It delivers one accepted record a second time, and
+passes only if the belief does not change and the core flags the duplicate. A fold that
+is not idempotent in this sense would double count a measurement. The cell below
+builds the batch by stacking four copies of the truth and prints the result, which
+reads as a pass or a list of failures.
 
 ```{code-cell} python
 batch = jax.tree_util.tree_map(lambda a: jnp.stack([a] * 4), truth)

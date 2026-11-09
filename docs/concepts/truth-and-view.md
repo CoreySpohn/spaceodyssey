@@ -51,9 +51,16 @@ either star reaches a signal-to-noise ratio above 3. The true brightnesses are 1
 
 Only the channel model receives the truth. Its `realize` method takes the truth, the
 subject observed and a random key, and returns the measured value together with the
-standard normal draw that produced the noise, called the variate. The toy channel
-computes value = signal + 0.5 * variate for a full exposure, where 0.5 is the noise
-level and the design gain is 1.
+standard normal draw that produced the noise, called the variate. For a full exposure
+the toy channel computes
+
+$$
+y = g\,s + \sigma z,
+$$
+
+where $y$ is the measured value, $s$ the true signal of the subject, $g$ the design
+gain (1 here), $\sigma = 0.5$ the noise level and $z$ the variate. Read it as: the
+measurement is the truth plus noise of a known size.
 
 The cell checks that formula against the first record in the log. The value and
 variate in the log are the ones the study's own run produced, so the check ties the
@@ -71,17 +78,20 @@ print(f"value {value:.4f}, variate {variate:.4f}, recovered {recovered:.4f}")
 assert abs(recovered - float(truth.signal[subject])) < 1e-12
 ```
 
-Subtracting the noise recovers the true brightness exactly. Anyone who holds both the
+Subtracting $\sigma z$ recovers the true brightness exactly. Anyone who holds both the
 value and the variate holds the truth, so the variate must stay out of reach of every
 reader that makes decisions.
 
 ## A column declares which readers may see it
 
 Each payload column of a record kind names the audiences allowed to read it. The
+audience is stored as an integer in which each bit stands for one reader, so
+`column.audience & a` is nonzero exactly when reader `a` is allowed. The
 `OBSERVER` audience folds records into beliefs, the `POLICY` audience decides, and the
 `SCORER` audience reads the log afterward to score the run. The toy measurement kind
 lets everyone read the value and the exposure fraction, and lets only the scorer read
-the variate.
+the variate. The observer is therefore barred from the variate too: its belief is built
+from the value alone.
 
 ```{code-cell} python
 from spaceodyssey.core import Audience
@@ -109,9 +119,12 @@ for name, j in (("value", 0), ("variate", 1), ("fraction", 2)):
 assert (seen[:, 1] == 0).all() and (held[:, 1] != 0).all()
 ```
 
-The column mask is the only thing between the policy and the truth. It protects the
-variate because the channel model declared it scorer-only. A column the channel
-declared readable would reach the policy unchanged.
+Two mechanisms keep the truth from the policy. First, only the channel model receives
+the truth, so the policy never holds it directly and sees only what the channel
+produced. Second, the column mask hides the one column, the variate, that would let the
+policy undo the noise and recover the truth from a measured value. The mask protects the
+variate because the channel declared it scorer-only. A column declared readable would
+reach the policy unchanged.
 
 ## A view grows only when a result is released
 
@@ -130,7 +143,14 @@ absent from every view. The next page shows when that gap opens and closes.
 
 ## Swapping the truth cannot change a decision until a record shows the difference
 
-The generated check `truth_swap` tests the whole boundary on a real run. It runs the
+This section uses two words the next pages define in full. A record is *released* when
+it reaches the readers its channel names, as the table above showed with the view's
+growing row count, and the *trace* is the per-step table of handled events from
+[Getting started](../getting-started.md).
+
+The library ships a battery of generated checks in `spaceodyssey.core.battery`: each one
+takes a study you supply, builds its own runs and reports pass or fail with a detail
+string. `truth_swap` tests the whole boundary on a real run. It runs the
 study on two batches of truths with the same random keys. Up to the first released
 record whose policy-readable columns differ, every trace field must be bitwise equal:
 event order, decisions, admissions and policy draws. The check fails when no record

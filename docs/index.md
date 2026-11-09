@@ -1,8 +1,6 @@
 # spaceodyssey
 
-Astronomical analysis and observing campaigns.
-
-spaceodyssey runs multi-visit observing programs with inference in the loop.
+spaceodyssey simulates astronomical analysis and observing campaigns. It runs multi-visit observing programs with inference in the loop.
 An analysis session fits the observations already in hand for a target. A
 campaign adds a time horizon, an observatory, a policy for choosing the next
 visit, and an execution model that turns admitted visits into new records. An
@@ -14,17 +12,15 @@ Pre-alpha. The campaign core provides a declarative vocabulary, a document form
 for studies, and host and compiled executors; physics and inference enter
 through adapters.
 
+Read the pages in order. The tutorial runs one campaign and then many; the concepts
+explain each idea the tutorial used; the how-to guides replace one part of a study; the
+reference is for looking things up.
+
 ```{toctree}
-:caption: Getting started
+:caption: Tutorial
 :maxdepth: 1
 
 getting-started
-```
-
-```{toctree}
-:caption: Many worlds
-:maxdepth: 1
-
 many-worlds
 ```
 

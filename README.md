@@ -10,6 +10,8 @@
 
 # spaceodyssey
 
+A campaign run in **spaceodyssey** leaves a log of records, a ledger of spent budget and a belief about the simulated world; [Getting started](https://spaceodyssey.readthedocs.io/en/latest/getting-started.html) runs one in a few lines.
+
 **spaceodyssey** supports astronomical analysis and observing campaigns: multi-visit observing programs with inference in the loop. Its JAX-based transaction core simulates a campaign as discrete events against a private simulated world, and a document codec writes and reads studies as JSON. Physical adapters connect it to the HWO direct imaging simulation tools:
 
 - **[yippy](https://github.com/CoreySpohn/yippy)**: coronagraph performance data
@@ -47,13 +49,26 @@ pip install spaceodyssey
 ## Quick Start
 
 ```python
-from spaceodyssey import codec, core
+import jax
 
-print(core.HostExecutor.__name__, codec.load_study.__name__)
+jax.config.update("jax_enable_x64", True)
+
+import jax.numpy as jnp
+import jax.random as jr
+
+from spaceodyssey.core import Capacities, HostExecutor, RunStatus
+from spaceodyssey.studies import toy
+
+caps = Capacities(n_subjects=2, n_an=2, n_assets=1, n_lanes=1, n_channels=1)
+study = toy.survey_1(caps=caps)
+truth = toy.ToyTruth(signal=jnp.array([1.0, 1.2]))
+result = HostExecutor().run(study, truth, jr.PRNGKey(0), 40)
+print(RunStatus(result.status).name, int(result.carry.log.valid.sum()), "records")
 ```
+
+A run of this five-observation toy campaign ends `COMPLETE` and leaves five records in
+its log, a ledger of the budget it spent and a belief about each star.
 
 ## Documentation
 
 Full documentation is available at [spaceodyssey.readthedocs.io](https://spaceodyssey.readthedocs.io).
-
-The campaign core was migrated from hwosim at commit edff0c6; hwosim remains as a deprecated compatibility alias.

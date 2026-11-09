@@ -18,7 +18,8 @@ campaign when it has seen enough.
 
 The toy's fixed plan never looks at its view. This guide writes a policy that observes
 whichever star has the fewest measurements and stops once every star has two, then
-runs it on both executors and checks what it declares about itself.
+runs it on both executors and, in the last section, checks what it declares about
+itself.
 
 ```{code-cell} python
 import dataclasses
@@ -57,7 +58,9 @@ truth = toy.ToyTruth(signal=jnp.array([1.0, 1.2]))
 
 Subclass `AbstractPolicy` and write `decide(pstate, view, study, key)`. It returns
 three things: an effect table that says what to do, the policy's next state, and a
-uniform draw it used (return 0.0 when it drew nothing). The policy keeps its own state
+uniform draw it used. The draw exists so a policy that randomizes can have its random
+number recorded in the trace: use the `key` argument for any randomness and return the
+uniform you drew, or 0.0 when you drew nothing, as here. The policy keeps its own state
 in `pstate`, a small float array it may read and update. It reads the world only
 through `view`, a snapshot of what has been released to it. [Truth and
 view](../concepts/truth-and-view.md) lists what the snapshot holds.
@@ -69,16 +72,21 @@ to stop.
 ## An effect table is a few rows of fixed size
 
 An effect is one request: observe this subject on this channel, wait until a tick, or
-stop. A decision returns a table of `caps.n_effects` rows, two by default, and empty
-rows do nothing. The helper `effects_none` builds an empty table, and
+stop. A decision returns a table of `caps.n_effects` rows, two by default, so a policy
+may ask for two things at once (this guide's policy uses one and leaves the other
+empty). Empty rows do nothing. The helper `effects_none` builds an empty table, and
 `dataclasses.replace` fills the rows the policy uses. The `group` column ties effects
 of one decision together, because the core admits or refuses them as a unit. The
-decision index `view.n_dec` is a convenient group number.
+decision index `view.n_dec` is a convenient group number, and a decision with a single
+effect needs only some group value.
 
-A `STOP` row names a scope and a disposition. Campaign scope with the drain
-disposition ends the campaign once the work already admitted has finished. The
-`channel_index` column is a position in the channel table, not a channel id, and
-position 0 is the toy's only channel.
+Each row has fields that only some kinds read. A `STOP` row names a scope and a
+disposition: campaign scope with the drain disposition ends the campaign once the work
+already admitted has finished. An `OBSERVE` row ignores `scope` and `disposition`, so
+the policy below sets them on row 0 whichever kind that row holds, which keeps the code
+free of a second branch. The `channel_index` column is a position in the channel
+table, not a channel id. Its default is 0, which is the toy's only channel, so the
+policy leaves it alone.
 
 ```{code-cell} python
 class BalancedPolicy(AbstractPolicy):
@@ -133,6 +141,15 @@ compiled = CompiledExecutor().run_worlds(balanced, batch, jr.PRNGKey(0)[None], 6
 print(histories_equal(result.history(), compiled.history(0)).go)
 ```
 
+## A policy may use Python on the host executor
+
+Control flow on traced values is not allowed under the compiled executor, but the
+host executor can call a second method, `decide_py`, written with ordinary Python on
+host values. Its default calls `decide`. A policy that needs it
+declares `requires=frozenset({"python_policy"})` in its `Declaration`, a capability
+only the host executor provides, so that `preflight` refuses the compiled executor
+for it.
+
 ## A policy declares the stops it asks for
 
 `preflight` reads a component's `declare` method and never runs the study, so the
@@ -141,8 +158,12 @@ policy must say what it is going to ask for. `Declaration(stops=...)` lists the
 `declared_matches_run` then runs the study and fails when the policy asks for a stop
 it did not declare.
 
-The first policy never declared its stop, so the check fails and names it. The second
-adds `declare` and passes.
+The first policy never declared its stop, so the check fails and names each world and
+phase where the undeclared stop appeared; the output has the form
+`declared_matches_run: FAIL: world 0: phase 0 asked for undeclared stop(s) CAMPAIGN/DRAIN`.
+The second adds `declare` and prints `declared_matches_run: pass`. A phase is one
+stretch of the campaign with its own policy, as in
+[Getting started](../getting-started.md).
 
 ```{code-cell} python
 class DeclaredBalancedPolicy(BalancedPolicy):
@@ -164,12 +185,3 @@ print(preflight(declared, executor="compiled"))
 
 Declarations are assertions by the component. A clean `preflight` does not prove a
 policy keeps them, which is why the check compares them with a run.
-
-## A policy may use Python on the host executor
-
-Control flow on traced values is not allowed under the compiled executor, but the
-host executor can call a second method, `decide_py`, written with ordinary Python on
-host values. Its default calls `decide`. A policy that needs it
-declares `requires=frozenset({"python_policy"})` in its `Declaration`, a capability
-only the host executor provides, so that `preflight` refuses the compiled executor
-for it.

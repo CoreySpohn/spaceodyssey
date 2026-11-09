@@ -56,7 +56,14 @@ columns of the record.
 
 The method runs inside compiled code, so it must be a pure JAX function of its
 arguments: no Python branching on traced values and no random numbers except from the
-key. The class is an Equinox module, so its parameters are fields.
+key. The class is an Equinox module, so its parameters are fields. `AbstractChannelModel`
+supplies the `version` field (default 1), which the document codec reads, so the
+subclass does not declare it.
+
+Two of the arguments need a word. `design` is the study's design component, which holds
+continuous settings; the toy design has one, a gain that multiplies the signal, set to 1
+here. `channels` is the channel table, which a model can read for per-channel settings;
+this model ignores it.
 
 ```{code-cell} python
 class ShotNoisePhotometry(AbstractChannelModel):
@@ -73,7 +80,9 @@ class ShotNoisePhotometry(AbstractChannelModel):
 ```
 
 The division by the square root of the fraction makes a shorter exposure noisier, as
-averaging fewer photons would. For a full exposure, the fraction is 1 and drops out.
+averaging fewer photons would. The fraction is floored at 0.001 so that an exposure that
+completed none of its time (a cancelled one) divides by a small number rather than by
+zero. For a full exposure, the fraction is 1 and drops out.
 
 ## The new channel replaces the old one in the study
 
@@ -94,7 +103,8 @@ An empty list means the declarations are consistent for the compiled executor.
 
 The variate is stored in the log, so the formula can be checked against what the run
 wrote. Rebuilding each value from the truth and its variate should reproduce the logged
-value exactly, whatever the key was.
+value exactly, whatever the key was. The check below omits the fraction term, which
+is valid because every exposure in this study completes in full, so the fraction is 1.
 
 ```{code-cell} python
 result = HostExecutor().run(shot, truth, jr.PRNGKey(0), 40)
@@ -120,8 +130,13 @@ def scatter(model, signal, n=20000):
     keys = jr.split(jr.PRNGKey(3), n)
     values = jax.vmap(
         lambda k: model.realize(
-            toy.ToyTruth(signal=jnp.array([signal, signal])), 0, 0, 1.0, k,
-            study.design, study.channels,
+            toy.ToyTruth(signal=jnp.array([signal, signal])),
+            subject=0,
+            channel_index=0,
+            fraction=1.0,
+            key=k,
+            design=study.design,
+            channels=study.channels,
         )[0]
     )(keys)
     return float(values.std())
@@ -134,7 +149,14 @@ for brightness in (0.5, 1.5):
 ```
 
 The measured scatter agrees with the expectation to within the sampling error of 20000
-draws, which is 1 / sqrt(2 * 20000), about 0.5 percent.
+draws. The relative error of a standard deviation estimated from $N$ draws is about
+
+$$
+\frac{1}{\sqrt{2N}},
+$$
+
+which is 0.5 percent for $N = 20000$. Read it as: quadrupling the draws halves the
+error.
 
 ## The channel runs on both executors with the same history
 

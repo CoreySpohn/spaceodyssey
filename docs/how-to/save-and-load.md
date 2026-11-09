@@ -56,7 +56,8 @@ class ShotNoisePhotometry(AbstractChannelModel):
         """Return the measured value and the standard normal variate behind it."""
         z = jr.normal(key, dtype=jnp.float64)
         signal = design.gain * truth.signal[subject]
-        return signal + self.noise[channel_index] * jnp.sqrt(signal) * z, z
+        scale = self.noise[channel_index] * jnp.sqrt(signal)
+        return signal + scale * z / jnp.sqrt(jnp.maximum(fraction, 1e-3)), z
 
 
 custom = eqx.tree_at(
@@ -64,8 +65,8 @@ custom = eqx.tree_at(
 )
 ```
 
-The channel is the one from [how to write a channel](channel.md), shortened to the
-part the document needs.
+The channel is the one from [how to write a channel](channel.md), repeated so this page
+runs on its own.
 
 ## Every class in a document is a registered kind
 
@@ -95,8 +96,9 @@ equal pytree rather than an approximation.
 ## A study whose kinds are not named cannot be saved
 
 `dump_study` refuses a class it cannot name, and the error points into the study
-where it found one. With no `kinds` argument only the core classes resolve, so the first class outside
-the core, here the custom channel, is refused.
+where it found one. With no `kinds` argument only the core classes resolve. The toy classes are registered
+through entry points, so they would be refused too; the error names the first class it
+met, here the custom channel at `/study/channel_model`.
 
 ```{code-cell} python
 try:
@@ -138,7 +140,7 @@ print(type(loaded.channel_model).__name__, float(loaded.channel_model.noise[0]))
 
 The check that counts is the one on behavior. Both studies run the same world with the
 same key, and their canonical histories must agree: every integer equal and every float
-within 1e-12.
+within $10^{-12}$.
 
 ```{code-cell} python
 key = jr.PRNGKey(0)

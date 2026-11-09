@@ -17,7 +17,8 @@ Where does the budget go, and how can a run prove that it was spent correctly?
 
 A telescope has finite time, and a program has a finite allocation. A simulator that
 lets a policy overspend gives a yield nobody could achieve. The ledger is the part of
-the carry that holds every balance and every lane's state, and it is the first place
+the carry (the full state of a run, defined in [Getting started](../getting-started.md))
+that holds every balance and every lane's state, and it is the first place
 to look when an observation is refused.
 
 ```{code-cell} python
