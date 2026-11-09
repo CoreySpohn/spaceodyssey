@@ -337,7 +337,6 @@ require_tier_reason = true
 "tests/test_package.py" = 10
 "tests/test_planit_adapter.py" = 252
 "tests/test_public_api.py" = 10
-"tests/test_slice3a_gate.py" = 283
 
 [tool.deptry]
 known_first_party = ["spaceodyssey"]

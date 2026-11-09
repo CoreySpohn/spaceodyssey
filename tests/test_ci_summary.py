@@ -1,15 +1,17 @@
-"""The CI summary script fails a run over its budget, baseline or tier limits."""
+"""CI tooling: the summary script's limits and the same-job step cost comparison."""
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-from tests.pin_helpers import REPO
-
+REPO = Path(__file__).resolve().parents[1]
 CI_SUMMARY = REPO / ".github/scripts/ci_summary.py"
+STEP_PAIR = REPO / "tools/step_cost_pair.py"
 
 JUNIT = """<?xml version="1.0"?>
 <testsuites><testsuite name="pytest" time="{wall}">
@@ -78,3 +80,37 @@ def test_an_advisory_baseline_prints_the_increase_without_failing(tmp_path):
     result = subprocess.run(command, capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "advisory: not a failure" in result.stdout
+
+
+def _pair_tool():
+    """The same-job comparison tool, loaded by path (it does not import JAX)."""
+    spec = importlib.util.spec_from_file_location("step_cost_pair", STEP_PAIR)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_step_cost_comparison_separates_its_limit():
+    """Fails if the same-job comparison passes a final tree over 1.10 times the base,
+    fails one within it, or compares anything but the lowest minimum of each tree.
+    """
+    pair = _pair_tool()
+    assert pair.LIMIT == 1.10
+
+    def runs(minima):
+        return [
+            {
+                "handlers": 11,
+                "plain": {"per_step_min_us": m, "cold_s": 1.0},
+                "mutant": {"per_step_min_us": 1.5 * m, "cold_s": 1.0},
+                "mutant_ratio": 1.5,
+            }
+            for m in minima
+        ]
+
+    base = runs([100.0, 120.0])
+    assert pair.compare(base, runs([110.0, 150.0]))["within_limit"]
+    assert not pair.compare(base, runs([111.0, 111.0]))["within_limit"]
+    # the lowest minimum of each tree: one noisy round does not decide the ratio
+    noisy = pair.compare(base, runs([300.0, 105.0]))
+    assert noisy["ratio"] == 1.05 and noisy["within_limit"]

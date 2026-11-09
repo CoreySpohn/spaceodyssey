@@ -256,3 +256,19 @@ def test_a_lane_closing_fault_breaks_the_fault_pin():
     assert all(got[k]["ints"] != pinned[k]["ints"] for k in got)
     ints = fault_run("host", True).history(0).ints
     assert np.count_nonzero(ints["status"] == RecordStatus.COMPLETED) == 0
+
+
+def test_the_twelve_stop_cases_stay_pinned():
+    """Fails if a `stop_*` corpus case (four scopes, three dispositions) loses its pin
+    on either executor or world, for instance because the case left the corpus.
+    """
+    pinned = _pin()["histories"]
+    names = [
+        f"stop_{scope}_{disposition}"
+        for scope in ("asset", "campaign", "lane", "program")
+        for disposition in ("abort", "close", "drain")
+    ]
+    for name in names:
+        for executor in EXECUTORS:
+            for world in range(N_WORLDS):
+                assert entry_key(name, executor, world) in pinned, name
