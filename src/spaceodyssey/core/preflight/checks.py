@@ -649,6 +649,45 @@ def config_timeline(study: Study):
     return out
 
 
+def ops_costs(study: Study):
+    """O001: a per-ops-state cost table the capacities cannot hold.
+
+    With `n_ops` 1 no table is declared. With more states a declared `cost_by_ops` has
+    shape `(n_ops, n_channels, n_resources)` and finite entries that are not negative
+    (a negative one would credit the ledger).
+    """
+    caps = study.caps
+    table = study.channels.cost_by_ops
+
+    def flag(why, entry=()):
+        return [
+            Finding(
+                FindingCode.O001,
+                ERROR,
+                "channels.cost_by_ops",
+                why,
+                "declare n_ops and a finite, nonnegative cost table of shape "
+                "(n_ops, n_channels, n_resources), or drop the table",
+                subject="channels",
+                member="cost_by_ops",
+                entry=entry,
+            )
+        ]
+
+    if table is None:
+        return []
+    if not caps.ops:
+        return flag("is set while n_ops is 1")
+    shape = (caps.n_ops, caps.n_channels, caps.n_resources)
+    if tuple(np.shape(table)) != shape:
+        return flag(f"is not an array of shape {shape}")
+    values = np.asarray(table, dtype=np.float64)
+    bad = np.argwhere(~(np.isfinite(values) & (values >= 0.0)))
+    if len(bad):
+        return flag("holds an entry that is negative or not finite", tuple(bad[0]))
+    return []
+
+
 def awards(study: Study):
     """W001: an award window a policy declares that cannot be admitted.
 
@@ -824,6 +863,7 @@ def preflight(
         *awards(study),
         *bundles(study),
         *config_timeline(study),
+        *ops_costs(study),
         *channels(study),
         *components(study, context),
     ]

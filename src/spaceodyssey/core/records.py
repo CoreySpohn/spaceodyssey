@@ -246,6 +246,9 @@ class Record(eqx.Module):
     # The bundle the acquisition was admitted in (`decision * max_bundles + ordinal`, -1
     # for none); present only while bundles are on, and visible to every audience.
     bundle: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    # The ops state of the asset when the acquisition was admitted, which priced it;
+    # present only while ops states are on.
+    ops: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
 
 
 def record_none(caps):
@@ -263,6 +266,7 @@ def record_none(caps):
         valid=jnp.asarray(False),
         program=z if caps.n_programs > 1 else None,
         bundle=jnp.asarray(-1, I64) if caps.bundles else None,
+        ops=z if caps.ops else None,
         **(
             dict(
                 nonrefundable=jnp.zeros(caps.n_resources, F64),
@@ -312,6 +316,7 @@ class RecordLog(eqx.Module):
     award_rules: jax.Array | None  # I64[L, R], present only with awards
     award_tos: jax.Array | None  # I64[L, R], present only with awards
     bundle: jax.Array | None  # I64[L], present only with bundles
+    ops: jax.Array | None  # I64[L], present only with ops states
     # Pedigree of a product row, I64[L, product_width]: audience, refit status, row
     # count and the revision set as (channel, acquisition index, revision) triples. It
     # is not a `Record` field: only a refresh writes it; every other row holds zeros.
@@ -336,6 +341,7 @@ def log_columns(log):
 REFUND_COLUMNS = ("nonrefundable", "refund_index", "award_gen")
 AWARD_COLUMNS = ("award_gens", "award_rules", "award_tos")
 BUNDLE_COLUMNS = ("bundle",)
+OPS_COLUMNS = ("ops",)
 
 
 def empty_log(caps):
@@ -365,6 +371,7 @@ def empty_log(caps):
         if caps.awards
         else None,
         bundle=jnp.full(caps.n_log, -1, I64) if caps.bundles else None,
+        ops=z if caps.ops else None,
     )
 
 
@@ -394,7 +401,7 @@ def write_log(carry, rec, caps):
     col = carry.log.program
     if col is not None:
         col = col.at[s].set(jnp.where(ok, rec.program, col[s]))
-    for name in (*REFUND_COLUMNS, *AWARD_COLUMNS, *BUNDLE_COLUMNS):
+    for name in (*REFUND_COLUMNS, *AWARD_COLUMNS, *BUNDLE_COLUMNS, *OPS_COLUMNS):
         old = getattr(carry.log, name)
         cols[name] = (
             None
@@ -494,6 +501,7 @@ _NOT_INT = (
     *REFUND_COLUMNS,
     *AWARD_COLUMNS,
     *BUNDLE_COLUMNS,
+    *OPS_COLUMNS,
 )
 RECORD_INT_FIELDS = tuple(
     f.name for f in dataclasses.fields(Record) if f.name not in _NOT_INT

@@ -30,6 +30,7 @@ from spaceodyssey.core.lift import lifting_jit
 from spaceodyssey.core.records import (
     AWARD_COLUMNS,
     BUNDLE_COLUMNS,
+    OPS_COLUMNS,
     REFUND_COLUMNS,
     Record,
     derived_rows,
@@ -47,8 +48,14 @@ def _emit(n, slot):
 
 # the columns a log row always has; `program` is present only with several programs,
 # the refund and award columns only while refunds or awards are on and the bundle
-# column only while bundles are
-_OPTIONAL_ROW = ("program", *REFUND_COLUMNS, *AWARD_COLUMNS, *BUNDLE_COLUMNS)
+# column only while bundles are and the ops column only with ops states
+_OPTIONAL_ROW = (
+    "program",
+    *REFUND_COLUMNS,
+    *AWARD_COLUMNS,
+    *BUNDLE_COLUMNS,
+    *OPS_COLUMNS,
+)
 _ROW_FIELDS = tuple(
     f for f in dataclasses.fields(Record) if f.name not in _OPTIONAL_ROW
 )
@@ -124,6 +131,23 @@ def _bundle_field(ev):
     return {} if ev.bundle is None else {"bundle": ev.bundle}
 
 
+def _ops_field(ops):
+    """The record's ops column from a stored admission state (nothing without one)."""
+    return {} if ops is None else {"ops": ops}
+
+
+def _priced(study, channel_index, ops):
+    """`(cost, charged)` of a record before refunds, at the admission ops state.
+
+    Without declared per-state costs this is the channel's `cost` twice, as before.
+    """
+    if study.channels.cost_by_ops is None:
+        cost = study.channels.cost[channel_index]
+        return cost, cost
+    cost = study.channels.cost_by_ops[0 if ops is None else ops, channel_index]
+    return cost, cost
+
+
 def h_done(c, ev, study, truth, root):
     """Settle one completed occupancy exactly once: realize, log, queue its Release.
 
@@ -156,6 +180,7 @@ def h_done(c, ev, study, truth, root):
         revision=jnp.asarray(0, I64),
         **_program_field(ev),
         **_bundle_field(ev),
+        **_ops_field(ev.ops),
         released_tick=jnp.asarray(-1, I64),
         accepted_tick=jnp.asarray(-1, I64),
         superseded_by=jnp.asarray(-1, I64),
@@ -163,12 +188,14 @@ def h_done(c, ev, study, truth, root):
         source=ev.channel,
         vintage=ev.scope,
         config_id=jnp.asarray(0 if ev.config is None else ev.config, I64),
-        cost=channels.cost[channel_index],
-        charged=channels.cost[channel_index],
+        cost=_priced(study, channel_index, ev.ops)[0],
+        charged=_priced(study, channel_index, ev.ops)[1],
         valid=~dup & ~stale,
     )
     if caps.refunds:
-        charge, fixed, _ = charge_parts(study, channel_index)
+        charge, fixed, _ = charge_parts(
+            study, channel_index, 0 if ev.ops is None else ev.ops
+        )
         base = dataclasses.replace(base, charged=charge, nonrefundable=fixed)
     if caps.awards:
         base = _with_award_capture(base, c.ledger, ev.lane)
@@ -590,6 +617,8 @@ def _cancel_one(
         channels.latency_ticks[channel_index],
     )
     start_tick = c.ev.tick[i] - dur
+    # the ops state the occupancy was admitted under, which priced its debit
+    stored = None if c.ev.ops is None else c.ev.ops[i]
     if named:
         start_tick = jnp.where(reserved, c.tick, start_tick)
     frac = jnp.clip((c.tick - start_tick).astype(F64) / dur.astype(F64), 0.0, 1.0)
@@ -617,14 +646,17 @@ def _cancel_one(
         source=c.ev.channel[i],
         vintage=c.ev.scope[i],
         config_id=jnp.asarray(0 if c.ev.config is None else c.ev.config[i], I64),
-        cost=channels.cost[channel_index] * spent,
-        charged=channels.cost[channel_index] * spent,
+        cost=_priced(study, channel_index, stored)[0] * spent,
+        charged=_priced(study, channel_index, stored)[1] * spent,
         valid=has,
         **({} if c.ev.program is None else {"program": c.ev.program[i]}),
         **({} if c.ev.bundle is None else {"bundle": c.ev.bundle[i]}),
+        **_ops_field(stored),
     )
     if caps.refunds:
-        charge, fixed, pricing = charge_parts(study, channel_index)
+        charge, fixed, pricing = charge_parts(
+            study, channel_index, 0 if stored is None else stored
+        )
         # per resource column: a flat price returns nothing on a cancel, and the fixed
         # part of any price stays with the record
         part = jnp.where(pricing == ChargePricing.FLAT_FRACTION, 1.0, spent)
@@ -638,7 +670,9 @@ def _cancel_one(
     if caps.refunds:
         credit = jnp.where(has, charge - kept, 0.0)
     else:
-        credit = jnp.where(has, channels.cost[channel_index] * (1.0 - spent), 0.0)
+        credit = jnp.where(
+            has, _priced(study, channel_index, stored)[0] * (1.0 - spent), 0.0
+        )
     # the lane is freed only by cancelling what occupies it; the later members of a
     # bundle leave the generation and the window to the first
     occupied = has & ~reserved if named else has
@@ -956,6 +990,7 @@ def h_commit_start(c, ev, study, truth, root):
         acquisition_id=ev.acquisition_id,
         program=0 if ev.program is None else ev.program,
         **({} if ev.config is None else {"config": c.ledger.cm_config[mark]}),
+        **({} if ev.ops is None else {"ops": c.ledger.cm_ops[mark]}),
         caps=caps,
     )
     return c2, _emit(n, slot), rec

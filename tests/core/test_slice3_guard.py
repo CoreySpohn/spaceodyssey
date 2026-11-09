@@ -190,6 +190,8 @@ def test_the_added_asset_keeps_every_existing_asset_coordinate():
         {"n_commitments": -1},
         {"n_commitments": True},
         {"n_commitments": 1.0},
+        {"n_ops": 0},
+        {"n_ops": True},
     ],
 )
 def test_a_malformed_slice_3a_capacity_is_refused(bad):
@@ -217,6 +219,7 @@ def test_the_slice_3a_capacities_default_to_off():
         "max_bundles",
         "max_bundle_size",
         "max_config_switches",
+        "n_ops",
     ]
 
 

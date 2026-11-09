@@ -423,6 +423,13 @@ def _commit_observe(c, eff, e, ok, study):
         ticks = study.assets.config_switch_ticks[study.assets.lane_asset[lane]]
         config = (ticks <= t).sum().astype(I64)
         config_extra = {"config": config}
+    ops_extra = {}
+    ops = jnp.asarray(0, I64)
+    if caps.ops:
+        # the asset's ops state at admission prices the debit and, stored on the row,
+        # the settlement and any cancel
+        ops = _ops_of(c, study, lane)
+        ops_extra = {"ops": ops}
     gen = c.ledger.lane_gen[lane] + first.astype(I64)
     subject = eff.subject[e]
     acquisition_index = c.acquisition_counts[subject]
@@ -430,10 +437,10 @@ def _commit_observe(c, eff, e, ok, study):
         c,
         **{
             "ledger.balance": c.ledger.balance.at[rows, cols].add(
-                jnp.where(ok, -charge_parts(study, channel_index)[0], 0.0)
+                jnp.where(ok, -charge_parts(study, channel_index, ops)[0], 0.0)
             ),
             "ledger.debited": c.ledger.debited.at[rows, cols].add(
-                jnp.where(ok, charge_parts(study, channel_index)[0], 0.0)
+                jnp.where(ok, charge_parts(study, channel_index, ops)[0], 0.0)
             ),
             "ledger.lane_busy_until": c.ledger.lane_busy_until.at[lane].set(
                 jnp.where(ok_now, busy, c.ledger.lane_busy_until[lane])
@@ -468,6 +475,7 @@ def _commit_observe(c, eff, e, ok, study):
                     if caps.configs
                     else {}
                 ),
+                **({"ledger.cm_ops": put(led.cm_ops, ops)} if caps.ops else {}),
             },
         )
         c1 = enqueue(
@@ -489,6 +497,7 @@ def _commit_observe(c, eff, e, ok, study):
             acquisition_id=c.next_sid,
             program=program,
             **config_extra,
+            **ops_extra,
             caps=caps,
         )
     if caps.awards:
@@ -537,6 +546,7 @@ def _commit_observe(c, eff, e, ok, study):
         program=program,
         **bundle_extra,
         **config_extra,
+        **ops_extra,
         caps=caps,
     )
 
@@ -635,6 +645,13 @@ def _commit_allocate(c, eff, e, want, study):
     return c2, jnp.where(want, code, AdmissionCode.NONE)
 
 
+def _ops_of(c, study, lane):
+    """The ops state of the asset that owns `lane` (0 while ops states are off)."""
+    if not study.caps.ops:
+        return jnp.asarray(0, I64)
+    return c.ledger.ops_state[study.assets.lane_asset[lane]]
+
+
 def _group_code(c, eff, member, study):
     """Admission result of the rows in `member`, judged as one group.
 
@@ -651,7 +668,8 @@ def _group_code(c, eff, member, study):
         lane = channels.lane[eff.channel_index[f]]
         program = _program_of(eff, f, caps)
         rows = _resource_rows(study, lane, program)
-        cost = charge_parts(study, eff.channel_index[f])[0]
+        ops = _ops_of(c, study, lane)
+        cost = charge_parts(study, eff.channel_index[f], ops)[0]
         return lane, program, rows, cost
 
     lanes, programs, rows, cost = jax.vmap(inputs)(idx)

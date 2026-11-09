@@ -86,6 +86,13 @@ class Capacities:
     # Configuration timeline: switch ticks held per asset (the padded width of
     # `AssetTable.config_switch_ticks`); zero (off) at the default.
     max_config_switches: int = dataclasses.field(default=0, metadata=OPTIONAL)
+    # Asset ops states: the number of states an asset can be in; one (off) by default.
+    n_ops: int = dataclasses.field(default=1, metadata=OPTIONAL)
+
+    @property
+    def ops(self) -> bool:
+        """Whether asset ops states are on (more than one state)."""
+        return self.n_ops > 1
 
     @property
     def configs(self) -> bool:
@@ -143,6 +150,10 @@ class Capacities:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
+        if isinstance(self.n_ops, bool) or not isinstance(self.n_ops, int):
+            raise ValueError("n_ops must be a positive integer")
+        if self.n_ops < 1:
+            raise ValueError("n_ops must be a positive integer")
         if (self.max_bundles > 0) != (self.max_bundle_size > 0):
             raise ValueError(
                 "max_bundles and max_bundle_size are both positive (bundles on) or "
