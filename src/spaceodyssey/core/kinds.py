@@ -242,6 +242,7 @@ class RealizeContext(eqx.Module):
     end_tick: jax.Array
     acquisition_index: jax.Array
     fraction: jax.Array
+    config_id: jax.Array
 
     @classmethod
     def from_record(cls, rec, fraction):
@@ -251,6 +252,7 @@ class RealizeContext(eqx.Module):
             end_tick=jnp.asarray(rec.end_tick, I64),
             acquisition_index=jnp.asarray(rec.acquisition_index, I64),
             fraction=jnp.asarray(fraction, F64),
+            config_id=jnp.asarray(rec.config_id, I64),
         )
 
 

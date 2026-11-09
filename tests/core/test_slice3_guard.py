@@ -216,6 +216,7 @@ def test_the_slice_3a_capacities_default_to_off():
         "balance_quantum",
         "max_bundles",
         "max_bundle_size",
+        "max_config_switches",
     ]
 
 

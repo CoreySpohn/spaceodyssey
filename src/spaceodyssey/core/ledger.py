@@ -79,6 +79,9 @@ class Ledger(eqx.Module):
     cm_end: jax.Array | None = None
     cm_index: jax.Array | None = None
     cm_count: jax.Array | None = None
+    # the configuration each commitment was admitted under (I64[K]), present only while
+    # a configuration timeline is on (of size zero without commitments)
+    cm_config: jax.Array | None = None
 
 
 def charge_parts(study, channel_index):
@@ -133,12 +136,25 @@ class AssetTable(eqx.Module):
 
     `freeze_ticks` and `disruptive_resource` have one entry per asset and are reserved:
     no rule reads them yet.
+
+    `config_switch_ticks` (I64[A, S], `S = caps.max_config_switches`) holds each asset's
+    configuration switch ticks, sorted and padded on the right with `CONFIG_PAD`; it is
+    present only while the capacities hold a timeline. The configuration of an asset at
+    a tick is the number of its switch ticks at or before that tick. The ticks are
+    traced, so a batch of timelines shares one program.
     """
 
     lane_asset: jax.Array
     transition_ticks: jax.Array
     freeze_ticks: jax.Array  # I64[A], 0 means no horizon
     disruptive_resource: jax.Array  # I64[A], -1 means none
+    config_switch_ticks: jax.Array | None = dataclasses.field(
+        default=None, metadata=OPTIONAL
+    )
+
+
+# Pads the unused tail of an asset's switch ticks; no tick reaches it.
+CONFIG_PAD = 2**62
 
 
 def fault_tie(channels, channel_index):

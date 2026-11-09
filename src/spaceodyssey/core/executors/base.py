@@ -69,6 +69,7 @@ CANONICAL_FIELDS = {
         "valid",
         "program",
         "bundle",
+        "config",
     ),
     "carry.log": (
         "kind",
@@ -135,6 +136,7 @@ CANONICAL_FIELDS = {
         "cm_end",
         "cm_index",
         "cm_count",
+        "cm_config",
     ),
     "carry.request": (
         "kind",
@@ -161,6 +163,7 @@ CANONICAL_FIELDS = {
         "valid",
         "program",
         "bundle",
+        "config",
     ),
     "carry.refresh": (
         "kind",
@@ -187,6 +190,7 @@ CANONICAL_FIELDS = {
         "valid",
         "program",
         "bundle",
+        "config",
     ),
     "trace": (
         "handled",
@@ -252,6 +256,11 @@ def bundles_on(carry):
     return carry.ev.bundle is not None
 
 
+def config_on(carry):
+    """Whether the carry holds configuration stamps (the event rows have the column)."""
+    return carry.ev.config is not None
+
+
 def balances_on(carry):
     """Whether the carry holds the balance snapshot (its refused-request leaf)."""
     return carry.query_refused is not None
@@ -291,6 +300,10 @@ CONDITIONAL_FIELDS = {
     "carry.log.bundle": bundles_on,
     "carry.request.bundle": bundles_on,
     "carry.refresh.bundle": bundles_on,
+    "carry.ev.config": config_on,
+    "carry.request.config": config_on,
+    "carry.refresh.config": config_on,
+    "carry.ledger.cm_config": config_on,
     "trace.program": programs_on,
     "carry.query_refused": balances_on,
     "carry.ledger.win_state": awards_on,

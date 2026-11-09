@@ -26,6 +26,7 @@ class FindingCode(StrEnum):
     P001 = "P001"  # a policy names a program the capacities do not hold
     W001 = "W001"  # an award window that is empty, out of range or overlaps another
     B001 = "B001"  # a bundle the study cannot admit as one occupancy of its lane
+    S001 = "S001"  # a configuration timeline the study cannot read or stamp from
     W002 = "W002"  # a declared failure kind the policy cannot read
     T002 = "T002"  # a channel with no valid coincident order
     R001 = "R001"  # a channel declares a record kind the registry lacks

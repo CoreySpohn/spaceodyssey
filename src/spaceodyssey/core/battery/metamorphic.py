@@ -19,6 +19,7 @@ from spaceodyssey.core.carry import absent
 from spaceodyssey.core.enums import I64
 from spaceodyssey.core.executors.base import belief_leaves, canonical_history
 from spaceodyssey.core.kinds import AbstractProcess
+from spaceodyssey.core.ledger import CONFIG_PAD
 from spaceodyssey.core.records import log_columns
 
 # Float columns of a canonical history that no draw feeds.
@@ -249,6 +250,14 @@ def with_zero_time_asset(study):
         freeze_ticks=jnp.concatenate([assets.freeze_ticks, jnp.zeros(1, I64)]),
         disruptive_resource=jnp.concatenate(
             [assets.disruptive_resource, jnp.full(1, -1, I64)]
+        ),
+        config_switch_ticks=None
+        if assets.config_switch_ticks is None
+        else jnp.concatenate(
+            [
+                assets.config_switch_ticks,
+                jnp.full((1, assets.config_switch_ticks.shape[1]), CONFIG_PAD, I64),
+            ]
         ),
     )
     budget = jnp.insert(study.budget, n_assets, 0.0, axis=0)

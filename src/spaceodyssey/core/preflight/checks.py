@@ -25,6 +25,7 @@ from spaceodyssey.core.enums import (
     EffectKind,
     Scope,
 )
+from spaceodyssey.core.ledger import CONFIG_PAD
 from spaceodyssey.core.preflight.findings import Finding, FindingCode, Severity
 from spaceodyssey.core.preflight.graph import NodeKind, Side, StudyGraph
 from spaceodyssey.core.study import Study
@@ -606,6 +607,47 @@ def bundles(study: Study):
     return out
 
 
+def config_timeline(study: Study):
+    """S001: a configuration timeline the capacities and horizon cannot hold.
+
+    With `max_config_switches` zero the assets declare no switch ticks. With it positive
+    each asset declares a row of exactly that many ticks, ascending, inside the horizon
+    (0 to `horizon_tick`), the unused tail padded with `CONFIG_PAD`.
+    """
+    caps = study.caps
+    ticks = study.assets.config_switch_ticks
+
+    def flag(why, entry=()):
+        return [
+            Finding(
+                FindingCode.S001,
+                ERROR,
+                "assets.config_switch_ticks",
+                why,
+                "declare max_config_switches and one ascending row of switch ticks "
+                "inside the horizon per asset, padded with CONFIG_PAD",
+                subject="assets",
+                member="config_switch_ticks",
+                entry=entry,
+            )
+        ]
+
+    if not caps.configs:
+        return [] if ticks is None else flag("is set while max_config_switches is 0")
+    shape = (caps.n_assets, caps.max_config_switches)
+    if ticks is None or tuple(np.shape(ticks)) != shape:
+        return flag(f"is not an array of shape {shape}")
+    horizon = int(study.horizon_tick)
+    out = []
+    for a, row in enumerate(np.asarray(ticks)):
+        real = row[row != CONFIG_PAD]
+        if len(real) and (real[0] < 0 or real[-1] > horizon):
+            out += flag(f"holds a tick outside 0 to {horizon}", (a,))
+        elif (np.diff(row) < 0).any():
+            out += flag("is not ascending with its padding last", (a,))
+    return out
+
+
 def awards(study: Study):
     """W001: an award window a policy declares that cannot be admitted.
 
@@ -780,6 +822,7 @@ def preflight(
         *programs(study),
         *awards(study),
         *bundles(study),
+        *config_timeline(study),
         *channels(study),
         *components(study, context),
     ]

@@ -26,6 +26,7 @@ from spaceodyssey.core.enums import (
     EffectKind,
     Scope,
 )
+from spaceodyssey.core.ledger import CONFIG_PAD
 from spaceodyssey.core.preflight import FindingCode as C
 from spaceodyssey.core.preflight.checks import PreflightContext
 from spaceodyssey.core.refresh import HostLoopRefit, MaskedBatchRefit
@@ -189,6 +190,15 @@ def _bundle_policy(bundles, **caps):
 def _assets(**columns):
     study = toy.survey_1()
     return _replace(study, assets=dataclasses.replace(study.assets, **columns))
+
+
+def _timeline_study(ticks, switches=3):
+    """`survey_1` with a configuration timeline of `switches` slots per asset."""
+    caps = Capacities(max_config_switches=switches)
+    return toy.survey_1(caps=caps, config_switch_ticks=ticks)
+
+
+PAD = CONFIG_PAD
 
 
 def _commitment_study(policy=None, **columns):
@@ -427,6 +437,22 @@ SEEDED = {
         lambda: _bundle_policy(((0, 2, 5, 1, 0),) * 3),
         None,
     ),
+    "config_ticks_without_capacity": (
+        C.S001,
+        lambda: toy.survey_1(config_switch_ticks=jnp.zeros((2, 1), I64)),
+        None,
+    ),
+    "config_ticks_missing": (C.S001, lambda: _timeline_study(None), None),
+    "config_ticks_unsorted": (
+        C.S001,
+        lambda: _timeline_study(jnp.asarray([[30, 20, PAD], [PAD, PAD, PAD]], I64)),
+        None,
+    ),
+    "config_tick_past_horizon": (
+        C.S001,
+        lambda: _timeline_study(jnp.asarray([[PAD] * 3, [10, 2000, PAD]], I64)),
+        None,
+    ),
     "frozen_horizon": (
         C.X002,
         lambda: _assets(freeze_ticks=jnp.asarray([5, 0], I64)),
@@ -505,6 +531,10 @@ CLEAN = {
     ),
     "bundles_within_capacity": (
         lambda: _bundle_policy(((0, 2, 5, 1, 0), (0, 2, 5, 1, 0), (1, 0, 6, 1, 0))),
+        (),
+    ),
+    "timeline_within_horizon": (
+        lambda: _timeline_study(jnp.asarray([[0, 500, PAD], [PAD, PAD, PAD]], I64)),
         (),
     ),
     "charge_with_refunds": (

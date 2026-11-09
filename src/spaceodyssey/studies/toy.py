@@ -798,6 +798,7 @@ def survey_1(caps=None, **overrides):
         transition_ticks=base.pop("transition_ticks"),
         freeze_ticks=jnp.zeros(caps.n_assets, I64),
         disruptive_resource=jnp.full(caps.n_assets, -1, I64),
+        config_switch_ticks=base.pop("config_switch_ticks", None),
     )
     policies = base.pop("policies")
     base["agenda"] = Agenda(
