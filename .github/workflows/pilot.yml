@@ -21,6 +21,10 @@ on:
         description: "Run the whole quick tier cold at this ref (empty: the pilot)"
         default: ""
         type: string
+      baseline_per_step_min_us:
+        description: "Pilot only: per-step minimum (us) of the eleven-handler table, measured in the same job; fails the run above 1.10 times it (empty: report only)"
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -62,8 +66,11 @@ jobs:
           uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt
 
       - name: Step cost, plain and mutant
+        env:
+          BASELINE_US: ${{ inputs.baseline_per_step_min_us }}
         run: |
-          python tools/step_cost.py --mutant --repeats 30 | tee step_cost.json
+          python tools/step_cost.py --mutant --repeats 30 \
+            ${BASELINE_US:+--baseline-per-step-us "$BASELINE_US"} | tee step_cost.json
 
       - name: Cold medium study tests, one process per file
         run: |

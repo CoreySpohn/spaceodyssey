@@ -35,6 +35,18 @@ def step_cost_table(path):
             )
     if "mutant_ratio" in data:
         lines += ["", f"Mutant ratio (median per step): {data['mutant_ratio']}"]
+    if "k3" in data:
+        k3 = data["k3"]
+        lines += [
+            "",
+            f"K3 plain per-step minimum over the baseline of "
+            f"{data['baseline_per_step_min_us']} us: ratio {k3['ratio']} against "
+            f"the limit {k3['limit']} ({'pass' if k3['within_limit'] else 'FAIL'})",
+        ]
+        if "k3_mutant" in data:
+            lines.append(
+                f"K3 mutant ratio over the baseline: {data['k3_mutant']['ratio']}"
+            )
     return lines
 
 

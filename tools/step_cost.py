@@ -14,6 +14,10 @@ is selected and handled again, and the result is kept only under a condition the
 compiler cannot prove false (it never holds). The ratio of its per-step time to the
 plain one calibrates the step-cost check: the mutant must exceed its threshold.
 
+With `--baseline-per-step-us` (the earlier table's per-step minimum, measured in the
+same job) the plain per-step minimum is compared with it, and the exit status is 1
+when the ratio exceeds `--limit` (1.10).
+
 Prints one JSON object. Run from the repository root with the package importable.
 """
 
@@ -52,6 +56,15 @@ class ExtraPassExecutor(CompiledExecutor):
         return where_tree(c2.tick < NEVER, c4, c2), trace
 
 
+K3_LIMIT = 1.10  # the final table may cost at most 10 percent more per step
+
+
+def verdict(per_step_min_us, baseline_us, limit=K3_LIMIT):
+    """Ratio of a per-step minimum to its baseline, and whether it is within `limit`."""
+    ratio = per_step_min_us / baseline_us
+    return {"ratio": round(ratio, 3), "limit": limit, "within_limit": ratio <= limit}
+
+
 def _call(executor, study, truths, roots, n_steps):
     out = _scan_worlds(executor, study, truths, roots, wake_by_audience, n_steps)
     return jax.block_until_ready(out)
@@ -87,6 +100,13 @@ def main(argv=None):
     parser.add_argument("--n-steps", type=int, default=400)
     parser.add_argument("--repeats", type=int, default=30)
     parser.add_argument("--mutant", action="store_true")
+    parser.add_argument(
+        "--baseline-per-step-us",
+        type=float,
+        help="per-step minimum of the earlier handler table, measured in the same "
+        "job; exit 1 if the plain run exceeds it by more than the limit",
+    )
+    parser.add_argument("--limit", type=float, default=K3_LIMIT)
     args = parser.parse_args(argv)
     out = {
         "handlers": len(HANDLERS),
@@ -105,7 +125,19 @@ def main(argv=None):
         out["mutant_ratio"] = round(
             out["mutant"]["per_step_us"] / out["plain"]["per_step_us"], 3
         )
+    failed = False
+    if args.baseline_per_step_us is not None:
+        base = args.baseline_per_step_us
+        out["baseline_per_step_min_us"] = base
+        out["k3"] = verdict(out["plain"]["per_step_min_us"], base, args.limit)
+        failed = not out["k3"]["within_limit"]
+        if args.mutant:
+            out["k3_mutant"] = verdict(
+                out["mutant"]["per_step_min_us"], base, args.limit
+            )
     print(json.dumps(out, indent=1))
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
