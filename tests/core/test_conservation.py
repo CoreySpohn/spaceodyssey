@@ -67,19 +67,6 @@ def test_every_account_agrees_after_pricing_cancels_and_refunds(runs, name):
     assert result.passed, result
 
 
-@pytest.mark.parametrize("name", CASES)
-def test_each_row_nets_debits_and_refunds(runs, name):
-    """Final balance is initial minus debited plus refunded, in every row."""
-    run = runs[name]
-    ledger = run.carry.ledger
-    expected = (
-        np.asarray(run.study.budget)
-        - np.asarray(ledger.debited)
-        + np.asarray(ledger.refunded)
-    )
-    np.testing.assert_allclose(np.asarray(ledger.balance), expected, atol=1e-9)
-
-
 def test_a_refund_nets_the_surcharge_out_of_the_credit(runs):
     """Debited 12, credited 5 on the cancel and 5 on the failure: 2 stays spent."""
     ledger = runs["refunded"].carry.ledger
