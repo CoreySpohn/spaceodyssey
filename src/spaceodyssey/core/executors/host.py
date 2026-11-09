@@ -221,9 +221,7 @@ class HostExecutor(AbstractExecutor):
             "executor": "host",
             "row_axis": 0,
             "policy_form": policy_form,
-            "wake_fn": ckpt.callable_name(wake_fn),
-            "service": None if service is None else ckpt.callable_name(type(service)),
-            "refit": None if refit is None else ckpt.binding_record(refit),
+            "bound": {"wake_fn": wake_fn, "service": service, "refit": refit},
         }
         got = checkpoint.begin(
             given, truths, roots, config=config, templates=templates, resume=resume
