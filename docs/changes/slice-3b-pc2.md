@@ -118,24 +118,34 @@ way, so it is not built.
 
 The store and identity layer: `tests/codec/test_checkpoint_store.py`, 49 tests, unit tier, 1.3 s.
 
-Medium, `tests/core/test_resume.py`, twelve tests (the first eight below, then one each for the manifest step count, the bucket refusal, and a pending request on each executor):
+Medium, `tests/core/test_resume.py`, four host tests on one study, 22.8 s cold in total (the
+host loop compiles once, in a module fixture that also builds the uninterrupted reference and
+the split checkpoint the tests share):
 
-- host resume is the uninterrupted run (trace and carry bit equal);
+- host resume is the uninterrupted run (trace and carry bit equal), and the manifest step
+  count equals the rows after a resume;
+- a held refresh reports `TRUNCATED_AT_HOLD`, is answered once on resume, finishes as in the
+  uninterrupted run, and a run with no sink drops the same hold and never reports the status;
+- a pending request is answered first on resume;
+- a changed truth, study, key version, boundary, kept log or roots is refused (C002), a used
+  directory without `resume` is refused (C008), and `resume` on an empty directory is
+  refused (C010).
+
+Slow, `tests/core/test_resume_compiled.py`, four tests, about 32 s cold (the chunked driver
+compiles once for a batch of two worlds):
+
 - compiled resume is the chunked run (carry bit equal, canonical history exact);
-- a held refresh is answered once on resume, and the answer count of the split run equals
-  the uninterrupted run's;
-- a compiled hold reports `TRUNCATED_AT_HOLD` and is answered on resume;
-- a run with no sink still drops the hold and never reports the new status;
-- an existing checkpoint needs `resume`, and a changed root is refused;
-- a changed truth, study, chunk size or boundary is refused (C002);
-- a checkpointed run keeps the hold a plain run drops.
+- a compiled hold is reported per world and answered on resume;
+- a pending request is answered before the first chunk of a resume (that chunk steps);
+- another chunk size is refused (C002), and a bucket beside a checkpoint is refused.
 
 Slow, `tests/core/test_resume_kill.py`, three cases: a child process killed by SIGKILL while
 writing a chunk, a manifest and the pointer rename, each resumed to the bit-equal
-uninterrupted run.
+uninterrupted run. About 47 s.
 
-Runner time: the slow tier adds about 47 s, inside the 90 s allowance. The medium tests add
-about 105 s in total.
+Runner time: the slow tier adds about 79 s (the kill file and the compiled file). The compiled
+cases are slow because the chunked driver for a batch costs about 25 s to compile cold, which
+no sharing between tests removes.
 
 ## Checks at merge
 
