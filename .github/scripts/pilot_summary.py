@@ -1,9 +1,10 @@
 """Write the pilot job summary: step cost and cold medium-test times.
 
-Usage: python pilot_summary.py step_cost.json junit-pilot-*.xml
+Usage: python pilot_summary.py step_cost.json [step_cost_pair.json] junit-pilot-*.xml
 
-Reads the JSON that `tools/step_cost.py --mutant` prints and one pytest junit file per
-test file run cold, and prints markdown (the workflow appends it to
+Reads the JSON that `tools/step_cost.py --mutant` prints, optionally the JSON of
+`tools/step_cost_pair.py` (the same-job comparison of two trees), and one pytest junit
+file per test file run cold, and prints markdown (the workflow appends it to
 $GITHUB_STEP_SUMMARY). Exits non-zero when the step-cost JSON or a junit file is
 missing, so a pilot that did not measure cannot pass.
 """
@@ -35,18 +36,34 @@ def step_cost_table(path):
             )
     if "mutant_ratio" in data:
         lines += ["", f"Mutant ratio (median per step): {data['mutant_ratio']}"]
-    if "k3" in data:
-        k3 = data["k3"]
-        lines += [
-            "",
-            f"K3 plain per-step minimum over the baseline of "
-            f"{data['baseline_per_step_min_us']} us: ratio {k3['ratio']} against "
-            f"the limit {k3['limit']} ({'pass' if k3['within_limit'] else 'FAIL'})",
-        ]
-        if "k3_mutant" in data:
-            lines.append(
-                f"K3 mutant ratio over the baseline: {data['k3_mutant']['ratio']}"
-            )
+    return lines
+
+
+def pair_table(path):
+    """Markdown rows for the same-job comparison of the base and final trees."""
+    data = json.loads(Path(path).read_text())
+    base, final = data["base"], data["final"]
+    lines = [
+        f"## Same-job step cost ({data['rounds']} interleaved rounds, "
+        f"{data['repeats']} repeats each)",
+        "",
+        "| Tree | Handlers | Plain per step, min (us) | Mutant per step, min (us) "
+        "| Mutant ratio | Cold first call, plain (s) | Cold first call, mutant (s) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for name, row in (("base", base), ("final", final)):
+        lines.append(
+            f"| {name} | {row['handlers']} | {row['per_step_min_us']} | "
+            f"{row['mutant_per_step_min_us']} | {row['mutant_ratio']} | "
+            f"{min(row['cold_s'])} | {min(row['mutant_cold_s'])} |"
+        )
+    lines += [
+        "",
+        f"K3 cost ratio (final over base, lowest minimum of each): {data['ratio']} "
+        f"against the limit {data['limit']} "
+        f"({'pass' if data['within_limit'] else 'FAIL'}); per round: "
+        f"{data['per_round_ratio']}",
+    ]
     return lines
 
 
@@ -82,14 +99,19 @@ def junit_table(paths):
 def main(argv):
     """Print the summary; non-zero when an input is missing."""
     if len(argv) < 2:
-        print("usage: pilot_summary.py step_cost.json junit-pilot-*.xml")
+        print("usage: pilot_summary.py step_cost.json [pair.json] junit-pilot-*.xml")
         return 2
     missing = [p for p in argv if not Path(p).exists()]
     if missing:
         print(f"missing pilot output: {', '.join(missing)}")
         return 1
-    lines = ["# Slice 2b and 3a CI-runner pilot", ""]
-    lines += [*step_cost_table(argv[0]), "", *junit_table(argv[1:])]
+    pair = [p for p in argv if Path(p).name == "step_cost_pair.json"]
+    junit = [p for p in argv[1:] if p not in pair]
+    lines = ["# CI-runner pilot", ""]
+    lines += [*step_cost_table(argv[0]), ""]
+    if pair:
+        lines += [*pair_table(pair[0]), ""]
+    lines += junit_table(junit)
     print("\n".join(lines))
     return 0
 

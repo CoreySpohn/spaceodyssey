@@ -5,6 +5,11 @@ name: Pilot
 # mutant) and the cold compile time of the medium study tests. Installs like the
 # quick tier of ci.yml, without the JAX compile-cache restore. No secrets are used.
 #
+# The pilot also measures the per-step cost of the base tree (`k3_base_ref`) and of this
+# commit in the same job, interleaved, and prints their ratio (tools/step_cost_pair.py);
+# a ratio above 1.10 fails that step. Figures from separate jobs are not compared, since
+# runner speed differs between jobs by more than the limit.
+#
 # With `quick_ref` set, it instead runs the whole quick tier cold at that ref (a
 # commit, branch or tag) and prints its summary as JSON in the baseline format of
 # .github/budget/. Dispatch it once at the reference commit and once at the commit
@@ -21,9 +26,9 @@ on:
         description: "Run the whole quick tier cold at this ref (empty: the pilot)"
         default: ""
         type: string
-      baseline_per_step_min_us:
-        description: "Pilot only: per-step minimum (us) of the eleven-handler table, measured in the same job; fails the run above 1.10 times it (empty: report only)"
-        default: ""
+      k3_base_ref:
+        description: "Pilot only: the earlier source tree the step cost is compared with, measured in the same job (default: 97753d5, the commit before the Slice 3a core changes)"
+        default: "97753d57564770664fca3b73c26840d0681dacf2"
         type: string
 
 permissions:
@@ -66,11 +71,9 @@ jobs:
           uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt
 
       - name: Step cost, plain and mutant
-        env:
-          BASELINE_US: ${{ inputs.baseline_per_step_min_us }}
         run: |
-          python tools/step_cost.py --mutant --repeats 30 \
-            ${BASELINE_US:+--baseline-per-step-us "$BASELINE_US"} | tee step_cost.json
+          set -o pipefail
+          python tools/step_cost.py --mutant --repeats 30 | tee step_cost.json
 
       - name: Cold medium study tests, one process per file
         run: |
@@ -84,10 +87,27 @@ jobs:
               --timeout=600 --durations=0 --junitxml="junit-pilot-$name.xml" || true
           done
 
+      # The base tree gets its own copy of the probe and its own package: each tree is
+      # measured by its own code, in fresh processes, alternating base and final.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.k3_base_ref }}
+          path: base-tree
+          persist-credentials: false
+
+      - name: Step cost, base tree and this tree in one job (K3)
+        run: |
+          set -o pipefail
+          # The version module is generated at install time and is not tracked.
+          cp src/spaceodyssey/_version.py base-tree/src/spaceodyssey/_version.py
+          python tools/step_cost_pair.py --base-tree base-tree --final-tree . \
+            --rounds 5 --repeats 30 | tee step_cost_pair.json
+
       - name: Job summary
         if: always()
         run: |
-          python .github/scripts/pilot_summary.py step_cost.json junit-pilot-*.xml \
+          python .github/scripts/pilot_summary.py step_cost.json step_cost_pair.json \
+            junit-pilot-*.xml \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
   quick-cold:
