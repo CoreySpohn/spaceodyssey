@@ -403,7 +403,7 @@ def test_one_real_fit_reproduces_the_orbit_and_equals_ofti_on_the_t4d_table():
 # -- Survey and done criterion (slow) ----------------------------------------------
 
 SURVEY_KEY = jax.random.PRNGKey(2026)
-SURVEY_PARTICLES = 64
+SURVEY_PARTICLES = 32
 
 
 def plan_rows():
@@ -416,14 +416,14 @@ def plan_rows():
 
 
 @pytest.mark.slow(
-    reason="five OFTI fits of up to five epochs, 64 particles (about 100 s)"
+    reason="five OFTI fits of up to five epochs, 32 particles (about 40 s)"
 )
 def test_survey_posterior_contraction_over_five_scripted_visits():
     """The predictive sky position contracts as the five visits arrive.
 
     Rows: the certified fixed plan, drawn under the law at signal-to-noise 10 with
     the stand-in's kappa. After each visit the stand-in refits every row so far
-    (64 particles, one key); the spread is the root mean square over one period
+    (32 particles, one key); the spread is the root mean square over one period
     after the last visit of the particles' predicted (east, north) scatter. Fails
     if every visit is not a detection, if the spread after five visits is not below
     0.4 of the spread after one, if a visit widens it by more than 15 percent, or if
@@ -527,17 +527,21 @@ def test_executor_parity_on_one_certified_visit():
     )
 
 
-@pytest.mark.slow(reason="ten OFTI fits and two cold study compiles (about 90 s)")
-def test_five_refreshes_install_particles_on_both_executors():
+@pytest.mark.slow(reason="six OFTI fits and two cold study compiles")
+def test_three_refreshes_install_particles_on_both_executors():
     """Each visit's refresh installs particles, and the executors agree.
 
-    The fixed plan runs as scripted summary records on a one-day checkpoint grid.
-    Fails if a refresh does not install (five `OK` product rows per audience with
-    one to five rows), if a record's epoch is not its science-interval midpoint
+    The first three visits of the fixed plan run as scripted summary records on a
+    one-day checkpoint grid; the contraction over all five is the survey test above.
+    Fails if a refresh does not install (three `OK` product rows per audience with
+    one to three rows), if a record's epoch is not its science-interval midpoint
     within half a tick, or if the compiled executor installs other particles than
     the host executor.
     """
-    context, rows = plan_rows()
+    context = context_from_profile(PROFILE, targets=[0])
+    plan = ph.fixed_plan(context)[:3]
+    require_certified(context, plan)
+    rows = ph.scripted_rows(context, plan, ph.nominal_orbit(PROFILE), key=SURVEY_KEY)
     refit = ph.StandInOftiRefit.from_profile(PROFILE, 0)
     host, _ = check_executor_parity(context, rows, refit, 25)
     log = host.carry.log

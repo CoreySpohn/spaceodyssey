@@ -614,8 +614,11 @@ def test_observer_only_column_is_computed_twice_and_public_rows_once():
 # ---- review fixes: budget, capacity, execution, audience ---------------------------
 
 
-@pytest.mark.parametrize("chunk", [1, 7, 32])
-@pytest.mark.parametrize("budget", [1, 2, 3, 4])
+# Every budget at one chunk; the chunk sweep is the first test of this file, so two more
+# cases only put a one-world and a padded chunk on a budget.
+@pytest.mark.parametrize(
+    ("budget", "chunk"), [(1, 7), (2, 7), (3, 7), (4, 7), (2, 1), (3, 32)]
+)
 def test_a_budget_that_ends_on_the_hold_installs_nothing(budget, chunk):
     """Fails if a checkpoint installs when no step is left for its completion."""
     h, c = run_pair(refresh_study(100), budget, N_WORLDS, chunk)

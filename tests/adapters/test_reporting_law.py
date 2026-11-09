@@ -895,16 +895,17 @@ def run_survey(n_worlds=N_WORLDS, kappas=(1.0, 2.0)):
 
     # Worlds whose planet never reaches half the limit: nulls carry no information.
     faint = np.flatnonzero(level.max(axis=1) < 0.5)
-    info = []
-    for w in faint:
-        planet = _planet_from_vector(params[w], truth.Mp_kg[w])
-        dark = jax.vmap(lambda iv, p=planet: report.predict(planet_free(p), iv))(
-            intervals
-        )
-        ll_dark = jax.vmap(lambda r, b: loglike_report(law, r, b))(
-            jax.tree_util.tree_map(lambda x, w=w: x[w], base), dark
-        )
-        info.append(float(np.sum(ll[w]) - np.sum(ll_dark)))
+
+    def dark_ll(p, mp, base_w):
+        planet = _planet_from_vector(p, mp)
+        dark = jax.vmap(lambda iv: report.predict(planet_free(planet), iv))(intervals)
+        return jnp.sum(jax.vmap(lambda r, b: loglike_report(law, r, b))(base_w, dark))
+
+    base_faint = jax.tree_util.tree_map(lambda x: x[faint], base)
+    ll_dark = eqx.filter_jit(jax.vmap(dark_ll))(
+        params[faint], truth.Mp_kg[faint], base_faint
+    )
+    info = np.sum(np.asarray(ll)[faint], axis=1) - np.asarray(ll_dark)
 
     bins = [0.0, 1.0, 3.0, 5.0, 7.0, np.inf]
     table = []
@@ -936,7 +937,7 @@ def run_survey(n_worlds=N_WORLDS, kappas=(1.0, 2.0)):
         det_term_diff=ours_det - theirs_det,
         widths=widths,
         ratio=ratio,
-        faint_info=np.asarray(info),
+        faint_info=info,
         n_all_null=int(np.sum(n_det == 0)),
         p_detect=1.0 - np.exp(ours_null),
         s_over_shat=s_true / np.sqrt(np.asarray(base.limit_counts)[detected] ** 2 + f),
