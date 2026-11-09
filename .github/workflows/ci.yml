@@ -204,8 +204,15 @@ jobs:
       - name: Slow tier (hypothesis nightly profile)
         env:
           HYPOTHESIS_PROFILE: nightly
+          EVENT: ${{ github.event_name }}
         run: |
           status=0
+          # The current slice gate reruns checks this tier already runs, so the
+          # schedule skips it; a manual slow or full run still includes it.
+          skip_gate=()
+          if [ "$EVENT" = "schedule" ]; then
+            skip_gate=(--ignore=tests/test_slice3a_gate.py)
+          fi
           # The golden pins run in their own job (below), so a slow tier that
           # overruns its limit cannot take them with it. Two workers, one file
           # each, as in the quick tier; radis writes its config on first import,
@@ -213,6 +220,7 @@ jobs:
           python -c "import radis"
           pytest tests/ -m slow -n 2 --dist loadfile -ra --tb=short --timeout=900 \
             --ignore=tests/core/test_golden_histories.py \
+            "${skip_gate[@]}" \
             --durations=25 --junitxml=junit-slow.xml || status=$?
           if [ "$status" -ne 0 ] && [ "$status" -ne 5 ]; then
             exit "$status"

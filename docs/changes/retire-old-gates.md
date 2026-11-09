@@ -84,3 +84,19 @@ no violation.
 `tests/conftest.py` drops the two gate entries from `SLOW_FILES` and the
 executor-family xdist group that only the Slice 1 gate used. `.pre-commit-config.yaml` adds
 the two new support modules to the test naming exclusion.
+
+## Slow tier on the runner
+
+With these changes and the slow tier on two workers (`-n 2 --dist loadfile`), the dispatched
+run 42641435989 finished the slow tier for the first time since its job limit started cutting
+it off: 1206 passed in 3822 s (64 min), where earlier runs were cancelled at 90 min. One budget
+failed: `tests/core/test_corpus_invariants.py` loads 2341 programs under the full slow selection
+on the runner, above the 1657 measured on the quick selection alone, so its budget is now
+ceil(2341 x 1.15) + 10 = 2703.
+
+The largest single cost was the current slice gate: 1292 s of setup in
+`tests/test_slice3a_gate.py`, where it reruns its inventory of checks that the same tier
+already runs in their own files. The scheduled run now skips that file; a manual slow or full
+run still includes it. Without it the two workers carry about 6350 s of work, an estimated
+53 min of wall time, still above the 45 min target; the next largest costs are the physical
+OFTI survey (312 s over three tests) and the gradient checks (about 250 s).
