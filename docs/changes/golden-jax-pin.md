@@ -2,8 +2,9 @@
 
 The golden history pins are bit-exact only under one jaxlib release. Float64 normal draws
 go through an inverse error function whose rounding differs between jaxlib releases: under
-jaxlib 0.10.2, 21 of the 120 pinned history entries differ, all in float leaves (the first
-by 2 ULP in `payload`), while the same machine under 0.12.0.1 matches all 120. CI resolved
+jaxlib 0.10.2, 21 of the 120 pinned history digests (116 corpus histories and 4 fault
+fixture entries) differ, all in float leaves (the first by 2 ULP in `payload`), while the
+same machine under 0.12.0.1 matches all 120. CI resolved
 JAX from PyPI without an upper bound, so a new JAX release could move the pins on CI with
 no change to this library.
 
