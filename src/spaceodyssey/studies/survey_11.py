@@ -29,6 +29,27 @@ from spaceodyssey.core.snapshot import effects_none
 from spaceodyssey.studies import toy
 from spaceodyssey.studies.scripted import SCRIPTED_CHANNEL, ScriptedRecords
 
+__all__ = [
+    "ALERT_CHANNEL",
+    "ALERT_DELAY",
+    "ALERT_FIRE",
+    "BALANCE",
+    "CHANNEL_INDEX",
+    "CHARGE",
+    "COST",
+    "HORIZON",
+    "LANE",
+    "LEVEL",
+    "N_EFFECTS",
+    "PRICING",
+    "STARTS",
+    "SUBJECT",
+    "SURCHARGE",
+    "AlertWatch",
+    "ScriptedAlerts",
+    "survey_11",
+]
+
 ALERT_CHANNEL = SCRIPTED_CHANNEL
 LEVEL = 1  # the policy level of the study: it reads arrays and may Cancel
 N_EFFECTS = 3  # the observe, the wait, and the slot the policy's Cancel takes
@@ -122,7 +143,7 @@ class AlertWatch(AbstractPolicy):
         return eff, pstate.at[0].set(jnp.where(due, 1.0, pstate[0])), jnp.zeros((), F64)
 
 
-def survey_study(*, frozen=False):
+def survey_11(*, frozen=False):
     """The toy study with refunds on, the priced channel, the alert and the policy.
 
     Every balance row holds `BALANCE`, so a debit never refuses. With `frozen` the

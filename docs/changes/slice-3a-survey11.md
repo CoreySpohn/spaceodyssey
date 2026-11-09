@@ -98,11 +98,11 @@ the subclass.
 Row 11 names no executor. The file runs the host executor once in a module-scoped store, and
 every check reads that run. One compiled run adds a parity check (ints exact, floats in the go
 band). All nine tests are medium, with reasons. The budget plugin splits the host fixture
-setup among the seven tests that use it, about 0.5 s each, so no one test carries it.
+setup among the eight tests that use it, about 0.4 s each, so no one test carries it.
 
 | Measure | Value |
 |---|---|
-| File, cold, caches off (this machine) | 25.4 s wall, 9 tests |
+| File, cold, caches off (one Mac) | 16 s to 25 s wall, 9 tests |
 | Host run (shared), compiled run, frozen variant | about 6.5 s, 6.2 s, 8.0 s |
-| Compiles in the file | 159 |
+| Compiles attributed to the file (session total) | 155 (159) |
 | Budget line | `"tests/studies/test_survey_11.py" = 189` |

@@ -34,7 +34,7 @@ from spaceodyssey.studies.survey_11 import (
     PRICING,
     STARTS,
     SUBJECT,
-    survey_study,
+    survey_11,
 )
 from tests.core.helpers import handle_event, one_world, pending_done_row, worlds
 from tests.studies.survey_helpers import run_on, same_histories
@@ -238,7 +238,7 @@ def evidence(world):
 
 @pytest.fixture(scope="module")
 def world():
-    return _run(survey_study())
+    return _run(survey_11())
 
 
 def test_the_study_reads_and_cancels_on_the_alert(world):
@@ -341,7 +341,7 @@ def test_the_alert_to_cancel_latency_is_the_declared_release_delay(world):
 def test_a_live_cancel_inside_the_frozen_horizon_is_admitted():
     """D8: cancelling an activity that has started is not frozen. Fails if the asset's
     horizon refuses the live Cancel, or the Cancel spends a disruptive activation."""
-    frozen = _run(survey_study(frozen=True))
+    frozen = _run(survey_11(frozen=True))
     assert _cancel_codes(frozen) == [AdmissionCode.OK]  # one Cancel, admitted
     _, _, first, second = _split(frozen)
     assert first["status"].tolist() == [RecordStatus.PARTIAL]
