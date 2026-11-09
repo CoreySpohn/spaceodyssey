@@ -92,11 +92,13 @@ class DocPolicy(toy.NullPolicy):
     disruptive: bool = _field(False)
     programs: tuple = _field(())
     awards: tuple = _field(())
+    bundles: tuple = _field(())
 
     def declare(self):
         return Declaration(
             programs=self.programs,
             awards=self.awards,
+            bundles=self.bundles,
             reads=self.reads,
             needs=tuple(Need(*n) for n in self.needs),
             stops=tuple((Scope(a), Disposition(b)) for a, b in self.stops),
@@ -173,6 +175,15 @@ def _award_policy(**stated):
     """`survey_1` with awards on and a policy that states `stated`."""
     study = toy.survey_1(caps=Capacities(awards=True))
     return _with_policy(study, StatedPolicy(stated=Declaration(**stated)))
+
+
+def _bundle_policy(bundles, **caps):
+    """`survey_1` with bundles on (two ordinals of two members) and a policy that
+    declares the bundle members `bundles`.
+    """
+    caps = {"max_bundles": 2, "max_bundle_size": 2, **caps}
+    study = toy.survey_1(caps=Capacities(**caps))
+    return _with_policy(study, StatedPolicy(stated=Declaration(bundles=bundles)))
 
 
 def _assets(**columns):
@@ -381,6 +392,41 @@ SEEDED = {
         lambda: _award_policy(awards=((2, 50, 80), (2, 70, 90))),
         None,
     ),
+    "bundle_without_capacity": (
+        C.B001,
+        lambda: _bundle_policy(((0, 2, 5, 1, 0),), max_bundles=0, max_bundle_size=0),
+        None,
+    ),
+    "bundle_ordinal_out_of_range": (
+        C.B001,
+        lambda: _bundle_policy(((2, 2, 5, 1, 0),)),
+        None,
+    ),
+    "bundle_members_on_two_lanes": (
+        C.B001,
+        lambda: _bundle_policy(((0, 2, 5, 1, 0), (0, 1, 5, 1, 0))),
+        None,
+    ),
+    "bundle_members_in_two_groups": (
+        C.B001,
+        lambda: _bundle_policy(((0, 2, 5, 1, 0), (0, 2, 6, 1, 0))),
+        None,
+    ),
+    "bundle_members_of_two_programs": (
+        C.B001,
+        lambda: _bundle_policy(((0, 2, 5, 1, 0), (0, 2, 5, 0, 0))),
+        None,
+    ),
+    "bundle_starting_later": (
+        C.B001,
+        lambda: _bundle_policy(((0, 2, 5, 1, 0), (0, 2, 5, 1, 4))),
+        None,
+    ),
+    "bundle_over_its_size": (
+        C.B001,
+        lambda: _bundle_policy(((0, 2, 5, 1, 0),) * 3),
+        None,
+    ),
     "frozen_horizon": (
         C.X002,
         lambda: _assets(freeze_ticks=jnp.asarray([5, 0], I64)),
@@ -455,6 +501,10 @@ CLEAN = {
             effects=frozenset({EffectKind.ALLOCATE}),
             awards=((2, 50, 80), (2, 80, 90), (3, 50, 80)),
         ),
+        (),
+    ),
+    "bundles_within_capacity": (
+        lambda: _bundle_policy(((0, 2, 5, 1, 0), (0, 2, 5, 1, 0), (1, 0, 6, 1, 0))),
         (),
     ),
     "charge_with_refunds": (

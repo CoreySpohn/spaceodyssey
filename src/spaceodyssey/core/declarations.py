@@ -72,6 +72,10 @@ class Declaration:
     programs: tuple[int, ...] = ()  # program ids a policy names (a plan or a Stop)
     # award windows a policy asks for, as (recipient balance row, start, until) triples
     awards: tuple[tuple[int, int, int], ...] = ()
+    # the members of the bundles a policy asks for, as (bundle ordinal, lane, admission
+    # group, program, start offset from the decision) per Observe row; rows that share
+    # an ordinal are one bundle
+    bundles: tuple[tuple[int, int, int, int, int], ...] = ()
 
     def __post_init__(self):
         """Reject unknown names so a typo cannot read as a clean declaration."""

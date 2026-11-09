@@ -67,6 +67,9 @@ class EventTable(eqx.Module):
     # The program a Done row charges and settles under; absent (None, no leaf) unless
     # the capacities hold more than one program, so a study with one is unchanged.
     program: jax.Array | None = None
+    # The bundle a Done row belongs to (`decision * max_bundles + ordinal`, -1 for
+    # none); absent unless the capacities hold bundles.
+    bundle: jax.Array | None = None
 
 
 def empty_events(caps):
@@ -76,6 +79,7 @@ def empty_events(caps):
         **{n: z for n in EVENT_INT_FIELDS},
         valid=jnp.zeros(caps.n_events, B),
         program=z if caps.n_programs > 1 else None,
+        bundle=z if caps.bundles else None,
     )
 
 
@@ -91,6 +95,7 @@ def empty_event_row(caps=None):
         **{n: z for n in EVENT_INT_FIELDS},
         valid=jnp.asarray(False),
         program=z if on else None,
+        bundle=z if caps is not None and caps.bundles else None,
     )
 
 
@@ -138,6 +143,7 @@ def enqueue(
     decision=0,
     tie=TIE_NEUTRAL,
     program=0,
+    bundle=-1,
     caps,
 ):
     """Add one row to the queue where `ok`, applying the micro placement rule.
@@ -167,6 +173,8 @@ def enqueue(
     extra = {}
     if carry.ev.program is not None:
         extra["program"] = jnp.asarray(program, I64)
+    if carry.ev.bundle is not None:
+        extra["bundle"] = jnp.asarray(bundle, I64)
     ev = _set_row(
         carry.ev,
         i,
@@ -259,5 +267,7 @@ def select_next(carry, caps):
 
 
 EVENT_INT_FIELDS = tuple(
-    f.name for f in dataclasses.fields(EventTable) if f.name not in ("valid", "program")
+    f.name
+    for f in dataclasses.fields(EventTable)
+    if f.name not in ("valid", "program", "bundle")
 )

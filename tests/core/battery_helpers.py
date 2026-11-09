@@ -325,7 +325,10 @@ def _compiled_with(realize=None, decide=None, policy_view=None):
     """A compiled executor whose settlement or decision stage has been broken."""
     table = handlers.HANDLERS
     if realize is not None:
-        cancel = _clone(handlers._cancel_lane, _realize_rec=realize)
+        cancel = _clone(
+            handlers._cancel_lane,
+            _cancel_one=_clone(handlers._cancel_one, _realize_rec=realize),
+        )
         table = (
             handlers.h_none,
             _clone(handlers.h_done, _realize_rec=realize),

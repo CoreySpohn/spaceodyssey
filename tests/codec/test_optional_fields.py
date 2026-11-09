@@ -39,6 +39,8 @@ CAP_FIELDS = (
     "n_commitments",
     "snapshot_balances",
     "balance_quantum",
+    "max_bundles",
+    "max_bundle_size",
 )
 STUDY_FIELDS = ("key_version",)
 CHANNEL_FIELDS = ("pricing", "surcharge", "failure_kind", "refund_deadline_ticks")
@@ -58,7 +60,8 @@ AWARD_COLUMNS = (
     "remainder",
     "realloc_to",
 )
-EFFECT_OPTIONAL = ("program", *AWARD_COLUMNS, "start_tick")
+EFFECT_OPTIONAL = ("program", *AWARD_COLUMNS, "start_tick", "bundle")
+BUNDLE_RECORD_FIELDS = ("bundle",)
 
 
 def _text(study):
@@ -84,7 +87,7 @@ def test_the_optional_fields_are_the_ones_slice_3a_added():
         | {("Study", n) for n in STUDY_FIELDS}
         | {("EffectTable", n) for n in EFFECT_OPTIONAL}
         | {("ChannelTable", n) for n in CHANNEL_FIELDS}
-        | {("Record", n) for n in RECORD_FIELDS}
+        | {("Record", n) for n in RECORD_FIELDS + BUNDLE_RECORD_FIELDS}
     )
 
 
@@ -115,6 +118,8 @@ def test_a_nondefault_optional_field_is_written_and_round_trips():
         n_commitments=3,
         snapshot_balances=True,
         balance_quantum=0.5,
+        max_bundles=2,
+        max_bundle_size=3,
     )
     study = toy.survey_1(caps=caps, key_version=2)
     doc = _doc(study)
@@ -125,6 +130,8 @@ def test_a_nondefault_optional_field_is_written_and_round_trips():
         3,
         True,
         0.5,
+        2,
+        3,
     ]
     text = _text(study)
     loaded = load_study(text, TOY_KINDS)
@@ -145,6 +152,8 @@ def test_a_missing_optional_field_loads_at_its_default():
         0,
         False,
         1.0,
+        0,
+        0,
     ]
     assert_same_pytree(study, loaded)
 
@@ -203,7 +212,9 @@ def test_a_wrong_typed_optional_value_is_refused_not_taken_for_the_default():
 @pytest.mark.parametrize("name", CAP_FIELDS)
 def test_an_explicit_null_balance_field_is_refused(name):
     """Fails if null loads as the default of an optional capacity field."""
-    caps = Capacities(snapshot_balances=True, balance_quantum=0.5)
+    caps = Capacities(
+        snapshot_balances=True, balance_quantum=0.5, max_bundles=2, max_bundle_size=2
+    )
     doc = _doc(toy.survey_1(caps=caps))
     doc["study"]["caps"][name] = None
     with pytest.raises(DocumentError) as err:
@@ -630,3 +641,63 @@ def test_each_charge_pricing_member_round_trips(member):
     assert type(loaded) is ChargePricing
     assert loaded is member
     assert encode(loaded, ("pricing",), resolver) == node
+
+
+# ---- the bundle columns (effect table and record) -----------------------------------
+
+
+def _bundle_caps(bundles):
+    return dataclasses.replace(
+        Capacities(),
+        max_bundles=2 if bundles else 0,
+        max_bundle_size=2 if bundles else 0,
+    )
+
+
+def test_a_study_without_bundles_is_written_without_a_bundle_column():
+    """Fails if the default effect table or record writes a bundle column, which would
+    move every document hash.
+    """
+    effects = encode(effects_none(_bundle_caps(False)), ("effects",), as_resolver(None))
+    record = encode(record_none(_bundle_caps(False)), ("record",), _RECORD_KINDS)
+    assert effects and record
+    assert "bundle" not in effects
+    assert "bundle" not in record
+
+
+@pytest.mark.parametrize("which", ["effects", "record"])
+def test_a_bundle_column_written_as_null_is_refused(which):
+    """Control: a null bundle column is the default written out, so it is two
+    documents.
+    """
+    if which == "effects":
+        node = encode(
+            effects_none(_bundle_caps(False)), ("effects",), as_resolver(None)
+        )
+        resolver = as_resolver(None)
+    else:
+        node = encode(record_none(_bundle_caps(False)), ("record",), _RECORD_KINDS)
+        resolver = _RECORD_KINDS
+    with pytest.raises(DocumentError, match="at its default"):
+        load_module.decode({**node, "bundle": None}, (which,), resolver)
+
+
+def test_populated_bundle_columns_round_trip():
+    """Fails if a bundle column is dropped, omitted or rebuilt with another dtype, or
+    a document from before bundles stops loading with the column absent.
+    """
+    caps = _bundle_caps(True)
+    eff = effects_none(caps)
+    eff = dataclasses.replace(eff, bundle=eff.bundle.at[1].set(1))
+    node = encode(eff, ("effects",), as_resolver(None))
+    assert "bundle" in node
+    built = load_module.decode(node, ("effects",), as_resolver(None))
+    assert_same_pytree(eff, built)
+    assert encode(built, ("effects",), as_resolver(None)) == node
+    rec = dataclasses.replace(record_none(caps), bundle=jnp.asarray(5, I64))
+    rnode = encode(rec, ("record",), _RECORD_KINDS)
+    assert "bundle" in rnode
+    rbuilt = load_module.decode(rnode, ("record",), _RECORD_KINDS)
+    assert_same_pytree(rec, rbuilt)
+    old = {k: v for k, v in rnode.items() if k != "bundle"}
+    assert load_module.decode(old, ("record",), _RECORD_KINDS).bundle is None
