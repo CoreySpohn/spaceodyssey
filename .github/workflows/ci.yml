@@ -214,11 +214,11 @@ jobs:
             skip_gate=(--ignore=tests/test_slice3a_gate.py)
           fi
           # The golden pins run in their own job (below), so a slow tier that
-          # overruns its limit cannot take them with it. Two workers, one file
-          # each, as in the quick tier; radis writes its config on first import,
+          # overruns its limit cannot take them with it. Three workers, one file
+          # each (four vCPUs, about 4.3 GB peak per worker); radis writes its config on first import,
           # so do that once before the workers start.
           python -c "import radis"
-          pytest tests/ -m slow -n 2 --dist loadfile -ra --tb=short --timeout=900 \
+          pytest tests/ -m slow -n 3 --dist loadfile -ra --tb=short --timeout=900 \
             --ignore=tests/core/test_golden_histories.py \
             "${skip_gate[@]}" \
             --durations=25 --junitxml=junit-slow.xml || status=$?
