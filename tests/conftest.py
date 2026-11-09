@@ -222,6 +222,7 @@ GATE = "gate or corpus file"
 SLOW_FILES = {
     "test_slice1_gate.py": GATE,
     "test_slice2b_gate.py": "reruns the golden histories, reads the commit history",
+    "test_slice3a_gate.py": "reruns goldens and four mutant runs, reads the history",
     "test_observer_kit_runs.py": "observer kit on runs, one executor compile alone",
     "test_refresh_runs.py": "refresh runs compile the chunked driver per executor",
     "test_replay_refresh.py": "replay of refresh runs repeats the refresh compiles",

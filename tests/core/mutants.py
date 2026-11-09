@@ -1,14 +1,17 @@
 import types
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 from jax import lax
 
 from spaceodyssey import core
-from spaceodyssey.core import Audience, handlers, transaction
-from spaceodyssey.core.enums import RecordStatus
+from spaceodyssey.core import Audience, capacities, events, handlers, transaction
+from spaceodyssey.core import snapshot as snapshot
+from spaceodyssey.core.enums import I64, RecordStatus
+from spaceodyssey.core.executors import base as executor_base
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.core.executors.replay import _fold, _row
@@ -230,3 +233,100 @@ def log_order_replay(study, carry, trace):
         row = masked_record(_row(log, i), study.caps, Audience.OBSERVER)
         belief = _fold(study, belief, row)
     return belief
+
+
+# ---- Slice 3a K1 mutants: each moves a pinned history or fingerprint --------------
+
+
+def _layout_asset_coordinate(study, channel_index):
+    """The mutant asset coordinate: the layout lookup, whatever the key version."""
+    lane = study.channels.lane[channel_index]
+    return study.assets.lane_asset[lane].astype(I64)
+
+
+def _asset_realize(c, study, truth, root, base, fraction):
+    return _clone(handlers._realize_rec, asset_coordinate=_layout_asset_coordinate)(
+        c, study, truth, root, base, fraction
+    )
+
+
+_asset_cancel = _clone(handlers._cancel_lane, _realize_rec=_asset_realize)
+ASSET_KEY_HANDLERS = (
+    handlers.h_none,
+    _clone(handlers.h_done, _realize_rec=_asset_realize),
+    handlers.h_release,
+    handlers.h_wait,
+    _clone(handlers.h_stop, _cancel_lane=_asset_cancel),
+    handlers.h_process,
+    _clone(handlers.h_cancel, _cancel_lane=_asset_cancel),
+    handlers.h_none,
+    _clone(handlers.h_fault, _cancel_lane=_asset_cancel),
+)
+
+
+def _asset_key_step(carry, ev, study, truth, root):
+    return _step_with_table(carry, ev, study, truth, root, ASSET_KEY_HANDLERS)
+
+
+_asset_key_advance = _clone(transaction.advance, step=_asset_key_step)
+_asset_key_advance_jit = eqx.filter_jit(_asset_key_advance)
+
+
+class AssetKeyHostExecutor(HostExecutor):
+    """Mutant: every study keys its draws by the layout's asset, as key_version 2 does.
+
+    The history of a pinned study that measures on a later asset moves; one that
+    measures only on asset 0 does not.
+    """
+
+    def advance(self, carry, root, study, truth, *, wake_fn=core.wake_by_audience):
+        return _asset_key_advance_jit(carry, root, study, truth, wake_fn=wake_fn)
+
+
+def _held(path, carry, trace):
+    """Whether the leaf at `path` exists in this run (a column can be absent)."""
+    obj = trace if path.startswith("trace.") else carry
+    for part in path.split(".")[1:]:
+        obj = getattr(obj, part)
+    return obj is not None
+
+
+def open_every_conditional_gate(monkeypatch, carry, trace):
+    """Mutant: each conditional history leaf the run holds is listed, empty or not."""
+    for table in ("CONDITIONAL_FIELDS", "CONDITIONAL_GROUPS"):
+        gates = getattr(executor_base, table)
+        opened = {
+            path: (lambda c: True) if _held(path, carry, trace) else gate
+            for path, gate in gates.items()
+        }
+        monkeypatch.setattr(executor_base, table, opened)
+
+
+class _SizeIsOne:
+    """`jnp` with every leaf counted as nonempty."""
+
+    def __getattr__(self, name):
+        return getattr(jnp, name)
+
+    @staticmethod
+    def size(x):
+        return 1
+
+
+# Mutant: the fingerprint lists a conditional leaf of size zero, which tags and counts
+# it into the digest. Call it eagerly.
+fingerprint_listing_empty_leaves = _clone(
+    snapshot.snapshot_fingerprint, jnp=_SizeIsOne()
+)
+
+
+def change_the_tie_ranks(monkeypatch, n_ties=4):
+    """Mutant: one more tie rank, which repacks every event order key.
+
+    The programs compiled so far hold the old constant, so the caches are cleared; the
+    caller clears them again after the monkeypatch is undone.
+    """
+    monkeypatch.setattr(events, "N_TIES", n_ties)
+    monkeypatch.setattr(capacities, "N_TIES", n_ties)
+    eqx.clear_caches()
+    jax.clear_caches()
