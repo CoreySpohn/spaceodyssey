@@ -234,6 +234,7 @@ require_tier_reason = true
 "tests/core/test_charging.py" = 169
 "tests/core/test_coincident_order.py" = 109
 "tests/core/test_compile_sharing.py" = 456
+"tests/core/test_config_timeline.py" = 155
 "tests/core/test_conformance_guards.py" = 235
 "tests/core/test_conservation.py" = 170
 "tests/core/test_contracts.py" = 150
