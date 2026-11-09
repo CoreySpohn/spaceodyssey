@@ -39,9 +39,18 @@ count it relies on is asserted nonzero.
   all 4 `Allocate` and 4 `Observe` requests admitted, and every decision rechecked. The awards are
   `(0, 200, 450, 8, 4)` and `(1, 500, 750, 6, 6)`. Dropping either recorded award fails the replay
   with a query failure. Each of these fails it too: removing a recorded `Allocate`, changing one
-  amount, flipping the admission code of an `Allocate` or of an `Observe`, changing the amount,
+  amount, flipping the admission code of an `Allocate`, `Observe`, `Query`, `Wait` or `Stop`,
+  changing the amount,
   window start, window end or recipient retained in the trace for an `Allocate`, changing a
   recorded proposal, and replaying with the carry-reading committee.
+- **Refused observations.** A run releases the unreleased proposal at tick 180 and raises the
+  program-0 request written at tick 400 from 2 to 20. Program 0 then holds 0.5 at the first query
+  and 2.5 at the second, so its first `Observe` (cost 1) is refused `NO_FUNDS` and its second is
+  admitted; the awards are (0.5, 11.25) and (2.5, 9.25), worked out by hand like the others. That
+  run shares the early-release program, so it compiles nothing. Its replay passes, and each of
+  these corruptions fails it: swapping the two outcomes, changing `NO_FUNDS` to `FORBIDDEN`,
+  marking an admitted request refused, and marking the refused one admitted. The early-release
+  run, which has two legitimate refusals, replays clean as well.
 - **Production process.** All default-structure runs use the production `ProposalRecords`, with
   static release ticks, not a substitute.
 - **Parity.** The host and compiled runs have equal histories, query ticks, awards and `Allocate`
@@ -49,12 +58,16 @@ count it relies on is asserted nonzero.
 
 ## Core changes
 
-None. `src/spaceodyssey/core` is untouched. A review found that `replay_allocation` checked
-admission outcomes only for `Allocate` effects, so an `Observe` admission changed from admitted to
-refused still replayed clean. A separate commit fixes it in
-`src/spaceodyssey/studies/allocator.py`: each replayed `Observe` that the trace shows admitted must
-have started one measurement record on its channel and subject (`observation_failures`), and each
-replayed `Query`, `Wait` and `Stop` must be admitted.
+None. `src/spaceodyssey/core` is untouched. Reviews found that `replay_allocation` first checked
+admission outcomes only for `Allocate` effects, and then reconciled `Observe` outcomes only as
+counts. `src/spaceodyssey/studies/allocator.py` now reconciles each one. An admitted `Observe` must
+own exactly one measurement record that starts inside its own occupancy on its channel and subject,
+and every record must belong to exactly one admitted request (`observation_failures`), so swapped
+outcomes leave a request without a record. An outcome must also agree with the program funds the
+replay rebuilds from the awards (window open at the tick, minus earlier charges): an admitted
+request needs the funds, and a refusal must be `NO_FUNDS` with the funds short (`funds_failures`;
+program rows hold no credit of their own in this study). Each replayed `Query`, `Wait` and `Stop`
+must be admitted.
 
 ## Evidence
 
@@ -92,15 +105,14 @@ the toy committee and policy, not data. Skipping the new observation reconciliat
 
 ## Tiers and cost
 
-All five tests are medium with a stated reason. Cold, with caches off, the whole file takes 31 s
-(9 passed, 278 programs, budget 326). The host tests alone take 17.4 s with 208 programs and the
-compiled tests 17.7 s with 205 programs; each fixture is about 12.6 s (host) and 14.4 s
-(compiled), and the eager replays add about 2 s and 1.5 s.
+All five tests are medium with a stated reason. Cold, with caches off, the survey file alone takes
+about 31 s (9 passed, 274 programs, budget 326). The host tests alone take about 17 s and the
+compiled tests about 18 s; each fixture is about 12.6 s (host) and 13.4 s (compiled), and the eager
+replays add about 2 s each.
 
 ## Notes
 
-- Tests in `test_allocator.py` that survey 10 makes redundant, now that (a) perturbs each sealed
-  proposal in its own run: the slow perturbation test (`test_the_committee_reads_only_released_records`)
-  and the slow control (`test_a_committee_that_reads_unreleased_records_fails_the_perturbation`).
-  Before this fix of the survey they were not redundant. The other slow tests stay: they cover the
-  study answer detail, the full set of altered-run replays and the capture callback.
+- The slow tests in `test_allocator.py` stay. The slow early-release perturbation test replays a
+  run with legitimate refusals, which no other test did before the refused-observation run of
+  survey 10; the survey now covers that too, but both are kept. The slow control and the perturbation
+  test also perturb each proposal in its own run, as survey 10 does.

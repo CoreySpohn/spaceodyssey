@@ -533,25 +533,52 @@ def allocation_failures(n_assets, n_resources, awards, allocates):
 def observation_failures(log, admitted):
     """How the admitted `Observe` requests differ from the observation records.
 
-    `admitted` maps `(channel id, subject)` to the number of `Observe` effects the trace
-    shows admitted; each admitted request starts exactly one measurement record on that
-    channel and subject, and a refused one starts none.
+    `admitted` lists `(channel id, subject, tick, occupancy)` for each `Observe` effect
+    the trace shows admitted. A request occupies its lane from its tick for the
+    channel's occupancy, so it owns exactly the measurement records on its channel and
+    subject that start inside that span. Each admitted request must own one record and
+    each record must belong to one request, so swapping two outcomes leaves a request
+    with no record and a record with no request.
     """
     kept = np.asarray(log.valid) & (np.asarray(log.kind) == toy.RECORD_MEASUREMENT)
-    pairs = zip(
-        np.asarray(log.channel)[kept].tolist(),
-        np.asarray(log.subject)[kept].tolist(),
-        strict=True,
+    records = list(
+        zip(
+            np.asarray(log.channel)[kept].tolist(),
+            np.asarray(log.subject)[kept].tolist(),
+            np.asarray(log.start_tick)[kept].tolist(),
+            strict=True,
+        )
     )
-    recorded = {}
-    for pair in pairs:
-        recorded[pair] = recorded.get(pair, 0) + 1
-    return [
-        f"channel {c} subject {u}: {admitted.get((c, u), 0)} admitted Observe "
-        f"requests for {recorded.get((c, u), 0)} records"
-        for c, u in sorted(admitted.keys() | recorded.keys())
-        if admitted.get((c, u), 0) != recorded.get((c, u), 0)
-    ]
+
+    def owns(request, record):
+        channel, subject, tick, span = map(int, request)
+        return record[:2] == (channel, subject) and tick <= record[2] < tick + span
+
+    fails = []
+    for r in admitted:
+        n = sum(owns(r, rec) for rec in records)
+        if n != 1:
+            fails.append(f"admitted Observe {tuple(map(int, r))} owns {n} records")
+    for rec in records:
+        n = sum(owns(r, rec) for r in admitted)
+        if n != 1:
+            fails.append(f"record {rec} belongs to {n} admitted Observe requests")
+    return fails
+
+
+def funds_failures(code, available, cost):
+    """How an `Observe` outcome differs from the program funds the replay recomputed.
+
+    An admitted request needs `available >= cost`. A refused one must carry the
+    `NO_FUNDS` code and `available < cost`: it is not refused for another reason this
+    study never produces, and not refused while the funds were there.
+    """
+    short = available < cost
+    if code == int(AdmissionCode.OK):
+        return ["admitted without the funds"] if short else []
+    if code != int(AdmissionCode.NO_FUNDS):
+        return [f"refused with code {code}, not NO_FUNDS"]
+    return [] if short else ["refused for funds although they were there"]
 
 
 def replay_allocation(study, run, committee=None):
@@ -565,8 +592,11 @@ def replay_allocation(study, run, committee=None):
     it reruns the committee on the view that asked. After the walk it compares those
     answers with the award records in the log, checks that each recorded `Allocate`
     follows its award, and checks the ledger's granted totals against the admitted
-    awards. Each replayed `Observe` that the trace shows admitted must have started one
-    measurement record, and each replayed `Query`, `Wait` and `Stop` must be admitted.
+    awards. Each replayed `Observe` that the trace shows admitted must own one
+    measurement record that starts within its occupancy, and its outcome must agree
+    with the program funds the replay rebuilds from the awards and the earlier charges
+    (program rows hold no credit of their own); each replayed `Query`, `Wait` and
+    `Stop` must be admitted.
     Returns a `ReplayReport`; it never raises on a mismatch.
     """
     committee = ToyCommittee() if committee is None else committee
@@ -588,7 +618,7 @@ def replay_allocation(study, run, committee=None):
     released = release_steps(trace, len(np.asarray(log.kind)))
     fails, asked, allocates = [], [], []
     pstate = jnp.zeros(caps.n_pstate, F64)
-    open_until, admitted = {}, {}
+    open_until, window, admitted = {}, {}, []
     granted = np.zeros((caps.n_assets + caps.n_programs + 1, caps.n_resources))
     previous, ordinal = None, 0
     for d, (step, (view, taken)) in enumerate(zip(steps, run.decisions, strict=True)):
@@ -643,15 +673,30 @@ def replay_allocation(study, run, committee=None):
                 fails.append(f"decision {d} slot {slot}: the admission code differs")
             if not opened:
                 open_until[row] = until
+                window[row] = (start, until, np.asarray(eff.amount[slot]).copy())
                 granted[row] += np.asarray(eff.amount[slot])
         for slot in np.flatnonzero(np.asarray(eff.kind) == EffectKind.OBSERVE):
             code = int(trace.admit_code[step, slot])
-            key = (
-                int(study.channels.id[int(eff.channel_index[slot])]),
-                int(eff.subject[slot]),
-            )
+            ci = int(eff.channel_index[slot])
+            row = caps.n_assets + int(eff.program[slot])
+            start, until, left = window.get(row, (0, 0, np.zeros(caps.n_resources)))
+            charge = np.asarray(study.channels.charge)[ci]
+            available = left[PROGRAM_COLUMN] if start <= tick < until else 0.0
+            fails += [
+                f"decision {d} slot {slot}: {m}"
+                for m in funds_failures(code, available, charge[PROGRAM_COLUMN])
+            ]
             if code == int(AdmissionCode.OK):
-                admitted[key] = admitted.get(key, 0) + 1
+                if start <= tick < until:
+                    left[PROGRAM_COLUMN] -= charge[PROGRAM_COLUMN]
+                admitted.append(
+                    (
+                        int(study.channels.id[ci]),
+                        int(eff.subject[slot]),
+                        tick,
+                        int(study.channels.occupancy_ticks[ci]),
+                    )
+                )
         for slot in np.flatnonzero(
             np.isin(
                 np.asarray(eff.kind),
@@ -697,6 +742,7 @@ __all__ = [
     "allocator_registry",
     "allocator_study",
     "award_failures",
+    "funds_failures",
     "observation_failures",
     "release_steps",
     "released_rows",

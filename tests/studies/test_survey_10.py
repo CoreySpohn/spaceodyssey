@@ -51,20 +51,27 @@ PENDING = next(i for i, p in enumerate(al.DEFAULT_PROPOSALS) if p[4] > LAST_QUER
 # default, round 0: requests 6 and 3 -> 12 * 6/9 = 8 and 12 * 3/9 = 4
 # default, round 1: requests 8 and 8 -> 6 and 6
 # early, round 0: requests 6 and 3 + 90 = 93 -> 12 * 6/99 = 0.727 -> 0.5,
-#   12 * 93/99 = 11.27 -> 11.25 (nearest or ceiling would give 0.75 and 11.5)
+#   12 * 93/99 = 11.27 -> 11.25 (nearest gives 0.75 and 11.25, ceiling 0.75 and 11.5)
 # early, round 1: requests 8 and 98 -> 12 * 8/106 = 0.906 -> 0.75,
 #   12 * 98/106 = 11.09 -> 11
 DEFAULT_AMOUNTS = [[8.0, 4.0], [6.0, 6.0]]
 EARLY_AMOUNTS = [[0.5, 11.25], [0.75, 11.0]]
+# mixed: the early script with the program-0 request written at tick 400 raised from 2
+# to 20, so round 1 has requests 26 and 98 -> 12 * 26/124 = 2.52 -> 2.5 and
+# 12 * 98/124 = 9.48 -> 9.25. Program 0 holds 0.5 at the first query and 2.5 at the
+# second; an observation costs 1, so its first request is refused for funds and its
+# second is admitted.
+LATE = next(i for i, p in enumerate(al.DEFAULT_PROPOSALS) if p[0] == 400)
+MIXED_AMOUNTS = [[0.5, 11.25], [2.5, 9.25]]
 
 
-def _study(*, request=None, index=None, release=None):
-    """The allocator study; one proposal's request or release tick may be replaced."""
+def _study(requests=None, releases=None):
+    """The allocator study; requests and release ticks replaced by script index."""
     proposals = [list(p) for p in al.DEFAULT_PROPOSALS]
-    if request is not None:
-        proposals[index][2] = request
-    if release is not None:
-        proposals[index][4] = release
+    for i, value in (requests or {}).items():
+        proposals[i][2] = value
+    for i, tick in (releases or {}).items():
+        proposals[i][4] = tick
     return al.allocator_study(tuple(tuple(p) for p in proposals))
 
 
@@ -102,14 +109,15 @@ def _carry_run(executor, study):
 
 
 def _runs(executor):
-    observer = _study(request=HUGE, index=OBSERVER)
-    pending = _study(request=HUGE, index=PENDING)
+    observer = _study({OBSERVER: HUGE})
+    pending = _study({PENDING: HUGE})
     toy = al.ToyCommittee
     return SimpleNamespace(
         base=_run(executor, _study(), toy()),
         observer=_run(executor, observer, toy()),
         unreleased=_run(executor, pending, toy()),
-        early=_run(executor, _study(index=PENDING, release=EARLY), toy()),
+        early=_run(executor, _study(releases={PENDING: EARLY}), toy()),
+        mixed=_run(executor, _study({LATE: 20.0}, releases={PENDING: EARLY}), toy()),
         carry_base=_carry_run(executor, _study()),
         carry_observer=_carry_run(executor, observer),
         carry_unreleased=_carry_run(executor, pending),
@@ -195,7 +203,7 @@ def _viewed(r, request, *, until=None):
 # ------------------------------------------------------------------------- the tests
 
 
-REASON = "two programs per executor, seven runs: about 15 s cold fixture, shared"
+REASON = "two programs per executor, eight runs: about 15 s cold fixture, shared"
 
 
 @pytest.mark.medium(reason=REASON)
@@ -330,6 +338,24 @@ def _flip_admission(r, kind):
     return dataclasses.replace(r, trace=eqx.tree_at(lambda x: x.admit_code, t, code))
 
 
+def _observe_slots(r):
+    """The `(step, slot)` of every requested `Observe`, in decision order."""
+    t = r.trace
+    kind = np.asarray(t.eff_kind) == EffectKind.OBSERVE
+    kind &= np.asarray(t.handled)[:, None]
+    return [tuple(map(int, x)) for x in np.argwhere(kind)]
+
+
+def _set_observe_codes(r, codes):
+    """Replace the admission code of the n-th `Observe` request for each `n: code`."""
+    t = r.trace
+    column = np.asarray(t.admit_code).copy()
+    slots = _observe_slots(r)
+    for n, code in codes.items():
+        column[slots[n]] = int(code)
+    return dataclasses.replace(r, trace=eqx.tree_at(lambda x: x.admit_code, t, column))
+
+
 def _bend_trace(r, field):
     """Add one to a field of the first retained `Allocate` row of the trace."""
     t = r.trace
@@ -389,6 +415,9 @@ def test_replay_reproduces_the_run_and_fails_without_a_recorded_award(runs):
         ("allocate amount", _bend_allocate(run)),
         ("allocate admission", _flip_admission(run, EffectKind.ALLOCATE)),
         ("observe admission", _flip_admission(run, EffectKind.OBSERVE)),
+        ("query admission", _flip_admission(run, EffectKind.QUERY)),
+        ("wait admission", _flip_admission(run, EffectKind.WAIT)),
+        ("stop admission", _flip_admission(run, EffectKind.STOP)),
         ("trace amount", _bend_trace(run, "alloc_amount")),
         ("trace window start", _bend_trace(run, "alloc_from")),
         ("trace window end", _bend_trace(run, "alloc_until")),
@@ -398,6 +427,31 @@ def test_replay_reproduces_the_run_and_fails_without_a_recorded_award(runs):
         assert not al.replay_allocation(study, edited).ok, name
     # a committee that read the carry cannot reproduce the recorded awards
     assert not al.replay_allocation(study, run, al.CarryCommittee()).ok
+    _replay_refused_observations(runs)
+
+
+def _replay_refused_observations(runs):
+    """Legitimate refusals replay; each outcome is reconciled with its own request."""
+    refused, ok = int(AdmissionCode.NO_FUNDS), OK
+    early = runs.early
+    assert _admitted(early, EffectKind.OBSERVE) == [refused, ok, refused, ok]
+    assert al.replay_allocation(early.study, early.run).ok
+    mixed = runs.mixed
+    assert _awards(mixed)[:, 3:5].tolist() == MIXED_AMOUNTS
+    codes = _admitted(mixed, EffectKind.OBSERVE)
+    assert codes == [refused, ok, ok, ok]
+    report = al.replay_allocation(mixed.study, mixed.run)
+    assert report.ok, report.failures
+    _positive(refusals=codes.count(refused), admissions=codes.count(ok))
+    study, run = mixed.study, mixed.run
+    for name, edit in (
+        ("swapped outcomes", {0: ok, 2: refused}),
+        ("refusal reason", {0: AdmissionCode.FORBIDDEN}),
+        ("refused though admitted", {1: refused}),
+        ("admitted though refused", {0: ok}),
+    ):
+        edited = _set_observe_codes(run, edit)
+        assert not al.replay_allocation(study, edited).ok, name
 
 
 @pytest.mark.medium(

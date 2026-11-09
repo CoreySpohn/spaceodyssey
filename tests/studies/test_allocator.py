@@ -244,20 +244,34 @@ def test_awards_must_be_visible_to_the_policy_as_recorded():
 
 
 def test_admitted_observations_must_match_the_observation_records():
-    rows = [(M, 10, 0), (M, 11, 1), (P, 50, 0), (A, 0, 0)]  # kind, channel, subject
+    rows = [(M, 10, 0, 510), (M, 11, 1, 210), (P, 50, 0, 80), (A, 0, 0, 200)]
     log = SimpleNamespace(
         kind=np.asarray([r[0] for r in rows]),
         channel=np.asarray([r[1] for r in rows]),
         subject=np.asarray([r[2] for r in rows]),
+        start_tick=np.asarray([r[3] for r in rows]),
         valid=np.asarray([True, True, True, True]),
     )
-    both = {(10, 0): 1, (11, 1): 1}
+    both = [(10, 0, 500, 100), (11, 1, 200, 150)]
     assert al.observation_failures(log, both) == []
-    assert al.observation_failures(log, {(10, 0): 1})  # a record with no admission
-    assert al.observation_failures(log, {**both, (12, 0): 1})  # no record
-    assert al.observation_failures(log, {**both, (10, 0): 2})  # one record, two
+    assert al.observation_failures(log, both[:1])  # a record with no admission
+    assert al.observation_failures(log, [*both, (12, 0, 500, 50)])  # no record
+    assert al.observation_failures(log, [*both, both[0]])  # one record, two
+    assert al.observation_failures(
+        log, [(10, 0, 200, 100), (11, 1, 500, 150)]
+    )  # swapped
     gone = SimpleNamespace(**{**vars(log), "valid": np.asarray([True, False] * 2)})
     assert al.observation_failures(gone, both)  # an invalid row is no record
+
+
+def test_an_observation_outcome_must_agree_with_the_funds():
+    ok, short = int(AdmissionCode.OK), int(AdmissionCode.NO_FUNDS)
+    other = int(AdmissionCode.FORBIDDEN)
+    assert al.funds_failures(ok, 1.0, 1.0) == []
+    assert al.funds_failures(ok, 0.5, 1.0)  # admitted without the funds
+    assert al.funds_failures(short, 0.5, 1.0) == []
+    assert al.funds_failures(short, 1.0, 1.0)  # refused with the funds there
+    assert al.funds_failures(other, 0.5, 1.0)  # another refusal code
 
 
 # ------------------------------------------------------------------ slow: study runs
