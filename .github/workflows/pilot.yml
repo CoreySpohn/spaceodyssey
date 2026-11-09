@@ -68,7 +68,7 @@ jobs:
           uv venv .venv --python 3.12
           echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt
+          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt --override .github/jax-pin.txt
 
       - name: Step cost, plain and mutant
         run: |
@@ -139,7 +139,7 @@ jobs:
           uv venv .venv --python 3.12
           echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt
+          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt --override .github/jax-pin.txt
 
       - name: Quick tier, cold
         run: |

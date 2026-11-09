@@ -76,7 +76,7 @@ jobs:
           echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           # One resolve, so pinned siblings satisfy the package floors.
-          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt ruff==0.17.3 deptry ty==0.0.96
+          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt --override .github/jax-pin.txt ruff==0.17.3 deptry ty==0.0.96
 
       - name: Lint and formatting
         run: |
@@ -148,7 +148,7 @@ jobs:
           uv venv .venv --python 3.12
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           # One resolve, so pinned siblings satisfy the package floors.
-          uv pip install --python .venv/bin/python -e ".[docs,test]" --override .github/sibling-pins.txt
+          uv pip install --python .venv/bin/python -e ".[docs,test]" --override .github/sibling-pins.txt --override .github/jax-pin.txt
 
       # Every Python fence in README.md and docs runs as a test. A block that cannot run on a
       # runner carries the info string `python notest` and a one-line reason above it.
@@ -199,14 +199,17 @@ jobs:
           uv venv .venv --python 3.12
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
           # One resolve, so pinned siblings satisfy the package floors.
-          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt
+          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt --override .github/jax-pin.txt
 
       - name: Slow tier (hypothesis nightly profile)
         env:
           HYPOTHESIS_PROFILE: nightly
         run: |
           status=0
+          # The golden pins run in their own job (below), so a slow tier that
+          # overruns its limit cannot take them with it.
           pytest tests/ -m slow -ra --tb=short --timeout=900 \
+            --ignore=tests/core/test_golden_histories.py \
             --durations=25 --junitxml=junit-slow.xml || status=$?
           if [ "$status" -ne 0 ] && [ "$status" -ne 5 ]; then
             exit "$status"
@@ -215,3 +218,42 @@ jobs:
       - name: Job summary
         if: always()
         run: python .github/scripts/ci_summary.py junit-slow.xml --title "Slow tier" --allow-skips
+
+  goldens:
+    name: Golden pins
+    # Bit-exact history pins, under the jaxlib in .github/jax-pin.txt. Nightly and on
+    # a manual slow or full run, apart from the slow tier.
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.tier != 'not slow')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .jax_cache
+          key: jax-goldens-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
+          restore-keys: jax-goldens-${{ hashFiles('pyproject.toml') }}-
+
+      - name: Install the package and test tools
+        run: |
+          uv venv .venv --python 3.12
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          uv pip install --python .venv/bin/python -e ".[test]" --override .github/sibling-pins.txt --override .github/jax-pin.txt
+
+      - name: Golden pins
+        run: |
+          pytest tests/core/test_golden_histories.py -m "" -ra --tb=short --timeout=900 \
+            --durations=10 --junitxml=junit-goldens.xml
+
+      - name: Job summary
+        if: always()
+        run: python .github/scripts/ci_summary.py junit-goldens.xml --title "Golden pins"
