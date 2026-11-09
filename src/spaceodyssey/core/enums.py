@@ -100,6 +100,7 @@ class Purpose(IntEnum):
     POLICY = 2
     INFERENCE = 3
     PROCESS = 4
+    TRAJECTORY = 5
 
 
 class AdmissionCode(IntEnum):

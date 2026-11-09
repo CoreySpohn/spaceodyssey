@@ -157,6 +157,9 @@ from spaceodyssey.core.snapshot import visible_rows as visible_rows
 from spaceodyssey.core.study import Agenda as Agenda
 from spaceodyssey.core.study import Clock as Clock
 from spaceodyssey.core.study import Study as Study
+from spaceodyssey.core.trajectory import TrajectoryTable as TrajectoryTable
+from spaceodyssey.core.trajectory import draw_walk as draw_walk
+from spaceodyssey.core.trajectory import trajectory_key as trajectory_key
 from spaceodyssey.core.transaction import active as active
 from spaceodyssey.core.transaction import admit as admit
 from spaceodyssey.core.transaction import advance as advance
