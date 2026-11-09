@@ -112,11 +112,26 @@ that part is a code-review concern.
 
 ## K3 and K7
 
-### K3: pending a same-job measurement
+### K3: measured in one job, ratio 0.805
 
-K3 is pending a same-job measurement. No figure in this record decides it yet.
+K3 passes. Pilot run 42601136720 (commit a560033, job "Step cost and cold compiles",
+success) measured the S0 end commit 97753d5 (eleven handlers) and this commit (thirteen
+handlers) in one job, interleaved over five rounds of 30 repeats:
 
-The earlier measurement does not decide it either. Two runs were dispatched together, but
+| Tree | Handlers | Plain per-step minimum | Extra-pass mutant | Mutant ratio | Cold first call, plain | Cold first call, mutant |
+|---|---|---|---|---|---|---|
+| base, 97753d5 | 11 | 99.11 us | 150.67 us | 1.526 | 8.60 to 8.75 s | 10.56 to 10.67 s |
+| final, a560033 | 13 | 79.76 us | 126.83 us | 1.618 | 5.42 to 5.51 s | 6.62 to 6.70 s |
+
+The ratio of the final minimum to the base minimum is 0.805, against the 1.10 limit; the
+per-round ratios run from 0.787 to 0.807, so the round-to-round spread is about 2
+percent, well inside the limit. The extra-pass mutant costs 1.526 and 1.618 times the
+plain step of its own tree, above 1.10, so the probe resolves a regression of the size
+K3 guards against. The thirteen-handler table is faster per step than the eleven-handler
+one because of the compile and step refactors that landed between S0 and S10; every pin
+stayed bit-identical through them (K1).
+
+The earlier measurement below does not decide K3. Two runs were dispatched together, but
 each is a separate job on a separate runner. Runner speed differs from job to job by more
 than the 10 percent limit, so the quotient of their plain figures (181.28 / 244.11 =
 0.743) is dominated by that difference, and K3 has no statistical power from it. An
@@ -148,11 +163,10 @@ step exits 1 above 1.10, and its output is a JSON file shown in the job summary.
 compile of the step is reported separately from the per-step cost (the cold first calls
 in the table above, per-round in the JSON).
 
-When the run exists the gate takes the figures from `K3_SAME_JOB` (run id, base and final
-commits, rounds, both minima, the ratio, both mutant ratios): it requires the ratio to
-follow from the two minima, to be at most 1.10, and both mutant ratios to exceed 1.10, and
-it requires the figures in this record. Until then it requires this record to say
-"pending a same-job measurement" and prints that on every run. The gate also fails if the
+The gate takes the figures from `K3_SAME_JOB` (run id, base and final commits, rounds,
+both minima, the ratio, both mutant ratios): it requires the ratio to follow from the two
+minima, to be at most 1.10, and both mutant ratios to exceed 1.10, and it requires the
+figures in this record. The gate also fails if the
 thirteen-handler step table is not the one K3 is judged at, if the probe's
 `ExtraPassExecutor.transition` no longer runs the extra select-and-handle pass (an ast
 check), if the pair tool stops alternating the trees, or if the workflow loses the pair
@@ -190,6 +204,14 @@ pass over the slow tests; that duplicate cost is accepted and not engineered aro
 Manual dispatch of the slow tier: the `CI` workflow (`ci.yml`) has a `workflow_dispatch`
 trigger with one input, `tier`, a choice of `not slow` (the default), `slow` or `all`.
 To run the slow tier on this branch, dispatch `CI` on ref `s10-gate` with `tier=slow`.
+
+That run (42601139487, commit a560033) was cancelled at the 90-minute job limit while it
+was still in `tests/test_slice1_gate.py`, about 89 percent through the slow selection, one
+error already reported there; it never reached this gate. The slow tier on main has the
+same problem: it does not finish inside 90 minutes, which is why the scheduled runs above
+were cancelled. That is a slow-tier budget problem older than this slice, and it is
+reported here, not fixed. The gate's runner time is therefore unmeasured; its local cold
+time is 434 s, inside the 2400 s timeout at the runner's slowdown.
 
 ## Known limits of a node id inventory
 

@@ -17,7 +17,7 @@ checks that each of those ran and passed in this process.
 - K2, conservation: the independent reconciliation holds on every scenario, refunds
   across expiry and re-award included, and the forged and mutant books fail it.
 - K3, step cost: measured by `pilot.yml` in one job for the base tree and this tree
-  (`K3_SAME_JOB` and the S10 record; pending until that run exists); the gate checks
+  (`K3_SAME_JOB` and the S10 record, from one pilot job); the gate checks
   the recorded ratio against 1.10, that the recorded mutant ratios exceed it, and that
   the probe's extra pass still runs.
 - K4, a survey needs no core patch: every `core/` commit after S0 is listed under a
@@ -330,7 +330,17 @@ K7_CEILING_S = 540
 # runners, whose speed differs by more than the limit, so their plain figures are not
 # compared. They are kept as context: the extra-pass mutant ratio inside each job shows
 # the probe resolves a regression, and the cold first calls are the compile times.
-K3_SAME_JOB = None
+K3_SAME_JOB = {
+    "run_id": 42601136720,
+    "base_commit": "97753d5",
+    "final_commit": "a560033",
+    "rounds": 5,
+    "base_per_step_min_us": 99.11,
+    "final_per_step_min_us": 79.76,
+    "ratio": 0.805,
+    "base_mutant_ratio": 1.526,
+    "final_mutant_ratio": 1.618,
+}
 K3_SAME_JOB_KEYS = (
     "run_id",
     "base_commit",
