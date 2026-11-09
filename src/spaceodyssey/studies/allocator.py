@@ -33,8 +33,10 @@ from spaceodyssey.core.enums import (
     RemainderRule,
     Scope,
 )
+from spaceodyssey.core.executors.base import GO_TOLERANCE
 from spaceodyssey.core.keys import policy_key
 from spaceodyssey.core.kinds import AbstractPolicy
+from spaceodyssey.core.records import log_columns
 from spaceodyssey.core.service import AbstractHostService, Request
 from spaceodyssey.core.snapshot import effects_none
 from spaceodyssey.studies import scripted, toy
@@ -556,30 +558,42 @@ def reference_execution(study, run, committee=None):
     return Reference(result.carry, result.trace)
 
 
-RECORD_COLUMNS = ("channel", "subject", "start_tick", "end_tick", "available_tick")
+def _record_failures(log, ref_log, kinds):
+    """Columns in which the valid `kinds` rows of two logs differ, in log order.
 
-
-def _record_rows(log, kinds):
-    """Each valid `kinds` record as a tuple, in log order."""
-    keep = np.asarray(log.valid) & np.isin(np.asarray(log.kind), kinds)
-    columns = [
-        np.asarray(log.kind)[keep],
-        *(np.asarray(getattr(log, c))[keep] for c in RECORD_COLUMNS),
+    Every column the log holds is compared, so a changed status, program, audience,
+    release stamp or identity shows. Integers, flags and shapes must match exactly;
+    floats must match within the go tolerance of the executor comparison.
+    """
+    keeps = [
+        np.asarray(x.valid) & np.isin(np.asarray(x.kind), kinds) for x in (log, ref_log)
     ]
-    pay = np.asarray(log.payload)[keep]
-    return [
-        (*(int(c[i]) for c in columns), tuple(pay[i].tolist()))
-        for i in range(int(keep.sum()))
-    ]
+    if keeps[0].sum() != keeps[1].sum():
+        return [f"{keeps[0].sum()} records against {keeps[1].sum()} on re-execution"]
+    rows = len(keeps[0])
+    ref_cols = log_columns(ref_log)
+    fails = []
+    for name, col in log_columns(log).items():
+        col, other = np.asarray(col), np.asarray(ref_cols[name])
+        if not col.ndim or col.shape[0] != rows:
+            continue
+        got, want = col[keeps[0]], other[keeps[1]]
+        if np.issubdtype(col.dtype, np.floating):
+            same = got.size == 0 or float(np.abs(got - want).max()) <= GO_TOLERANCE
+        else:
+            same = np.array_equal(got, want)
+        if not same:
+            fails.append(f"record column {name} differs from the re-execution")
+    return fails
 
 
 def reference_failures(carry, trace, ref):
     """How a recorded run differs from the core's re-execution of it.
 
     Every handled decision must request the same effects and receive the same
-    admission codes, every measurement and award record must be the same, and the
-    ledger's granted totals must agree. An outcome or record changed after the fact,
-    dropped or repeated, is a difference.
+    admission codes, every column of every measurement and award record must be the
+    same (floats within the go tolerance), and the ledger's granted totals must agree.
+    An outcome or record changed after the fact, dropped or repeated, is a difference.
     """
     fails = []
     steps = np.flatnonzero(np.asarray(trace.handled) & np.asarray(trace.wake))
@@ -592,8 +606,7 @@ def reference_failures(carry, trace, ref):
         for d in np.flatnonzero((got != want).reshape(len(steps), -1).any(axis=1)):
             fails.append(f"decision {d}: {name} differs from the re-execution")
     kinds = (toy.RECORD_MEASUREMENT, AWARD_KIND_INDEX)
-    if _record_rows(carry.log, kinds) != _record_rows(ref.carry.log, kinds):
-        fails.append("the measurement and award records differ from the re-execution")
+    fails += _record_failures(carry.log, ref.carry.log, kinds)
     if not np.array_equal(
         np.asarray(carry.ledger.granted), np.asarray(ref.carry.ledger.granted)
     ):
