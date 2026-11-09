@@ -1,42 +1,42 @@
 """Survey 11, targets of opportunity: an alert makes the policy cancel the exposure.
 
-Asset 0, lane 0 runs channel 10 (100 ticks of occupancy, 10 of transition, release
-delay 20, a priced surcharge). A scripted alert fires at tick 40 and is released to the
-policy `DELAY` ticks later. A level-1 array policy reads the released alert row in its
-snapshot and, at that decision, emits a live `Cancel` of lane 0. The script, keyed by
-tick, then starts the same subject again, so the next acquisition shows whether the
-cancelled index was reused. The merge-time guard runs the study on the host executor
-once and holds every assertion to that run; the checks are plain functions so a source
-mutant can be held to the same ones.
+The study (`spaceodyssey.studies.survey_11`) runs channel 10 on lane 0, writes an
+alert at tick 40 that the policy reads 15 ticks later, and has the policy cancel the
+live work in that tick, then start the subject again. The merge-time guard runs it
+once on the host executor and holds every check to that run; the checks are plain
+functions so a source mutant can be held to the same ones. A late delivery of the
+cancelled generation's DONE, a run on a frozen asset and a compiled-executor parity
+run are one test each.
 """
 
-import dataclasses
 from types import SimpleNamespace
 
-import equinox as eqx
 import jax
-import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from spaceodyssey.core import HostExecutor
 from spaceodyssey.core.enums import (
-    F64,
-    I64,
     AdmissionCode,
-    Audience,
     ChargePricing,
     EffectKind,
     EventKind,
     RecordStatus,
 )
 from spaceodyssey.core.executors.base import GO_TOLERANCE, index_world
-from spaceodyssey.core.ledger import charge_parts
-from spaceodyssey.core.lift import traced
 from spaceodyssey.core.records import log_columns
-from spaceodyssey.studies.scripted import SCRIPTED_CHANNEL, ScriptedRecords
-from tests.core.helpers import worlds
-from tests.core.program_helpers import ScriptedPrograms, observe, wait
-from tests.core.refund_helpers import refund_study
+from spaceodyssey.studies.survey_11 import (
+    ALERT_CHANNEL,
+    ALERT_DELAY,
+    ALERT_FIRE,
+    LANE,
+    LEVEL,
+    PRICING,
+    STARTS,
+    SUBJECT,
+    survey_study,
+)
+from tests.core.helpers import handle_event, one_world, pending_done_row, worlds
 from tests.studies.survey_helpers import run_on, same_histories
 
 pytestmark = pytest.mark.medium(
@@ -44,103 +44,32 @@ pytestmark = pytest.mark.medium(
 )
 
 N_STEPS = 60
-N_EFFECTS = 3  # the observe, the wait, and the slot the policy's Cancel takes
-LEVEL = 1  # the policy level of the study: it reads arrays and may Cancel
-LANE, SUBJECT, CHANNEL = 0, 0, 10
-OCCUPANCY, TRANSITION = 100, 10  # channel 10 and the transition of asset 0
-ALERT_CHANNEL = SCRIPTED_CHANNEL
-CHARGE, SURCHARGE = 10.0, 2.0
-
-# Ticks of the script. The first exposure starts at FIRST + TRANSITION and would finish
-# at START + OCCUPANCY; the alert fires at FIRE and the policy sees it at FIRE + DELAY.
-FIRST, FIRE, DELAY, AGAIN = 0, 40, 15, 120
-START = FIRST + TRANSITION
-SEEN = FIRE + DELAY
+CHANNEL = 10
+OCCUPANCY, TRANSITION, LATENCY = 100, 10, 20  # channel 10 and asset 0's transition
+AGAIN = STARTS[1]
+START = STARTS[0] + TRANSITION  # the first exposure starts after the transition
+SEEN = ALERT_FIRE + ALERT_DELAY  # the tick the policy reads the alert and cancels
 PLANNED_DONE = START + OCCUPANCY
-FINISH = 250
-SCRIPT = (
-    observe(FIRST, SUBJECT, CHANNEL, 0),
-    # the decision that sees the alert waits for the next request
-    wait(SEEN, AGAIN - SEEN),
-    observe(AGAIN, SUBJECT, CHANNEL, 0),
-    wait(AGAIN, FINISH - AGAIN),
-)
+SECOND_DONE = AGAIN + TRANSITION + OCCUPANCY
 
-
-def _as_rows(rows):
-    """The script as an int table; the shared helper's table holds only eight rows."""
-    return jnp.asarray(np.asarray(rows, np.int64), I64)
-
-
-class ScriptedAlerts(ScriptedRecords):
-    """Scripted records released `delay` ticks after they are written.
-
-    `ScriptedRecords` releases a record in the tick it is written. An alert is declared
-    with a release delay: written at its fire tick, released to the policy `delay` ticks
-    later. The delay is a leaf, so studies that differ only in it share a program.
-    """
-
-    delay: int = eqx.field(default=0, metadata=traced(I64))
-
-    def handle(self, carry, ev, study):
-        """Write the scripted record, available `delay` ticks after the fire."""
-        carry, rec = super().handle(carry, ev, study)
-        return carry, dataclasses.replace(rec, available_tick=ev.tick + self.delay)
-
-
-class AlertWatch(ScriptedPrograms):
-    """The script, read by tick, plus a policy that cancels the lane on an alert.
-
-    A level-1 array policy: it scans the released rows of its snapshot for a row on the
-    alert channel and, once, puts a live `Cancel(lane)` in the last effect row.
-    """
-
-    script: object = eqx.field(converter=_as_rows)
-
-    def decide(self, pstate, view, study, key):
-        """Emit the scripted rows of this tick, then the Cancel once an alert shows."""
-        by_tick = eqx.tree_at(lambda v: v.n_dec, view, view.tick)
-        eff, _, _ = super().decide(pstate, by_tick, study, key)
-        alert = ((view.log.channel == ALERT_CHANNEL) & view.log.valid).any()
-        due = alert & (pstate[0] == 0.0)
-        last = N_EFFECTS - 1
-
-        def put(column, value):
-            return column.at[last].set(jnp.where(due, value, column[last]))
-
-        eff = dataclasses.replace(
-            eff,
-            kind=put(eff.kind, EffectKind.CANCEL),
-            lane=put(eff.lane, LANE),
-            group=put(eff.group, view.tick * N_EFFECTS + last),
-        )
-        return eff, pstate.at[0].set(jnp.where(due, 1.0, pstate[0])), jnp.zeros((), F64)
-
-
-def survey_study():
-    """The refund toy study with channel 10 on a surcharge price and the alert process.
-
-    Only the alert, the first exposure and the second exposure are written, so the log
-    holds three rows. The agenda is at level 1.
-    """
-    study = refund_study(
-        (),
-        charge=CHARGE,
-        pricing=ChargePricing.SURCHARGE,
-        surcharge=SURCHARGE,
-        policy=AlertWatch(script=SCRIPT),
-    )
-    alerts = ScriptedAlerts(
-        ticks=(FIRE,),
-        values=(1.0,),
-        ids=(0,),
-        revisions=(0,),
-        statuses=(int(RecordStatus.COMPLETED),),
-        audience=int(Audience.POLICY),
-        delay=DELAY,
-    )
-    study = eqx.tree_at(lambda s: s.process, study, alerts)
-    return eqx.tree_at(lambda s: s.agenda.levels, study, jnp.asarray([LEVEL]))
+# The price of channel 10 per resource column (asset, program, shared) against a cost of
+# 10 in each. The cancel comes at 45 of 100 ticks, so the elapsed fraction is 0.45.
+#   column 0, SURCHARGE: charge 20 + surcharge 2 = 22, of which 2 is fixed.
+#     kept = (22 - 2) * 0.45 + 2 = 11, credit = 22 - 11 = 11
+#   column 1, OCCUPANCY: charge 12. kept = 12 * 0.45 = 5.4, credit = 12 - 5.4 = 6.6
+#   column 2, FLAT_FRACTION: charge 8. A cancel keeps it all: kept = 8, credit = 0
+# Two exposures are debited (the cancelled one and the completed one), so the debit is
+# twice the charge in each column; only the cancelled one is credited.
+#   column 0 on balance row 0 (asset 0): 100 - 44 + 11 = 67
+#   column 1 on balance row 2 (the program row): 100 - 24 + 6.6 = 82.6
+#   column 2 on balance row 3 (the shared row): 100 - 16 + 0 = 84
+FRACTION = 0.45
+KEPT = np.array([11.0, 5.4, 8.0])
+FIXED = np.array([2.0, 0.0, 0.0])
+FULL = np.array([22.0, 12.0, 8.0])
+DEBITED = np.array([[44, 0, 0], [0, 0, 0], [0, 24, 0], [0, 0, 16]], float)
+REFUNDED = np.array([[11, 0, 0], [0, 0, 0], [0, 6.6, 0], [0, 0, 0]], float)
+BALANCE = np.array([[67, 100, 100], [100, 100, 100], [100, 82.6, 100], [100, 100, 84]])
 
 
 def _run(study):
@@ -174,7 +103,7 @@ def _pick(rows, keep):
 
 
 def _split(world):
-    """The alert row, the partial record and the second exposure's record."""
+    """The alert row, the work rows, the partial record and the second exposure's."""
     rows = _rows(world)
     alert = _pick(rows, rows["channel"] == ALERT_CHANNEL)
     work = _pick(rows, rows["channel"] == CHANNEL)
@@ -191,18 +120,27 @@ def _steps(world, kind):
     return np.asarray(t.tick)[keep].tolist(), np.asarray(t.n_written)[keep].tolist()
 
 
+def _cancel_codes(world):
+    """The admission code of every Cancel the policy emitted."""
+    t = world.trace
+    sent = np.asarray(t.handled)[:, None] & (
+        np.asarray(t.eff_kind) == EffectKind.CANCEL
+    )
+    return np.asarray(t.admit_code)[sent].tolist()
+
+
 def check_a(world):
-    """(a) The DONE of the cancelled generation settles nothing, writes no record."""
+    """(a) The DONE of the cancelled generation settles nothing and writes no record."""
     _, work, first, _ = _split(world)
     # the cancelled exposure is one PARTIAL record; no COMPLETED one has its index
     assert first["status"].tolist() == [RecordStatus.PARTIAL]
     cancelled = work["acquisition_index"] == 0
     assert not (cancelled & (work["status"] == RecordStatus.COMPLETED)).any()
     # the only DONE handled in the run is the second exposure's, at its own tick, and
-    # it wrote its row; the cancelled exposure's planned DONE tick handled none
+    # it wrote its row; the cancel invalidated the planned DONE row, so none came at 110
     ticks, written = _steps(world, EventKind.DONE)
     assert PLANNED_DONE not in ticks
-    assert ticks == [AGAIN + TRANSITION + OCCUPANCY]
+    assert ticks == [SECOND_DONE]
     assert written == [1]
     assert not bool(world.carry.double_settle)
     # the planned DONE tick is later than the cancel, so there was something to cancel
@@ -212,39 +150,34 @@ def check_a(world):
 def check_b(world):
     """(b) The partial record's fraction equals elapsed over planned."""
     _, _, first, _ = _split(world)
-    planned = OCCUPANCY
     elapsed = SEEN - START
     assert elapsed > 0
     fraction = float(first["payload"][0, 2])
-    assert abs(fraction - elapsed / planned) <= GO_TOLERANCE
+    assert abs(fraction - elapsed / OCCUPANCY) <= GO_TOLERANCE
+    assert abs(fraction - FRACTION) <= GO_TOLERANCE
     assert first["start_tick"][0] == START
     assert first["end_tick"][0] - first["start_tick"][0] == elapsed
 
 
 def check_c(world):
-    """(c) The retained charge and the credit follow the pricing table."""
-    study = world.study
+    """(c) The retained charge and the credit follow the pricing table, per column."""
     _, _, first, second = _split(world)
-    charge, fixed, pricing = (np.asarray(x)[0] for x in charge_parts(study, 0))
-    assert pricing == ChargePricing.SURCHARGE
-    assert fixed == SURCHARGE > 0
-    assert charge == CHARGE + SURCHARGE
-    part = (SEEN - START) / OCCUPANCY
-    kept = (charge - fixed) * part + fixed
-    assert first["charged"][0, 0] == pytest.approx(kept, abs=GO_TOLERANCE)
-    assert first["nonrefundable"][0, 0] == fixed  # the surcharge is retained
-    credit = charge - kept
-    assert credit > 0
-    ledger = world.carry.ledger
-    refunded = np.asarray(ledger.refunded)[0, 0]
-    assert refunded == pytest.approx(credit, abs=GO_TOLERANCE)
-    # the second exposure is completed and keeps its whole price, surcharge included
+    assert world.study.channels.pricing[0].tolist() == [int(p) for p in PRICING]
+    assert PRICING[2] == ChargePricing.FLAT_FRACTION  # a cancel returns none of it
+    # the records hold the retained charge and the fixed part in every column
+    np.testing.assert_allclose(first["charged"][0], KEPT, atol=1e-9)
+    np.testing.assert_allclose(first["nonrefundable"][0], FIXED, atol=1e-9)
+    np.testing.assert_allclose(second["charged"][0], FULL, atol=1e-9)
+    np.testing.assert_allclose(second["nonrefundable"][0], FIXED, atol=1e-9)
     assert second["status"].tolist() == [RecordStatus.COMPLETED]
-    assert second["charged"][0, 0] == charge
-    balance = np.asarray(ledger.balance)[0, 0]
-    start = float(np.asarray(study.budget)[0, 0])
-    assert np.asarray(ledger.debited)[0, 0] == pytest.approx(2 * charge)
-    assert balance == pytest.approx(start - 2 * charge + credit, abs=GO_TOLERANCE)
+    # the ledger debits and credits each payer row of each column, and no other cell
+    ledger = world.carry.ledger
+    np.testing.assert_allclose(np.asarray(ledger.debited), DEBITED, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(ledger.refunded), REFUNDED, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(ledger.balance), BALANCE, atol=1e-9)
+    refunded = np.asarray(ledger.refunded)
+    assert refunded[0, 0] > 0 and refunded[2, 1] > 0  # the asset and program credits
+    assert refunded[3, 2] == 0 and (np.asarray(ledger.debited)[3, 2] > 0)  # flat price
 
 
 def check_d(world):
@@ -258,11 +191,11 @@ def check_d(world):
 def check_e(world):
     """(e) The alert-to-cancel latency equals the declared release delay."""
     study = world.study
-    alert, _, first, _ = _split(world)
+    alert, _, first, second = _split(world)
     declared = int(study.process.delay)
-    assert declared == DELAY > 0
+    assert declared == ALERT_DELAY > 0
     # the alert is released to the policy the declared delay after it is written
-    assert alert["end_tick"][0] == FIRE
+    assert alert["end_tick"][0] == ALERT_FIRE
     assert alert["available_tick"][0] - alert["end_tick"][0] == declared
     assert alert["released_tick"][0] == alert["available_tick"][0]
     # the policy answers in the tick it reads the alert, so the cancel lands then
@@ -270,7 +203,12 @@ def check_e(world):
     assert latency == declared
     t = world.trace
     cancels = np.asarray(t.handled) & (np.asarray(t.kind) == EventKind.CANCEL)
-    assert np.asarray(t.tick)[cancels].tolist() == [FIRE + declared]
+    assert np.asarray(t.tick)[cancels].tolist() == [SEEN]
+    # a work record is released after the channel's declared latency, cancelled or not
+    assert int(study.channels.latency_ticks[0]) == LATENCY
+    assert first["available_tick"][0] == SEEN + LATENCY
+    assert first["released_tick"][0] == SEEN + LATENCY
+    assert second["available_tick"][0] == SECOND_DONE + LATENCY
 
 
 CHECKS = (check_a, check_b, check_c, check_d, check_e)
@@ -283,18 +221,18 @@ def evidence(world):
     effects = np.asarray(t.handled)[:, None] & (
         np.asarray(t.eff_kind) == EffectKind.CANCEL
     )
-    admitted = effects & (np.asarray(t.admit_code) == AdmissionCode.OK)
+    refunded = np.asarray(world.carry.ledger.refunded)
     return {
         "alert rows": len(alert["channel"]),
         "cancel effects emitted": int(effects.sum()),
-        "cancel effects admitted": int(admitted.sum()),
+        "cancel effects admitted": _cancel_codes(world).count(AdmissionCode.OK),
         "cancel events handled": len(_steps(world, EventKind.CANCEL)[0]),
         "partial records": len(first["channel"]),
         "completed records": len(second["channel"]),
         "done events handled": len(_steps(world, EventKind.DONE)[0]),
         "process events handled": len(_steps(world, EventKind.PROCESS)[0]),
-        "retained surcharge": int(first["nonrefundable"][0, 0] > 0),
-        "credit rows": int(np.asarray(world.carry.ledger.refunded)[0, 0] > 0),
+        "retained fixed parts": int((first["nonrefundable"][0] > 0).sum()),
+        "credited cells": int((refunded > 0).sum()),
     }
 
 
@@ -310,6 +248,7 @@ def test_the_study_reads_and_cancels_on_the_alert(world):
     counts = evidence(world)
     assert all(v > 0 for v in counts.values()), counts
     assert counts["cancel effects emitted"] == counts["cancel effects admitted"] == 1
+    assert counts["credited cells"] == 2
     assert int(world.carry.n_log) == 3
 
 
@@ -318,13 +257,72 @@ def test_the_cancelled_generation_settles_nothing(world):
     check_a(world)
 
 
+def late_done(world):
+    """The post-cancel carry before and after the cancelled DONE is handled.
+
+    The DONE row is read from the queue as it stood before the Cancel ran, then handed
+    to the real handler path, with the generation it was queued with, in the tick of the
+    cancel: the helper enqueues at the carry's tick, and the partial record's queued
+    release is earlier than the planned DONE tick, so a later tick would handle that.
+    """
+    study = world.study
+    truth, root = one_world(caps=study.caps)
+    t = world.trace
+    handled = np.asarray(t.handled) & (np.asarray(t.kind) == EventKind.CANCEL)
+    at = int(np.flatnonzero(handled)[0])
+    run = HostExecutor()
+    before = run.run(study, truth, root, at).carry  # the Cancel is queued, not handled
+    after = run.run(study, truth, root, at + 1).carry  # the Cancel has run
+    row = pending_done_row(before, LANE)
+    assert bool(row.valid)  # the queue held the exposure's DONE until the cancel
+    assert not bool(pending_done_row(after, LANE).valid)
+    old_gen = int(row.gen)
+    assert int(after.ledger.lane_gen[LANE]) != old_gen  # the cancel retired it
+    late = handle_event(
+        after,
+        study,
+        truth,
+        root,
+        EventKind.DONE,
+        lane=LANE,
+        gen=old_gen,
+        acquisition_id=int(row.acquisition_id),
+        channel_index=int(row.channel_index),
+        channel=int(row.channel),
+        subject=int(row.subject),
+        acquisition_index=int(row.acquisition_index),
+        scope=int(row.scope),
+    )
+    return after, late
+
+
+def test_a_late_done_of_the_cancelled_generation_settles_nothing(world):
+    """Delivers the cancelled generation's DONE to the post-cancel carry by the real
+    handler. Fails if the stale-generation guard is dropped, or the cancel does not
+    retire the lane's generation: either lets the late DONE count as a double settle.
+    """
+    after, late = late_done(world)
+    assert int(late.n_log) == int(after.n_log) == 2  # the alert and the partial record
+    assert not bool(late.double_settle)
+    for name in ("log", "ledger", "acquisition_counts"):
+        pairs = zip(
+            jax.tree_util.tree_leaves(getattr(after, name)),
+            jax.tree_util.tree_leaves(getattr(late, name)),
+            strict=True,
+        )
+        for a, b in pairs:
+            assert np.array_equal(np.asarray(a), np.asarray(b)), name
+
+
 def test_the_partial_record_fraction_is_elapsed_over_planned(world):
     """Fails if the partial fraction is not elapsed over planned, in the go band."""
     check_b(world)
 
 
 def test_the_retained_charge_and_credit_follow_the_pricing_table(world):
-    """Fails if the surcharge is credited back or the credit is not charge less kept."""
+    """Fails if the charge, the fixed part or the credit of any column or payer row
+    differs from the hand-worked table, or the credit follows the cost, not the charge.
+    """
     check_c(world)
 
 
@@ -334,8 +332,24 @@ def test_the_cancelled_index_is_not_reused(world):
 
 
 def test_the_alert_to_cancel_latency_is_the_declared_release_delay(world):
-    """Fails if the cancel lands at any tick but the alert's declared release."""
+    """Fails if the cancel lands at any tick but the alert's declared release, or a
+    work record is released other than after the channel's declared latency."""
     check_e(world)
+
+
+@pytest.mark.medium(reason="commitments change the program, so one more host compile")
+def test_a_live_cancel_inside_the_frozen_horizon_is_admitted():
+    """D8: cancelling an activity that has started is not frozen. Fails if the asset's
+    horizon refuses the live Cancel, or the Cancel spends a disruptive activation."""
+    frozen = _run(survey_study(frozen=True))
+    assert _cancel_codes(frozen) == [AdmissionCode.OK]  # one Cancel, admitted
+    _, _, first, second = _split(frozen)
+    assert first["status"].tolist() == [RecordStatus.PARTIAL]
+    assert first["end_tick"].tolist() == [SEEN]
+    assert second["status"].tolist() == [RecordStatus.COMPLETED]
+    # the two starts broke the freeze, one activation each; the Cancel took none
+    assert np.asarray(frozen.carry.ledger.disruptive_used).tolist() == [2, 0]
+    assert abs(float(first["payload"][0, 2]) - FRACTION) <= GO_TOLERANCE
 
 
 @pytest.mark.medium(reason="the compiled executor compiles every program again")
