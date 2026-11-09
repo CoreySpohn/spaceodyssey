@@ -14,12 +14,21 @@ a positive integer equal to the default of the class's `version` field when it
 has one. `installed_resolver()` reads the installed entry points and builds the
 `KindResolver` the codec takes; the codec itself never imports by name.
 
+An entry point of an optional extra is declared with extras syntax
+(`"module:Class [physical]"`). In an install without that extra the entry is skipped
+rather than failing the whole table: `installed_missing()` names it, and the
+installed resolver refuses it only when a document asks for that kind.
+
 This module sits outside the core, which may not load code dynamically.
 """
 
 import re
-from importlib.metadata import entry_points
+from importlib.metadata import PackageNotFoundError, entry_points, version
+from importlib.metadata import (
+    requires as dist_requires,
+)
 
+from spaceodyssey.codec.document import DocumentError, pointer
 from spaceodyssey.codec.kinds import (
     CORE_KINDS,
     KindResolver,
@@ -56,22 +65,50 @@ _NAME = re.compile(
 )
 
 
+_EXTRA = re.compile(r"""extra\s*==\s*["']([^"']+)["']""")
+_REQ_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
 def _origin(entry):
     """The entry point and the distribution it comes from, for messages."""
     dist = getattr(entry.dist, "name", None) or "an unknown distribution"
     return f"{entry.group} {entry.name} = {entry.value} (from {dist})"
 
 
-def kinds_from_entry_points(entries):
-    """The `(group, id, version)` to class mapping a set of entry points registers.
+def _extras_unmet(entry):
+    """The requirements of an entry's declared extras that are not installed."""
+    extras = tuple(getattr(entry, "extras", None) or ())
+    dist = getattr(entry.dist, "name", None)
+    if not extras or not dist:
+        return []
+    try:
+        lines = dist_requires(dist) or []
+    except PackageNotFoundError:
+        return []
+    unmet = []
+    for line in lines:
+        head, _, marker = line.partition(";")
+        if not set(_EXTRA.findall(marker)) & set(extras):
+            continue
+        name = _REQ_NAME.match(head.strip())
+        try:
+            version(name[0])
+        except PackageNotFoundError:
+            unmet.append(name[0])
+    return unmet
 
-    Entries outside the `spaceodyssey.` groups are ignored. A group naming no
-    family, a malformed name, an object that fails to load, a class of the wrong
-    family or version, a core entry that differs from `CORE_KINDS`, and one
-    `(group, id)` registered twice or one class registered under two ids (naming
-    both entries and their distributions) each raise `RegistrationError`.
+
+def scan_entry_points(entries):
+    """The registered kinds and the kinds skipped for a missing extra.
+
+    Returns `(kinds, missing)`: `kinds` as `kinds_from_entry_points` documents, and
+    `missing` mapping `(group, id, version)` to the extra names that would provide it.
+    An entry that declares extras is skipped, not raised, when a requirement of those
+    extras is not installed or its load fails with `ModuleNotFoundError` for a module
+    outside spaceodyssey; every other defect raises `RegistrationError`.
     """
     kinds = {}
+    missing = {}
     seen = {}
     bound = {}
     for entry in entries:
@@ -96,8 +133,18 @@ def kinds_from_entry_points(entries):
                 f"{_origin(seen[ref[:2]])} and {_origin(entry)}"
             )
         seen[ref[:2]] = entry
+        extras = tuple(getattr(entry, "extras", None) or ())
+        if _extras_unmet(entry):
+            missing[ref] = extras
+            continue
         try:
             cls = entry.load()
+        except ModuleNotFoundError as err:
+            top = (err.name or "").partition(".")[0]
+            if extras and top != "spaceodyssey":
+                missing[ref] = extras
+                continue
+            raise RegistrationError(f"{_origin(entry)}: cannot load: {err}") from err
         except (ImportError, AttributeError) as err:
             raise RegistrationError(f"{_origin(entry)}: cannot load: {err}") from err
         cls = _checked(entry, ref, cls)
@@ -108,7 +155,20 @@ def kinds_from_entry_points(entries):
             )
         bound[cls] = entry
         kinds[ref] = cls
-    return kinds
+    return kinds, missing
+
+
+def kinds_from_entry_points(entries):
+    """The `(group, id, version)` to class mapping a set of entry points registers.
+
+    Entries outside the `spaceodyssey.` groups are ignored, and entries of an extra
+    that is not installed are skipped (see `scan_entry_points`). A group naming no
+    family, a malformed name, an object that fails to load, a class of the wrong
+    family or version, a core entry that differs from `CORE_KINDS`, and one
+    `(group, id)` registered twice or one class registered under two ids (naming
+    both entries and their distributions) each raise `RegistrationError`.
+    """
+    return scan_entry_points(entries)[0]
 
 
 def _checked(entry, ref, cls):
@@ -140,6 +200,35 @@ def installed_kinds():
     return kinds_from_entry_points(entry_points())
 
 
+def installed_missing():
+    """The kinds skipped for a missing extra, as `(group, id, version)` to extras."""
+    return scan_entry_points(entry_points())[1]
+
+
+class InstalledResolver(KindResolver):
+    """A `KindResolver` that names the extra when a skipped kind is requested."""
+
+    def __init__(self, kinds=None, missing=None):
+        """Resolve over `kinds`; `missing` maps skipped references to their extras."""
+        super().__init__(kinds)
+        self._missing = {
+            ref[:2]: (ref, extras) for ref, extras in (missing or {}).items()
+        }
+
+    def resolve(self, ref, path=()):
+        """The class a reference names; a kind of a missing extra says to install it."""
+        hit = self._missing.get(tuple(ref[:2]))
+        if hit is not None and self.current_version(*ref[:2]) is None:
+            extras = ",".join(hit[1])
+            raise DocumentError(
+                f"kind {list(ref)} needs the optional install `spaceodyssey[{extras}]`",
+                pointer(path),
+                code="D001",
+            )
+        return super().resolve(ref, path)
+
+
 def installed_resolver():
     """A `KindResolver` over the installed kinds."""
-    return KindResolver(installed_kinds())
+    kinds, missing = scan_entry_points(entry_points())
+    return InstalledResolver(kinds, missing)

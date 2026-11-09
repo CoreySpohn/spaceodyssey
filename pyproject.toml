@@ -83,7 +83,7 @@ Documentation = "https://spaceodyssey.readthedocs.io"
 [project.entry-points."spaceodyssey.channel_model"]
 "toy.photometry@1" = "spaceodyssey.studies.toy:ToyPhotometry"
 # Needs the `physical` extra: loading this entry imports jaxedith and its siblings.
-"jaxedith.summary_channel@2" = "spaceodyssey.adapters.jaxedith:JaxedithSummaryChannel"
+"jaxedith.summary_channel@2" = "spaceodyssey.adapters.jaxedith:JaxedithSummaryChannel [physical]"
 
 [project.entry-points."spaceodyssey.design"]
 "toy.gain@1" = "spaceodyssey.studies.toy:ToyDesign"
@@ -223,7 +223,7 @@ require_tier_reason = true
 "tests/adapters/test_refinement.py" = 1312
 "tests/adapters/test_reporting_law.py" = 1602
 "tests/adapters/test_skyscapes_scene.py" = 653
-"tests/adapters/test_summary_channel.py" = 413
+"tests/adapters/test_summary_channel.py" = 416
 "tests/anchors/test_profile_table.py" = 10
 "tests/codec/test_checkpoint_store.py" = 32
 "tests/codec/test_document.py" = 129

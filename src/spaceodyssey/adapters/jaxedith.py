@@ -74,9 +74,11 @@ outside its certified window is a no-science row.
 """
 
 import concurrent.futures
+import contextlib
 import dataclasses
 import functools
 import hashlib
+import json
 import math
 
 import equinox as eqx
@@ -1256,7 +1258,6 @@ class _ChannelAssets(eqx.Module):
     calibration_id: int
 
 
-@functools.lru_cache(maxsize=4)
 def _channel_assets(profile, target, detector, n_time_nodes, n_exozodi, law):
     """Build the report, observing context and nominal planet a channel realizes with.
 
@@ -1316,6 +1317,34 @@ def _channel_assets(profile, target, detector, n_time_nodes, n_exozodi, law):
     )
 
 
+def _thread_config():
+    """The caller's thread-local JAX settings that change what a build computes."""
+    return (
+        bool(jax.config.jax_enable_x64),
+        jax.config.jax_default_device,
+        jax.config.jax_default_matmul_precision,
+    )
+
+
+def _profile_digest(profile):
+    """Digest of the profile file text and the pinned response, for the cache key."""
+    raw = json.dumps(load_profile(profile), sort_keys=True).encode()
+    raw += YIP_DIGEST.encode()
+    return hashlib.blake2b(raw, digest_size=8).hexdigest()
+
+
+def _build_in_thread(declarations, config):
+    """Run the cached build under the caller's JAX settings, on this thread."""
+    x64, device, precision = config
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(jax.enable_x64(x64))
+        if device is not None:
+            stack.enter_context(jax.default_device(device))
+        if precision is not None:
+            stack.enter_context(jax.default_matmul_precision(precision))
+        return _channel_assets(*declarations)
+
+
 def _build_assets(*declarations):
     """`_channel_assets`, built outside any trace the caller is in.
 
@@ -1323,9 +1352,21 @@ def _build_assets(*declarations):
     its channel at its first realization). Tracing state belongs to the thread, so
     the build runs on a fresh one, where it is the ordinary eager build; the response
     tables then equal an offline report's to the last bit, whichever call came first.
+    A fresh thread starts from the process defaults, so the caller's thread-local
+    settings (`jax.enable_x64`, default device, matmul precision) are re-entered
+    there, and they join the profile digest in the cache key: a build under one
+    setting is never served to another, nor after the profile file changes.
     """
+    key = (*declarations, _profile_digest(declarations[0]), _thread_config())
+    return _cached_build(key)
+
+
+@functools.lru_cache(maxsize=8)
+def _cached_build(key):
+    """The build for one declaration set, profile digest and JAX setting."""
+    *declarations, _, config = key
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(_channel_assets, *declarations).result()
+        return pool.submit(_build_in_thread, tuple(declarations), config).result()
 
 
 class JaxedithSummaryChannel(AbstractChannelModel):

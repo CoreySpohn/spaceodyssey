@@ -55,44 +55,55 @@ PT4's `sample_report`. No file under `src/spaceodyssey/core/` or `codec/` change
 | Test | Tier | What it catches |
 |---|---|---|
 | declarations refused before anything is built | unit | a malformed window, calibration, profile, detector, law, target or node count; empty and mixed-target plans |
-| executed record equals the offline report | medium | any bit of difference from `sample_report` at the executed interval and key, a calibration id that is not the independent report's, an epoch away from the science midpoint (KP9, with a shifted-epoch control) |
-| delay, edge and cancellation | medium | a delay that does not move the epoch by the delay; science reported after an admission shifted across the keepout edge; a second charge; science after a cancellation inside settling; a mid-exposure cancellation not scored over the observed time; an uncertified plan or a stale calibration accepted |
-| both executors and a new process | slow | executors that write different histories or rows, a document that drops a declaration, a reloaded channel that builds another calibration, a new process that writes a different row |
+| the build runs under the caller's JAX settings | unit | a build thread that drops `jax.enable_x64`, the default device or matmul precision (a float32 build cached for every later caller); one setting served another's build; a repeat that rebuilds |
+| an edited profile is not served a stale build | unit | a build cache that ignores the profile text |
+| realize equals the offline report at the executed interval | medium | any bit of difference from `sample_report` for a full exposure, a delayed one (epoch moves by the delay), an admission across the keepout edge and a cancellation inside settling (no-science rows, bit-anchored too), a cancellation 400 s in; a calibration id other than the PT4 survey's; an epoch away from the science midpoint (KP9) |
+| the core moves, charges and refuses around the edge | medium | a delayed admission that does not move the record or reports science; a charge to the wrong channel or more than once; a core row that is not the offline row at the record's ticks and key; an uncertified plan or stale calibration accepted |
+| both executors and a new process | slow | a compiled history or row that differs from the host run; a document that drops a declaration; a reloaded channel that builds another calibration; a new process that writes a different row |
 
-The offline reference builds its own `SummaryReport` from the profile and calls
-`sample_report` itself; the epoch and interval come from `PhysicalClock`, the keepout
-edge is located with the context's visibility test, and KP9 uses plain tick arithmetic.
-The offline function is compiled like the channel's: eager and fused arithmetic differ
-in the last bit (two columns, relative 1e-15), so the bit-for-bit anchor compares like
-with like.
+The channel's own `realize` runs under one `eqx.filter_jit` with array context ticks and
+keys, so one compile covers every scenario; the key is the core's measurement key of the
+one host run, which is a module fixture shared by the medium and slow tests. The offline
+reference uses the channel's report build (one build per process) but makes its scene and
+interval itself and draws with `sample_report`. Both functions close over the same build,
+because a closed-over constant and a jit argument fuse differently in the last bit, so
+the bit-for-bit anchor compares like with like.
 
-All scenarios share one study structure: the policy's start tick, cancellation tick
-and channel are array leaves, so the five host runs share one compiled program.
+## Optional extra
+
+The entry point is declared with extras syntax (`... [physical]`). In an install without
+the extra, `kinds_from_entry_points` skips that entry (a declared requirement of the
+extra is not installed, or the load fails with `ModuleNotFoundError` for a module outside
+spaceodyssey) and `installed_missing()` names it; `installed_resolver()` returns an
+`InstalledResolver` that refuses the kind with an "install `spaceodyssey[physical]`"
+error only when a document asks for it. An entry without extras that fails to import
+still raises `RegistrationError`. `tests/codec/test_entry_points_installed.py` is back to
+the core assertions plus the plain-install path and the physical kind's round trip when
+the extra is present.
+
+## Build settings and cache key
+
+The asset build runs on a fresh thread so that it is the ordinary eager build even when
+the first call is inside a trace. The thread starts from the process defaults, so the
+caller's thread-local settings (`jax.enable_x64`, default device, matmul precision) are
+read on the calling thread and entered again on the worker, and they join a digest of
+the profile and pinned response in the cache key.
 
 ## Measured cost and mutants
 
-Cold (`SPACEODYSSEY_JAX_CACHE=off`, 4 threads) on a loaded laptop (load average 7 to 9):
-unit 0.4 s; offline-report medium 16 s call plus 11 s shared setup (the independent
-report build); delay, edge and cancellation medium 8 s (it reuses the setup and the
-host program); both executors and a new process (slow) 43 s. The slow test holds the
-only compiled-executor program of the file, which is why the executor comparison moved
-out of the quick tier: with it, the first medium took 32 s, over its 30 s budget. The
-slow tier for this file is therefore about 43 s on this laptop, above the 20 s laptop
-share implied by 60 s of runner time; it is the one thing in this change over budget.
-The file compiles 350 programs, so its entry in
-`module_compile_budget_by_file` is ceil(350 x 1.15) + 10 = 413.
+The machine was heavily loaded for the final measurements (load average 25 to 47, both
+compute slots queued behind other jobs), so the times below are upper bounds: the
+medium tier measured 40 s of shared setup plus 13 s and 4 s of calls, the slow test 82 s,
+the full file 142 s wall. An earlier run under a lighter load (load average 8) measured
+the first design at 33 s and 43 s. The file compiles 353 programs, so its entry in
+`module_compile_budget_by_file` is ceil(353 x 1.15) + 10 = 416.
 
-Mutants (each applied alone, each fails a quick test): the context ticks ignored (the
-planned interval used), no settling subtracted, no certificate check, a fixed key, and
-counts scaled by the occupancy fraction.
+Mutants of the first design (each applied alone, each failed a quick test): the context
+ticks ignored, no settling subtracted, no certificate check, a fixed key, and counts
+scaled by the occupancy fraction. The realize-level test fails each of them through the
+same bit anchor.
 
-Checklist notes: the offline reference and the channel share no code beyond the
-library functions under test; the truth side differs from the model in the planet
-only; no controlled data is read; the new entry point has an installed-kinds test and
-`tests/codec/test_entry_points_installed.py` exempts the physical kind.
-
-Tests: 4 added, none retired, net +4.
-
+Tests: 6 in the file (3 unit, 2 medium, 1 slow), plus 2 in the entry-point file.
 
 ## Where the spec was silent or the code differs
 
@@ -105,8 +116,8 @@ Tests: 4 added, none retired, net +4.
   that offset; the tests assert the settle-corrected science time, not the plan.
 - `SceneSpec` and `PriorSpec` cannot be registered through entry points, so a run
   document of a physical study needs an explicit kinds mapping at load.
-- The new entry point requires the `physical` extra: `installed_kinds()` raises
-  `RegistrationError` in an install without it. The metadata in a shared environment
-  stays stale until a reinstall.
+- The metadata in a shared environment stays stale until a reinstall, so the
+  installed-metadata comparison in `test_entry_points_installed.py` fails there until
+  the package is reinstalled.
 - The bit-for-bit anchor needs a jit-compiled offline reference: eager and fused
   arithmetic differ by one unit in the last place.

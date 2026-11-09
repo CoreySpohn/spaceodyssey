@@ -9,6 +9,7 @@ one compiled program per executor.
 """
 
 import dataclasses
+import functools
 import json
 import math
 import os
@@ -26,17 +27,14 @@ from hwoutils.constants import AU2m, Mearth2kg, Msun2kg
 from hwoutils.conversions import photons_per_nm_per_m2_to_jy
 from orbix.equations.orbit import period_to_sma
 
+from spaceodyssey.adapters import jaxedith
 from spaceodyssey.adapters.jaxedith import (
     SUMMARY_COLUMNS,
     DetectorSpec,
     JaxedithSummaryChannel,
-    ReportingLaw,
     ScienceInterval,
-    SummaryReport,
     SummaryScene,
     SummaryTruth,
-    calibration_id,
-    nominal_planet,
     planet_free,
     sample_report,
 )
@@ -71,7 +69,7 @@ from spaceodyssey.core.executors.base import histories_equal
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.core.keys import asset_coordinate, draw_key
-from spaceodyssey.core.kinds import AbstractPolicy
+from spaceodyssey.core.kinds import AbstractPolicy, RealizeContext
 from spaceodyssey.core.ledger import ChannelTable
 from spaceodyssey.core.study import Clock
 from spaceodyssey.studies import toy
@@ -194,7 +192,8 @@ def build_study(channel, context, plan):
     caps = physical_registry().lower(Capacities(n_subjects=1, n_an=1, n_channels=n))
     occupancy = context.settle_ticks + plan[0].exposure_ticks
     hours = occupancy * HOURS_PER_TICK
-    price = jnp.asarray([[hours, 0.0, 0.0]] * n)
+    # Each channel prices at its own multiple, so a charge names its channel.
+    price = jnp.asarray([[hours * (1 + i), 0.0, 0.0] for i in range(n)])
     channels = ChannelTable(
         id=jnp.arange(10, 10 + n, dtype=I64),
         lane=jnp.zeros(n, I64),
@@ -264,11 +263,15 @@ def measurement_key(study, root, log, slot):
 
 
 class Offline:
-    """PT4's offline path: its own report, `sample_report` at a tick interval."""
+    """PT4's offline path at a tick interval, on the channel's own report.
 
-    def __init__(self):
+    The report is the channel's build (one build per process); the scene is made here
+    from the profile, the interval and validity come from tick arithmetic and the
+    context's science interval, and the row is drawn by `sample_report`.
+    """
+
+    def __init__(self, built):
         spec = SceneSpec.from_profile(PROFILE, 0)
-        self.context = context_from_profile(PROFILE)
         epoch = PROFILE["time"]["study_epoch_jd"]
         photons = build_star(spec).spec_flux_density(spec.wavelength_nm, epoch)
         self.scene = SummaryScene(
@@ -283,55 +286,57 @@ class Offline:
             star_diameter_mas=spec.angular_diameter_mas,
             n_exozodi=3.0,
         )
-        self.report = SummaryReport.from_yip(
-            DetectorSpec.fixture(),
-            self.scene,
-            orbit_epoch_jd=epoch,
-            observatory=self.context.observatory,
+        # The channel's build is a closed-over constant of its program, so the
+        # reference closes over the same objects: a bit-for-bit anchor compares
+        # like with like (constants and arguments fuse differently in the last bit).
+        self._row = eqx.filter_jit(
+            functools.partial(
+                _offline_row,
+                built.report,
+                self.scene,
+                built.law,
+                built.nominal,
+                built.context,
+                epoch,
+                built.calibration_id,
+            )
         )
-        mp = spec.planet_mass_mearth * Mearth2kg
-        self.nominal = nominal_planet(
-            a_au=float(period_to_sma(spec.period_d, self.scene.star_mass_kg + mp)),
-            e=spec.ecc,
-            inclination_rad=math.radians(spec.inclination_deg),
-            W_rad=math.radians(spec.node_deg),
-            w_rad=math.radians(spec.omega_planet_deg),
-            tp_d=spec.tp_jd - epoch,
-            Rp_au=spec.planet_radius_m / AU2m,
-            Ag=spec.geometric_albedo,
-        )
-        self.nominal["Mp"] = jnp.asarray(mp)
-        self.law = ReportingLaw()
-        self.epoch = epoch
-        self.calibration = calibration_id(self.report, self.law)
 
-    def row(self, truth, start, end, key):
+    def row(self, truth, start, end, key, window):
         """`sample_report` at the science interval of the occupancy `[start, end]`."""
-        return _offline_row(
-            self.report,
-            self.scene,
-            self.law,
-            self.nominal,
-            self.context,
-            self.epoch,
-            self.calibration,
+        return self._row(
             truth,
-            start,
-            end,
+            jnp.asarray(start, I64),
+            jnp.asarray(end, I64),
             key,
+            jnp.asarray(window[:2], I64),
         )
 
 
 @eqx.filter_jit
 def _offline_row(
-    report, scene, law, nominal, context, epoch, calibration, truth, start, end, key
+    report,
+    scene,
+    law,
+    nominal,
+    context,
+    epoch,
+    calibration,
+    truth,
+    start,
+    end,
+    key,
+    window,
 ):
     """The offline row, compiled like the channel's (eager and fused arithmetic
     differ in the last bit, so a bit-for-bit anchor compares like with like)."""
     clock = context.clock
     s0, s1, _ = context.science_interval(start, end)
+    valid = (s1 > s0) & (start >= window[0]) & (end <= window[1])
+    frame_s = jnp.asarray(report.detector_spec.frame_time_s, F64)
     interval = ScienceInterval(
-        clock.jd(s0, (s1 - s0).astype(F64) / 2.0), clock.seconds(s1 - s0)
+        clock.jd(s0, (s1 - s0).astype(F64) / 2.0),
+        jnp.where(valid, clock.seconds(s1 - s0), frame_s),
     )
     mp = truth.Mp_kg[0]
     planet = {
@@ -356,10 +361,25 @@ def _offline_row(
         time_d=interval.midpoint_jd,
         occupied_s=clock.seconds(end - start),
         calibration_id=calibration,
+        valid_science=valid,
     ).payload()
 
 
-def check_time_boundary(context, windows, rows):
+@eqx.filter_jit
+def _channel_row(channel, truth, channel_index, start, end, key):
+    """The channel's own realization of an occupancy, traced like the handlers do."""
+    context = RealizeContext(
+        start_tick=start,
+        end_tick=end,
+        acquisition_index=jnp.asarray(0, I64),
+        fraction=jnp.asarray(1.0, F64),
+    )
+    return channel.realize(
+        truth, 0, channel_index, context.fraction, key, None, None, context=context
+    )
+
+
+def check_time_boundary(context, window, rows):
     """KP9: epoch at the science midpoint; valid science inside the keepout window.
 
     Independent arithmetic: the midpoint tick in integers, converted with the study
@@ -374,16 +394,10 @@ def check_time_boundary(context, windows, rows):
         epoch_row = row.payload[COLUMN["time_d"]]
         assert abs(epoch_row - midpoint) * per_day <= 0.5, "epoch is not the midpoint"
         if row.payload[COLUMN["valid_science"]] == 1:
-            lo, hi = windows[0]
+            lo, hi = window
             assert lo <= row.start and row.end <= hi, "science outside the window"
             grid = np.linspace(epoch + s0 / per_day, epoch + s1 / per_day, 200)
             assert np.all(np.asarray(context.observable(0, grid))), "science in keepout"
-
-
-@pytest.fixture(scope="module")
-def offline():
-    """The independent report, built once (about 4 s cold)."""
-    return Offline()
 
 
 @pytest.fixture(scope="module")
@@ -400,21 +414,19 @@ def setup():
         study=build_study(channel, context, plan),
         truth=truth,
         root=root,
+        offline=Offline(channel.assets()),
     )
 
 
-def run_host(setup, start, cancel_after=-1, channel=0):
-    """One host run of the visit script; the study and the carry."""
-    study = with_policy(setup.study, start, cancel_after, channel)
+@pytest.fixture(scope="module")
+def hosted(setup):
+    """The one host run: visit 1 admitted 4.5 days late, across the keepout edge."""
+    start = setup.plan[1].start_tick + _days(setup.context, 4.5)
+    study = with_policy(setup.study, start, channel=1)
     run = HostExecutor().run(study, setup.truth, setup.root, N_STEPS)
-    return study, run
-
-
-def executed(setup, study, run, offline):
-    """The one written row, its offline reference and its measurement key."""
     (row,) = summary_rows(run.carry.log)
     key = measurement_key(study, setup.root, run.carry.log, row.slot)
-    return row, offline.row(setup.truth, row.start, row.end, key)
+    return types.SimpleNamespace(study=study, run=run, row=row, key=key, start=start)
 
 
 def test_declarations_are_refused_before_anything_is_built():
@@ -451,95 +463,147 @@ def test_declarations_are_refused_before_anything_is_built():
         JaxedithSummaryChannel.from_plan(two)
 
 
-@pytest.mark.medium(reason="one study through the host executor, about 20 s cold")
-def test_the_executed_record_is_the_offline_report(setup, offline):
+def test_the_build_runs_under_the_callers_jax_settings(monkeypatch):
+    """Fails if the build thread drops the caller's thread-local JAX settings (a build
+    under `jax.enable_x64(True)` made in float32 and cached for every later caller),
+    if one setting is served another's build, or if a repeat call rebuilds."""
+    seen = []
+
+    def stub(*declarations):
+        seen.append(
+            (jnp.asarray(1.0).dtype.name, jax.config.jax_default_matmul_precision)
+        )
+        return len(seen)
+
+    monkeypatch.setattr(jaxedith, "_channel_assets", stub)
+    args = ("first-summary-v1", 0, (), 4, 1.0, ())
+    with jax.enable_x64(False):
+        first = jaxedith._build_assets(*args)
+    with jax.enable_x64(True):
+        second = jaxedith._build_assets(*args)
+        again = jaxedith._build_assets(*args)
+    with jax.enable_x64(True), jax.default_matmul_precision("highest"):
+        third = jaxedith._build_assets(*args)
+    assert (first, second, third) == (1, 2, 3) and again == second
+    assert seen == [
+        ("float32", None),
+        ("float64", None),
+        ("float64", "highest"),
+    ]
+
+
+def test_an_edited_profile_is_not_served_a_stale_build(monkeypatch):
+    """Fails if the build cache ignores the profile text: an in-process edit of the
+    profile would keep returning the build made before it."""
+    builds = []
+    monkeypatch.setattr(
+        jaxedith, "_channel_assets", lambda *d: builds.append(d) or len(builds)
+    )
+    args = ("first-summary-v1", 0, (), 5, 1.0, ())
+    before = jaxedith._build_assets(*args)
+    edited = {**PROFILE, "note": "edited in process"}
+    with monkeypatch.context() as patch:
+        patch.setattr(jaxedith, "load_profile", lambda label=None: edited)
+        during = jaxedith._build_assets(*args)
+    after = jaxedith._build_assets(*args)
+    assert (before, during, after) == (1, 2, 1)
+
+
+@pytest.mark.medium(reason="one compiled realize and one compiled offline row, ~9 s")
+def test_realize_is_the_offline_report_at_the_executed_interval(setup, hosted):
     """Fails if the channel's row differs by a bit from `sample_report` at the
-    executed science interval and key, if the calibration id is not the independent
-    report's, or if the epoch leaves the science midpoint."""
-    study = setup.study
-    host = HostExecutor().run(study, setup.truth, setup.root, N_STEPS)
-    row, reference = executed(setup, study, host, offline)
-    assert row.status == RecordStatus.COMPLETED
-    np.testing.assert_array_equal(row.payload, np.asarray(reference))
-    payload = row.payload
-    assert payload[COLUMN["detected"]] == 1 and payload[COLUMN["counts"]] > 0
-    assert payload[COLUMN["calibration_id"]] == offline.calibration
-    assert payload[COLUMN["calibration_id"]] == setup.channel.calibration
-    occupied = setup.context.settle_ticks + setup.plan[0].exposure_ticks
-    assert payload[COLUMN["occupied_s"]] == occupied / 1000
-    assert payload[COLUMN["science_s"]] == FIXED_EXPOSURE_S
-    windows = [w[:2] for w in setup.channel.windows]
-    check_time_boundary(setup.context, windows, [row])
-    late = types.SimpleNamespace(**{**vars(row), "end": row.end + 10_000})
-    with pytest.raises(AssertionError, match="midpoint"):
-        check_time_boundary(setup.context, windows, [late])
-
-
-@pytest.mark.medium(reason="five host runs on one compiled structure, cold")
-def test_delay_edge_and_cancellation_set_the_science_interval(setup, offline):
-    """Fails if a delayed admission does not move the epoch by the delay, if an
-    admission shifted across the keepout edge still reports science, if it is charged
-    twice, if a cancellation inside settling yields science, or if a cancellation
-    during the exposure is not scored over the time actually observed."""
-    context, study = setup.context, setup.study
+    executed science interval and the core's measurement key: a full exposure, a
+    delayed one (epoch must move by the delay), an admission across the keepout edge
+    or a cancellation inside settling (no-science rows), or a cancellation 400 s into
+    the exposure (scored over the observed time); if the calibration id leaves the
+    PT4 survey's; or if the epoch leaves the science midpoint."""
+    context, plan, offline = setup.context, setup.plan, setup.offline
     per_day = context.clock.ticks_per_day
-    plan0, plan1 = setup.plan
-    windows = [w[:2] for w in setup.channel.windows]
+    settle = context.settle_ticks
+    exposure = plan[0].exposure_ticks
+    assert setup.channel.calibration == 47548537668345
 
-    # Delaying admission by two days moves the record's epoch by two days.
-    study0, run0 = run_host(setup, plan0.start_tick)
-    study2, run2 = run_host(setup, plan0.start_tick + 2 * per_day)
-    (row0,), (row2,) = summary_rows(run0.carry.log), summary_rows(run2.carry.log)
-    assert row2.start - row0.start == 2 * per_day
-    shift = row2.payload[COLUMN["time_d"]] - row0.payload[COLUMN["time_d"]]
+    def check(name, channel_index, start, end):
+        row = np.asarray(
+            _channel_row(
+                setup.channel,
+                setup.truth,
+                jnp.asarray(channel_index, I64),
+                jnp.asarray(start, I64),
+                jnp.asarray(end, I64),
+                hosted.key,
+            )
+        )[: len(SUMMARY_COLUMNS)]
+        window = setup.channel.windows[channel_index]
+        reference = offline.row(setup.truth, start, end, hosted.key, window)
+        np.testing.assert_array_equal(row, np.asarray(reference), err_msg=name)
+        record = types.SimpleNamespace(start=start, end=end, payload=row)
+        check_time_boundary(context, window[:2], [record])
+        return row
+
+    start0 = plan[0].start_tick
+    full = check("full", 0, start0, start0 + settle + exposure)
+    assert full[COLUMN["valid_science"]] == 1
+    assert full[COLUMN["science_s"]] == FIXED_EXPOSURE_S
+    assert full[COLUMN["detected"]] == 1 and full[COLUMN["counts"]] > 0
+    assert full[COLUMN["occupied_s"]] == (settle + exposure) / 1000
+
+    late = check(
+        "delayed", 0, start0 + 2 * per_day, start0 + 2 * per_day + settle + exposure
+    )
+    shift = late[COLUMN["time_d"]] - full[COLUMN["time_d"]]
     assert abs(shift * per_day - 2 * per_day) < 0.5
-    for study_i, run_i in ((study0, run0), (study2, run2)):
-        row, reference = executed(setup, study_i, run_i, offline)
-        np.testing.assert_array_equal(row.payload, np.asarray(reference))
-        assert row.payload[COLUMN["valid_science"]] == 1
 
-    # The edge visit: inside its slack the science is valid; shifted across the
-    # keepout edge it is a no-science row, charged once, with the occupancy kept.
-    inside = run_host(setup, plan1.start_tick, channel=1)
-    across = run_host(setup, plan1.start_tick + _days(context, 4.5), channel=1)
-    (kept,), (lost,) = (summary_rows(r.carry.log) for _, r in (inside, across))
-    assert kept.payload[COLUMN["valid_science"]] == 1
-    p = lost.payload
-    assert p[COLUMN["valid_science"]] == 0
+    start1 = plan[1].start_tick
+    inside = check("edge inside", 1, start1, start1 + settle + exposure)
+    assert inside[COLUMN["valid_science"]] == 1
+    across_start = start1 + _days(context, 4.5)
+    across = check("edge across", 1, across_start, across_start + settle + exposure)
+    assert across[COLUMN["valid_science"]] == 0
     for name in ("science_s", "counts", "limit_counts", "snr", "ra", "dec", "detected"):
-        assert p[COLUMN[name]] == 0, name
-    assert p[COLUMN["occupied_s"]] == kept.payload[COLUMN["occupied_s"]] > 0
-    assert p[COLUMN["calibration_id"]] == setup.channel.calibration
-    debited = np.asarray(across[1].carry.ledger.debited)
-    hours = (context.settle_ticks + plan0.exposure_ticks) * HOURS_PER_TICK
-    assert debited[0, 0] == pytest.approx(hours, rel=1e-12)
+        assert across[COLUMN[name]] == 0, name
+    assert across[COLUMN["occupied_s"]] == inside[COLUMN["occupied_s"]] > 0
+    assert across[COLUMN["calibration_id"]] == setup.channel.calibration
+
+    early = check("settle cancel", 0, start0, start0 + settle // 2)
+    assert early[COLUMN["valid_science"]] == 0 and early[COLUMN["counts"]] == 0
+    assert early[COLUMN["science_s"]] == 0 and early[COLUMN["occupied_s"]] > 0
+    mid = check("mid cancel", 0, start0, start0 + settle + 400_000)
+    assert mid[COLUMN["valid_science"]] == 1 and mid[COLUMN["science_s"]] == 400.0
+
+    # KP9's checker rejects an epoch away from the midpoint.
+    record = types.SimpleNamespace(
+        start=start0, end=start0 + settle + exposure + 10_000, payload=full
+    )
+    with pytest.raises(AssertionError, match="midpoint"):
+        check_time_boundary(context, setup.channel.windows[0][:2], [record])
+
+
+@pytest.mark.medium(reason="the host run is the module fixture; cheap asserts")
+def test_the_core_moves_charges_and_refuses_around_the_edge(setup, hosted):
+    """Fails if an admission delayed across the keepout edge does not move the record
+    by the delay or reports science, if it is charged to the wrong channel or more
+    than once, if the executed row is not the offline row at the record's own ticks and
+    key, or if an uncertified plan or a stale calibration is accepted."""
+    context, row = setup.context, hosted.row
+    offset = row.start - hosted.start
+    assert 0 <= offset <= 20, "the record starts a lane transition after admission"
+    payload = row.payload
+    assert payload[COLUMN["valid_science"]] == 0 and payload[COLUMN["counts"]] == 0
+    assert payload[COLUMN["occupied_s"]] > 0
+    assert payload[COLUMN["calibration_id"]] == setup.channel.calibration
+    reference = setup.offline.row(
+        setup.truth, row.start, row.end, hosted.key, setup.channel.windows[1]
+    )
+    np.testing.assert_array_equal(payload, np.asarray(reference))
+    debited = np.asarray(hosted.run.carry.ledger.debited)
     assert np.count_nonzero(debited) == 1
-    check_time_boundary(context, windows, [row0, row2])
-    check_time_boundary(context, [setup.channel.windows[1][:2]] * 2, [kept, lost])
+    charge = float(setup.study.channels.charge[1][0])
+    assert charge != float(setup.study.channels.charge[0][0])
+    assert debited.sum() == pytest.approx(charge, rel=1e-12)
 
-    # Cancelled half a day in (settling): no science. Cancelled 400 s into the
-    # exposure: the science is the 400 s observed, scored like any other interval.
-    settle_cancel = run_host(setup, plan0.start_tick, _days(context, 0.5))
-    (early,) = summary_rows(settle_cancel[1].carry.log)
-    assert early.status != RecordStatus.COMPLETED
-    assert early.payload[COLUMN["valid_science"]] == 0
-    assert early.payload[COLUMN["science_s"]] == 0
-    assert early.payload[COLUMN["counts"]] == 0
-    cut = context.settle_ticks + 400_000
-    mid = run_host(setup, plan0.start_tick, cut)
-    row, reference = executed(setup, *mid, offline)
-    assert row.status != RecordStatus.COMPLETED
-    observed = (row.end - row.start - context.settle_ticks) / 1000
-    assert 399.0 < observed <= 400.0
-    assert row.payload[COLUMN["science_s"]] == observed
-    assert row.end == plan0.start_tick + cut
-    np.testing.assert_array_equal(row.payload, np.asarray(reference))
-
-    # A plan with a visit inside keepout is refused; a build under another
-    # calibration is refused instead of writing rows under the wrong id.
     edge = keepout_edge_day(context)
-    exposure = plan0.exposure_ticks
-    dark = PlannedVisit(0, _days(context, edge + 1), exposure)
+    dark = PlannedVisit(0, _days(context, edge + 1), setup.plan[0].exposure_ticks)
     with pytest.raises(UncertifiedPlan):
         JaxedithSummaryChannel.from_plan((dark,))
     stale = dataclasses.replace(
@@ -547,26 +611,24 @@ def test_delay_edge_and_cancellation_set_the_science_interval(setup, offline):
     )
     with pytest.raises(ValueError, match="calibration"):
         stale.assets()
-    assert study.channel_model is setup.channel
 
 
 @pytest.mark.slow(
     reason="a compiled run (its own program) and a child process that loads the "
     "run document, rebuilds the channel and runs it"
 )
-def test_both_executors_and_a_new_process_write_the_same_row(setup, offline, tmp_path):
-    """Fails if the executors write different histories or rows, if the document drops
-    a channel declaration, if a reloaded channel builds another calibration, or if a
-    new process writes a different row from the same study, truth and root."""
-    study, run = run_host(setup, setup.plan[0].start_tick)
+def test_both_executors_and_a_new_process_write_the_same_row(setup, hosted, tmp_path):
+    """Fails if the compiled executor writes another history or row than the host run,
+    if the document drops a channel declaration, if a reloaded channel builds another
+    calibration, or if a new process writes a different row from the same study,
+    truth and root."""
+    study, run = hosted.study, hosted.run
     batched = jax.tree_util.tree_map(lambda x: x[None], setup.truth)
     compiled = CompiledExecutor().run(study, batched, setup.root[None], N_STEPS)
     assert histories_equal(run.history(), compiled.history(0)).ok
     first_world = jax.tree_util.tree_map(lambda x: x[0], compiled.carry.log)
     (twin,) = summary_rows(first_world)
-    row, reference = executed(setup, study, run, offline)
-    np.testing.assert_array_equal(np.asarray(twin.payload), np.asarray(reference))
-    np.testing.assert_array_equal(row.payload, np.asarray(reference))
+    np.testing.assert_array_equal(twin.payload, hosted.row.payload)
     doc = dump_run(
         study,
         physical_registry(),
@@ -600,8 +662,7 @@ def test_both_executors_and_a_new_process_write_the_same_row(setup, offline, tmp
     )
     assert done.returncode == 0, done.stderr[-2000:]
     line = next(x for x in done.stdout.splitlines() if x.startswith("ROW"))
-    (mine,) = summary_rows(run.carry.log)
-    np.testing.assert_array_equal(np.asarray(json.loads(line[3:])), mine.payload)
+    np.testing.assert_array_equal(np.asarray(json.loads(line[3:])), hosted.row.payload)
     assert load_run(doc.to_json(), Bindings(), KINDS).study.channel_model == (
         study.channel_model
     )
