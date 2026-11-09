@@ -3,6 +3,7 @@
 import dataclasses
 import functools
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -187,9 +188,9 @@ def test_dedup_computes_once_when_rows_match():
 
 @functools.cache
 def _mutation_pair():
-    # Two programs, refunds, awards, commitments, bundles and balances shown, so the
-    # program, refund, award, commitment, bundle and refused-request leaves are held:
-    # every conditional leaf is exercised (a producer naming no program charges
+    # Two programs, refunds, awards, commitments, bundles, a configuration timeline,
+    # ops states and balances shown, so every conditional leaf is held and exercised,
+    # the refused-request leaves included (a producer naming no program charges
     # program 0).
     caps = Capacities(
         rows_per_subject=8,
@@ -201,9 +202,19 @@ def _mutation_pair():
         n_commitments=2,
         max_bundles=1,
         max_bundle_size=2,
+        max_config_switches=1,
+        n_ops=2,
     )
     # 20 steps: a refresh has run and an event is still pending (60 drains the queue).
-    h, c = run_pair(refresh_study(100, caps=caps), 20, 2, 7)
+    study = refresh_study(100, caps=caps)
+    # one configuration switch per asset at tick 50, inside the run
+    study = eqx.tree_at(
+        lambda s: s.assets.config_switch_ticks,
+        study,
+        jnp.full((caps.n_assets, 1), 50, I64),
+        is_leaf=lambda x: x is None,
+    )
+    h, c = run_pair(study, 20, 2, 7)
     host = base.RunResult(
         base.index_world(h.carry, 0), base.index_world(h.trace, 0), h.layout
     )
