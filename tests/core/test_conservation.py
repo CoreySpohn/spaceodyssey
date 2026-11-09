@@ -24,6 +24,10 @@ from tests.core.refund_helpers import (
     receipt,
     refund_study,
 )
+from tests.core.test_ops_state import PLANS as OPS_PLANS
+from tests.core.test_ops_state import SCRIPT as OPS_SCRIPT
+from tests.core.test_ops_state import host as ops_host
+from tests.core.test_ops_state import ops_study
 
 pytestmark = pytest.mark.medium(reason="A cold host run compiles the executor")
 
@@ -216,3 +220,43 @@ def test_mutant_a_second_receipt_credit_fails_conservation(program):
     assert int(before.carry.n_log) == 3  # the acquisition and two receipts
     assert balance_conserved(real).passed
     assert not balance_conserved(mutant).passed
+
+
+@pytest.fixture(scope="module")
+def ops_run():
+    """The ops script: three admissions in state 0, the failure, one in state 1."""
+    return ops_host(ops_study(OPS_SCRIPT, OPS_PLANS))
+
+
+def test_ops_priced_debits_equal_what_is_retained_plus_refunded(ops_run):
+    """Fails if a completion or a cancel prices from another ops state than the
+    admission did: the 16 debited (three at 2, two at 5) must equal the retained
+    charges (2 + 1.2 + 2 + 0.5 + 5) plus the 5.3 refunded, in every account.
+    """
+    assert balance_conserved(ops_run).passed
+    ledger = ops_run.carry.ledger
+    log = ops_run.carry.log
+    kept = float(np.asarray(log.charged)[np.asarray(log.valid), 0].sum())
+    assert float(ledger.debited[0, 0]) == pytest.approx(16.0)
+    assert float(ledger.debited[0, 0]) == pytest.approx(
+        kept + float(ledger.refunded[0, 0])
+    )
+
+
+def test_a_charge_repriced_at_the_current_state_is_caught(ops_run):
+    """Fails if the check cannot see a settlement priced from the asset's state at the
+    time: the completion of an occupancy admitted in state 0 recorded at the state 1
+    price leaves the records overstating the net spend.
+    """
+    log = ops_run.carry.log
+    row = int(np.flatnonzero(np.asarray(log.valid) & (np.asarray(log.status) == 0))[-1])
+    assert float(log.ops[row]) == 0.0 and float(log.charged[row, 0]) == 2.0
+    forged = dataclasses.replace(
+        log, charged=log.charged.at[row].set(jnp.full_like(log.charged[row], 5.0))
+    )
+    run = SimpleNamespace(
+        study=ops_run.study,
+        carry=dataclasses.replace(ops_run.carry, log=forged),
+        trace=ops_run.trace,
+    )
+    assert not balance_conserved(run).passed
