@@ -250,18 +250,15 @@ def test_a_shorter_member_committed_second_leaves_the_longer_end(hand, order):
     assert set(np.asarray(c1.ev.bundle)[done].tolist()) == {0}
 
 
-def test_a_bundle_takes_one_acquisition_transition_charge(hand):
-    """Fails if each member pays its own transition, so a bundle of two debits more
-    than the two observations on their own.
+def test_a_bundle_pays_one_transition_in_ticks(hand):
+    """Fails if each member pays its own transition: with one 5 tick transition the
+    Done rows fall at 5 + 40 and 5 + 50, a second transition would push them later.
     """
     study, c0, step = hand
-    both, _ = step(c0, table([(LONG_IX, 0, 0, 1), (SHORT_IX, 0, 0, 1)]), study)
-    alone = [
-        step(c0, table([(ix, 0, 0, 1)]), study)[0].ledger.debited
-        for ix in (LONG_IX, SHORT_IX)
-    ]
-    np.testing.assert_allclose(both.ledger.debited, sum(alone))
-    assert int(both.ledger.lane_gen[LANE]) == 1  # not 2: one transition
+    c1, _ = step(c0, table([(LONG_IX, 0, 0, 1), (SHORT_IX, 0, 0, 1)]), study)
+    done = done_rows(c1)
+    assert sorted(np.asarray(c1.ev.tick)[done].tolist()) == [5 + 40, 5 + 50]
+    assert int(c1.ledger.lane_gen[LANE]) == 1  # not 2: one occupancy
 
 
 REFUSALS = {
@@ -303,6 +300,15 @@ def test_cancelling_a_member_settles_every_pending_member(runs):
     assert (
         int(result.carry.ledger.lane_gen[LANE]) == 2
     )  # one bump to start, one to cancel
+    assert len(done) == 2  # exactly the two Done rows were settled
+    ledger = result.carry.ledger
+    own = [(1, 0), (PROGRAM_ROW, 1), (CAPS.n_assets + CAPS.n_programs, 2)]
+    charged = np.asarray([ledger.debited[r, k] for r, k in own])
+    refunded = np.asarray([ledger.refunded[r, k] for r, k in own])
+    # each member debited its own unit cost once, and refunded its unused share once:
+    # cancelled at 20, the long member has 35 of 50 ticks left and the short 25 of 40
+    np.testing.assert_allclose(charged, 2.0)
+    np.testing.assert_allclose(refunded, 35 / 50 + 25 / 40)
     assert balance_conserved(result).passed  # refunds, programs and the award window
 
 
