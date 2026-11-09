@@ -204,8 +204,9 @@ charge_fixture_setup = true
 # Each file starts with no compiled programs, so its program count below does not
 # depend on which files ran before it on the same worker.
 clear_caches = true
-# The per-file program budgets are read in report mode until runner data confirms them.
-module_mode = "report"
+# The per-file program budgets fail the run; runner and Mac counts agree within 3
+# programs per file (cold Pilot and warm CI, 2026-11-09).
+module_mode = "enforce"
 # Every medium and slow mark states why the test cannot be cheaper.
 require_tier_reason = true
 
