@@ -7,14 +7,17 @@ in for a crash: the state on disk afterwards is what a killed process would leav
 
 import json
 import os
+from typing import NamedTuple
 
 import numpy as np
 import pytest
 
+from spaceodyssey.codec import checkpoint as ckpt_module
 from spaceodyssey.codec.checkpoint import (
     CARRY_FILE,
     CURRENT,
     MANIFEST,
+    DirectoryCheckpoint,
     GenerationStore,
 )
 from spaceodyssey.core.checkpoint import (
@@ -27,6 +30,8 @@ from spaceodyssey.core.checkpoint import (
     rebuild,
     tree_digest,
 )
+from spaceodyssey.studies import toy
+from tests.codec.test_document import TOY_KINDS
 
 OPS = (
     "payload",
@@ -143,20 +148,26 @@ def test_a_crash_before_the_manifest_in_the_first_save_leaves_an_empty_run(
     assert store.load() is None
 
 
-@pytest.mark.parametrize("op", OPS[2:5])
-def test_a_crash_after_the_manifest_in_the_first_save_needs_the_recovery_flag(
-    tmp_path, op
-):
-    # a manifest with no pointer cannot be told from a deleted pointer
+@pytest.mark.parametrize("op", OPS[2:])
+def test_a_crash_after_the_manifest_in_the_first_save_is_a_fresh_start(tmp_path, op):
+    """Fails if a first save killed before its pointer commit (so nothing was ever
+    committed) is refused as a damaged run: it must load as empty, and a deleted
+    pointer on a committed run must still be refused (next test).
+    """
     store = GenerationStore(tmp_path / "run")
     store.hook = stop_at(op)
     with pytest.raises(Crash):
         publish(store, 1, [])
     store.hook = None
-    with pytest.raises(CheckpointError) as err:
-        store.load()
-    assert err.value.code is CheckpointCode.C005
+    committed = (tmp_path / "run" / CURRENT).exists()
+    if committed:
+        assert store.load().generation == 1
+        return
+    assert store.load() is None
     assert store.load(recover=True).generation == 1
+    store.discard_uncommitted()
+    assert not list((tmp_path / "run").glob("gen-*"))
+    assert publish(store, 1, []) == 1 and store.load().generation == 1
 
 
 def test_a_generation_without_a_manifest_is_never_loaded(tmp_path):
@@ -394,3 +405,100 @@ def test_rows_join_along_the_row_axis():
     a, b = {"x": np.ones((2, 3))}, {"x": np.zeros((2, 4))}
     assert concat_rows(a, b, 1)["x"].shape == (2, 7)
     assert concat_rows(None, b, 1) is b and concat_rows(a, None, 1) is a
+
+
+def test_an_unfinished_generation_takes_no_retention_slot(tmp_path):
+    """Fails if a manifest-less generation left by a crash counts toward the kept
+    two, so that the next publish deletes the last complete older generation.
+    """
+    store = GenerationStore(tmp_path / "run")
+    publish(store, 1, [])
+    publish(store, 2, [])
+    store.hook = stop_at("manifest")
+    with pytest.raises(Crash):
+        publish(store, 3, [])
+    store.hook = None
+    assert publish(store, 4, []) == 4
+    names = sorted(p.name for p in (tmp_path / "run").glob("gen-*"))
+    assert names == ["gen-000002", "gen-000004"]
+
+
+def test_clear_incomplete_removes_only_generations_without_a_manifest(tmp_path):
+    """Fails if the cleanup at the start of a run leaves a crashed generation or
+    removes a complete one.
+    """
+    store = GenerationStore(tmp_path / "run")
+    publish(store, 1, [])
+    store.hook = stop_at("manifest")
+    with pytest.raises(Crash):
+        publish(store, 2, [])
+    store.hook = None
+    store.clear_incomplete()
+    assert [p.name for p in (tmp_path / "run").glob("gen-*")] == ["gen-000001"]
+
+
+class Carry(NamedTuple):
+    log: np.ndarray
+    x: np.ndarray
+
+
+def identity_run(directory, **kw):
+    sink = DirectoryCheckpoint(directory, kinds=TOY_KINDS, **kw)
+    study = toy.survey_1()
+    truths = {"a": np.zeros(2)}
+    roots = np.zeros(2, np.uint32)
+    config = {"executor": "host", "row_axis": 0}
+    carry = Carry(np.arange(3), np.ones(2))
+    templates = {"carry": carry, "trace": {"t": np.zeros(())}}
+    return sink, (study, truths, roots), config, templates, carry
+
+
+def other_dependencies(monkeypatch):
+    real = ckpt_module.dependency_fingerprint
+    monkeypatch.setattr(
+        ckpt_module, "dependency_fingerprint", lambda: {**real(), "jax": "0.0.0"}
+    )
+
+
+def test_changed_dependencies_are_refused_unless_overridden(tmp_path, monkeypatch):
+    """Fails if a checkpoint resumes under a different dependency fingerprint with no
+    override (C003), or if an accepted override is not recorded in the manifest of
+    every later generation.
+    """
+    sink, ids, config, templates, carry = identity_run(tmp_path / "run")
+    sink.begin(*ids, config=config, templates=templates, resume=False)
+    sink.save("final", carry, None, 0)
+    other_dependencies(monkeypatch)
+    again, *_ = identity_run(tmp_path / "run")
+    with pytest.raises(CheckpointError) as err:
+        again.begin(*ids, config=config, templates=templates, resume=True)
+    assert err.value.code is CheckpointCode.C003 and "jax" in err.value.message
+    allowed, *_ = identity_run(tmp_path / "run", allow_dependency_change=True)
+    allowed.begin(*ids, config=config, templates=templates, resume=True)
+    allowed.save("final", carry, None, 0)
+    manifest = GenerationStore(tmp_path / "run").load().manifest
+    saved_now = manifest["overrides"][0]["dependencies"]
+    assert saved_now["saved"]["jax"] != "0.0.0" and saved_now["now"]["jax"] == "0.0.0"
+
+
+def test_resume_on_an_empty_directory_is_refused(tmp_path):
+    """Fails if resume on a directory with no checkpoint silently starts fresh."""
+    sink, ids, config, templates, _ = identity_run(tmp_path / "run")
+    with pytest.raises(CheckpointError) as err:
+        sink.begin(*ids, config=config, templates=templates, resume=True)
+    assert err.value.code is CheckpointCode.C010
+
+
+def test_a_reused_sink_starts_a_new_run_from_nothing(tmp_path):
+    """Fails if a sink that resumed one directory carries its chunks, rows or
+    overrides into a fresh run in another.
+    """
+    sink, ids, config, templates, carry = identity_run(tmp_path / "a")
+    sink.begin(*ids, config=config, templates=templates, resume=False)
+    row = {"t": np.arange(2, dtype=np.float64)}
+    sink.save("final", carry, row, 2)
+    sink.store = GenerationStore(tmp_path / "b")
+    sink.begin(*ids, config=config, templates=templates, resume=False)
+    sink.save("final", carry, None, 0)
+    manifest = GenerationStore(tmp_path / "b").load().manifest
+    assert manifest["rows"] == 0 and manifest["chunks"] == []

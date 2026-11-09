@@ -1,10 +1,12 @@
 """Checkpoint and resume on both executors: a resumed run is the uninterrupted run."""
 
+import dataclasses
+
 import jax
 import numpy as np
 import pytest
 
-from spaceodyssey.codec.checkpoint import DirectoryCheckpoint
+from spaceodyssey.codec.checkpoint import DirectoryCheckpoint, GenerationStore
 from spaceodyssey.core import CompiledExecutor, HostExecutor, RunStatus
 from spaceodyssey.core.checkpoint import CheckpointCode, CheckpointError
 from spaceodyssey.core.executors.base import (
@@ -124,7 +126,7 @@ def test_held_refresh_is_answered_once_on_resume(tmp_path):
     """
     study, truth, root = host_args()
     whole = rh.SpyBoundary(rh.masked())
-    HostExecutor().run(
+    full = HostExecutor().run(
         study, truth, root, 60, refit=whole, checkpoint=sink(tmp_path / "a")
     )
     first = rh.SpyBoundary(rh.masked())
@@ -139,7 +141,7 @@ def test_held_refresh_is_answered_once_on_resume(tmp_path):
     assert int(cut.status) == RunStatus.TRUNCATED_AT_HOLD
     assert bool(cut.carry.refresh.valid)
     second = rh.SpyBoundary(rh.masked())
-    HostExecutor().run(
+    rest = HostExecutor().run(
         study,
         truth,
         root,
@@ -148,6 +150,9 @@ def test_held_refresh_is_answered_once_on_resume(tmp_path):
         checkpoint=sink(tmp_path / "b"),
         resume=True,
     )
+    # the resumed hold completes inside the new budget, as in the uninterrupted run
+    assert same_tree(full.trace, rest.trace)
+    assert same_tree(full.carry, rest.carry)
     assert len(second.calls) >= 1
     assert len(first.calls) + len(second.calls) == len(whole.calls)
 
@@ -239,7 +244,7 @@ def test_resume_refuses_a_changed_truth_study_chunk_or_boundary(tmp_path):
         study, truth, root, 10, refit=rh.masked(), checkpoint=sink(tmp_path / "h")
     )
 
-    def host(study=study, truth=truth, refit=None):
+    def host(study=study, truth=truth, refit=None, **kw):
         return HostExecutor().run(
             study,
             truth,
@@ -248,12 +253,19 @@ def test_resume_refuses_a_changed_truth_study_chunk_or_boundary(tmp_path):
             refit=refit or rh.masked(),
             checkpoint=sink(tmp_path / "h"),
             resume=True,
+            **kw,
         )
 
     other_truth = jax.tree_util.tree_map(lambda x: x + 1, truth)
     refused(CheckpointCode.C002, lambda: host(truth=other_truth))
     refused(CheckpointCode.C002, lambda: host(study=rh.refresh_study(110)))
     refused(CheckpointCode.C002, lambda: host(refit=rh.host_loop()))
+    newer = dataclasses.replace(study, key_version=study.key_version + 1)
+    with pytest.raises(CheckpointError) as err:
+        host(study=newer)
+    assert err.value.code == CheckpointCode.C002 and "key_version" in err.value.message
+    # a log the saved run did not keep is a run the saved rows do not match
+    refused(CheckpointCode.C002, lambda: host(view_log=[]))
     host()  # unchanged, the same directory resumes
 
     study, truths, roots = compiled_args(1)
@@ -292,3 +304,102 @@ def test_a_checkpointed_run_keeps_a_hold_where_a_plain_run_drops_it(tmp_path):
     )
     assert not bool(plain.carry.refresh.valid)
     assert bool(kept.carry.refresh.valid)
+
+
+@pytest.mark.medium(reason="host refresh runs, about 10 s cold")
+def test_manifest_steps_count_every_row_after_a_resume(tmp_path):
+    """Fails if a resumed host run records only this call's steps in its manifest, so
+    that a later resume after a kill continues with the wrong budget.
+    """
+    study, truth, root = host_args()
+    HostExecutor().run(
+        study, truth, root, 10, refit=rh.masked(), checkpoint=sink(tmp_path)
+    )
+    HostExecutor().run(
+        study, truth, root, 5, refit=rh.masked(), checkpoint=sink(tmp_path), resume=True
+    )
+    manifest = GenerationStore(tmp_path / "run").load().manifest
+    assert manifest["rows"] == 15 and manifest["steps"] == 15
+
+
+@pytest.mark.medium(reason="a bucket check before any compile")
+def test_bucket_with_a_checkpoint_is_refused(tmp_path):
+    """Fails if a bucket is silently ignored when a checkpoint selects the chunked
+    driver.
+    """
+    study, truths, roots = compiled_args(1)
+    with pytest.raises(ValueError, match="bucket"):
+        CompiledExecutor().run(
+            study, truths, roots, 10, bucket=8, checkpoint=sink(tmp_path)
+        )
+
+
+def service_args():
+    study, service = rh.oracle_refresh_study(130)
+    truths, roots = worlds(1)
+    return study, service, truths, roots
+
+
+@pytest.mark.medium(reason="host refresh runs with a service, about 15 s cold")
+def test_host_resume_answers_a_pending_request_first(tmp_path):
+    """Fails if a host resume does not answer the request the saved run was waiting
+    on before it steps: the resumed run must equal the uninterrupted one.
+    """
+    study, service, truths, roots = service_args()
+    truth, root = index_world(truths, 0), roots[0]
+    full = HostExecutor().run(
+        study, truth, root, 40, service=service, refit=rh.masked()
+    )
+    cut = HostExecutor().run(
+        study, truth, root, 12, refit=rh.masked(), checkpoint=sink(tmp_path)
+    )
+    assert int(cut.status) == RunStatus.AWAITING and bool(cut.carry.request.valid)
+    rest = HostExecutor().run(
+        study,
+        truth,
+        root,
+        28,
+        service=service,
+        refit=rh.masked(),
+        checkpoint=sink(tmp_path),
+        resume=True,
+    )
+    assert same_tree(full.carry, rest.carry)
+    a, b = (canonical_history(r.carry, r.trace, r.layout) for r in (full, rest))
+    assert histories_equal(a, b).structure_equal
+    assert histories_equal(a, b).max_ulps == 0.0
+
+
+@pytest.mark.medium(reason="compiled refresh runs with a service, about 15 s cold")
+def test_compiled_resume_answers_a_pending_request_first(tmp_path):
+    """Fails if a compiled resume does not answer the request the saved run was
+    waiting on before its first chunk.
+    """
+    study, service, truths, roots = service_args()
+    full = CompiledExecutor().run(
+        study, truths, roots, 40, service=service, refit=rh.masked(), chunk=CHUNK
+    )
+    cut = CompiledExecutor().run(
+        study,
+        truths,
+        roots,
+        12,
+        refit=rh.masked(),
+        chunk=CHUNK,
+        checkpoint=sink(tmp_path),
+    )
+    assert int(cut.status[0]) == RunStatus.AWAITING
+    rest = CompiledExecutor().run(
+        study,
+        truths,
+        roots,
+        28,
+        service=service,
+        refit=rh.masked(),
+        chunk=CHUNK,
+        checkpoint=sink(tmp_path),
+        resume=True,
+    )
+    assert same_tree(full.carry, rest.carry)
+    [a], [b] = histories(full), histories(rest)
+    assert histories_equal(a, b).max_ulps == 0.0
