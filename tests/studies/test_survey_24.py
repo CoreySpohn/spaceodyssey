@@ -18,7 +18,7 @@ from spaceodyssey.studies.survey_24 import (
     TrajectoryWorldSource,
     survey_24,
 )
-from tests.studies.trajectory_helpers import (
+from tests.studies.survey_helpers import (
     first_release,
     first_step,
     run_one,
