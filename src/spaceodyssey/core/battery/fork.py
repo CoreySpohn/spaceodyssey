@@ -33,6 +33,7 @@ RECORD_PURPOSES = (
     Purpose.MEASUREMENT,
     Purpose.INFERENCE,
     Purpose.PROCESS,
+    Purpose.TRAJECTORY,
 )
 
 
