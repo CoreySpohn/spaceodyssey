@@ -14,20 +14,47 @@ Pre-alpha. The campaign core provides a declarative vocabulary, a document form
 for studies, and host and compiled executors; physics and inference enter
 through adapters.
 
-## Getting Started
+```{toctree}
+:caption: Getting started
+:maxdepth: 1
+
+getting-started
+```
 
 ```{toctree}
-:maxdepth: 2
+:caption: Many worlds
+:maxdepth: 1
+
+many-worlds
+```
+
+```{toctree}
+:caption: Concepts
+:maxdepth: 1
+
+concepts/truth-and-view
+concepts/events-and-admission
+concepts/records-and-release
+concepts/ledger
+```
+
+```{toctree}
+:caption: How-to guides
+:maxdepth: 1
+
+how-to/channel
+how-to/policy
+how-to/observer
+how-to/save-and-load
+```
+
+```{toctree}
+:caption: Reference
+:maxdepth: 1
 
 architecture
 core
 executors
 records
-```
-
-## API Reference
-
-```{toctree}
-:maxdepth: 1
 autoapi/index
 ```
