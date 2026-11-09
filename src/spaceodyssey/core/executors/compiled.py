@@ -312,9 +312,7 @@ class CompiledExecutor(AbstractExecutor):
             "executor": "compiled",
             "row_axis": 1,
             "chunk": int(chunk),
-            "wake_fn": ckpt.callable_name(wake_fn),
-            "service": None if service is None else ckpt.callable_name(type(service)),
-            "refit": None if refit is None else ckpt.binding_record(refit),
+            "bound": {"wake_fn": wake_fn, "service": service, "refit": refit},
         }
         got = checkpoint.begin(
             given,

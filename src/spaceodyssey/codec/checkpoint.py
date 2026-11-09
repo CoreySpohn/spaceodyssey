@@ -598,6 +598,35 @@ def _unstack_rows(prefix, arrays, template):
     )
 
 
+def callable_name(obj):
+    """A stable name for a function or class, for the run configuration."""
+    return f"{obj.__module__}.{obj.__qualname__}"
+
+
+def binding_record(boundary):
+    """The configuration a refit boundary adds to a run identity: its `binding()`."""
+    out = dict(boundary.binding())
+    out["model_hash"] = int(out["model_hash"])
+    return {"class": callable_name(boundary.__class__), **out}
+
+
+def named_config(config):
+    """`config` with its `bound` callables and objects replaced by stable names.
+
+    The executors hand over the wake function, the service and the refit boundary as
+    they are, so the core never inspects them; the sink turns them into names here.
+    """
+    if "bound" not in config:
+        return config
+    config = dict(config)
+    bound = config.pop("bound")
+    config["wake_fn"] = callable_name(bound["wake_fn"])
+    service, refit = bound.get("service"), bound.get("refit")
+    config["service"] = None if service is None else callable_name(service.__class__)
+    config["refit"] = None if refit is None else binding_record(refit)
+    return config
+
+
 class DirectoryCheckpoint(CheckpointSink):
     """Save to and resume from a run directory.
 
@@ -638,6 +667,7 @@ class DirectoryCheckpoint(CheckpointSink):
 
     def begin(self, study, truths, roots, *, config, templates, resume):
         """Check the identity against the directory and restore its newest state."""
+        config = named_config(config)
         parts = identity_parts(study, truths, roots, config, self.kinds)
         deps = dependency_fingerprint()
         self._parts, self._deps = parts, deps
