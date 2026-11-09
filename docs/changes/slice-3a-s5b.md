@@ -56,3 +56,18 @@ balance for both.
 | `tests/core/test_refund.py` | medium | one table-driven test over scenarios that share one compiled run each: a late refund of a FORFEIT award lapses under a newer award of every rule and, with a refund of exactly 5, when the row ends ALWAYS; an IDLE row with no newer award takes a NONE refund; a NONE refund lapses under a newer award; a REALLOCATE refund goes to its destination; a refund inside the window credits the row. Forged credits to the newer award and to the expired row fail (slow) |
 | `tests/core/test_conservation.py` | medium | a cancellation under an award conserves (the ledger refunds 5); a debit after its window expired names generation 0 and rule NONE; a refund across an expiry and a re-award conserves; a handler mutant that always credits the row fails (slow) |
 | `tests/codec/test_optional_fields.py` | unit | the two new record columns: omitted at default, null refused, populated round trip |
+
+## Core paths changed (K4)
+
+The exact core paths that S5b changed after the S0 close-out, which the Slice 3a gate matches against this record:
+
+- `src/spaceodyssey/core/carry.py`
+- `src/spaceodyssey/core/conformance/invariants.py`
+- `src/spaceodyssey/core/executors/base.py`
+- `src/spaceodyssey/core/handlers.py`
+- `src/spaceodyssey/core/ledger.py`
+- `src/spaceodyssey/core/records.py`
+- `src/spaceodyssey/core/snapshot.py`
+- `src/spaceodyssey/core/transaction.py`
+
+Core tests that cover this change: `tests/core/test_conservation.py`, `tests/core/test_refund.py`.

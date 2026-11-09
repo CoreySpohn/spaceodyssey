@@ -129,3 +129,29 @@ edits (`events.py`, `records.py`, `snapshot.py`, `ledger.py`, `carry.py`, `servi
   cold, alone, cache off (was 72 s); the mutants take 12.7 to 14.1 s each in the slow tier.
 - Default scan StableHLO re-checked under this machine's current JAX: `main`, 7431b06 and the
   fixed tree lower to the identical module.
+
+## Core paths changed (K4)
+
+The exact core paths that S2 changed after the S0 close-out, which the Slice 3a gate matches against this record:
+
+- `src/spaceodyssey/core/battery/fork.py`
+- `src/spaceodyssey/core/battery/metamorphic.py`
+- `src/spaceodyssey/core/battery/replay_latency.py`
+- `src/spaceodyssey/core/battery/views.py`
+- `src/spaceodyssey/core/carry.py`
+- `src/spaceodyssey/core/conformance/observer_kit.py`
+- `src/spaceodyssey/core/declarations.py`
+- `src/spaceodyssey/core/events.py`
+- `src/spaceodyssey/core/executors/base.py`
+- `src/spaceodyssey/core/executors/replay.py`
+- `src/spaceodyssey/core/handlers.py`
+- `src/spaceodyssey/core/ledger.py`
+- `src/spaceodyssey/core/preflight/checks.py`
+- `src/spaceodyssey/core/preflight/findings.py`
+- `src/spaceodyssey/core/records.py`
+- `src/spaceodyssey/core/refresh.py`
+- `src/spaceodyssey/core/service.py`
+- `src/spaceodyssey/core/snapshot.py`
+- `src/spaceodyssey/core/transaction.py`
+
+Core tests that cover this change: `tests/core/test_programs.py`, `tests/core/test_slice3_guard.py`.

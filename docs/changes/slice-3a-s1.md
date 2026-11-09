@@ -109,3 +109,18 @@ for the lookup, a lookup pinned to zero and a lookup that keys by `asset * n_ass
 Core edits (`capacities.py`, `keys.py`, `study.py`, `handlers.py`, `battery/fork.py`,
 `executors/base.py`, `snapshot.py`) belong to S1. Event order, handlers and the K3 baseline
 are untouched.
+
+## Core paths changed (K4)
+
+The exact core paths that S1 changed after the S0 close-out, which the Slice 3a gate matches against this record:
+
+- `src/spaceodyssey/core/battery/fork.py`
+- `src/spaceodyssey/core/capacities.py`
+- `src/spaceodyssey/core/executors/base.py`
+- `src/spaceodyssey/core/handlers.py`
+- `src/spaceodyssey/core/keys.py`
+- `src/spaceodyssey/core/preflight/checks.py`
+- `src/spaceodyssey/core/snapshot.py`
+- `src/spaceodyssey/core/study.py`
+
+Core tests that cover this change: `tests/core/test_canonical_fields.py`, `tests/core/test_key_version.py`, `tests/core/test_metamorphic.py`, `tests/core/test_slice3_guard.py`.

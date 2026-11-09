@@ -108,3 +108,21 @@ that no balance is negative. The mutants of `h_commit_start` (lane busy until th
 | `core/handlers.py` | `tests/core/test_frozen_horizon.py`, `tests/core/test_program_size.py` |
 | `core/conformance/invariants.py` | `tests/core/test_frozen_horizon.py` |
 | `core/preflight/checks.py`, `core/preflight/findings.py` (A001) | `tests/core/test_preflight.py`, `tests/codec/test_preflight_json.py` |
+
+## Core paths changed (K4)
+
+The exact core paths that S6 changed after the S0 close-out, which the Slice 3a gate matches against this record:
+
+- `src/spaceodyssey/core/capacities.py`
+- `src/spaceodyssey/core/carry.py`
+- `src/spaceodyssey/core/conformance/invariants.py`
+- `src/spaceodyssey/core/enums.py`
+- `src/spaceodyssey/core/executors/base.py`
+- `src/spaceodyssey/core/handlers.py`
+- `src/spaceodyssey/core/ledger.py`
+- `src/spaceodyssey/core/preflight/checks.py`
+- `src/spaceodyssey/core/preflight/findings.py`
+- `src/spaceodyssey/core/snapshot.py`
+- `src/spaceodyssey/core/transaction.py`
+
+Core tests that cover this change: `tests/core/test_canonical_fields.py`, `tests/core/test_frozen_horizon.py`, `tests/core/test_preflight.py`, `tests/core/test_program_size.py`.

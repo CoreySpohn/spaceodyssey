@@ -95,3 +95,20 @@ checks the switch holds only distinct bodies, checks the shared branches equal t
 handlers of their own kinds, runs the toy study at `n_effects` 3, 4 and 5, and checks
 the width error for tables of 1, n-1 and n+1 rows. The mutation controls that replace
 the policy snapshot view now replace it where `transition` builds it.
+
+## Core paths changed (K4)
+
+The exact core paths that the compile-speed work (attributed here) changed after the S0 close-out, which the Slice 3a gate matches against this record:
+
+- `src/spaceodyssey/core/capacities.py`
+- `src/spaceodyssey/core/conformance/observer_kit.py`
+- `src/spaceodyssey/core/executors/compiled.py`
+- `src/spaceodyssey/core/executors/host.py`
+- `src/spaceodyssey/core/executors/replay.py`
+- `src/spaceodyssey/core/handlers.py`
+- `src/spaceodyssey/core/lift.py`
+- `src/spaceodyssey/core/refresh.py`
+- `src/spaceodyssey/core/service.py`
+- `src/spaceodyssey/core/transaction.py`
+
+Core tests that cover this change: `tests/core/test_compile_sharing.py`, `tests/core/test_program_size.py`.

@@ -305,3 +305,17 @@ exist yet. The pinned file is provisional and says so:
   change is not propagated here.
 - The K6 delta is a laptop measurement; the runner figures wait on two pilot
   dispatches.
+
+## Core paths changed (K4)
+
+The exact core paths that Slice 2b (R1 to R6, attributed here) changed after the S0 close-out, which the Slice 3a gate matches against this record:
+
+- `src/spaceodyssey/core/battery/metamorphic.py`
+- `src/spaceodyssey/core/battery/result.py`
+- `src/spaceodyssey/core/battery/views.py`
+- `src/spaceodyssey/core/conformance/__init__.py`
+- `src/spaceodyssey/core/conformance/observer_kit.py`
+- `src/spaceodyssey/core/preflight/checks.py`
+- `src/spaceodyssey/core/preflight/findings.py`
+
+Core tests that cover this change: `tests/core/test_epoch_relation.py`, `tests/core/test_golden_histories.py`, `tests/core/test_lints.py`, `tests/core/test_metamorphic.py`, `tests/core/test_observer_kit_corrections.py`, `tests/core/test_preflight.py`.

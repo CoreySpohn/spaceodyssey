@@ -121,3 +121,27 @@ None. `tests/core/golden_histories.json` and every pin file are unchanged.
 
 `handlers.py` gained branches, all static on `caps.refunds`. With refunds off the lowered
 default scan is byte-identical to `main`, so the step cost is that of `main`. `tools/step_cost.py --mutant` was not rerun here; the Mac and CI runner remain the baseline of record.
+
+## Core paths changed (K4)
+
+The exact core paths that S3a changed after the S0 close-out, which the Slice 3a gate matches against this record:
+
+- `src/spaceodyssey/core/__init__.py`
+- `src/spaceodyssey/core/battery/fork.py`
+- `src/spaceodyssey/core/battery/metamorphic.py`
+- `src/spaceodyssey/core/battery/replay_latency.py`
+- `src/spaceodyssey/core/battery/truth_swap.py`
+- `src/spaceodyssey/core/carry.py`
+- `src/spaceodyssey/core/conformance/invariants.py`
+- `src/spaceodyssey/core/enums.py`
+- `src/spaceodyssey/core/executors/base.py`
+- `src/spaceodyssey/core/executors/replay.py`
+- `src/spaceodyssey/core/handlers.py`
+- `src/spaceodyssey/core/ledger.py`
+- `src/spaceodyssey/core/preflight/checks.py`
+- `src/spaceodyssey/core/preflight/findings.py`
+- `src/spaceodyssey/core/records.py`
+- `src/spaceodyssey/core/snapshot.py`
+- `src/spaceodyssey/core/transaction.py`
+
+Core tests that cover this change: `tests/core/test_charging.py`, `tests/core/test_conservation.py`, `tests/core/test_preflight.py`, `tests/core/test_refund.py`.

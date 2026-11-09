@@ -180,3 +180,27 @@ and this run does not replace it. Raw output is in the session scratchpad, not i
 ## K4 attribution
 
 K4 is 3b.
+
+## Core paths changed (K4)
+
+The exact core paths that S5 changed after the S0 close-out, which the Slice 3a gate matches against this record:
+
+- `src/spaceodyssey/core/battery/fork.py`
+- `src/spaceodyssey/core/battery/metamorphic.py`
+- `src/spaceodyssey/core/battery/replay_latency.py`
+- `src/spaceodyssey/core/battery/truth_swap.py`
+- `src/spaceodyssey/core/carry.py`
+- `src/spaceodyssey/core/conformance/invariants.py`
+- `src/spaceodyssey/core/declarations.py`
+- `src/spaceodyssey/core/enums.py`
+- `src/spaceodyssey/core/executors/base.py`
+- `src/spaceodyssey/core/executors/replay.py`
+- `src/spaceodyssey/core/handlers.py`
+- `src/spaceodyssey/core/ledger.py`
+- `src/spaceodyssey/core/preflight/checks.py`
+- `src/spaceodyssey/core/preflight/findings.py`
+- `src/spaceodyssey/core/records.py`
+- `src/spaceodyssey/core/snapshot.py`
+- `src/spaceodyssey/core/transaction.py`
+
+Core tests that cover this change: `tests/core/test_awards.py`, `tests/core/test_preflight.py`, `tests/core/test_refresh_runs.py`.

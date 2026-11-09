@@ -419,3 +419,19 @@ the observer alone credits nothing, so it cannot reach the stale path.
   integrated tree: identical (`a67917728c...`, `09226cf964...`). No golden pin moved.
 - Balances file: 54 passed. Lints and pre-commit (`--all-files`, conventional-pre-commit
   skipped): passed, codespell included.
+
+## Core paths changed (K4)
+
+The exact core paths that S4 changed after the S0 close-out, which the Slice 3a gate matches against this record:
+
+- `src/spaceodyssey/core/capacities.py`
+- `src/spaceodyssey/core/carry.py`
+- `src/spaceodyssey/core/enums.py`
+- `src/spaceodyssey/core/executors/base.py`
+- `src/spaceodyssey/core/handlers.py`
+- `src/spaceodyssey/core/preflight/checks.py`
+- `src/spaceodyssey/core/snapshot.py`
+- `src/spaceodyssey/core/study.py`
+- `src/spaceodyssey/core/transaction.py`
+
+Core tests that cover this change: `tests/core/test_preflight.py`, `tests/core/test_snapshot_balances.py`.
