@@ -308,6 +308,7 @@ require_tier_reason = true
 "tests/studies/test_survey_1.py" = 106
 "tests/studies/test_survey_10.py" = 368
 "tests/studies/test_survey_11.py" = 189
+"tests/studies/test_survey_13.py" = 75
 "tests/studies/test_survey_14.py" = 185
 "tests/studies/test_survey_14_static.py" = 53
 "tests/studies/test_survey_18.py" = 236
