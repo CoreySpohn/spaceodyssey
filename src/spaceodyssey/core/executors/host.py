@@ -100,7 +100,7 @@ class HostExecutor(AbstractExecutor):
         carry = _init(study, truths)
         caps = study.caps
         layout = study.observer.layout(caps)
-        prefix = None
+        prefix, base = None, 0
         if checkpoint is not None:
             carry, prefix = self._begin(
                 checkpoint,
@@ -108,6 +108,8 @@ class HostExecutor(AbstractExecutor):
                 (study, carry, wake_fn, policy_form, service, refit),
                 (view_log, effects_log, resume),
             )
+            if prefix is not None:
+                base = int(jax.tree_util.tree_leaves(prefix)[0].shape[0])
             if service is not None:
                 carry = answer_pending(carry, study, service)
             if refit is not None:
@@ -180,14 +182,23 @@ class HostExecutor(AbstractExecutor):
                     boundary = ckpt.AFTER_INFERENCE
             if boundary is not None and checkpoint.wants(boundary):
                 saved = self._save(
-                    checkpoint, boundary, carry, traces, saved, view_log, effects_log
+                    checkpoint,
+                    boundary,
+                    carry,
+                    traces,
+                    saved,
+                    view_log,
+                    effects_log,
+                    base,
                 )
         held = None
         if checkpoint is not None:
             held = jnp.asarray(refit is not None and bool(carry.refresh.valid))
             end = ckpt.AT_HOLD if bool(held) else ckpt.FINAL
             if len(traces) > saved.rows and checkpoint.wants(end):
-                self._save(checkpoint, end, carry, traces, saved, view_log, effects_log)
+                self._save(
+                    checkpoint, end, carry, traces, saved, view_log, effects_log, base
+                )
         trace = (
             jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces)
             if traces
@@ -221,6 +232,7 @@ class HostExecutor(AbstractExecutor):
             "executor": "host",
             "row_axis": 0,
             "policy_form": policy_form,
+            "logs": {"view": view_log is not None, "effects": effects_log is not None},
             "bound": {"wake_fn": wake_fn, "service": service, "refit": refit},
         }
         got = checkpoint.begin(
@@ -234,7 +246,9 @@ class HostExecutor(AbstractExecutor):
             effects_log.extend(got.effect_rows)
         return jax.tree_util.tree_map(jnp.asarray, got.carry), got.trace
 
-    def _save(self, checkpoint, boundary, carry, traces, saved, view_log, effects_log):
+    def _save(
+        self, checkpoint, boundary, carry, traces, saved, view_log, effects_log, base
+    ):
         """Publish the carry and the rows produced since the last save."""
         new = traces[saved.rows :]
         rows = (
@@ -250,7 +264,7 @@ class HostExecutor(AbstractExecutor):
             boundary,
             carry,
             rows,
-            len(traces),
+            base + len(traces),
             view_rows=views,
             effect_rows=effects,
         )

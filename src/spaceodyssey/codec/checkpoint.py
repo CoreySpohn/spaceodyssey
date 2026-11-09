@@ -55,6 +55,7 @@ from spaceodyssey.core.checkpoint import (
     tree_digest,
 )
 
+PENDING = "PENDING"  # marks a first save that has not yet committed
 CURRENT = "CURRENT"
 MANIFEST = "manifest.json"
 CARRY_FILE = "carry.npz"
@@ -256,6 +257,66 @@ class GenerationStore:
                 os.close(gfd)
         return False
 
+    def _complete(self, root, g):
+        """Whether generation `g` holds a manifest (an unfinished write has none)."""
+        try:
+            gfd = os.open(_gen_name(g), _DIR, dir_fd=root)
+        except OSError:
+            return False
+        try:
+            os.stat(MANIFEST, dir_fd=gfd, follow_symlinks=False)
+            return True
+        except OSError:
+            return False
+        finally:
+            os.close(gfd)
+
+    def _committed(self, root):
+        """Whether the pointer exists: the commit point of the first save."""
+        try:
+            os.stat(CURRENT, dir_fd=root, follow_symlinks=False)
+            return True
+        except OSError:
+            return False
+
+    def _pending(self, root):
+        try:
+            os.stat(PENDING, dir_fd=root, follow_symlinks=False)
+            return True
+        except OSError:
+            return False
+
+    def discard_uncommitted(self):
+        """Remove what a first save that never committed left behind.
+
+        Only a directory with no pointer is touched; one with a pointer keeps every
+        generation it has.
+        """
+        root = self._root(create=False)
+        if root is None:
+            return
+        try:
+            if self._committed(root):
+                return
+            for g in self._generations(root):
+                _rmtree(root, _gen_name(g))
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(PENDING, dir_fd=root)
+        finally:
+            os.close(root)
+
+    def clear_incomplete(self):
+        """Remove generation directories that have no manifest (a crashed write)."""
+        root = self._root(create=False)
+        if root is None:
+            return
+        try:
+            for g in self._generations(root):
+                if not self._complete(root, g):
+                    _rmtree(root, _gen_name(g))
+        finally:
+            os.close(root)
+
     def _chunks_fd(self, fd, create):
         flags = _DIR
         try:
@@ -308,6 +369,11 @@ class GenerationStore:
         try:
             previous = self._generations(root)
             n = (previous[-1] + 1) if previous else 1
+            first = not self._committed(root)
+            if first:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(PENDING, dir_fd=root)
+                _write_new(root, PENDING, b"")
             self._at("payload")
             os.mkdir(_gen_name(n), dir_fd=root)
             gfd = os.open(_gen_name(n), _DIR, dir_fd=root)
@@ -347,6 +413,9 @@ class GenerationStore:
             os.rename(tmp, CURRENT, src_dir_fd=root, dst_dir_fd=root)
             self._at("pointer-sync")
             os.fsync(root)
+            if first:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(PENDING, dir_fd=root)
             self._prune(root, n)
         finally:
             os.close(root)
@@ -354,7 +423,11 @@ class GenerationStore:
 
     def _prune(self, root, current):
         """Keep the newest `keep` generations up to `current`, and their chunks."""
-        gens = [g for g in self._generations(root) if g <= current]
+        gens = [
+            g
+            for g in self._generations(root)
+            if g <= current and self._complete(root, g)
+        ]
         keep = set(gens[-self.keep :])
         for g in self._generations(root):
             if g not in keep:
@@ -400,12 +473,17 @@ class GenerationStore:
             try:
                 raw = _open_read(root, CURRENT, max_bytes=1 << 16)
             except CheckpointError as exc:
-                if exc.code is CheckpointCode.C004 and not self._published(root, gens):
+                if exc.code is CheckpointCode.C004 and (
+                    not self._published(root, gens)
+                    or (not recover and self._pending(root))
+                ):
                     # nothing was ever committed: a first save that never finished
                     return None
                 if not recover:
                     raise CheckpointError(
-                        CheckpointCode.C005, f"the pointer is unusable: {exc.message}"
+                        CheckpointCode.C005,
+                        f"the pointer is unusable: {exc.message}; "
+                        "recover=True loads the newest generation that verifies",
                     ) from exc
                 return self._newest(root, gens, [exc.message])
             try:
@@ -627,6 +705,20 @@ def named_config(config):
     return config
 
 
+def _comparable(saved, now):
+    """The saved and current identity parts, as they are compared.
+
+    A run saved with no service that stopped on a pending request may be resumed with
+    one (the answer is what it waited for), so a service present now and absent then
+    is not a difference.
+    """
+    if (saved.get("config") or {}).get("service") is None:
+        saved, now = dict(saved), dict(now)
+        saved["config"] = {**saved["config"], "service": None}
+        now["config"] = {**now["config"], "service": None}
+    return saved, now
+
+
 class DirectoryCheckpoint(CheckpointSink):
     """Save to and resume from a run directory.
 
@@ -672,16 +764,25 @@ class DirectoryCheckpoint(CheckpointSink):
         deps = dependency_fingerprint()
         self._parts, self._deps = parts, deps
         self._row_axis = config["row_axis"]
+        self._overrides, self._chunks, self._rows = [], [], 0
         loaded = self.store.load(recover=self.recover)
         if loaded is None:
+            self.store.discard_uncommitted()
+            if resume:
+                raise CheckpointError(
+                    CheckpointCode.C010,
+                    "resume was asked for and the directory holds no checkpoint; "
+                    "call without resume to start the run",
+                )
             return None
+        self.store.clear_incomplete()
         if not resume:
             raise CheckpointError(
                 CheckpointCode.C008,
                 "the directory holds a checkpoint; resume it or use another directory",
             )
         saved = loaded.manifest["identity"]
-        diff = differing_parts(saved["parts"], parts)
+        diff = differing_parts(*_comparable(saved["parts"], parts))
         if diff:
             raise CheckpointError(
                 CheckpointCode.C002,
