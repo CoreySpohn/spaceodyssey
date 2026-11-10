@@ -691,6 +691,14 @@ def search_probability_truth(p_det, live):
 # -- The report refit ----------------------------------------------------------------
 
 
+def _catalog_elements(row, n_slots):
+    """`[n_slots, 8]` elements (`ELEMENTS` order) of a catalog row, on the host."""
+    width = len(CATALOG_FIELDS)
+    cells = np.asarray(row)[: n_slots * width].reshape(n_slots, width)
+    names = [f for f, _ in CATALOG_FIELDS]
+    return np.stack([cells[:, names.index(e)] for e in ELEMENTS], axis=-1)
+
+
 def _catalog_slots(row, n_slots):
     """`(present, class1, elements)` of every slot from a catalog payload row."""
     width = len(CATALOG_FIELDS)
@@ -856,6 +864,13 @@ MASS_WINDOW = 0.10
 ROW_BUCKETS = (8, 16)
 # The fixed cloud of a star is drawn from this seed folded with the star.
 CLOUD_SEED = 20261110
+# The shrinkage rule: draws of the cloud around the catalog orbit, the fractional width
+# of `a` and `Ag` after one, two and three or more detections, and the catalog groups
+# the kernel reads (the orbit, and the photometric scale `ln_lam`, a column of the
+# class group).
+SHRINK_DRAWS = 500
+SHRINK_WIDTHS = (0.20, 0.10, 0.025)
+SHRINK_GROUPS = ("ephemeris", "class")
 # Diagnostic columns of the posterior kernel.
 POSTERIOR_DIAGNOSTICS = ("n_reports", "n_retried", "n_degraded", "n_failed")
 
@@ -985,6 +1000,8 @@ class _PostSettings:
     occupancy: float
     grid_points: int
     lane_batch: int
+    n_shrink: int
+    shrink_widths: tuple
 
 
 def _over_lanes(fn, lanes, batch):
@@ -1048,6 +1065,12 @@ class _FitLane(eqx.Module):
     corr: jax.Array
     end_tick: jax.Array
     live: jax.Array  # False for a padding lane, which is skipped
+
+
+class _ShrinkLane(_FitLane):
+    """One detected slot of one entry, with the catalog orbit the rule centers on."""
+
+    truth: jax.Array  # [8] catalog elements of the slot, in the channel's convention
 
 
 def _grid_entry(channel, lane, grid_points):
@@ -1321,11 +1344,70 @@ def _first_tier_lane(channel, lane, st, scale):
     )
 
 
+def shrinkage_width(n_det, widths=SHRINK_WIDTHS):
+    """Fractional width of the shrinkage cloud after `n_det` (at least 1) detections."""
+    return jnp.asarray(widths, F64)[jnp.clip(n_det, 1, len(widths)) - 1]
+
+
+def shrinkage_cloud(truth, key, n, width):
+    """`n` orbits around the catalog orbit `truth (8,)`, elements in `ELEMENTS` order.
+
+    The semimajor axis `a` and the geometric albedo `Ag` are log-normal about their
+    catalog values with log standard deviation `width` (a fractional width, to second
+    order), drawn independently. The stellar mass, the planet radius and every other
+    element are held at the catalog values, so the period follows `a` at fixed mass
+    (`ln P` moves by 1.5 `ln a`) and `ln_lam = ln(Ag Rp^2)` moves by `ln Ag`.
+    """
+    z = jax.random.normal(key, (n, 2), F64)
+    cloud = jnp.broadcast_to(jnp.asarray(truth, F64), (n, 8))
+    cloud = cloud.at[:, 0].add(1.5 * width * z[:, 0])
+    return cloud.at[:, 7].add(width * z[:, 1])
+
+
+def _shrink_lane(channel, lane, st, engine, scale):
+    """One detected slot under the shrinkage rule: the cloud's summary leaves.
+
+    Returns the tuple of `_fit_lane`; the cloud is never weighted, so its size is
+    `st.n_shrink` and the code is always OK.
+    """
+    n_det = (lane.detected & lane.valid).sum()
+    width = shrinkage_width(n_det, st.shrink_widths)
+    elements = shrinkage_cloud(lane.truth, _slot_key(lane, scale), st.n_shrink, width)
+    zeros = jnp.zeros(st.n_shrink, F64)
+    last = jnp.max(jnp.where(lane.detected & lane.valid, lane.end_tick, -1))
+    last_d = jnp.where(last >= 0, last.astype(F64) * channel.tick_days, 0.0)
+    leaves = summarize(
+        elements,
+        zeros,
+        lane.subject,
+        channel,
+        lane.tick,
+        last_det_d=jnp.where(last >= 0, last_d, lane.tick * channel.tick_days),
+        n_grid=st.n_grid,
+        spacing_d=st.spacing_d,
+        block_snr=st.block_snr,
+        albedo=st.albedo,
+        position_lag_d=st.position_lag_d,
+    )
+    return (
+        leaves.p_det,
+        leaves.p_block,
+        leaves.scatter,
+        leaves.pos_mean,
+        leaves.p_class,
+        leaves.ln_period_q,
+        leaves.ess,
+        jnp.asarray(int(UpdaterStatus.OK), I64),
+        jnp.all(jnp.isfinite(elements)),
+    )
+
+
 @eqx.filter_jit
 def _fit_lanes(channel, lanes, st, engine, scale):
     """A batch of slot fits, one output tuple per leaf."""
+    fit = _shrink_lane if engine == "shrink" else _fit_lane
     return _over_lanes(
-        _if_live(lambda lane: _fit_lane(channel, lane, st, engine, scale)),
+        _if_live(lambda lane: fit(channel, lane, st, engine, scale)),
         lanes,
         st.lane_batch,
     )
@@ -1378,6 +1460,20 @@ class ReportRefit(AbstractRefitBoundary):
     empty `truth_groups` is the only form it accepts, and arms that open one
     (`ephemeris` or `class`) raise `NotImplementedError`.
 
+    `kernel="shrinkage"` is the shrinkage rule of a published study, taken as an
+    external reference. A slot with no detection takes the posterior kernel's first
+    tier. After a detection the slot's cloud is `SHRINK_DRAWS` orbits around its
+    catalog orbit, with the semimajor axis `a` and the geometric albedo `Ag` log-normal
+    at a fractional width of 0.20, 0.10 and 0.025 after one, two and three or more
+    detections (`SHRINK_WIDTHS`); the planet radius, the stellar mass and every other
+    element stay at the catalog values (see `shrinkage_cloud`). The cloud goes through
+    `summarize` unweighted, so the leaves and the claim rule are those of every other
+    kernel, and its key is the entry's key folded with the slot. The kernel reads the
+    catalog groups of `SHRINK_GROUPS`: the orbit and the photometric scale `ln_lam`
+    that `Ag` is centered on. It needs `occupancy` and `ln_lam_range` like the
+    posterior kernel, for the first tier. A detected slot of an entry with no catalog
+    row is `SLOT_NO_SUPPORT` and installs nothing.
+
     The first tier's `p_new` weighs each undetected slot by its posterior occupancy
     after the entry's nulls (`posterior_occupancy`), so repeated nulls on a star lower
     the chance of a new detection.
@@ -1428,32 +1524,37 @@ class ReportRefit(AbstractRefitBoundary):
         version=1,
     ):
         """Declare the kernel and its settings; check the registry when given."""
-        if kernel not in ("truth", "posterior"):
+        if kernel not in ("truth", "posterior", "shrinkage"):
             raise NotImplementedError(
-                f"kernel {kernel!r} is not built; known: 'truth', 'posterior'"
+                f"kernel {kernel!r} is not built; known: 'truth', 'posterior', "
+                "'shrinkage'"
             )
         groups = tuple(truth_groups)
         if kernel == "truth" and set(groups) != set(CATALOG_GROUPS):
             raise ValueError(f"the truth kernel reads exactly {CATALOG_GROUPS}")
-        if kernel == "posterior":
-            if groups and set(groups) != set(CATALOG_GROUPS):
-                raise NotImplementedError(
-                    "the posterior kernel reads no catalog group; an arm that opens "
-                    f"{groups} needs the truth-informed variants"
-                )
+        if kernel == "shrinkage" and set(groups) != set(SHRINK_GROUPS):
+            raise ValueError(f"the shrinkage kernel reads exactly {SHRINK_GROUPS}")
+        if kernel in ("posterior", "shrinkage"):
+            if kernel == "posterior" and groups:
+                if set(groups) != set(CATALOG_GROUPS):
+                    raise NotImplementedError(
+                        "the posterior kernel reads no catalog group; an arm that "
+                        f"opens {groups} needs the truth-informed variants"
+                    )
             if occupancy is None:
                 raise ValueError(
-                    "the posterior kernel needs `occupancy`, the class-1 planets "
+                    f"the {kernel} kernel needs `occupancy`, the class-1 planets "
                     "per star its first tier assumes"
                 )
             if ln_lam_range is None:
                 raise ValueError(
-                    "the posterior kernel needs `ln_lam_range`, the range of "
+                    f"the {kernel} kernel needs `ln_lam_range`, the range of "
                     "ln(albedo radius^2) of the population (see "
                     "`population_ln_lam_range`); a default window would refuse a "
                     "planet outside it"
                 )
-            groups = ()
+            if kernel == "posterior":
+                groups = ()
         if lanes < 1:
             raise ValueError("lanes is at least one")
         self.kernel = kernel
@@ -1483,7 +1584,7 @@ class ReportRefit(AbstractRefitBoundary):
         self.grid_points = int(grid_points)
         self.row_buckets = tuple(int(b) for b in row_buckets)
         self.lane_batch = int(lane_batch)
-        self.n_diag = len(POSTERIOR_DIAGNOSTICS) if kernel == "posterior" else 2
+        self.n_diag = len(POSTERIOR_DIAGNOSTICS) if kernel != "truth" else 2
         self.version = version
         text = json.dumps(self.configuration(), sort_keys=True)
         self.model_hash = int.from_bytes(
@@ -1509,7 +1610,7 @@ class ReportRefit(AbstractRefitBoundary):
             "albedo": self.albedo,
             "position_lag_d": self.position_lag_d,
         }
-        if self.kernel == "posterior":
+        if self.kernel != "truth":
             out |= {
                 "n_particles": self.n_particles,
                 "occupancy": self.occupancy,
@@ -1527,6 +1628,11 @@ class ReportRefit(AbstractRefitBoundary):
                 "row_buckets": list(self.row_buckets),
                 "retry_factor": RETRY_FACTOR,
                 "cloud_seed": CLOUD_SEED,
+            }
+        if self.kernel == "shrinkage":
+            out |= {
+                "n_shrink": SHRINK_DRAWS,
+                "shrink_widths": list(SHRINK_WIDTHS),
             }
         return out
 
@@ -1556,8 +1662,8 @@ class ReportRefit(AbstractRefitBoundary):
             if group in self.truth_groups and (int(audience) & need) != need:
                 raise ValueError(
                     f"catalog column {field!r} of slot {col // width} (group "
-                    f"{group!r}) is hidden from an audience; the truth kernel "
-                    "needs it open to the observer and the policy"
+                    f"{group!r}) is hidden from an audience; the {self.kernel} "
+                    "kernel needs it open to the observer and the policy"
                 )
 
     def _settings(self, study):
@@ -1580,7 +1686,7 @@ class ReportRefit(AbstractRefitBoundary):
     def refit_batch(self, study, requests):
         """Answer every dirty entry: `[W, 2, n_subjects, ...]` slices and statuses."""
         self.check(study.caps)
-        if self.kernel == "posterior":
+        if self.kernel != "truth":
             return self._refit_posterior(study, requests)
         return self._refit_truth(study, requests)
 
@@ -1672,9 +1778,11 @@ class ReportRefit(AbstractRefitBoundary):
             occupancy=self.occupancy,
             grid_points=self.grid_points,
             lane_batch=self.lane_batch,
+            n_shrink=SHRINK_DRAWS,
+            shrink_widths=SHRINK_WIDTHS,
         )
 
-    def _run_groups(self, run, items, lane_cls_fields):
+    def _run_groups(self, run, items, lane_cls_fields, lane_cls=_FitLane):
         """Run `items` (a list of `_FitLane` field dicts) in padded groups of lanes.
 
         `run(lanes)` is a batched call returning a tuple of arrays; the result is one
@@ -1685,7 +1793,7 @@ class ReportRefit(AbstractRefitBoundary):
         for start in range(0, len(items), self.lanes):
             part = items[start : start + self.lanes]
             padded = part + [part[0]] * (self.lanes - len(part))
-            lanes = _FitLane(
+            lanes = lane_cls(
                 **{
                     f: jnp.asarray(np.stack([it[f] for it in padded]))
                     for f in lane_cls_fields
@@ -1718,6 +1826,8 @@ class ReportRefit(AbstractRefitBoundary):
         tick = tick.reshape(tick.shape + (1,) * (3 - tick.ndim))
         tick = np.broadcast_to(tick, (n_worlds, 2, count))
         kind_index = study.caps.kind_names.index(self.report_kind)
+        shrink = self.kernel == "shrinkage"
+        cat_index = study.caps.kind_names.index(self.catalog_kind) if shrink else -1
         width = channel.widths()[0]
         cap = req.rows.payload.shape[3]
         buckets = sorted({b for b in self.row_buckets if b < cap} | {cap})
@@ -1735,9 +1845,18 @@ class ReportRefit(AbstractRefitBoundary):
             end = np.zeros(rows, np.int64)
             end[: len(idx)] = req.rows.end_tick[w, a, s][idx]
             used = np.arange(rows) < len(idx)
+            truth, has_cat = np.zeros((n_slots, 8)), False
+            if shrink:
+                is_cat = req.rows.valid[w, a, s] & (req.rows.kind[w, a, s] == cat_index)
+                has_cat = bool(is_cat.any())
+                if has_cat:
+                    row = req.rows.payload[w, a, s][int(np.argmax(is_cat))]
+                    truth = _catalog_elements(row, n_slots)
             entries.append(
                 {
                     "at": (w, a, s),
+                    "truth": truth,
+                    "has_cat": has_cat,
                     "n_rep": len(idx),
                     "rows": rows,
                     "payload": payload,
@@ -1768,7 +1887,6 @@ class ReportRefit(AbstractRefitBoundary):
                     e["report"] = {k: v[i] for k, v in result.items()}
 
         # Stage two: slot fits by engine, the first tier once per entry.
-        fit_fields = [f.name for f in dataclasses.fields(_FitLane) if f.name != "live"]
         fits, firsts = [], []
         for e in entries:
             rep = e["report"]
@@ -1781,6 +1899,7 @@ class ReportRefit(AbstractRefitBoundary):
             e["n_det"] = (rep["detected"] & rep["valid"]).sum(axis=1)
             e["live"] = np.flatnonzero(e["n_det"] > 0)
             e["dark"] = np.flatnonzero(e["n_det"] == 0)
+            e["skipped"] = []
             base = {
                 "subject": np.asarray(e["at"][2]),
                 "tick": np.asarray(e["tick"]),
@@ -1793,8 +1912,13 @@ class ReportRefit(AbstractRefitBoundary):
                 "n_undetected": np.asarray(len(e["dark"])),
             }
             for slot in e["live"]:
+                if shrink and not e["has_cat"]:
+                    e["skipped"].append(slot)
+                    continue
                 item = dict(base)
                 item["slot"] = np.asarray(slot)
+                if shrink:
+                    item["truth"] = e["truth"][slot]
                 for f in (
                     "detected",
                     "valid",
@@ -1807,7 +1931,8 @@ class ReportRefit(AbstractRefitBoundary):
                 ):
                     item[f] = rep[f][slot]
                 n_records = int(astrometry[slot].sum())
-                fits.append((e, slot, "single" if n_records <= 1 else "multi", item))
+                engine = "shrink" if shrink else "single" if n_records <= 1 else "multi"
+                fits.append((e, slot, engine, item))
             if len(e["dark"]):
                 first = dict(base)
                 first["slot"] = np.asarray(n_slots)
@@ -1825,9 +1950,12 @@ class ReportRefit(AbstractRefitBoundary):
                     first[f] = np.zeros_like(rep[f][0])
                 firsts.append((e, first))
 
+        lane_cls = _ShrinkLane if shrink else _FitLane
+        fit_fields = [f.name for f in dataclasses.fields(lane_cls) if f.name != "live"]
+
         def run_fits(selected, scale):
             results = {}
-            for engine in ("single", "multi"):
+            for engine in ("shrink",) if shrink else ("single", "multi"):
                 group = [(k, it) for k, (_, _, eng, it) in selected if eng == engine]
                 for rows in {it["epochs"].shape[0] for _, it in group}:
                     part = [(k, it) for k, it in group if it["epochs"].shape[0] == rows]
@@ -1837,6 +1965,7 @@ class ReportRefit(AbstractRefitBoundary):
                         ),
                         [it for _, it in part],
                         fit_fields,
+                        lane_cls,
                     )
                     results.update({k: o for (k, _), o in zip(part, out, strict=True)})
             return results
@@ -1850,11 +1979,14 @@ class ReportRefit(AbstractRefitBoundary):
                 out = self._run_groups(
                     lambda lanes: _first_tier_lanes(channel, lanes, st, scale),
                     [it for _, it in part],
-                    fit_fields,
+                    first_fields,
                 )
                 results.update({k: o for (k, _), o in zip(part, out, strict=True)})
             return results
 
+        first_fields = [
+            f.name for f in dataclasses.fields(_FitLane) if f.name != "live"
+        ]
         low = int(UpdaterStatus.LOW_ESS)
         indexed_fits = list(enumerate(fits))
         fit_out = run_fits(indexed_fits, 1)
@@ -1904,6 +2036,9 @@ class ReportRefit(AbstractRefitBoundary):
                     slices["ess"][w, a, s, slot] = ess
                     codes[slot] = code
                 units.append(code)
+            for slot in e["skipped"]:
+                codes[slot] = SLOT_NO_SUPPORT
+                units.append(SLOT_NO_SUPPORT)
             n_low = sum(c == SLOT_DEGRADED for c in units)
             n_fail = sum(c in SLOT_KEPT for c in units)
             slices["ref_tick"][w, a, s] = e["tick"]
@@ -1939,6 +2074,9 @@ __all__ = [
     "CATALOG_GROUPS",
     "COLUMN_NAMES",
     "ELEMENTS",
+    "SHRINK_DRAWS",
+    "SHRINK_GROUPS",
+    "SHRINK_WIDTHS",
     "SLOT_DEGRADED",
     "SLOT_FAILED",
     "SLOT_KEPT",
@@ -1965,6 +2103,8 @@ __all__ = [
     "posterior_occupancy",
     "report_kind",
     "search_probability_truth",
+    "shrinkage_cloud",
+    "shrinkage_width",
     "slot_status",
     "summarize",
     "summarize_search",

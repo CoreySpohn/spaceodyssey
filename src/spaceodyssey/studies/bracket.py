@@ -125,7 +125,7 @@ ARMS = {
     "replan": Arm("replan", EVERYONE, (), "posterior"),
     "replan+ephemeris": Arm("replan+ephemeris", EVERYONE, ("ephemeris",), "posterior"),
     "replan+class": Arm("replan+class", EVERYONE, ("class",), "posterior"),
-    "shrinkage": Arm("shrinkage", EVERYONE, ("ephemeris",), "shrinkage"),
+    "shrinkage": Arm("shrinkage", EVERYONE, ("ephemeris", "class"), "shrinkage"),
 }
 
 
@@ -278,12 +278,12 @@ def bracket_boundary(study, arm, **settings):
     """The refit boundary of `arm` for `study` (`ReportRefit` with the arm's kernel).
 
     Construction refuses a registry that hides a catalog group the kernel needs.
-    `settings` are the kernel's own (the posterior kernel needs `occupancy`; its scale
-    prior `ln_lam_range` is derived from the world source's population when not
-    given).
+    `settings` are the kernel's own (the posterior and shrinkage kernels need
+    `occupancy`; their scale prior `ln_lam_range` is derived from the world source's
+    population when not given).
     """
     arm = _arm(arm)
-    if arm.kernel == "posterior" and "ln_lam_range" not in settings:
+    if arm.kernel != "truth" and "ln_lam_range" not in settings:
         population = getattr(study.world_source, "population", None)
         if population is not None:
             settings["ln_lam_range"] = population_ln_lam_range(population)
