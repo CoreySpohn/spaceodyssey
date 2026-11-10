@@ -32,9 +32,11 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.constants import Msun2kg, Rearth2AU
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.ofti import PARAM_NAMES, ofti
 from photomancy.orbit.priors import ecc_distribution
+from photomancy.orbit.updater import UpdaterStatus
 
 from spaceodyssey.codec.bindings import BindingKind, Bindings
 from spaceodyssey.core.capacities import require_x64
@@ -473,7 +475,7 @@ class DecisionSummary(eqx.Module):
     p_class: jax.Array  # [n, S], probability of class 1
     ln_period_q: jax.Array  # [n, S, 3], 16, 50 and 84 percent quantiles
     ess: jax.Array  # [n, S], Kish effective size
-    status: jax.Array  # I64 [n, S], refit status
+    status: jax.Array  # I64 [n, S], slot fit code (`SLOT_NEVER_FIT` before any fit)
     aux: jax.Array  # [n_an]
 
     @classmethod
@@ -492,7 +494,7 @@ class DecisionSummary(eqx.Module):
             p_class=jnp.zeros((n, s), F64),
             ln_period_q=jnp.zeros((n, s, 3), F64),
             ess=jnp.zeros((n, s), F64),
-            status=jnp.full((n, s), int(RefitStatus.NO_SUPPORT), I64),
+            status=jnp.full((n, s), SLOT_NEVER_FIT, I64),
             aux=jnp.zeros(n_an, F64),
         )
 
@@ -661,7 +663,10 @@ def summarize_search(
     number of class-1 planets still undetected around the star and `n_undetected`
     the slots that hold them, so each slot is occupied with `q = occupancy /
     n_undetected`. A visit finds one when an occupied slot is class 1 and detected:
-    `1 - (1 - q p1) ** n_undetected`, `p1` the cloud's probability of both.
+    `1 - (1 - q p1) ** n_undetected`, `p1` the cloud's probability of both. The
+    refit boundary passes the expected count after the null reports, not the prior:
+    each slot's occupancy is updated by the evidence of its cloud (see
+    `posterior_occupancy`), so a star whose nulls rule the cloud out is searched less.
     """
     tick_days = channel.tick_days if tick_days is None else tick_days
     w = _normalized(log_w)
@@ -802,6 +807,540 @@ class _Lane(eqx.Module):
     subject: jax.Array
 
 
+# -- The posterior kernel -------------------------------------------------------------
+#
+# A slot with no detection is the first tier: a fixed cloud of prior draws inside the
+# class-1 window of the star, reweighted by the nulls of the reports. A slot with one
+# detection is refit by scale-and-rotate and a slot with two or more by the collapsed
+# rounds, both from photomancy's physical-prior refit (the report term included). The
+# work is batched by items: one item is one slot of one entry (or, for the first tier,
+# one entry), items are grouped by engine and row bucket, and each group is padded to
+# `lanes` and makes one jitted call whose lanes run in turn.
+
+# The `status` leaf of a summary holds one code per slot, the same set under every
+# kernel: a `RefitStatus`.
+#
+# - `SLOT_OK`: fit, with a cloud above the size floor (the truth kernel's only code).
+# - `SLOT_DEGRADED`: fit, but the cloud stayed under the size floor after the retry
+#   (photomancy's `LOW_ESS`). The leaves are installed and labelled; the slot cannot
+#   support a claim.
+# - `SLOT_NO_SUPPORT`: the fit found no orbit the data allow (photomancy's
+#   `NO_SUPPORT`), or the truth kernel had no catalog row to read.
+# - `SLOT_FAILED`: the fit returned a non-finite cloud.
+# - `SLOT_NEVER_FIT`: no refit has touched the slot. It is outside the `RefitStatus`
+#   codes (0 to 3), so it cannot be read as a fit outcome.
+#
+# A slot that is `NO_SUPPORT` or `FAILED` installs nothing: it keeps its previous
+# summary and carries the code (`SummaryObserver.install`).
+SLOT_NEVER_FIT = -1
+SLOT_OK = int(RefitStatus.OK)
+SLOT_NO_SUPPORT = int(RefitStatus.NO_SUPPORT)
+SLOT_DEGRADED = int(RefitStatus.DEGRADED)
+SLOT_FAILED = int(RefitStatus.FAILED)
+SLOT_KEPT = (SLOT_NO_SUPPORT, SLOT_FAILED)
+
+# Draws of the first tier's fixed prior cloud, and the factor a retry multiplies the
+# proposals (or the draws) by.
+FIRST_TIER_DRAWS = 4096
+RETRY_FACTOR = 4
+# Separation nodes of the sensitivity grid of each report row. The interpolation error
+# of the report likelihood falls about 16 times from 256 to 1024 nodes, and the node
+# count does not change the cost of a fit.
+GRID_POINTS = 1024
+# Half width added on each side of the population's range of ln(albedo radius^2), so
+# a planet at the edge of the population sits inside the scale prior.
+LN_LAM_PAD = 0.5
+# Fractional half width of the stellar mass window around the catalog mass.
+MASS_WINDOW = 0.10
+# Row counts a report batch is padded to (the last is the capacity of the study).
+ROW_BUCKETS = (8, 16)
+# The fixed cloud of a star is drawn from this seed folded with the star.
+CLOUD_SEED = 20261110
+# Diagnostic columns of the posterior kernel.
+POSTERIOR_DIAGNOSTICS = ("n_reports", "n_retried", "n_degraded", "n_failed")
+
+
+def _photomancy_refit():
+    """The report refit module of photomancy.
+
+    Imported when a posterior first runs, never inside a trace: the module builds
+    JAX constants as it loads.
+    """
+    from photomancy.orbit import refit
+
+    return refit
+
+
+def channel_elements(elements):
+    """Physical elements `(..., 8)` of a photomancy cloud in the channel's convention.
+
+    Photomancy holds the periastron phase `tau` (periods) and `ln_lam` as the log of
+    albedo times radius squared in AU squared; the channel holds `tau` in days from
+    the epoch and `ln_lam` with the radius in Earth radii.
+    """
+    el = jnp.asarray(elements)
+    period = jnp.exp(el[..., 0])
+    el = el.at[..., 5].set(el[..., 5] * period)
+    return el.at[..., 7].set(el[..., 7] - 2.0 * jnp.log(Rearth2AU))
+
+
+def photomancy_elements(elements):
+    """The inverse of `channel_elements`: the periastron phase lies in [0, 1)."""
+    el = jnp.asarray(elements)
+    period = jnp.exp(el[..., 0])
+    el = el.at[..., 5].set(jnp.mod(el[..., 5] / period, 1.0))
+    return el.at[..., 7].set(el[..., 7] + 2.0 * jnp.log(Rearth2AU))
+
+
+def population_ln_lam_range(population, pad=LN_LAM_PAD):
+    """`(low, high)` of `ln(albedo * radius^2)` (AU^2) over a population, padded.
+
+    `population` holds `Ag` and `Rp_AU` leaves and a `present` mask, as the world
+    sources' populations do. The range is the scale prior of the report refit: it
+    must hold every planet a world can draw, or the refit refuses a bright planet
+    (the default Earth-twin window excludes planets under 0.6 or over 1.7 Earth radii
+    at albedo 0.3).
+    """
+    present = np.asarray(population.present)
+    scale = np.asarray(population.Ag) * np.asarray(population.Rp_AU) ** 2
+    scale = scale[present & (scale > 0.0)]
+    if scale.size == 0:
+        raise ValueError("the population holds no planet to derive a scale range from")
+    log = np.log(scale)
+    return float(log.min() - pad), float(log.max() + pad)
+
+
+def posterior_occupancy(prior, log_evidence):
+    """Probability a slot holds a planet after reports: `q L / (1 - q + q L)`.
+
+    `prior` is the slot's occupancy `q` before the reports and `log_evidence` the log
+    of `L`, the likelihood of the reports (nulls) given a planet there over their
+    likelihood given none. A likelihood of zero (`-inf`) gives zero; `q` is clipped
+    to [0, 1].
+    """
+    q = jnp.clip(jnp.asarray(prior, F64), 0.0, 1.0)
+    safe = jnp.where(q > 0.0, q, 0.5)
+    log_num = jnp.log(safe) + log_evidence
+    log_den = jnp.logaddexp(jnp.log1p(-safe), log_num)
+    post = jnp.exp(log_num - log_den)
+    return jnp.where((q > 0.0) & jnp.isfinite(log_den), post, 0.0)
+
+
+def slot_status(photomancy_status, finite):
+    """The slot code (`SLOT_*`) of a photomancy `UpdaterStatus` and a finiteness flag.
+
+    Host-side, on NumPy values: `LOW_ESS` becomes `SLOT_DEGRADED` (the caller has
+    already retried it), `NO_SUPPORT` stays so and a non-finite cloud is `SLOT_FAILED`.
+    """
+    raw = int(photomancy_status)
+    if not finite:
+        return SLOT_FAILED
+    if raw == int(UpdaterStatus.NO_SUPPORT):
+        return SLOT_NO_SUPPORT
+    if raw == int(UpdaterStatus.LOW_ESS):
+        return SLOT_DEGRADED
+    return SLOT_OK
+
+
+def class1_window(luminosity, mass_msun, half_width, albedo=ALBEDO):
+    """The class-1 window of a star: `(ln_period_lo, hi, ln_lam_lo, hi)`.
+
+    The period bounds follow from the scaled semimajor axis window at the largest and
+    smallest mass of the stellar window, limited to the belief's 50 to 5000 day
+    support; the scale bounds are the radius window of the rule at the declared
+    albedo, in photomancy's units (AU squared).
+    """
+    root = jnp.sqrt(luminosity)
+    a_lo, a_hi = CLASS1_A_SCALED[0] * root, CLASS1_A_SCALED[1] * root
+    p_lo = DAYS_PER_YEAR * jnp.sqrt(a_lo**3 / (mass_msun * (1.0 + half_width)))
+    p_hi = DAYS_PER_YEAR * jnp.sqrt(a_hi**3 / (mass_msun * (1.0 - half_width)))
+    low = jnp.clip(jnp.log(p_lo), jnp.log(50.0), jnp.log(5000.0) - 1e-3)
+    high = jnp.clip(jnp.log(p_hi), low + 1e-3, jnp.log(5000.0))
+    r_lo = CLASS1_R_LOWER / jnp.sqrt(CLASS1_A_SCALED[1])
+    shift = jnp.log(albedo) + 2.0 * jnp.log(Rearth2AU)
+    return low, high, shift + 2.0 * jnp.log(r_lo), shift + 2.0 * jnp.log(CLASS1_R_UPPER)
+
+
+@dataclasses.dataclass(frozen=True)
+class _PostSettings:
+    """The static layout and constants a posterior program is compiled for."""
+
+    n_slots: int
+    n_grid: int
+    spacing_d: float
+    block_snr: float
+    albedo: float
+    position_lag_d: float
+    n_particles: int
+    n_round: int
+    n_rounds: int
+    n_centers: int
+    n_constants: int
+    defensive: float
+    ess_floor: float
+    max_rounds: int
+    mass_window: float
+    ln_lam_range: object
+    n_first: int
+    occupancy: float
+    grid_points: int
+    lane_batch: int
+
+
+def _over_lanes(fn, lanes, batch):
+    """`fn` over the lane axis: `vmap` when `batch` is 0, else `lax.map`.
+
+    A `vmap` of the refits runs every lane through the slowest lane's loops. A plain
+    `lax.map` (`batch` of 1) runs the lanes in turn, each paying only for itself, and
+    keeps a per-lane `cond` a branch; with `batch_size=1` the map is a scan over a
+    `vmap` and turns every `cond` into a select. A `batch` above one maps in chunks.
+    """
+    if batch <= 0:
+        return jax.vmap(fn)(lanes)
+    if batch == 1:
+        return jax.lax.map(fn, lanes)
+    return jax.lax.map(fn, lanes, batch_size=batch)
+
+
+def _if_live(fn):
+    """`fn` of a lane that runs only when `lane.live`; a dead lane returns zeros.
+
+    The batch is padded to a fixed number of lanes with copies of a real lane; a copy
+    is dead, so it costs one branch instead of a fit. Under a plain `lax.map` the
+    `cond` stays a branch.
+    """
+
+    def run(lane):
+        shapes = jax.eval_shape(fn, lane)
+        dead = jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), shapes)
+        return jax.lax.cond(lane.live, fn, lambda _: dead, lane)
+
+    return run
+
+
+class _RowLane(eqx.Module):
+    """One entry's report rows, compacted to the front, for the grid stage."""
+
+    payload: jax.Array  # [R, width]
+    use: jax.Array  # [R], a report row
+    subject: jax.Array
+
+
+class _FitLane(eqx.Module):
+    """One slot of one entry (or the entry itself, for the first tier)."""
+
+    subject: jax.Array
+    tick: jax.Array
+    key: jax.Array  # the entry's refit key
+    slot: jax.Array  # folded into the key; the slot count for the first tier
+    n_undetected: jax.Array
+    epochs: jax.Array  # [R] days from the study epoch
+    sep: jax.Array  # [R, P]
+    dmag0: jax.Array
+    limit: jax.Array
+    detected: jax.Array  # [R]
+    counts: jax.Array
+    valid: jax.Array
+    ra: jax.Array
+    dec: jax.Array
+    ra_err: jax.Array
+    dec_err: jax.Array
+    corr: jax.Array
+    end_tick: jax.Array
+    live: jax.Array  # False for a padding lane, which is skipped
+
+
+def _grid_entry(channel, lane, grid_points):
+    """Photomancy-ready arrays of one entry's reports, every slot.
+
+    The channel's `report_data` reads the rows; each row's detection curve and noise
+    level come from the channel's own sensitivity (`sensitivity_grid`), so the
+    likelihood and the realization share one model. Slot arrays are `[S, R]`.
+
+    The conversion carries four declared approximations, against the channel's own
+    likelihood of a row at the true orbit (largest size over the fixture's detectable
+    rows, in nats per row unless stated):
+
+    - Midpoint epoch: the planet is placed at the exposure midpoint, while the channel
+      integrates its motion over the exposure; 5.3e-2 in the 320,000 s mode (smaller
+      in shorter modes).
+    - Grid interpolation: the curve is interpolated linearly between `grid_points`
+      separation nodes; at most 5e-3 at 1024 nodes (a Jupiter-sized planet at
+      2.5 lambda/D), about 1e-3 at a signal-to-noise near 10.
+    - Grid edges: the grid runs from 0.1 lambda/D to the end of the channel's
+      response table, where the planet counts vanish; a planet outside the grid has
+      zero expected counts, as in the channel.
+    - Centroid: a detection's position is compared with the planet at the midpoint,
+      while the channel reports the flux-weighted centroid over the exposure; the two
+      differ by at most 0.07 of the position uncertainty and by 1e-3 at the median.
+    """
+    data = channel.report_data(lane.subject, lane.payload)
+    row = data.row
+    valid = data.valid & lane.use[:, None] & jnp.isfinite(row.detected)
+    interval = data.interval
+    science = lane.use & data.valid[:, 0]
+    duration = jnp.where(science, interval.duration_s, 1.0)
+    midpoint = jnp.where(science, interval.midpoint_jd, channel.epoch_jd)
+
+    def one(mid, dur):
+        return channel.sensitivity_grid(
+            lane.subject, type(interval)(mid, dur), grid_points
+        )
+
+    sep, dmag0, limit = jax.vmap(one)(midpoint, duration)
+    detected = (row.detected > 0.5) & valid
+    pick = lambda x: jnp.where(valid, x, 0.0).T  # noqa: E731
+    return {
+        "epochs": jnp.where(science, midpoint - channel.epoch_jd, 0.0),
+        "sep": sep,
+        "dmag0": dmag0,
+        "limit": limit,
+        "detected": detected.T,
+        "valid": valid.T,
+        "counts": pick(row.counts),
+        "ra": pick(row.ra),
+        "dec": pick(row.dec),
+        "ra_err": pick(row.ra_err),
+        "dec_err": pick(row.dec_err),
+        "corr": pick(row.corr),
+    }
+
+
+@eqx.filter_jit
+def _grid_lanes(channel, lanes, st):
+    """`_grid_entry` over a batch of entry lanes."""
+    return jax.vmap(lambda lane: _grid_entry(channel, lane, st.grid_points))(lanes)
+
+
+def photomancy_report(channel, subject, rows, slot, grid_points=GRID_POINTS):
+    """Photomancy's `ReportData` of one slot from visit-report rows `[R, width]`.
+
+    The rows are read through `channel.report_data`; each row's detection curve and
+    noise level come from `channel.sensitivity_grid`, so the likelihood the refit
+    weighs shares the sensitivity model of the realization.
+
+    Declared approximations of the conversion (sizes are the largest per-row nats
+    against the channel's likelihood at the true orbit, on the fixture's detectable
+    rows):
+
+    - Midpoint epoch: planet motion over the exposure is replaced by its position at
+      the midpoint; 5.3e-2 nats in the 320,000 s mode.
+    - Grid interpolation: linear between `grid_points` nodes; at most 5e-3 nats at
+      1024 nodes.
+    - Grid edges: 0.1 lambda/D to the end of the response table; beyond it the
+      expected counts are zero, as in the channel.
+    - Centroid: a detection's position is the midpoint position, not the flux-weighted
+      centroid over the exposure; the shift is at most 0.07 position sigma.
+    """
+    refit = _photomancy_refit()
+    rows = jnp.asarray(rows, F64)
+    lane = _RowLane(payload=rows, use=jnp.ones(rows.shape[0], bool), subject=subject)
+    g = _grid_entry(channel, lane, grid_points)
+    return refit.ReportData(
+        epochs=g["epochs"],
+        sep_grid=g["sep"],
+        dmag0_grid=g["dmag0"],
+        limit_grid=g["limit"],
+        is_detected=g["detected"][slot],
+        counts=g["counts"][slot],
+        is_valid=g["valid"][slot],
+        snr_thresh=float(channel.law[0]),
+    )
+
+
+def _star_target(refit, channel, subject, st):
+    """The photomancy target of a star: its distance, catalog mass and window."""
+    mass = channel.catalog_mass_kg[subject] / Msun2kg
+    return mass, refit.physical_prior_target(
+        mass, channel.scenes.dist_pc[subject], st.mass_window, st.ln_lam_range
+    )
+
+
+def _report_of(refit, channel, lane, detected):
+    return refit.ReportData(
+        epochs=lane.epochs,
+        sep_grid=lane.sep,
+        dmag0_grid=lane.dmag0,
+        limit_grid=lane.limit,
+        is_detected=detected,
+        counts=lane.counts,
+        is_valid=lane.valid,
+        snr_thresh=float(channel.law[0]),
+    )
+
+
+def _slot_key(lane, scale):
+    """The entry's key folded with the slot, and with the retry factor."""
+    key = jax.random.fold_in(jnp.asarray(lane.key, jnp.uint32), lane.slot)
+    return jax.random.fold_in(key, scale)
+
+
+def _fit_lane(channel, lane, st, engine, scale):
+    """One slot with detections: refit, then its summary leaves and the status."""
+    refit = _photomancy_refit()
+    _, target = _star_target(refit, channel, lane.subject, st)
+    report = _report_of(refit, channel, lane, lane.detected)
+    astrometry = lane.detected & lane.valid & (lane.ra_err > 0) & (lane.dec_err > 0)
+    records = RelativeAstromData(
+        times=lane.epochs,
+        ra=lane.ra,
+        dec=lane.dec,
+        ra_err=jnp.where(astrometry, lane.ra_err, 1.0),
+        dec_err=jnp.where(astrometry, lane.dec_err, 1.0),
+        corr=jnp.where(astrometry, lane.corr, 0.0),
+        planet_id=jnp.zeros(lane.valid.shape, int),
+        is_valid=astrometry,
+    )
+    n_round = st.n_round * scale
+    key = _slot_key(lane, scale)
+    if engine == "single":
+        cloud = refit.scale_rotate_refit(
+            target,
+            records,
+            key,
+            n_particles=st.n_particles,
+            n_proposals=n_round,
+            ess_floor=st.ess_floor,
+            report=report,
+        )
+    else:
+        cloud = refit.collapsed_refit(
+            target,
+            records,
+            key,
+            n_particles=st.n_particles,
+            n_round=n_round,
+            n_rounds=st.n_rounds,
+            n_centers=st.n_centers,
+            defensive=st.defensive,
+            n_constants=st.n_constants,
+            ess_floor=st.ess_floor,
+            report=report,
+            max_rounds=st.max_rounds,
+        )
+    elements = channel_elements(cloud.elements)
+    last = jnp.max(jnp.where(lane.detected & lane.valid, lane.end_tick, -1))
+    last_d = jnp.where(last >= 0, last.astype(F64) * channel.tick_days, 0.0)
+    leaves = summarize(
+        elements,
+        jnp.zeros(elements.shape[0], F64),
+        lane.subject,
+        channel,
+        lane.tick,
+        last_det_d=jnp.where(last >= 0, last_d, lane.tick * channel.tick_days),
+        n_grid=st.n_grid,
+        spacing_d=st.spacing_d,
+        block_snr=st.block_snr,
+        albedo=st.albedo,
+        position_lag_d=st.position_lag_d,
+    )
+    finite = jnp.all(jnp.isfinite(elements))
+    return (
+        leaves.p_det,
+        leaves.p_block,
+        leaves.scatter,
+        leaves.pos_mean,
+        leaves.p_class,
+        leaves.ln_period_q,
+        cloud.ess,
+        cloud.status.astype(I64),
+        finite,
+    )
+
+
+def _first_tier_cloud(channel, lane, st, scale):
+    """The first-tier cloud of an entry: `(cloud, luminosity)`.
+
+    The cloud is the fixed class-1 prior draws of the star reweighted by the entry's
+    null reports; `cloud.log_evidence` is the log of `L`, the likelihood of the
+    nulls given a class-1 planet in the slot over their likelihood given none.
+    """
+    refit = _photomancy_refit()
+    mass, _ = _star_target(refit, channel, lane.subject, st)
+    luminosity = channel.luminosity(lane.subject)
+    lnp_lo, lnp_hi, lam_lo, lam_hi = class1_window(
+        luminosity, mass, st.mass_window, st.albedo
+    )
+    base = refit.physical_prior_target(
+        mass, channel.scenes.dist_pc[lane.subject], st.mass_window
+    )
+    model = dataclasses.replace(base.model, lnP_lo=lnp_lo, lnP_hi=lnp_hi)
+    target = type(base)(model, base.dist_pc, (lam_lo, lam_hi))
+    n = st.n_first * scale
+    cloud_key = jax.random.fold_in(jax.random.PRNGKey(CLOUD_SEED), lane.subject)
+    pool = refit.prior_cloud(target, cloud_key, 2 * n)
+    inside = class1_indicator(channel_elements(pool), luminosity, st.albedo)
+    draws = pool[jnp.argsort(~inside, stable=True)[:n]]
+    report = _report_of(refit, channel, lane, jnp.zeros_like(lane.detected))
+    cloud = refit.first_tier(
+        target,
+        draws,
+        report,
+        _slot_key(lane, scale),
+        n_particles=st.n_particles,
+        ess_floor=st.ess_floor,
+    )
+    return cloud, luminosity
+
+
+def _first_tier_lane(channel, lane, st, scale):
+    """One entry's belief of an undetected slot: `p_new` and the slot leaves.
+
+    Each undetected slot holds a class-1 planet with the prior occupancy `q`
+    (`st.occupancy` spread over the undetected slots) before the entry's reports and
+    with `q L / (1 - q + q L)` after them, `L` the null evidence of the first tier:
+    every null lowers the chance that a planet is still there to find.
+    """
+    cloud, luminosity = _first_tier_cloud(channel, lane, st, scale)
+    elements = channel_elements(cloud.elements)
+    zeros = jnp.zeros(elements.shape[0], F64)
+    n_dark = jnp.maximum(lane.n_undetected, 1)
+    prior = st.occupancy / n_dark
+    occupancy = n_dark * posterior_occupancy(prior, cloud.log_evidence)
+    p_new = summarize_search(
+        elements,
+        zeros,
+        occupancy,
+        lane.n_undetected,
+        lane.subject,
+        channel,
+        lane.tick,
+        n_grid=st.n_grid,
+        spacing_d=st.spacing_d,
+        albedo=st.albedo,
+    )
+    p_class = jnp.mean(class1_indicator(elements, luminosity, st.albedo).astype(F64))
+    finite = jnp.all(jnp.isfinite(elements))
+    return (
+        p_new,
+        p_class,
+        weighted_quantiles(elements[:, 0], zeros),
+        cloud.ess,
+        cloud.status.astype(I64),
+        finite,
+    )
+
+
+@eqx.filter_jit
+def _fit_lanes(channel, lanes, st, engine, scale):
+    """A batch of slot fits, one output tuple per leaf."""
+    return _over_lanes(
+        _if_live(lambda lane: _fit_lane(channel, lane, st, engine, scale)),
+        lanes,
+        st.lane_batch,
+    )
+
+
+@eqx.filter_jit
+def _first_tier_lanes(channel, lanes, st, scale):
+    """A batch of first-tier entries."""
+    return _over_lanes(
+        _if_live(lambda lane: _first_tier_lane(channel, lane, st, scale)),
+        lanes,
+        st.lane_batch,
+    )
+
+
 class ReportRefit(AbstractRefitBoundary):
     """The refit boundary of a decision study: summaries from visit reports.
 
@@ -812,12 +1351,47 @@ class ReportRefit(AbstractRefitBoundary):
     checked at construction and the study is checked again on every call, because a
     hidden column reads as zero and would be taken for a value.
 
+    `kernel="posterior"` fits each slot from the visit reports alone, with
+    photomancy's physical-prior refit and its report term: the first tier for a slot
+    with no detection (a fixed cloud of `FIRST_TIER_DRAWS` prior draws inside the
+    class-1 window of the star, reweighted once per entry; `occupancy` is the
+    expected number of class-1 planets per star it assumes), scale-and-rotate for one
+    detection and the collapsed rounds for two or more. The target of a star takes
+    its distance and catalog mass from the channel and a mass window of
+    `mass_window` and a scale prior of `ln_lam_range` (the range of `ln(albedo
+    radius^2)` in AU^2 the population can hold, required: see
+    `population_ln_lam_range`). An audience that cannot read every measurement
+    column of the report kind is answered `NO_SUPPORT` and installs nothing, so its
+    summary stays what it was.
+
+    A slot whose refit is under the size floor runs once more with `RETRY_FACTOR`
+    times the proposals (a second compiled program per engine and row bucket, since
+    the proposal count is a static shape); if it is still low the slot is
+    `SLOT_DEGRADED`. The slot's `status` leaf holds one code set under every kernel
+    (`SLOT_*`, a `RefitStatus`), photomancy's statuses mapped onto it by
+    `slot_status`. A slot that is `NO_SUPPORT` or `FAILED` installs nothing: it keeps
+    its previous summary and carries the code, so it cannot support a claim, while
+    the slots that fit are installed. The entry is `FAILED` when every slot failed,
+    `DEGRADED` when any slot failed or stayed low, else `OK`, and is counted in
+    `diagnostics` (`POSTERIOR_DIAGNOSTICS`). The refit key of each slot is the
+    entry's key folded with the slot. The posterior kernel reads no catalog group: an
+    empty `truth_groups` is the only form it accepts, and arms that open one
+    (`ephemeris` or `class`) raise `NotImplementedError`.
+
+    The first tier's `p_new` weighs each undetected slot by its posterior occupancy
+    after the entry's nulls (`posterior_occupancy`), so repeated nulls on a star lower
+    the chance of a new detection.
+
     `refit_batch` gathers the dirty entries of every world, shares duplicates through
     `requests.source`, pads to `lanes` and makes one jitted call per group of
-    `lanes` entries, then scatters the slices back. Every lane is independent of the
-    others, so an entry's slices are the same alone or in any batch. The stored
-    `n_particles` is the cloud size a posterior kernel draws; the truth kernel
-    ignores it and the refit key.
+    `lanes` items, then scatters the slices back. The posterior fits run under a
+    plain `lax.map` (`lane_batch=1`): under `vmap` every lane runs the slowest lane's
+    ladder loops, which made four collapsed fits far slower than the same four in
+    turn. The padding lanes of a group are skipped by a `cond`, not fit. Every lane
+    is independent of the others, so an entry's slices are bitwise equal at a fixed
+    lane count wherever the entry sits, and agree to 1e-11 (relative) across lane
+    counts (3.3e-12 measured). The stored `n_particles` is the cloud size a posterior
+    kernel returns; the truth kernel ignores it and the refit key.
     """
 
     kind = "spaceodyssey.report_summary"
@@ -836,15 +1410,50 @@ class ReportRefit(AbstractRefitBoundary):
         block_snr=BLOCK_SNR,
         albedo=ALBEDO,
         position_lag_d=POSITION_LAG_D,
+        occupancy=None,
+        mass_window=MASS_WINDOW,
+        ln_lam_range=None,
+        n_round=2**16,
+        n_rounds=3,
+        n_centers=256,
+        n_constants=8,
+        defensive=0.1,
+        ess_floor=400.0,
+        max_rounds=8,
+        n_first=FIRST_TIER_DRAWS,
+        grid_points=GRID_POINTS,
+        row_buckets=ROW_BUCKETS,
+        lane_batch=1,
         caps=None,
         version=1,
     ):
         """Declare the kernel and its settings; check the registry when given."""
-        if kernel != "truth":
-            raise NotImplementedError(f"kernel {kernel!r} is not built; only 'truth'")
+        if kernel not in ("truth", "posterior"):
+            raise NotImplementedError(
+                f"kernel {kernel!r} is not built; known: 'truth', 'posterior'"
+            )
         groups = tuple(truth_groups)
-        if set(groups) != set(CATALOG_GROUPS):
+        if kernel == "truth" and set(groups) != set(CATALOG_GROUPS):
             raise ValueError(f"the truth kernel reads exactly {CATALOG_GROUPS}")
+        if kernel == "posterior":
+            if groups and set(groups) != set(CATALOG_GROUPS):
+                raise NotImplementedError(
+                    "the posterior kernel reads no catalog group; an arm that opens "
+                    f"{groups} needs the truth-informed variants"
+                )
+            if occupancy is None:
+                raise ValueError(
+                    "the posterior kernel needs `occupancy`, the class-1 planets "
+                    "per star its first tier assumes"
+                )
+            if ln_lam_range is None:
+                raise ValueError(
+                    "the posterior kernel needs `ln_lam_range`, the range of "
+                    "ln(albedo radius^2) of the population (see "
+                    "`population_ln_lam_range`); a default window would refuse a "
+                    "planet outside it"
+                )
+            groups = ()
         if lanes < 1:
             raise ValueError("lanes is at least one")
         self.kernel = kernel
@@ -858,7 +1467,23 @@ class ReportRefit(AbstractRefitBoundary):
         self.block_snr = float(block_snr)
         self.albedo = float(albedo)
         self.position_lag_d = float(position_lag_d)
-        self.n_diag = 2
+        self.occupancy = None if occupancy is None else float(occupancy)
+        self.mass_window = float(mass_window)
+        self.ln_lam_range = (
+            None if ln_lam_range is None else tuple(float(x) for x in ln_lam_range)
+        )
+        self.n_round = int(n_round)
+        self.n_rounds = int(n_rounds)
+        self.n_centers = int(n_centers)
+        self.n_constants = int(n_constants)
+        self.defensive = float(defensive)
+        self.ess_floor = float(ess_floor)
+        self.max_rounds = int(max_rounds)
+        self.n_first = int(n_first)
+        self.grid_points = int(grid_points)
+        self.row_buckets = tuple(int(b) for b in row_buckets)
+        self.lane_batch = int(lane_batch)
+        self.n_diag = len(POSTERIOR_DIAGNOSTICS) if kernel == "posterior" else 2
         self.version = version
         text = json.dumps(self.configuration(), sort_keys=True)
         self.model_hash = int.from_bytes(
@@ -870,9 +1495,10 @@ class ReportRefit(AbstractRefitBoundary):
     def configuration(self):
         """The settings that define the target, as plain JSON.
 
-        `lanes` and `n_particles` are left out: neither changes a truth slice.
+        `lanes` is left out, and so is `n_particles` under the truth kernel: neither
+        changes a truth slice.
         """
-        return {
+        out = {
             "kernel": self.kernel,
             "truth_groups": list(self.truth_groups),
             "catalog_kind": self.catalog_kind,
@@ -883,10 +1509,37 @@ class ReportRefit(AbstractRefitBoundary):
             "albedo": self.albedo,
             "position_lag_d": self.position_lag_d,
         }
+        if self.kernel == "posterior":
+            out |= {
+                "n_particles": self.n_particles,
+                "occupancy": self.occupancy,
+                "mass_window": self.mass_window,
+                "ln_lam_range": self.ln_lam_range,
+                "n_round": self.n_round,
+                "n_rounds": self.n_rounds,
+                "n_centers": self.n_centers,
+                "n_constants": self.n_constants,
+                "defensive": self.defensive,
+                "ess_floor": self.ess_floor,
+                "max_rounds": self.max_rounds,
+                "n_first": self.n_first,
+                "grid_points": self.grid_points,
+                "row_buckets": list(self.row_buckets),
+                "retry_factor": RETRY_FACTOR,
+                "cloud_seed": CLOUD_SEED,
+            }
+        return out
 
     def check(self, caps):
-        """Raise unless both audiences read every catalog column the kernel needs."""
+        """Raise unless the registry shows the kernel every column it needs."""
         names = caps.kind_names
+        if self.kernel == "posterior":
+            if self.report_kind not in names:
+                raise ValueError(
+                    f"the registry holds {list(names)}; the refit reads "
+                    f"{self.report_kind!r}"
+                )
+            return
         if self.catalog_kind not in names or self.report_kind not in names:
             raise ValueError(
                 f"the registry holds {list(names)}; the refit reads "
@@ -927,6 +1580,11 @@ class ReportRefit(AbstractRefitBoundary):
     def refit_batch(self, study, requests):
         """Answer every dirty entry: `[W, 2, n_subjects, ...]` slices and statuses."""
         self.check(study.caps)
+        if self.kernel == "posterior":
+            return self._refit_posterior(study, requests)
+        return self._refit_truth(study, requests)
+
+    def _refit_truth(self, study, requests):
         req = jax.tree_util.tree_map(np.asarray, requests)
         n_worlds, _, count = req.dirty.shape
         spec = slice_spec(study)
@@ -982,6 +1640,297 @@ class ReportRefit(AbstractRefitBoundary):
             computed=jnp.asarray(computed),
         )
 
+    # -- The posterior kernel on the host ----------------------------------------------
+
+    def _readable(self, study, channel):
+        """Per audience (observer, policy): every measurement column is readable."""
+        names = study.caps.kind_names
+        row = study.caps.payload_audience[names.index(self.report_kind)]
+        width = channel.widths()[0]
+        flags = (int(Audience.OBSERVER), int(Audience.POLICY))
+        return tuple(all(int(x) & flag for x in row[:width]) for flag in flags)
+
+    def _post_settings(self, channel):
+        return _PostSettings(
+            n_slots=channel.n_slots,
+            n_grid=self.n_grid,
+            spacing_d=self.spacing_d,
+            block_snr=self.block_snr,
+            albedo=self.albedo,
+            position_lag_d=self.position_lag_d,
+            n_particles=self.n_particles,
+            n_round=self.n_round,
+            n_rounds=self.n_rounds,
+            n_centers=self.n_centers,
+            n_constants=self.n_constants,
+            defensive=self.defensive,
+            ess_floor=self.ess_floor,
+            max_rounds=self.max_rounds,
+            mass_window=self.mass_window,
+            ln_lam_range=self.ln_lam_range,
+            n_first=self.n_first,
+            occupancy=self.occupancy,
+            grid_points=self.grid_points,
+            lane_batch=self.lane_batch,
+        )
+
+    def _run_groups(self, run, items, lane_cls_fields):
+        """Run `items` (a list of `_FitLane` field dicts) in padded groups of lanes.
+
+        `run(lanes)` is a batched call returning a tuple of arrays; the result is one
+        tuple of per-item numpy values for each item, in order. The padding lanes copy
+        the first item and are marked dead, so they are skipped.
+        """
+        out = []
+        for start in range(0, len(items), self.lanes):
+            part = items[start : start + self.lanes]
+            padded = part + [part[0]] * (self.lanes - len(part))
+            lanes = _FitLane(
+                **{
+                    f: jnp.asarray(np.stack([it[f] for it in padded]))
+                    for f in lane_cls_fields
+                },
+                live=jnp.arange(self.lanes) < len(part),
+            )
+            result = [np.asarray(x) for x in run(lanes)]
+            out.extend(tuple(x[i] for x in result) for i in range(len(part)))
+        return out
+
+    def _refit_posterior(self, study, requests):
+        require_x64()
+        # Import outside any trace: the module builds JAX constants as it loads.
+        _photomancy_refit()
+        req = jax.tree_util.tree_map(np.asarray, requests)
+        n_worlds, _, count = req.dirty.shape
+        spec = slice_spec(study)
+        names = tuple(name for name, _, _ in spec)
+        channel = study.channel_model
+        st = self._post_settings(channel)
+        n_slots = st.n_slots
+        readable = np.asarray(self._readable(study, channel))
+        flat = np.arange(2 * count).reshape(2, count)
+        own = req.dirty & (req.source == flat[None])
+        mine = own & readable[None, :, None]
+        slices = {n: np.zeros((n_worlds, 2, count, *s), d) for n, s, d in spec}
+        status = np.full((n_worlds, 2, count), int(RefitStatus.NO_SUPPORT), np.int64)
+        diag = np.zeros((n_worlds, 2, count, self.n_diag))
+        tick = np.asarray(req.tick)
+        tick = tick.reshape(tick.shape + (1,) * (3 - tick.ndim))
+        tick = np.broadcast_to(tick, (n_worlds, 2, count))
+        kind_index = study.caps.kind_names.index(self.report_kind)
+        width = channel.widths()[0]
+        cap = req.rows.payload.shape[3]
+        buckets = sorted({b for b in self.row_buckets if b < cap} | {cap})
+
+        # Compact each entry's report rows to the front, padded to a bucket.
+        entries = []
+        for w, a, s in np.argwhere(mine):
+            use = req.rows.valid[w, a, s] & (req.rows.kind[w, a, s] == kind_index)
+            idx = np.flatnonzero(use)
+            if len(idx) == 0:
+                continue
+            rows = next(b for b in buckets if b >= len(idx))
+            payload = np.zeros((rows, width))
+            payload[: len(idx)] = req.rows.payload[w, a, s][idx, :width]
+            end = np.zeros(rows, np.int64)
+            end[: len(idx)] = req.rows.end_tick[w, a, s][idx]
+            used = np.arange(rows) < len(idx)
+            entries.append(
+                {
+                    "at": (w, a, s),
+                    "n_rep": len(idx),
+                    "rows": rows,
+                    "payload": payload,
+                    "use": used,
+                    "end": end,
+                    "key": np.asarray(req.keys[w, a, s], np.uint32),
+                    "tick": int(tick[w, a, s]),
+                }
+            )
+
+        # Stage one: the photomancy-ready report of every entry, grouped by row bucket.
+        by_rows = {}
+        for e in entries:
+            by_rows.setdefault(e["rows"], []).append(e)
+        for group in by_rows.values():
+            for start in range(0, len(group), self.lanes):
+                part = group[start : start + self.lanes]
+                padded = part + [part[0]] * (self.lanes - len(part))
+                lanes = _RowLane(
+                    payload=jnp.asarray(np.stack([e["payload"] for e in padded])),
+                    use=jnp.asarray(np.stack([e["use"] for e in padded])),
+                    subject=jnp.asarray([e["at"][2] for e in padded]),
+                )
+                result = {
+                    k: np.asarray(v) for k, v in _grid_lanes(channel, lanes, st).items()
+                }
+                for i, e in enumerate(part):
+                    e["report"] = {k: v[i] for k, v in result.items()}
+
+        # Stage two: slot fits by engine, the first tier once per entry.
+        fit_fields = [f.name for f in dataclasses.fields(_FitLane) if f.name != "live"]
+        fits, firsts = [], []
+        for e in entries:
+            rep = e["report"]
+            astrometry = (
+                rep["detected"]
+                & rep["valid"]
+                & (rep["ra_err"] > 0)
+                & (rep["dec_err"] > 0)
+            )
+            e["n_det"] = (rep["detected"] & rep["valid"]).sum(axis=1)
+            e["live"] = np.flatnonzero(e["n_det"] > 0)
+            e["dark"] = np.flatnonzero(e["n_det"] == 0)
+            base = {
+                "subject": np.asarray(e["at"][2]),
+                "tick": np.asarray(e["tick"]),
+                "key": e["key"],
+                "epochs": rep["epochs"],
+                "sep": rep["sep"],
+                "dmag0": rep["dmag0"],
+                "limit": rep["limit"],
+                "end_tick": e["end"],
+                "n_undetected": np.asarray(len(e["dark"])),
+            }
+            for slot in e["live"]:
+                item = dict(base)
+                item["slot"] = np.asarray(slot)
+                for f in (
+                    "detected",
+                    "valid",
+                    "counts",
+                    "ra",
+                    "dec",
+                    "ra_err",
+                    "dec_err",
+                    "corr",
+                ):
+                    item[f] = rep[f][slot]
+                n_records = int(astrometry[slot].sum())
+                fits.append((e, slot, "single" if n_records <= 1 else "multi", item))
+            if len(e["dark"]):
+                first = dict(base)
+                first["slot"] = np.asarray(n_slots)
+                # a row counts for the first tier when every undetected slot read it
+                first["valid"] = rep["valid"][e["dark"]].all(axis=0)
+                for f in (
+                    "detected",
+                    "counts",
+                    "ra",
+                    "dec",
+                    "ra_err",
+                    "dec_err",
+                    "corr",
+                ):
+                    first[f] = np.zeros_like(rep[f][0])
+                firsts.append((e, first))
+
+        def run_fits(selected, scale):
+            results = {}
+            for engine in ("single", "multi"):
+                group = [(k, it) for k, (_, _, eng, it) in selected if eng == engine]
+                for rows in {it["epochs"].shape[0] for _, it in group}:
+                    part = [(k, it) for k, it in group if it["epochs"].shape[0] == rows]
+                    out = self._run_groups(
+                        lambda lanes, engine=engine: _fit_lanes(
+                            channel, lanes, st, engine, scale
+                        ),
+                        [it for _, it in part],
+                        fit_fields,
+                    )
+                    results.update({k: o for (k, _), o in zip(part, out, strict=True)})
+            return results
+
+        def run_firsts(selected, scale):
+            results = {}
+            for rows in {it["epochs"].shape[0] for _, (_, it) in selected}:
+                part = [
+                    (k, it) for k, (_, it) in selected if it["epochs"].shape[0] == rows
+                ]
+                out = self._run_groups(
+                    lambda lanes: _first_tier_lanes(channel, lanes, st, scale),
+                    [it for _, it in part],
+                    fit_fields,
+                )
+                results.update({k: o for (k, _), o in zip(part, out, strict=True)})
+            return results
+
+        low = int(UpdaterStatus.LOW_ESS)
+        indexed_fits = list(enumerate(fits))
+        fit_out = run_fits(indexed_fits, 1)
+        retried_fits = [(k, fit) for k, fit in indexed_fits if fit_out[k][7] == low]
+        fit_out.update(run_fits(retried_fits, RETRY_FACTOR))
+        indexed_firsts = list(enumerate(firsts))
+        first_out = run_firsts(indexed_firsts, 1)
+        retried_firsts = [(k, f) for k, f in indexed_firsts if first_out[k][4] == low]
+        first_out.update(run_firsts(retried_firsts, RETRY_FACTOR))
+        retried_ids = {id(fits[k][0]) for k, _ in retried_fits} | {
+            id(firsts[k][0]) for k, _ in retried_firsts
+        }
+
+        # Assemble the slices, the entry statuses and the diagnostics.
+        per_entry = {}
+        for k, (e, slot, _, _) in enumerate(fits):
+            per_entry.setdefault(id(e), {"e": e, "fits": {}, "first": None})["fits"][
+                slot
+            ] = fit_out[k]
+        for k, (e, _) in enumerate(firsts):
+            per_entry.setdefault(id(e), {"e": e, "fits": {}, "first": None})[
+                "first"
+            ] = first_out[k]
+        for item in per_entry.values():
+            e = item["e"]
+            w, a, s = e["at"]
+            codes = np.zeros(n_slots, np.int64)
+            units = []
+            for slot, out in item["fits"].items():
+                p_det, p_block, scatter, pos, p_class, q, ess, raw, finite = out
+                slices["p_det"][w, a, s, slot] = p_det
+                slices["p_block"][w, a, s, slot] = p_block
+                slices["scatter"][w, a, s, slot] = scatter
+                slices["pos_mean"][w, a, s, slot] = pos
+                slices["p_class"][w, a, s, slot] = p_class
+                slices["ln_period_q"][w, a, s, slot] = q
+                slices["ess"][w, a, s, slot] = ess
+                codes[slot] = slot_status(raw, finite)
+                units.append(codes[slot])
+            if item["first"] is not None:
+                p_new, p_class, q, ess, raw, finite = item["first"]
+                code = slot_status(raw, finite)
+                slices["p_new"][w, a, s] = p_new
+                for slot in e["dark"]:
+                    slices["p_class"][w, a, s, slot] = p_class
+                    slices["ln_period_q"][w, a, s, slot] = q
+                    slices["ess"][w, a, s, slot] = ess
+                    codes[slot] = code
+                units.append(code)
+            n_low = sum(c == SLOT_DEGRADED for c in units)
+            n_fail = sum(c in SLOT_KEPT for c in units)
+            slices["ref_tick"][w, a, s] = e["tick"]
+            slices["n_obs"][w, a, s] = e["n_rep"]
+            slices["n_det"][w, a, s] = e["n_det"]
+            slices["status"][w, a, s] = codes
+            status[w, a, s] = (
+                int(RefitStatus.FAILED)
+                if n_fail == len(units)
+                else int(RefitStatus.DEGRADED)
+                if n_fail or n_low
+                else int(RefitStatus.OK)
+            )
+            diag[w, a, s] = [e["n_rep"], float(id(e) in retried_ids), n_low, n_fail]
+        for w, a, s in np.argwhere(req.dirty & ~own):
+            sa, ss = divmod(int(req.source[w, a, s]), count)
+            for piece in slices.values():
+                piece[w, a, s] = piece[w, sa, ss]
+            status[w, a, s] = status[w, sa, ss]
+            diag[w, a, s] = diag[w, sa, ss]
+        return RefitResult(
+            slices=tuple(jnp.asarray(slices[n]) for n in names),
+            status=jnp.asarray(status),
+            diagnostics=jnp.asarray(diag),
+            computed=jnp.asarray(mine),
+        )
+
 
 __all__ = [
     "ALBEDO",
@@ -990,6 +1939,12 @@ __all__ = [
     "CATALOG_GROUPS",
     "COLUMN_NAMES",
     "ELEMENTS",
+    "SLOT_DEGRADED",
+    "SLOT_FAILED",
+    "SLOT_KEPT",
+    "SLOT_NEVER_FIT",
+    "SLOT_NO_SUPPORT",
+    "SLOT_OK",
     "SUMMARY_LEAVES",
     "DecisionSummary",
     "InferenceModel",
@@ -997,13 +1952,20 @@ __all__ = [
     "ReportRefit",
     "SlotLeaves",
     "catalog_kind",
+    "channel_elements",
     "class1_indicator",
+    "class1_window",
     "kish_size",
     "ofti_binding",
     "ofti_model",
     "photomancy_bindings",
+    "photomancy_elements",
+    "photomancy_report",
+    "population_ln_lam_range",
+    "posterior_occupancy",
     "report_kind",
     "search_probability_truth",
+    "slot_status",
     "summarize",
     "summarize_search",
     "weighted_quantiles",

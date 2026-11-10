@@ -52,9 +52,13 @@ from spaceodyssey.adapters.photomancy import (
     N_GRID,
     POSITION_LAG_D,
     REPORT_KIND_NAME,
+    SLOT_DEGRADED,
+    SLOT_KEPT,
+    SLOT_OK,
     SUMMARY_LEAVES,
     DecisionSummary,
     ReportRefit,
+    population_ln_lam_range,
 )
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration
@@ -68,7 +72,6 @@ from spaceodyssey.core.enums import (
     CoincidentOrder,
     Disposition,
     EffectKind,
-    RefitStatus,
     Scope,
 )
 from spaceodyssey.core.executors.compiled import CompiledExecutor
@@ -271,13 +274,22 @@ def bracket_study(
     return dataclasses.replace(study, clock=Clock(0.001), world_source=source)
 
 
-def bracket_boundary(study, arm):
+def bracket_boundary(study, arm, **settings):
     """The refit boundary of `arm` for `study` (`ReportRefit` with the arm's kernel).
 
     Construction refuses a registry that hides a catalog group the kernel needs.
+    `settings` are the kernel's own (the posterior kernel needs `occupancy`; its scale
+    prior `ln_lam_range` is derived from the world source's population when not
+    given).
     """
     arm = _arm(arm)
-    return ReportRefit(kernel=arm.kernel, truth_groups=arm.groups, caps=study.caps)
+    if arm.kernel == "posterior" and "ln_lam_range" not in settings:
+        population = getattr(study.world_source, "population", None)
+        if population is not None:
+            settings["ln_lam_range"] = population_ln_lam_range(population)
+    return ReportRefit(
+        kernel=arm.kernel, truth_groups=arm.groups, caps=study.caps, **settings
+    )
 
 
 class BoundExecutor(CompiledExecutor):
@@ -501,6 +513,12 @@ def project_detections(belief):
     return belief.n_det.sum(axis=-1).astype(F64), jnp.zeros_like(belief.aux)
 
 
+# Slot leaves of a summary that a failed slot keeps (`status` takes the new code).
+_SLOT_LEAVES = tuple(
+    n for n in SUMMARY_LEAVES if n not in ("ref_tick", "n_obs", "p_new", "status")
+)
+
+
 class SummaryObserver(AbstractObserver):
     """A `DecisionSummary` per star, set only by `install`.
 
@@ -542,13 +560,32 @@ class SummaryObserver(AbstractObserver):
         )
 
     def install(self, belief, fitted, subject):
-        """Replace one star's leaves with those of the refit belief."""
+        """Replace one star's leaves with those of the refit belief, slot by slot.
+
+        A slot whose `status` is `SLOT_NO_SUPPORT` or `SLOT_FAILED` in `fitted` keeps
+        its previous leaves and takes the code, so it cannot support a claim while
+        the slots that fit are installed. `p_new` is the first tier's: it keeps its
+        previous value when an undetected slot (no detection in `fitted`) failed.
+        """
+        status = fitted.status[subject]
+        kept = jnp.isin(status, jnp.asarray(SLOT_KEPT, I64))
+        dark_failed = jnp.any(kept & (fitted.n_det[subject] == 0))
+
+        def merged(name):
+            new, old = getattr(fitted, name)[subject], getattr(belief, name)[subject]
+            if name == "p_new":
+                keep = dark_failed
+            elif name in _SLOT_LEAVES:
+                keep = kept.reshape(kept.shape + (1,) * (new.ndim - 1))
+            else:
+                return new
+            return jnp.where(keep, old, new)
+
         return eqx.tree_at(
             lambda b: tuple(getattr(b, n) for n in SUMMARY_LEAVES),
             belief,
             tuple(
-                getattr(belief, n).at[subject].set(getattr(fitted, n)[subject])
-                for n in SUMMARY_LEAVES
+                getattr(belief, n).at[subject].set(merged(n)) for n in SUMMARY_LEAVES
             ),
         )
 
@@ -566,7 +603,8 @@ def claimed_slots(belief, lod_arcsec):
     """The slots a summary lets a reader claim: ``bool[n_stars, n_slots]``.
 
     A slot is claimed when it holds at least three detections, a class probability of
-    at least 0.5, a refit status of OK and a predicted-position scatter under one
+    at least 0.5, a slot status of `SLOT_OK` (a fit above the size floor, never a
+    degraded, unsupported or failed one) and a predicted-position scatter under one
     lambda over D (`lod_arcsec`, in arcsec like the summary's `scatter`). The policy
     reads its own summary through this rule and the outcome table reads the
     observer's, so the two cannot drift apart.
@@ -574,7 +612,7 @@ def claimed_slots(belief, lod_arcsec):
     return (
         (belief.n_det >= CLAIM_DETECTIONS)
         & (belief.p_class >= CLAIM_CLASS)
-        & (belief.status == int(RefitStatus.OK))
+        & (belief.status == SLOT_OK)
         & (belief.scatter < CLAIM_SCATTER_LOD * lod_arcsec)
     )
 
@@ -599,7 +637,8 @@ class OutcomeTable:
 
     World leaves: `confirmed` (claims on present class-1 slots), `false_claims`,
     `delivered`, `charged` (telescope days spent), `low_ess` (slots whose last refit
-    was degraded) and `no_funds` (admissions refused for lack of budget).
+    was degraded, `SLOT_DEGRADED`) and `no_funds` (admissions refused for lack of
+    budget).
     """
 
     slot: dict
@@ -747,9 +786,7 @@ def outcome_table(result, truths, study, *, dropped=None, check_detection=False)
         "false_claims": (claimed & ~real).sum(axis=(1, 2)),
         "delivered": delivered.sum(axis=(1, 2)),
         "charged": budget - balance,
-        "low_ess": (np.asarray(belief.status) == int(RefitStatus.DEGRADED)).sum(
-            axis=(1, 2)
-        ),
+        "low_ess": (np.asarray(belief.status) == SLOT_DEGRADED).sum(axis=(1, 2)),
         "no_funds": (
             np.asarray(trace.admit_code).reshape(n_w, -1) == int(AdmissionCode.NO_FUNDS)
         ).sum(axis=1),

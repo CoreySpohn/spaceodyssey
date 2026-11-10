@@ -1626,6 +1626,21 @@ BLOCK_RATE_DIVISOR = 28.0
 # orbit at the Earth's insolation, so it sits at quadrature at every epoch.
 REFERENCE_ALBEDO = 0.3
 _BISECTION_STEPS = 48
+# Inner edge of the sensitivity grid in lambda/D: the response passes planet light
+# below the nominal inner working angle (a few counts at 0.25, thousands at 2), so the
+# grid starts well inside it. Its outer edge is the end of the response table
+# (`leakage_max_lod`): the channel returns planet counts beyond the outer working
+# angle, so a cut at the working angle would give a bright planet there a zero
+# likelihood at the truth.
+INNER_LOD = 0.1
+# The sensitivity grid spends ADAPTIVE_MIX of its nodes where a coarse pilot (1 /
+# PILOT_FRACTION of the nodes) shows the detection curve or noise level changing, the
+# rest geometrically. Linear interpolation of the noise level across a steep edge
+# otherwise costs several nats for a bright planet.
+PILOT_FRACTION, ADAPTIVE_MIX = 4, 0.5
+# The probe planet of `sensitivity_grid`: an Earth twin's scale (albedo times radius
+# squared) in AU squared, only a unit the counts are divided back out of.
+PROBE_LAMBDA = REFERENCE_ALBEDO * Rearth2AU**2
 
 MODE_DETECT, MODE_BLOCK, MODE_CATALOG = 0, 1, 2
 
@@ -2378,6 +2393,96 @@ class ObservingModeChannel(AbstractChannelModel):
         valid = row.valid_science > 0.5
         interval = ScienceInterval(head["time_d"], head["science_s"])
         return ReportData(interval=interval, row=row, valid=valid)
+
+    def sensitivity_grid(self, subject, interval, n_points):
+        """Detection curve and noise level of one exposure, on a separation grid.
+
+        `interval` is one `ScienceInterval` (scalar leaves). Returns ``(sep_arcsec,
+        dmag0, limit)``, each ``(n_points,)``, spaced geometrically from `INNER_LOD`
+        (inside the inner working angle, where the response still passes light) to
+        the end of the response table (`leakage_max_lod`, beyond the outer working
+        angle, where the planet counts have vanished). `limit` is the planet-free
+        noise standard deviation (the same `limit_counts` a realized row stores) and
+        `dmag0` the delta magnitude at which the expected planet counts equal the
+        detection threshold times `limit`, so the expected counts of a planet of
+        delta magnitude `dMag` at a grid separation are
+        ``threshold * limit * 10 ** (-0.4 * (dMag - dmag0))``. Both come from the
+        probe planet of the report model (face-on and circular, so its separation is
+        fixed over the exposure). Grid points with no planet signal come last, with
+        `dmag0` equal to minus infinity.
+
+        The nodes are geometric for half the grid; the other half follow a pilot of a
+        quarter as many geometric nodes and sit where the pilot's noise level or
+        detection curve changes (`ADAPTIVE_MIX`). The report model interpolates both
+        linearly, and the noise level of the fixture rises by a factor of two every 0.1
+        lambda/D near its outer edge: 1024 geometric nodes left 6.6 nats at the truth
+        of a signal-to-noise of 100 there, these leave 1e-3.
+
+        The grid carries the channel's own response to its end rather than cutting
+        at the outer working angle: the channel still returns planet counts there
+        (a Jupiter-sized probe has a signal-to-noise of 100 at 29 lambda/D on the
+        fixture's 32 lambda/D working angle), and the realized data are the channel's.
+        """
+        built = self.assets()
+        report, law = built.report, built.law
+        prepared = self._prepared(subject, nominal=True)
+        zero = jnp.zeros((), F64)
+        probe = {
+            "e": zero,
+            "cos_i": jnp.ones((), F64),
+            "W": zero,
+            "cos_w": jnp.ones((), F64),
+            "sin_w": zero,
+            "tp": zero,
+            "Lambda": jnp.asarray(PROBE_LAMBDA, F64),
+            "Mp": zero,
+        }
+
+        def one(arcsec):
+            planet = {**probe, "a": arcsec * prepared.dist_pc}
+            counts = report.budget(prepared, planet, interval).planet
+            limit = law.limit_counts(
+                report.budget(prepared, planet_free(planet), interval)
+            )
+            _, d_mag = predict_photometry(
+                jnp.zeros(1, F64),
+                planet["a"],
+                zero,
+                jnp.ones((), F64),
+                zero,
+                jnp.ones((), F64),
+                zero,
+                zero,
+                prepared.star_mass_kg,
+                planet["Lambda"],
+                prepared.dist_pc,
+            )
+            live = (counts > 0) & (limit > 0)
+            safe = jnp.where(
+                live, counts / jnp.where(live, law.threshold * limit, 1.0), 1.0
+            )
+            dmag0 = 2.5 * jnp.log10(safe) + d_mag[0]
+            return jnp.where(live, dmag0, -jnp.inf), limit
+
+        n_pilot = max(n_points // PILOT_FRACTION, 2)
+        pilot_ln = jnp.linspace(
+            jnp.log(INNER_LOD), jnp.log(report.leakage_max_lod), n_pilot
+        )
+        pilot_d, pilot_l = jax.vmap(one)(jnp.exp(pilot_ln) * report.lod_arcsec)
+        both = jnp.isfinite(pilot_d[1:]) & jnp.isfinite(pilot_d[:-1])
+        change = jnp.abs(jnp.diff(jnp.log(pilot_l))) + 0.4 * jnp.log(10.0) * jnp.where(
+            both, jnp.abs(jnp.diff(jnp.where(jnp.isfinite(pilot_d), pilot_d, 0.0))), 0.0
+        )
+        weight = (1.0 - ADAPTIVE_MIX) / (
+            n_pilot - 1
+        ) + ADAPTIVE_MIX * change / jnp.maximum(change.sum(), 1e-300)
+        weight = jnp.where(change.sum() > 0, weight, 1.0 / (n_pilot - 1))
+        cdf = jnp.concatenate([jnp.zeros(1, F64), jnp.cumsum(weight / weight.sum())])
+        sep_ln = jnp.interp(jnp.linspace(0.0, 1.0, n_points), cdf, pilot_ln)
+        sep_arcsec = jnp.exp(sep_ln) * report.lod_arcsec
+        dmag0, limit = jax.vmap(one)(sep_arcsec)
+        order = jnp.argsort(~jnp.isfinite(dmag0), stable=True)
+        return sep_arcsec[order], dmag0[order], limit[order]
 
     def predict_budget(self, subject, elements, interval):
         """The belief's `CountBudget` of the planet `elements` over `interval`."""

@@ -55,8 +55,11 @@ def prior_summary(channel, n_stars):
     )
 
 
-def build(run=True, horizon_d=HORIZON_D, budget_d=BUDGET_D):
-    """`(source, study, executor, truths, roots, run)` of the oracle arm."""
+def build(run=True, horizon_d=HORIZON_D, budget_d=BUDGET_D, arm="oracle", **settings):
+    """`(source, study, executor, truths, roots, run)` of `arm` (the oracle by default).
+
+    `settings` go to the arm's boundary (a posterior arm needs `occupancy`).
+    """
     source = fixture_source()
     channel = fixture_channel(source)
     n_stars = len(source.stars)
@@ -67,13 +70,13 @@ def build(run=True, horizon_d=HORIZON_D, budget_d=BUDGET_D):
     study = br.bracket_study(
         source,
         channel,
-        arm="oracle",
+        arm=arm,
         horizon_d=horizon_d,
         budget_d=budget_d,
         observer=br.SummaryObserver(prior=prior_summary(channel, n_stars)),
         policy=br.BracketPolicy(block_mode, budget_d, N_SLOTS),
     )
-    executor = br.BoundExecutor(boundary=br.bracket_boundary(study, "oracle"))
+    executor = br.BoundExecutor(boundary=br.bracket_boundary(study, arm, **settings))
     roots = jnp.stack(
         [jax.random.fold_in(jax.random.PRNGKey(1), i) for i in range(N_WORLDS)]
     )
