@@ -203,6 +203,8 @@ require_tier_reason = true
 # --budget-json runs of both.
 [tool.testbudget.module_compile_budget_by_file]
 "tests/adapters/test_jaxedith_summary.py" = 1078
+"tests/adapters/test_observing_firewall.py" = 420
+"tests/adapters/test_observing_mode.py" = 1005
 "tests/adapters/test_photomancy_ofti.py" = 416
 "tests/adapters/test_physical_context.py" = 560
 "tests/adapters/test_physical_surveys.py" = 527
@@ -303,6 +305,8 @@ require_tier_reason = true
 "tests/core/test_visible_relations.py" = 177
 "tests/core/test_wake_coalescing.py" = 77
 "tests/studies/test_allocator.py" = 361
+"tests/studies/test_bracket.py" = 565
+"tests/studies/test_bracket_batteries.py" = 709
 "tests/studies/test_gradients.py" = 206
 "tests/studies/test_physical_ofti.py" = 772
 "tests/studies/test_survey_1.py" = 106

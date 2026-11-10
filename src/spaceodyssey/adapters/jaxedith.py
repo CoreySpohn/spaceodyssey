@@ -86,13 +86,22 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.constants import AU2m, Mearth2kg, Msun2kg, nm2m, rad2arcsec, s2d
+from hwoutils.constants import (
+    AU2m,
+    Mearth2kg,
+    Msun2kg,
+    Rearth2AU,
+    d2s,
+    nm2m,
+    rad2arcsec,
+    s2d,
+)
 from hwoutils.conversions import (
     jy_to_photons_per_nm_per_m2,
     mag_to_flux_jy,
     photons_per_nm_per_m2_to_jy,
 )
-from jax.scipy.special import log_ndtr
+from jax.scipy.special import log_ndtr, ndtr
 from jax.scipy.stats import norm
 from jaxedith import (
     ETCScene,
@@ -124,8 +133,10 @@ from yippy import EqxCoronagraph, fetch_yip
 from yippy.datasets import CATALOG, DATA_RELEASE_TAG
 from yippy.performance import PROFILE_STEP_PIX
 
+from spaceodyssey.adapters.photomancy import CATALOG_FIELDS, catalog_kind
 from spaceodyssey.adapters.physical_context import (
     Certificate,
+    PhysicalClock,
     PlannedVisit,
     context_from_profile,
     require_certified,
@@ -137,7 +148,7 @@ from spaceodyssey.adapters.physical_profile import (
     load_profile,
     payload_column_names,
 )
-from spaceodyssey.core.enums import I64
+from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience
 from spaceodyssey.core.kinds import AbstractChannelModel
 from spaceodyssey.core.records import PayloadColumn, RecordKind
 
@@ -561,17 +572,21 @@ class SummaryReport(eqx.Module):
         ppfact=math.inf,
         eps_warm_T_cold=0.0,
         n_time_nodes=8,
+        diameter_m=None,
     ):
         """Build the summary path on a response package.
 
         The aperture diameter and the central wavelength come from the package
         header; the linear obscuration is the square root of its obscured area
         fraction. Without `yip_path` the pinned package is fetched through yippy's
-        hash-checked loader.
+        hash-checked loader. A `diameter_m` replaces the header diameter: the
+        response stays in units of lambda/D, so the aperture axis moves the angular
+        scale and the collecting area together.
         """
         path = fetch_pinned_yip() if yip_path is None else yip_path
         backend = EqxCoronagraph(path)
-        wavelength_nm, diameter_m = backend.stellar_frame
+        wavelength_nm, header_diameter_m = backend.stellar_frame
+        diameter_m = header_diameter_m if diameter_m is None else diameter_m
         optical_path = OpticalPath(
             primary=SimplePrimary(
                 diameter_m=diameter_m, obscuration=math.sqrt(backend.frac_obscured)
@@ -607,18 +622,40 @@ class SummaryReport(eqx.Module):
             self.wavelength_nm * nm2m / self.optical_path.primary.diameter_m
         ) * rad2arcsec
 
-    def prepare(self, scene):
-        """Cache the geometry-invariant factors of `scene`."""
+    @property
+    def leakage_grid(self):
+        """The radial nodes [lambda/D] the leakage table is tabulated on."""
+        n = round(self.leakage_max_lod / self.leakage_step_lod)
+        return jnp.arange(n + 1, dtype=jnp.float64) * self.leakage_step_lod
+
+    def leakage_table(self, scene):
+        """The response's stellar leakage at the host's diameter on `leakage_grid`.
+
+        Evaluating the response at a finite stellar diameter re-averages a whole
+        stellar map, so a study of many hosts tabulates each once and passes the
+        table to `prepare`.
+        """
+        diam_lod = jnp.asarray(scene.star_diameter_mas) / (1000.0 * self.lod_arcsec)
+        response = self.optical_path.coronagraph
+        return response.core_mean_intensity(
+            self.leakage_grid, self.wavelength_nm, stellar_diam_lod=diam_lod
+        )
+
+    def prepare(self, scene, leakage=None):
+        """Cache the geometry-invariant factors of `scene`.
+
+        `leakage` is the host's table from `leakage_table`, computed here when absent.
+        """
         wl = self.wavelength_nm
         zero_point = jy_to_photons_per_nm_per_m2(mag_to_flux_jy(0.0), wl)
         star = jy_to_photons_per_nm_per_m2(scene.star_flux_density_jy, wl)
         exposure = self._exposure(jnp.asarray(0.0))
         one_zodi = zodi_fn_ayo(self.observatory, exposure, scene)
         diam_lod = jnp.asarray(scene.star_diameter_mas) / (1000.0 * self.lod_arcsec)
-        n = round(self.leakage_max_lod / self.leakage_step_lod)
-        grid = jnp.arange(n + 1, dtype=jnp.float64) * self.leakage_step_lod
+        grid = self.leakage_grid
         response = self.optical_path.coronagraph
-        leakage = response.core_mean_intensity(grid, wl, stellar_diam_lod=diam_lod)
+        if leakage is None:
+            leakage = self.leakage_table(scene)
         tabulated = TabulatedLeakageCoronagraph(
             response=response,
             leakage_curve=interpax.PchipInterpolator(
@@ -761,7 +798,15 @@ class SummaryReport(eqx.Module):
         """Counts and variances of `planet` against `prepared` over `interval`."""
         r = self.rates(prepared, planet, self.node_times_jd(interval))
         duration = jnp.asarray(interval.duration_s, dtype=jnp.float64)
-        w = self.weights * 0.5 * duration
+        return self.budget_from_rates(
+            prepared, r, duration, self.weights * 0.5 * duration
+        )
+
+    def budget_from_rates(self, prepared, r, duration, w):
+        """The budget of rates `r` at the nodes, with time weights `w` [s] per node.
+
+        `duration` is the exposure the fixed-frame detector term counts frames over.
+        """
         k = self.bg_multiplier
         planet_e = jnp.sum(w * r.planet)
         leakage_e = jnp.sum(w * r.leakage)
@@ -1335,6 +1380,11 @@ def _profile_digest(profile):
 
 def _build_in_thread(declarations, config):
     """Run the cached build under the caller's JAX settings, on this thread."""
+    return _in_thread(_channel_assets, declarations, config)
+
+
+def _in_thread(builder, declarations, config):
+    """`builder(*declarations)` under the JAX settings in `config`."""
     x64, device, precision = config
     with contextlib.ExitStack() as stack:
         stack.enter_context(jax.enable_x64(x64))
@@ -1342,7 +1392,7 @@ def _build_in_thread(declarations, config):
             stack.enter_context(jax.default_device(device))
         if precision is not None:
             stack.enter_context(jax.default_matmul_precision(precision))
-        return _channel_assets(*declarations)
+        return builder(*declarations)
 
 
 def _build_assets(*declarations):
@@ -1556,3 +1606,777 @@ def _truth_planet(truth, subject, built):
         "Lambda": truth.Ag[subject] * truth.Rp_AU[subject] ** 2,
         "Mp": mp,
     }
+
+
+# -- Observing-mode channel ----------------------------------------------------------
+
+# Detection exposures [s] and block lengths [d] of the observing modes. A block is
+# delivered when the signal-to-noise ratio of one spectral channel reaches
+# `BLOCK_SNR_REQUIRED` with every photon rate divided by `BLOCK_RATE_DIVISOR`: a
+# 20 percent band at resolving power 140 holds 28 spectral channels.
+DETECTION_EXPOSURES_S = (10_000.0, 20_000.0, 40_000.0, 80_000.0, 160_000.0, 320_000.0)
+BLOCK_DAYS = (5.0, 15.0, 45.0)
+BLOCK_SNR_REQUIRED = 10.0
+BLOCK_RATE_DIVISOR = 28.0
+# The reference planet of a block's duration: an Earth twin on a face-on circular
+# orbit at the Earth's insolation, so it sits at quadrature at every epoch.
+REFERENCE_ALBEDO = 0.3
+_BISECTION_STEPS = 48
+
+MODE_DETECT, MODE_BLOCK, MODE_CATALOG = 0, 1, 2
+
+VISIT_KIND_NAME = "visit_report"
+BLOCK_KIND_NAME = "block_outcome"
+CATALOG_KIND_NAME = "truth_catalog"
+VISIT_HEADER = (
+    "time_d",
+    "science_s",
+    "occupied_s",
+    "cadence",
+    "calibration_id",
+    "valid_science",
+)
+VISIT_SLOT = (
+    "detected",
+    "counts",
+    "limit_counts",
+    "snr",
+    "ra",
+    "dec",
+    "ra_err",
+    "dec_err",
+    "corr",
+)
+# Columns after the header, per slot; the detected flags lead the row so a refit that
+# reads them needs only the slot count.
+VISIT_REST = VISIT_SLOT[1:]
+BLOCK_HEADER = ("time_d", "block_s")
+BLOCK_SLOT = ("block_snr", "observable_fraction")
+
+
+def _flat(header, slot, n_slots):
+    """Column names of a row: the header, then each slot's columns in turn."""
+    return header + tuple(f"{n}_{s}" for s in range(n_slots) for n in slot)
+
+
+def visit_columns(n_slots):
+    """Column names of a `visit_report` row: detected flags, header, other columns."""
+    flags = tuple(f"detected_{s}" for s in range(n_slots))
+    return flags + _flat(VISIT_HEADER, VISIT_REST, n_slots)
+
+
+def block_columns(n_slots):
+    """Column names of a `block_outcome` row."""
+    return _flat(BLOCK_HEADER, BLOCK_SLOT, n_slots)
+
+
+def catalog_columns(n_slots):
+    """Column names of a `truth_catalog` row (the layout of `CATALOG_FIELDS`)."""
+    return tuple(f"{f}_{s}" for s in range(n_slots) for f, _ in CATALOG_FIELDS)
+
+
+def column_index(columns, name):
+    """Position of the column `name` in a layout from `visit_columns` and kin."""
+    return columns.index(name)
+
+
+def visit_report_kind(n_slots, audience=EVERYONE):
+    """The `visit_report` record kind: every column readable by `audience`."""
+    return RecordKind(
+        VISIT_KIND_NAME,
+        tuple(PayloadColumn(n, audience) for n in visit_columns(n_slots)),
+    )
+
+
+def block_outcome_kind(n_slots):
+    """The `block_outcome` kind: scorer-only, so no audience reads a block's truth."""
+    return RecordKind(
+        BLOCK_KIND_NAME,
+        tuple(PayloadColumn(n, Audience.SCORER) for n in block_columns(n_slots)),
+    )
+
+
+def truth_catalog_kind(n_slots, open_groups=(), audience=EVERYONE):
+    """The `truth_catalog` kind: `open_groups` are readable, the rest scorer-only."""
+    return catalog_kind(n_slots, dict.fromkeys(open_groups, audience))
+
+
+class ReportData(eqx.Module):
+    """The visit reports of one star, shaped for a likelihood.
+
+    Attributes:
+        interval: `ScienceInterval` of each report, leaves ``[R]``, rebuilt from the
+            row's epoch and science duration.
+        row: `SummaryRow` with leaves ``[R, n_slots]`` (the visit-level columns are
+            repeated across slots).
+        valid: ``bool[R, n_slots]``, true where the report holds science.
+    """
+
+    interval: ScienceInterval
+    row: SummaryRow
+    valid: jax.Array
+
+
+class _ModeAssets(eqx.Module):
+    """What an observing-mode channel builds from its declarations."""
+
+    report: SummaryReport
+    context: eqx.Module
+    law: ReportingLaw
+    calibration_id: int
+
+
+def _mode_assets(profile, detector, diameter_m, n_time_nodes, epoch_jd, law):
+    """The report, observing context and law at one aperture diameter."""
+    entry = load_profile(profile)
+    clock = PhysicalClock.from_jd(epoch_jd, entry["time"]["tick_length_s"])
+    context = context_from_profile(entry, clock)
+    placeholder = SummaryScene(
+        star_flux_density_jy=1.0,
+        dist_pc=10.0,
+        star_mass_kg=Msun2kg,
+        luminosity_lsun=1.0,
+        ra_deg=0.0,
+        dec_deg=0.0,
+        star_diameter_mas=0.0,
+        n_exozodi=PROFILE_N_EXOZODI,
+    )
+    report = SummaryReport.from_yip(
+        DetectorSpec(*detector),
+        placeholder,
+        orbit_epoch_jd=epoch_jd,
+        observatory=context.observatory,
+        n_time_nodes=n_time_nodes,
+        diameter_m=diameter_m,
+    )
+    law = ReportingLaw(*law)
+    return _ModeAssets(report, context, law, calibration_id(report, law))
+
+
+@functools.lru_cache(maxsize=8)
+def _cached_mode_build(key):
+    """The mode assets for one declaration set, profile digest and JAX setting."""
+    *declarations, _, config = key
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(
+            _in_thread, _mode_assets, tuple(declarations), config
+        ).result()
+
+
+def _build_mode_assets(*declarations):
+    """`_mode_assets`, built outside any trace, shared by equal declarations."""
+    key = (*declarations, _profile_digest(declarations[0]), _thread_config())
+    return _cached_mode_build(key)
+
+
+def _scaled_snr(budget, divisor):
+    """Signal-to-noise with every photon rate divided by `divisor`.
+
+    Planet and background counts and their shot-noise variances scale with the rate;
+    the detector variance is a per-channel property and stays; the systematic floor
+    scales with its square.
+    """
+    planet = budget.planet / divisor
+    variance = (
+        budget.var_planet / divisor
+        + budget.var_background / divisor
+        + budget.var_detector
+        + budget.var_systematic / divisor**2
+    )
+    safe = jnp.where(variance > 0, variance, 1.0)
+    return jnp.where(variance > 0, planet / jnp.sqrt(safe), 0.0)
+
+
+class ObservingModeChannel(AbstractChannelModel):
+    """A version-2 channel model whose channels are observing modes of many stars.
+
+    Channel `i` is a mode, not a planned visit: detection exposures first
+    (`exposures_s`), then block lengths (`block_days`), then the catalog mode. The
+    star is the record's `subject`, the interval comes from the record's own start
+    and end ticks (`RealizeContext`), and the truth is a `PopulationTruth`, so one
+    star holds `n_slots` planets and a `present` mask.
+
+    - Detection modes write a `visit_report`: per slot, the reporting law's draw
+      (`sample_report`) of that slot's planet over the science interval
+      ``[start + settle, end]``. An absent slot never detects. A null slot reports
+      zero limit counts, because the planet-free limit is evaluated at the true
+      geometry and would otherwise place the planet; the belief recomputes the
+      threshold at the geometry it tests (`detect_probability`).
+    - Block modes write a `block_outcome`: per slot, the signal-to-noise ratio of
+      one spectral channel accumulated over the block while the planet lies inside
+      the response working angles, with every photon rate divided by
+      `block_rate_divisor`, and the fraction of the block that was observable.
+    - The catalog mode writes the `truth_catalog`: the slots' elements and scale,
+      for the registry's audiences to open or close by group.
+
+    The model keeps plain declarations and per-star arrays; the report is built
+    from the declarations on first use and shared. No keepout is applied: any
+    interval with science time is observable. The true scene and mass are the star's
+    own; the belief side (`detect_probability`, `block_snr`, `block_time`) uses the
+    catalog mass.
+
+    Attributes:
+        scenes: `SummaryScene` with leaves ``[n_stars]``, the true hosts.
+        leakage: ``[n_stars, n_grid]`` stellar leakage tables at each host's diameter.
+        catalog_mass_kg: ``[n_stars]`` stellar masses the belief uses.
+        profile, detector, law, n_time_nodes: as `JaxedithSummaryChannel`.
+        diameter_m: Aperture diameter; the response and leakage are rebuilt on it.
+        epoch_jd: Orbit epoch and tick 0 of the study.
+        n_slots: Planet slots per star.
+        exposures_s, block_days: The mode tables.
+        block_snr_required, block_rate_divisor: The block requirement.
+        calibration: Digest of the declarations and the hosts.
+    """
+
+    version: int = eqx.field(default=2, kw_only=True)
+    scenes: SummaryScene
+    leakage: jax.Array
+    catalog_mass_kg: jax.Array
+    profile: str = eqx.field(static=True)
+    detector: tuple = eqx.field(static=True)
+    law: tuple = eqx.field(static=True)
+    n_time_nodes: int = eqx.field(static=True)
+    diameter_m: float = eqx.field(static=True)
+    epoch_jd: float = eqx.field(static=True)
+    n_slots: int = eqx.field(static=True)
+    exposures_s: tuple = eqx.field(static=True)
+    block_days: tuple = eqx.field(static=True)
+    block_snr_required: float = eqx.field(static=True)
+    block_rate_divisor: float = eqx.field(static=True)
+    calibration: int = eqx.field(static=True)
+
+    def __check_init__(self):
+        """Refuse malformed declarations."""
+        DetectorSpec(*self.detector)
+        ReportingLaw(*self.law)
+        if type(self.n_slots) is not int or self.n_slots < 1:
+            raise ValueError("n_slots must be a positive integer")
+        if not self.exposures_s or not self.block_days:
+            raise ValueError("a channel needs detection exposures and block lengths")
+        _finite("block_snr_required", self.block_snr_required, low=0.0, low_open=True)
+        _finite("block_rate_divisor", self.block_rate_divisor, low=1.0)
+        _finite("diameter_m", self.diameter_m, low=0.0, low_open=True)
+
+    @classmethod
+    def from_stars(
+        cls,
+        stars,
+        *,
+        n_slots,
+        epoch_jd,
+        diameter_m=None,
+        catalog_mass_kg=None,
+        profile=FIRST_SUMMARY_V1,
+        detector=None,
+        law=None,
+        n_time_nodes=8,
+        n_exozodi=PROFILE_N_EXOZODI,
+        exposures_s=DETECTION_EXPOSURES_S,
+        block_days=BLOCK_DAYS,
+        block_snr_required=BLOCK_SNR_REQUIRED,
+        block_rate_divisor=BLOCK_RATE_DIVISOR,
+    ):
+        """The channel of `stars` (objects with `StarSpec`'s fields).
+
+        `diameter_m` defaults to the response header's; `catalog_mass_kg` to the
+        stars' own masses. Each host's leakage table is computed here, once.
+        """
+        stars = tuple(stars)
+        detector = dataclasses.astuple(detector or DetectorSpec.fixture())
+        law = law or ReportingLaw()
+        law = (law.threshold, law.kappa, law.corr)
+        if diameter_m is None:
+            diameter_m = float(load_profile(profile)["response"]["diameter_m"])
+        args = (
+            profile,
+            detector,
+            float(diameter_m),
+            n_time_nodes,
+            float(epoch_jd),
+            law,
+        )
+        built = _build_mode_assets(*args)
+        scenes = SummaryScene(
+            **{
+                name: jnp.asarray(
+                    [getattr(_star_scene(st, n_exozodi), name) for st in stars],
+                    jnp.float64,
+                )
+                for name in SummaryScene.__dataclass_fields__
+            }
+        )
+        tables = jnp.stack(
+            [built.report.leakage_table(_star_scene(st, n_exozodi)) for st in stars]
+        )
+        if catalog_mass_kg is None:
+            catalog_mass_kg = scenes.star_mass_kg
+        digest = hashlib.blake2b(digest_size=CALIBRATION_ID_BYTES)
+        digest.update(str(built.calibration_id).encode())
+        digest.update(np.asarray(tables).tobytes())
+        for leaf in jax.tree_util.tree_leaves(scenes):
+            digest.update(np.asarray(leaf).tobytes())
+        digest.update(np.asarray(catalog_mass_kg, np.float64).tobytes())
+        return cls(
+            scenes=scenes,
+            leakage=tables,
+            catalog_mass_kg=jnp.asarray(catalog_mass_kg, jnp.float64),
+            profile=profile,
+            detector=detector,
+            law=law,
+            n_time_nodes=n_time_nodes,
+            diameter_m=float(diameter_m),
+            epoch_jd=float(epoch_jd),
+            n_slots=n_slots,
+            exposures_s=tuple(float(x) for x in exposures_s),
+            block_days=tuple(float(x) for x in block_days),
+            block_snr_required=float(block_snr_required),
+            block_rate_divisor=float(block_rate_divisor),
+            calibration=int.from_bytes(digest.digest(), "big") or 1,
+        )
+
+    # -- Modes ---------------------------------------------------------------
+
+    @property
+    def n_detect(self):
+        """Number of detection modes."""
+        return len(self.exposures_s)
+
+    @property
+    def n_block(self):
+        """Number of block modes."""
+        return len(self.block_days)
+
+    @property
+    def n_modes(self):
+        """Detection modes, the `M` of a decision summary."""
+        return self.n_detect
+
+    @property
+    def n_channels(self):
+        """Channels the model realizes: detections, blocks, then the catalog."""
+        return self.n_detect + self.n_block + 1
+
+    @property
+    def catalog_mode(self):
+        """Channel index of the catalog mode."""
+        return self.n_detect + self.n_block
+
+    def mode_kinds(self):
+        """Per channel, ``(MODE_*, index within its group)``."""
+        kinds = [(MODE_DETECT, i) for i in range(self.n_detect)]
+        kinds += [(MODE_BLOCK, i) for i in range(self.n_block)]
+        return (*kinds, (MODE_CATALOG, 0))
+
+    def widths(self):
+        """Payload width of each record kind, as `(visit, block, catalog)`."""
+        n = self.n_slots
+        return (
+            len(visit_columns(n)),
+            len(block_columns(n)),
+            len(catalog_columns(n)),
+        )
+
+    def assets(self):
+        """The report, context and law this model realizes with."""
+        return _build_mode_assets(
+            self.profile,
+            self.detector,
+            self.diameter_m,
+            self.n_time_nodes,
+            self.epoch_jd,
+            self.law,
+        )
+
+    # -- Scenes and planets ----------------------------------------------------
+
+    def _prepared(self, subject, *, nominal, mass_kg=None):
+        """The prepared scene of one star: true, or the belief's (catalog mass)."""
+        built = self.assets()
+        scene = jax.tree_util.tree_map(lambda x: x[subject], self.scenes)
+        if nominal:
+            scene = eqx.tree_at(
+                lambda s: s.star_mass_kg, scene, self.catalog_mass_kg[subject]
+            )
+        prepared = built.report.prepare(scene, self.leakage[subject])
+        if mass_kg is not None:
+            prepared = eqx.tree_at(
+                lambda p: p.star_mass_kg, prepared, jnp.asarray(mass_kg, jnp.float64)
+            )
+        return prepared
+
+    def _slot_planets(self, truth, subject):
+        """The true planets of one star as photomancy dicts, leaves ``[n_slots]``."""
+        mass = self.scenes.star_mass_kg[subject]
+        mp = truth.Mp_kg[subject]
+        return {
+            "a": period_to_sma(truth.period_d[subject], mass + mp),
+            "e": truth.e[subject],
+            "cos_i": truth.cos_i[subject],
+            "W": truth.W_rad[subject],
+            "cos_w": truth.cos_w[subject],
+            "sin_w": truth.sin_w[subject],
+            "tp": truth.tp_jd[subject] - self.epoch_jd,
+            "Lambda": truth.Ag[subject] * truth.Rp_AU[subject] ** 2,
+            "Mp": mp,
+        }
+
+    # -- Realization -----------------------------------------------------------
+
+    def realize(
+        self, truth, subject, channel_index, fraction, key, design, channels, *, context
+    ):
+        """The row of the mode `channel_index` for star `subject`; `fraction` unused."""
+        table = jnp.asarray(self.mode_kinds(), I64)
+        code, index = table[channel_index, 0], table[channel_index, 1]
+        width = max(self.widths())
+
+        def padded(branch):
+            def run(_):
+                row = branch(truth, subject, index, key, context)
+                return jnp.pad(row, (0, width - row.shape[0]))
+
+            return run
+
+        return jax.lax.switch(
+            code,
+            [
+                padded(self._visit_row),
+                padded(self._block_row),
+                padded(self._catalog_row),
+            ],
+            None,
+        )
+
+    def _interval(self, context, *, settle):
+        """Science interval of the record: ``(interval, valid, occupied_s)``."""
+        built = self.assets()
+        clock = built.context.clock
+        settle_ticks = built.context.settle_ticks if settle else 0
+        start = jnp.asarray(context.start_tick, I64)
+        end = jnp.asarray(context.end_tick, I64)
+        s0 = start + settle_ticks
+        s1 = jnp.maximum(end, s0)
+        valid = s1 > s0
+        mid_jd = clock.jd(s0, (s1 - s0).astype(F64) / 2.0)
+        frame_s = jnp.asarray(built.report.detector_spec.frame_time_s, F64)
+        duration = jnp.where(valid, clock.seconds(s1 - s0), frame_s)
+        occupied = clock.seconds(jnp.maximum(end - start, 0))
+        return ScienceInterval(mid_jd, duration), valid, occupied
+
+    def _visit_row(self, truth, subject, index, key, context):
+        """A detection mode's row."""
+        built = self.assets()
+        report, law = built.report, built.law
+        interval, valid, occupied = self._interval(context, settle=True)
+        true_prep = self._prepared(subject, nominal=False)
+        nominal_prep = self._prepared(subject, nominal=True)
+        planets = self._slot_planets(truth, subject)
+        present = truth.present[subject]
+        keys = jax.vmap(lambda s: jax.random.fold_in(key, s))(jnp.arange(self.n_slots))
+
+        def one(planet, here, k):
+            expected = report.budget(true_prep, planet, interval)
+            reference = report.budget(nominal_prep, planet_free(planet), interval)
+            return sample_report(
+                k,
+                law,
+                expected,
+                law.limit_counts(reference),
+                lod_arcsec=report.lod_arcsec,
+                time_d=interval.midpoint_jd,
+                occupied_s=occupied,
+                calibration_id=self.calibration,
+                valid_science=valid & here,
+            )
+
+        rows = jax.vmap(one)(planets, present, keys)
+        detected = rows.detected > 0.5
+        limit = jnp.where(
+            detected | jnp.isnan(rows.limit_counts), rows.limit_counts, 0.0
+        )
+        head = jnp.stack(
+            [
+                interval.midpoint_jd,
+                jnp.where(valid, interval.duration_s, 0.0),
+                occupied,
+                jnp.asarray(report.detector_spec.cadence_code, F64),
+                jnp.asarray(self.calibration, F64),
+                valid.astype(F64),
+            ]
+        )
+        rest = jnp.stack(
+            [
+                rows.counts,
+                limit,
+                rows.snr,
+                rows.ra,
+                rows.dec,
+                rows.ra_err,
+                rows.dec_err,
+                rows.corr,
+            ],
+            axis=-1,
+        )
+        return jnp.concatenate([rows.detected, head, rest.reshape(-1)])
+
+    def _block_row(self, truth, subject, index, key, context):
+        """A block mode's row: true accumulated signal-to-noise per slot."""
+        interval, valid, _ = self._interval(context, settle=False)
+        prepared = self._prepared(subject, nominal=False)
+        planets = self._slot_planets(truth, subject)
+        present = truth.present[subject]
+        interval = ScienceInterval(
+            interval.midpoint_jd, jnp.where(valid, interval.duration_s, 0.0)
+        )
+        snr, observable = jax.vmap(lambda p: self._block(prepared, p, interval))(
+            planets
+        )
+        live = present & valid
+        snr = jnp.where(live, snr, 0.0)
+        observable = jnp.where(live, observable, 0.0)
+        head = jnp.stack([interval.midpoint_jd, interval.duration_s])
+        return jnp.concatenate([head, jnp.stack([snr, observable], -1).reshape(-1)])
+
+    def _catalog_row(self, truth, subject, index, key, context):
+        """The catalog mode's row: every slot in the layout of `CATALOG_FIELDS`.
+
+        Slots are exchangeable to a reader: they are sorted by descending peak flux
+        ratio, so the slot index carries the existence ordering of the truth and a
+        belief must not read meaning into it.
+
+        Elements are the log-parameter set the summary reads: `tau` is days from the
+        epoch, `ln_mass` the central mass (star plus planet) in solar masses and
+        `ln_lam` the log of albedo times radius squared in Earth radii.
+        """
+        mass = self.scenes.star_mass_kg[subject]
+        planets = self._slot_planets(truth, subject)
+        present = truth.present[subject]
+        radius = truth.Rp_AU[subject] / Rearth2AU
+        columns = {
+            "present": present.astype(F64),
+            "ln_period": jnp.log(truth.period_d[subject]),
+            "ecc": planets["e"],
+            "cos_i": planets["cos_i"],
+            "node": planets["W"],
+            "argp": jnp.arctan2(planets["sin_w"], planets["cos_w"]),
+            "tau": planets["tp"],
+            "ln_mass": jnp.log((mass + planets["Mp"]) / Msun2kg),
+            "class1": truth.klass[subject].astype(F64),
+            "ln_lam": jnp.log(jnp.maximum(truth.Ag[subject] * radius**2, 1e-300)),
+        }
+        names = [f for f, _ in CATALOG_FIELDS]
+        stacked = jnp.stack([jnp.asarray(columns[c], F64) for c in names], -1)
+        stacked = jnp.where(present[:, None], stacked, 0.0)
+        return stacked.reshape(-1)
+
+    # -- Block accumulation ----------------------------------------------------
+
+    def _block(self, prepared, planet, interval):
+        """``(scaled signal-to-noise, observable fraction)`` of `planet` over a block.
+
+        Time accumulates only at nodes where the planet lies between the inner and
+        outer working angles of the response; the detector term counts frames over
+        the observable time.
+        """
+        report = self.assets().report
+        times = report.node_times_jd(interval)
+        r = report.rates(prepared, planet, times)
+        coronagraph = prepared.optical_path.coronagraph
+        observable = r.in_field & (r.separation_lod >= coronagraph.IWA)
+        duration = jnp.asarray(interval.duration_s, F64)
+        share = jnp.sum(report.weights * observable) / jnp.sum(report.weights)
+        w = report.weights * 0.5 * duration * observable
+        budget = report.budget_from_rates(prepared, r, duration * share, w)
+        snr = _scaled_snr(budget, self.block_rate_divisor)
+        return jnp.where(share > 0, snr, 0.0), share
+
+    # -- The belief's views of the channel ---------------------------------------
+
+    def _belief_planet(self, elements):
+        """`(planet dict, central mass override or None)` from one planet's elements.
+
+        `elements` is either a photomancy dict (`PLANET_KEYS`, `tp` in days from
+        `epoch_jd`, optional `Mp` and `Ms` in kg) or a row of the log-parameter set
+        of `ELEMENTS` (`ln_period` in days, `ln_mass` the central mass in solar
+        masses, `tau` days from the epoch, `ln_lam` the log of albedo times radius
+        squared in Earth radii). The row has no separate planet mass: the central
+        mass is the total, as in the truth catalog.
+        """
+        if isinstance(elements, dict):
+            planet = {k: jnp.asarray(v, F64) for k, v in elements.items() if k != "Ms"}
+            return planet, elements.get("Ms")
+        el = jnp.asarray(elements, F64)
+        mass = jnp.exp(el[6]) * Msun2kg
+        planet = {
+            "a": period_to_sma(jnp.exp(el[0]), mass),
+            "e": el[1],
+            "cos_i": el[2],
+            "W": el[3],
+            "cos_w": jnp.cos(el[4]),
+            "sin_w": jnp.sin(el[4]),
+            "tp": el[5],
+            "Lambda": jnp.exp(el[7]) * Rearth2AU**2,
+            "Mp": jnp.zeros((), F64),
+        }
+        return planet, mass
+
+    @property
+    def tick_days(self):
+        """Days per clock tick."""
+        return 1.0 / float(self.assets().context.clock.ticks_per_day)
+
+    @property
+    def n_block_modes(self):
+        """Number of block modes."""
+        return self.n_block
+
+    def luminosity(self, subject):
+        """Stellar luminosity of `subject` in solar luminosities."""
+        return jnp.asarray(self.scenes.luminosity_lsun, F64)[subject]
+
+    def sky_position(self, subject, time_d, elements):
+        """East and north offsets in arcsec of each draw of `elements` ``(n, 8)``.
+
+        `time_d` is days from the epoch (tick zero).
+        """
+        report = self.assets().report
+        time_jd = self.epoch_jd + jnp.asarray(time_d, F64)
+
+        def one(row):
+            planet, mass = self._belief_planet(row)
+            prepared = self._prepared(subject, nominal=True, mass_kg=mass)
+            r = report.rates(prepared, planet, time_jd)
+            return jnp.stack([r.ra_arcsec[0], r.dec_arcsec[0]])
+
+        return jax.vmap(one)(jnp.asarray(elements, F64))
+
+    def detect_probability(self, subject, mode, time_d, elements):
+        """Probability that a visit of `mode` detects each draw of `elements` (n, 8).
+
+        `time_d` is the science-interval midpoint in days from the epoch (tick zero).
+        The threshold is evaluated at the geometry given, against the catalog scene,
+        so it is the model's own probability, not the realization's: with the true
+        elements and the catalog mass equal to the true mass the two agree.
+        """
+        built = self.assets()
+        duration = jnp.asarray(self.exposures_s, F64)[mode]
+        interval = ScienceInterval(self.epoch_jd + jnp.asarray(time_d, F64), duration)
+
+        def one(row):
+            planet, mass = self._belief_planet(row)
+            prepared = self._prepared(subject, nominal=True, mass_kg=mass)
+            expected = built.report.budget(prepared, planet, interval)
+            reference = built.report.budget(prepared, planet_free(planet), interval)
+            limit = built.law.limit_counts(reference)
+            return ndtr(
+                (expected.planet - built.law.threshold * limit) / _noise(expected)
+            )
+
+        return jax.vmap(one)(jnp.asarray(elements, F64))
+
+    def block_snr(self, subject, block_mode, start_d, elements):
+        """Scaled signal-to-noise of a block from day `start_d`, per draw ``(n, 8)``."""
+        length_s = jnp.asarray(self.block_days, F64)[block_mode] * d2s
+        start = self.epoch_jd + jnp.asarray(start_d, F64)
+        interval = ScienceInterval(start + 0.5 * length_s * s2d, length_s)
+
+        def one(row):
+            planet, mass = self._belief_planet(row)
+            prepared = self._prepared(subject, nominal=True, mass_kg=mass)
+            return self._block(prepared, planet, interval)[0]
+
+        return jax.vmap(one)(jnp.asarray(elements, F64))
+
+    def block_time(self, subject):
+        """Days a reference Earth twin at quadrature needs to reach the requirement.
+
+        The twin has the Earth's radius and mass, the albedo `REFERENCE_ALBEDO` and
+        a face-on circular orbit at the star's Earth-equivalent insolation, so its
+        phase angle is 90 degrees at every epoch. The accumulation is rate-scaled
+        (`block_rate_divisor`), and the time is found by bisection in log time.
+        """
+        report = self.assets().report
+        prepared = self._prepared(subject, nominal=True)
+        scene = prepared.scene
+        a_au = jnp.sqrt(jnp.asarray(scene.luminosity_lsun, F64))
+        twin = nominal_planet(
+            a_au=a_au,
+            e=0.0,
+            inclination_rad=0.0,
+            W_rad=0.0,
+            w_rad=0.0,
+            tp_d=0.0,
+            Rp_au=Rearth2AU,
+            Ag=REFERENCE_ALBEDO,
+        )
+        twin["Mp"] = jnp.asarray(Mearth2kg, F64)
+        mid = jnp.asarray(report.orbit_epoch_jd, F64)
+
+        def snr_at(log_seconds):
+            seconds = jnp.exp(log_seconds)
+            interval = ScienceInterval(mid, seconds)
+            budget = report.budget(prepared, twin, interval)
+            return _scaled_snr(budget, self.block_rate_divisor)
+
+        def step(_, bounds):
+            lo, hi = bounds
+            half = 0.5 * (lo + hi)
+            below = snr_at(half) < self.block_snr_required
+            return jnp.where(below, half, lo), jnp.where(below, hi, half)
+
+        lo, hi = jax.lax.fori_loop(
+            0, _BISECTION_STEPS, step, (jnp.log(1e2), jnp.log(1e9))
+        )
+        return jnp.exp(0.5 * (lo + hi)) * s2d
+
+    def report_data(self, subject, rows):
+        """`ReportData` of the visit-report rows `rows` (``[R, width]``) of one star."""
+        rows = jnp.asarray(rows, F64)
+        n = self.n_slots
+        head = {n_: rows[:, n + i] for i, n_ in enumerate(VISIT_HEADER)}
+        start = n + len(VISIT_HEADER)
+        rest = rows[:, start : start + n * len(VISIT_REST)]
+        rest = rest.reshape(rows.shape[0], n, len(VISIT_REST))
+        cols = {name: rest[..., j] for j, name in enumerate(VISIT_REST)}
+        cols["detected"] = rows[:, :n]
+        shape = (rows.shape[0], n)
+        row = SummaryRow(
+            time_d=jnp.broadcast_to(head["time_d"][:, None], shape),
+            science_s=jnp.broadcast_to(head["science_s"][:, None], shape),
+            occupied_s=jnp.broadcast_to(head["occupied_s"][:, None], shape),
+            detected=cols["detected"],
+            counts=cols["counts"],
+            limit_counts=cols["limit_counts"],
+            snr=cols["snr"],
+            ra=cols["ra"],
+            dec=cols["dec"],
+            ra_err=cols["ra_err"],
+            dec_err=cols["dec_err"],
+            corr=cols["corr"],
+            cadence=jnp.broadcast_to(head["cadence"][:, None], shape),
+            calibration_id=jnp.broadcast_to(head["calibration_id"][:, None], shape),
+            valid_science=jnp.broadcast_to(head["valid_science"][:, None], shape),
+        )
+        valid = row.valid_science > 0.5
+        interval = ScienceInterval(head["time_d"], head["science_s"])
+        return ReportData(interval=interval, row=row, valid=valid)
+
+    def predict_budget(self, subject, elements, interval):
+        """The belief's `CountBudget` of the planet `elements` over `interval`."""
+        planet, mass = self._belief_planet(elements)
+        prepared = self._prepared(subject, nominal=True, mass_kg=mass)
+        return self.assets().report.budget(prepared, planet, interval)
+
+
+def _star_scene(star, n_exozodi):
+    """The `SummaryScene` of a host described by a `StarSpec`."""
+    return SummaryScene(
+        star_flux_density_jy=float(star.flux_density_jy),
+        dist_pc=float(star.dist_pc),
+        star_mass_kg=float(star.mass_msun) * Msun2kg,
+        luminosity_lsun=float(star.luminosity_lsun),
+        ra_deg=float(star.ra_deg),
+        dec_deg=float(star.dec_deg),
+        star_diameter_mas=float(star.diameter_mas),
+        n_exozodi=float(n_exozodi),
+    )
