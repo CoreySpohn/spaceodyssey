@@ -28,6 +28,7 @@ Declared conventions:
   asset and program rows are not binding.
 """
 
+import csv
 import dataclasses
 import pathlib
 
@@ -612,8 +613,6 @@ class OutcomeTable:
 
     def to_csv(self, directory, name):
         """Write `<name>_slot.csv`, `<name>_star.csv` and `<name>_world.csv`."""
-        import pandas as pd
-
         directory = pathlib.Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         for level, leaves in (("slot", self.slot), ("star", self.star)):
@@ -622,9 +621,19 @@ class OutcomeTable:
             labels = ["world", "star", "slot"][: len(shape)]
             frame = {k: v.reshape(-1) for k, v in zip(labels, index, strict=False)}
             frame.update({k: v.reshape(-1) for k, v in leaves.items()})
-            pd.DataFrame(frame).to_csv(directory / f"{name}_{level}.csv", index=False)
+            _write_columns(directory / f"{name}_{level}.csv", frame)
         frame = {"world": np.arange(self.n_worlds), **self.world}
-        pd.DataFrame(frame).to_csv(directory / f"{name}_world.csv", index=False)
+        _write_columns(directory / f"{name}_world.csv", frame)
+
+
+def _write_columns(path, columns):
+    """Write equal-length 1-D columns as a CSV with a header row."""
+    names = list(columns)
+    data = [np.asarray(columns[k]).reshape(-1) for k in names]
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(names)
+        writer.writerows(zip(*(d.tolist() for d in data), strict=True))
 
 
 def _rows_of(log, w, kind):
