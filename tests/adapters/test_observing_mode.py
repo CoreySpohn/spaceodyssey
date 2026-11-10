@@ -14,7 +14,7 @@ from orbix.kepler import markley_solve_trig
 from skyscapes.io import from_exovista
 
 from spaceodyssey.adapters.jaxedith import column_index, visit_columns
-from spaceodyssey.adapters.photomancy import CATALOG_FIELDS
+from spaceodyssey.adapters.photomancy import CATALOG_FIELDS, ELEMENTS
 from spaceodyssey.adapters.skyscapes import geometry, population_system
 from spaceodyssey.core.kinds import RealizeContext
 from tests.studies.bracket_helpers import (
@@ -149,6 +149,9 @@ def test_the_catalog_row_follows_the_declared_layout(source, channel):
     np.testing.assert_array_equal(
         cells[:, names.index("class1")], np.asarray(truth.klass[0])
     )
+    elements = np.asarray(channel.truth_elements(truth))[0]
+    columns = [names.index(c) for c in ELEMENTS]
+    np.testing.assert_array_equal(elements, cells[:, columns])
 
 
 def test_realized_detection_matches_the_stated_probability(source, channel):

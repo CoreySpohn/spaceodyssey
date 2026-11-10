@@ -16,7 +16,6 @@ from spaceodyssey.adapters.jaxedith import ObservingModeChannel
 from spaceodyssey.adapters.photomancy import GRID_SPACING_D, N_GRID, DecisionSummary
 from spaceodyssey.adapters.skyscapes import ExoVistaWorldSource
 from spaceodyssey.studies import bracket as br
-from spaceodyssey.studies.bracket_policy import StandInPolicy
 
 FIXTURE = pathlib.Path(__file__).parents[1] / "fixtures" / "exovista"
 N_SLOTS, N_WORLDS = 6, 2
@@ -72,7 +71,7 @@ def build(run=True, horizon_d=HORIZON_D, budget_d=BUDGET_D):
         horizon_d=horizon_d,
         budget_d=budget_d,
         observer=br.SummaryObserver(prior=prior_summary(channel, n_stars)),
-        policy=StandInPolicy(block_mode, budget_d, N_SLOTS),
+        policy=br.BracketPolicy(block_mode, budget_d, N_SLOTS),
     )
     executor = br.BoundExecutor(boundary=br.bracket_boundary(study, "oracle"))
     roots = jnp.stack(

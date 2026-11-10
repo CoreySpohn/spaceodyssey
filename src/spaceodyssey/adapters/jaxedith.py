@@ -133,7 +133,11 @@ from yippy import EqxCoronagraph, fetch_yip
 from yippy.datasets import CATALOG, DATA_RELEASE_TAG
 from yippy.performance import PROFILE_STEP_PIX
 
-from spaceodyssey.adapters.photomancy import CATALOG_FIELDS, catalog_kind
+from spaceodyssey.adapters.photomancy import (
+    CATALOG_FIELDS,
+    ELEMENTS,
+    catalog_kind,
+)
 from spaceodyssey.adapters.physical_context import (
     Certificate,
     PhysicalClock,
@@ -2168,6 +2172,20 @@ class ObservingModeChannel(AbstractChannelModel):
         stacked = jnp.stack([jnp.asarray(columns[c], F64) for c in names], -1)
         stacked = jnp.where(present[:, None], stacked, 0.0)
         return stacked.reshape(-1)
+
+    def truth_elements(self, truth):
+        """The true elements of every slot of one world: ``(n_stars, n_slots, 8)``.
+
+        The columns follow `ELEMENTS`, the set `sky_position` and `detect_probability`
+        read; an absent slot is all zeros.
+        """
+        names = [f for f, _ in CATALOG_FIELDS]
+        n_stars = int(self.catalog_mass_kg.shape[0])
+        rows = jax.vmap(lambda s: self._catalog_row(truth, s, 0, None, None))(
+            jnp.arange(n_stars)
+        )
+        cells = rows.reshape(n_stars, self.n_slots, len(names))
+        return cells[..., jnp.asarray([names.index(c) for c in ELEMENTS])]
 
     # -- Block accumulation ----------------------------------------------------
 
