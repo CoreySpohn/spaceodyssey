@@ -429,6 +429,63 @@ def derived_rows(log, caps):
     return jnp.isin(log.kind, jnp.asarray(caps.derived_kinds, I64))
 
 
+_NO_REVISION = jnp.iinfo(jnp.int64).min
+
+
+def _received(log, caps, audience):
+    """Rows the audience has received and that may replace or be replaced.
+
+    A derived row neither replaces nor is replaced: it has its own internal id, and a
+    correction that reuses one never touches a source row.
+    """
+    seen = log.accepted_tick if audience == Audience.OBSERVER else log.released_tick
+    return log.valid & (seen >= 0) & ~derived_rows(log, caps)
+
+
+def group_replaced(group_keys, mine, revision):
+    """`(newer, replaced)` per row from the latest `mine` revision of its group.
+
+    A group is the rows sharing every array in `group_keys`. `replaced` is the largest
+    revision among the group's `mine` rows when it exceeds the row's own, else -1, and
+    `newer` marks those rows. One sort and a segment maximum: memory is linear in the
+    number of rows.
+    """
+    n = revision.shape[0]
+    order = jnp.lexsort(group_keys)
+    changed = jnp.zeros(n - 1, B)
+    for key in group_keys:
+        changed = changed | (key[order][1:] != key[order][:-1])
+    ids = jnp.concatenate([jnp.zeros(1, I64), jnp.cumsum(changed.astype(I64))])
+    ids = jnp.zeros(n, I64).at[order].set(ids)
+    top = jax.ops.segment_max(
+        jnp.where(mine, revision, _NO_REVISION), ids, num_segments=n
+    )[ids]
+    newer = top > revision
+    return newer, jnp.where(newer, top, -1)
+
+
+def _counting(log, caps, mine, newer):
+    """Rows of the revision set: current, of a refit kind and a refit status."""
+    kinds = jnp.asarray(caps.refit_kinds, I64)
+    statuses = jnp.asarray(caps.refit_statuses, I64)
+    return mine & ~newer & jnp.isin(log.kind, kinds) & jnp.isin(log.status, statuses)
+
+
+def revision_set_all(log, caps, audience, n_subjects):
+    """`(counts, replaced)` of `revision_set` for every subject at once.
+
+    Row `i` is read against its own subject (rows of a subject outside
+    `[0, n_subjects)` belong to no set), so `counts[i]` equals `revision_set(...,
+    log.subject[i])[0][i]`. Memory is linear in the number of rows.
+    """
+    mine = _received(log, caps, audience)
+    mine = mine & (log.subject >= 0) & (log.subject < n_subjects)
+    newer, replaced = group_replaced(
+        (log.acquisition_id, log.subject), mine, log.revision
+    )
+    return _counting(log, caps, mine, newer), replaced
+
+
 def revision_set(log, caps, audience, subject):
     """`(counts, replaced)` over the log rows: the revision set of a subject.
 
@@ -442,19 +499,9 @@ def revision_set(log, caps, audience, subject):
     unlisted status retracts the acquisition rather than leaving its earlier value.
     A derived kind is never in `refit_kinds`, so a product is never in a set.
     """
-    seen = log.accepted_tick if audience == Audience.OBSERVER else log.released_tick
-    # a derived row neither replaces nor is replaced: it has its own internal id, and a
-    # correction that reuses one never touches a source row
-    mine = log.valid & (seen >= 0) & (log.subject == subject)
-    mine = mine & ~derived_rows(log, caps)
-    same = (log.acquisition_id[:, None] == log.acquisition_id[None, :]) & mine[None, :]
-    later = same & (log.revision[None, :] > log.revision[:, None])
-    newer = later.any(axis=1)
-    replaced = jnp.max(jnp.where(later, log.revision[None, :], -1), axis=1)
-    kinds = jnp.asarray(caps.refit_kinds, I64)
-    statuses = jnp.asarray(caps.refit_statuses, I64)
-    counts = mine & ~newer & jnp.isin(log.kind, kinds) & jnp.isin(log.status, statuses)
-    return counts, replaced
+    mine = _received(log, caps, audience) & (log.subject == subject)
+    newer, replaced = group_replaced((log.acquisition_id,), mine, log.revision)
+    return _counting(log, caps, mine, newer), replaced
 
 
 def refit_rows(log, caps, audience, subject):

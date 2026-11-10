@@ -47,8 +47,10 @@ from spaceodyssey.core.records import (
     PayloadColumn,
     Record,
     RecordKind,
+    log_records,
+    masked_record,
     record_none,
-    refit_rows,
+    revision_set_all,
     write_log,
 )
 from spaceodyssey.core.snapshot import _mix, named_leaves
@@ -241,13 +243,6 @@ def _canonical(rows):
     )
 
 
-def _cut(x, n):
-    """The first `n` entries along axis 0, zero padded when there are fewer."""
-    if n <= x.shape[0]:
-        return x[:n]
-    return jnp.pad(x, [(0, n - x.shape[0])] + [(0, 0)] * (x.ndim - 1))
-
-
 def _bits(x):
     if jnp.issubdtype(x.dtype, jnp.floating):
         return lax.bitcast_convert_type(x.astype(F64), I64)
@@ -278,27 +273,44 @@ def _fold_row(h, row, ok):
     return jnp.where(ok, new, h), None
 
 
-def _entry_rows(log, caps, audience, subject, n):
-    rows = refit_rows(log, caps, audience, subject)
-    count = rows.valid.sum().astype(I64)
-    return jax.tree_util.tree_map(lambda x: _cut(x, n), _canonical(rows)), count
+def _audience_rows(log, caps, audience, n_subjects, n):
+    """`(rows, n_rows)` of every subject for one audience, one pass over the log.
+
+    The counting rows of the revision set (`records.revision_set_all`) are sorted by
+    subject and then canonical order (channel, acquisition index, revision); each
+    subject takes the first `n` rows of its segment and only those rows are gathered.
+    Rows are masked for the audience and zeroed where they do not count; `n_rows` is
+    the full count of each subject.
+    """
+    counts, replaced = revision_set_all(log, caps, audience, n_subjects)
+    skey = jnp.where(counts, log.subject, n_subjects)
+    order = jnp.lexsort((log.revision, log.acquisition_index, log.channel, skey))
+    first = jnp.searchsorted(skey[order], jnp.arange(n_subjects), side="left")
+    n_rows = jnp.searchsorted(skey[order], jnp.arange(n_subjects), side="right") - first
+    pos = jnp.arange(n)
+    ok = pos[None, :] < n_rows[:, None]
+    idx = order[jnp.minimum(first[:, None] + pos[None, :], order.shape[0] - 1)]
+    rows = log_records(
+        jax.tree_util.tree_map(lambda x: x[idx], log_records(log)),
+        valid=ok,
+        superseded_by=replaced[idx],
+    )
+    return _canonical(masked_record(rows, caps, audience)), n_rows.astype(I64)
 
 
 def gather_refit_rows(carry, root, study):
     """The `RefitRequest` of one frozen world, read from its log.
 
     Exact because a frozen world's log does not change while the host computes. Rows
-    come from `records.refit_rows` for each audience and subject, are zeroed where they
-    do not count, and are cut to `rows_per_subject`; `n_rows` keeps the full count so
-    that `commit_refresh` can refuse a truncation.
+    are the revision set of each audience and subject in canonical order (the rows
+    `records.refit_rows` selects), zeroed where they do not count, and cut to
+    `rows_per_subject`; `n_rows` keeps the full count so that `commit_refresh` can
+    refuse a truncation. Memory is linear in the log and the rows kept.
     """
     caps = study.caps
     n, count = caps.rows_per_subject, caps.n_subjects
     subjects = jnp.arange(count)
-    per = [
-        jax.vmap(lambda s, a=a: _entry_rows(carry.log, caps, a, s, n))(subjects)
-        for a in AUDIENCES
-    ]
+    per = [_audience_rows(carry.log, caps, a, count, n) for a in AUDIENCES]
     rows = jax.tree_util.tree_map(lambda x, y: jnp.stack([x, y]), per[0][0], per[1][0])
     n_rows = jnp.stack([per[0][1], per[1][1]])
     row_keys = jax.vmap(jax.vmap(lambda r: fold_keys(root, r, study)))(rows)

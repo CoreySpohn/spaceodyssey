@@ -15,6 +15,7 @@ from spaceodyssey.core.records import (
     REFUND_COLUMNS,
     RecordLog,
     derived_rows,
+    group_replaced,
     hide_refund_of,
     payload_columns,
 )
@@ -259,9 +260,7 @@ def _superseded_in_view(log, vis, caps):
     A derived row neither replaces nor is replaced.
     """
     vis = vis & ~derived_rows(log, caps)
-    same = (log.acquisition_id[:, None] == log.acquisition_id[None, :]) & vis[None, :]
-    newer = same & (log.revision[None, :] > log.revision[:, None])
-    out = jnp.max(jnp.where(newer, log.revision[None, :], -1), axis=1)
+    _, out = group_replaced((log.acquisition_id,), vis, log.revision)
     return jnp.where(derived_rows(log, caps), -1, out)
 
 
