@@ -378,7 +378,7 @@ def photomancy_bindings():
 
 # -- Decision summary ----------------------------------------------------------------
 #
-# The belief a bracket study carries is not a particle cloud but the few numbers a
+# The belief a decision study carries is not a particle cloud but the few numbers a
 # policy decides from. `DecisionSummary` holds them per star; `summarize` turns one
 # slot's weighted orbit cloud into its leaves, and `ReportRefit` fills them.
 #
@@ -746,10 +746,11 @@ def _truth_entry(channel, entry, settings):
     keep = lambda x: jnp.where(  # noqa: E731
         present.reshape((-1,) + (1,) * (x.ndim - 1)), x, 0.0
     )
+    has_cat = is_cat.any()
     status = jnp.where(
-        is_cat.any(), int(RefitStatus.OK), int(RefitStatus.NO_SUPPORT)
+        has_cat, int(RefitStatus.OK), int(RefitStatus.NO_SUPPORT)
     ).astype(I64)
-    return {
+    leaves_out = {
         "ref_tick": jnp.asarray(entry.tick, I64),
         "n_obs": is_rep.sum().astype(I64),
         "p_new": search_probability_truth(leaves.p_det, live),
@@ -761,8 +762,11 @@ def _truth_entry(channel, entry, settings):
         "p_class": keep(leaves.p_class),
         "ln_period_q": keep(leaves.ln_period_q),
         "ess": keep(leaves.ess),
-        "status": jnp.full(n_slots, status, I64),
     }
+    # without a catalog row nothing was read: the leaves are zero, not row 0's values
+    out = {k: jnp.where(has_cat, v, jnp.zeros_like(v)) for k, v in leaves_out.items()}
+    out["status"] = jnp.full(n_slots, status, I64)
+    return out
 
 
 @dataclasses.dataclass(frozen=True)
@@ -799,7 +803,7 @@ class _Lane(eqx.Module):
 
 
 class ReportRefit(AbstractRefitBoundary):
-    """The refit boundary of the bracket study: summaries from visit reports.
+    """The refit boundary of a decision study: summaries from visit reports.
 
     `kernel="truth"` builds every leaf from the truth catalog row, a one-point cloud
     with no key and no particles: the oracle arm's belief. It reads the groups of
@@ -816,7 +820,7 @@ class ReportRefit(AbstractRefitBoundary):
     ignores it and the refit key.
     """
 
-    kind = "bracket.report"
+    kind = "spaceodyssey.report_summary"
 
     def __init__(
         self,
@@ -891,7 +895,10 @@ class ReportRefit(AbstractRefitBoundary):
         row = caps.payload_audience[names.index(self.catalog_kind)]
         width = len(CATALOG_FIELDS)
         need = int(Audience.OBSERVER) | int(Audience.POLICY)
-        for col, audience in enumerate(row[: len(row) // width * width]):
+        # A declared column always has a nonempty audience; the padding to the widest
+        # registered kind has none, so the slot count is the declared width.
+        n_slots = sum(1 for a in row if a) // width
+        for col, audience in enumerate(row[: n_slots * width]):
             field, group = CATALOG_FIELDS[col % width]
             if group in self.truth_groups and (int(audience) & need) != need:
                 raise ValueError(

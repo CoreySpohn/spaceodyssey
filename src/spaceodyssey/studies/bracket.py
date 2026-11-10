@@ -1,4 +1,4 @@
-"""The bracket study's observer: a decision summary per star, changed by refits only.
+"""The summary observer: a decision summary per star, changed by refits only.
 
 `SummaryObserver` holds a `DecisionSummary` as both the full belief and the policy
 summary. It never folds a record: a checkpoint's refit boundary computes each star's

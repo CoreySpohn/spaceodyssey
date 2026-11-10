@@ -16,6 +16,7 @@ pytest.importorskip("photomancy")
 
 from spaceodyssey.adapters.photomancy import (
     CATALOG_FIELDS,
+    CATALOG_GROUPS,
     DecisionSummary,
     ReportRefit,
     catalog_kind,
@@ -24,7 +25,12 @@ from spaceodyssey.adapters.photomancy import (
 )
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import EVERYONE, Audience, RefitStatus
-from spaceodyssey.core.records import KindRegistry, record_none
+from spaceodyssey.core.records import (
+    KindRegistry,
+    PayloadColumn,
+    RecordKind,
+    record_none,
+)
 from spaceodyssey.core.refresh import RefitRequest
 from spaceodyssey.studies.bracket import SummaryObserver
 
@@ -239,3 +245,38 @@ def test_an_install_changes_only_its_star():
     for n in names:
         assert np.array_equal(getattr(after, n)[1:], getattr(observer.prior, n)[1:])
     assert not np.array_equal(after.n_obs, observer.prior.n_obs)
+
+
+def test_a_wider_registered_kind_does_not_add_phantom_slots():
+    """The slot count is the declared width, not the padded `payload_width`.
+
+    Fails if the check reads columns past the catalog kind and reports a phantom slot
+    as hidden when another registered kind is wider than the catalog.
+    """
+    audiences = {g: Audience.OBSERVER | Audience.POLICY for g in CATALOG_GROUPS}
+    wide = RecordKind(
+        "wide", tuple(PayloadColumn(f"w{i}", int(EVERYONE)) for i in range(40))
+    )
+    registry = KindRegistry([catalog_kind(1, audiences), report_kind(1), wide])
+    prior = DecisionSummary.zeros(N_SUBJECTS, 1, GRID, MODES, BLOCKS, n_an=4)
+    caps = registry.lower(
+        Capacities(n_subjects=N_SUBJECTS, rows_per_subject=ROWS, refit_lanes=2),
+        SummaryObserver(prior=prior),
+    )
+    ReportRefit(caps=caps)
+
+
+def test_an_entry_without_a_catalog_row_installs_nothing():
+    """With no catalog row every leaf is zero and the status is `NO_SUPPORT`."""
+    study = make_study()
+    request = make_request(study, 1)
+    rows = request.rows
+    valid = np.asarray(rows.valid).copy()
+    kind = np.asarray(rows.kind)
+    valid &= kind != study.caps.kind_names.index("truth_catalog")
+    request = eqx.tree_at(lambda r: r.rows.valid, request, valid)
+    out = ReportRefit().refit_batch(study, request)
+    assert (np.asarray(out.status) == RefitStatus.NO_SUPPORT).all()
+    for name, piece in zip(study.observer.subject_leaves, out.slices, strict=True):
+        if name != "status":
+            assert not np.asarray(piece).any(), name
