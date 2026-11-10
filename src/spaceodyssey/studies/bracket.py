@@ -245,6 +245,9 @@ def bracket_study(
     arm = _arm(arm)
     if observer is None or policy is None:
         raise ValueError("bracket_study needs an observer and a policy")
+    if isinstance(policy, BracketPolicy):
+        reaches = bool(arm.report_audience & Audience.POLICY)
+        policy = dataclasses.replace(policy, refits_reach_policy=reaches)
     built = channel.assets()
     n_stars = int(channel.catalog_mass_kg.shape[0])
     if len(source.stars) != n_stars:
@@ -340,6 +343,9 @@ class BracketPolicy(AbstractPolicy):
        visits, of largest `p_new` per charged day, when `p_new` is 0.02 or more.
     4. Otherwise wait a day.
 
+    The wait is for refits to read the report visits (search and follow-up); the
+    visits that start a block are not counted, since a refit never reads them.
+
     No star gets more than 24 visits. A choice that does not fit the budget falls back
     to the cheapest visit; when not even that fits the policy attempts one more visit
     (the refusal is the budget binding) and stops, else it stops at the horizon.
@@ -349,6 +355,10 @@ class BracketPolicy(AbstractPolicy):
         budget_d: Telescope days the policy may spend.
         n_slots: Planet slots per star.
         max_visits, max_search: Per-star visit and search limits.
+        refits_reach_policy: Whether the policy's summary is ever refit. When false
+            (an arm whose report columns the policy may not read) the summary never
+            changes, so the policy never waits for a refit to read its visits.
+            `bracket_study` sets it from the arm.
     """
 
     block_mode: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, I64))
@@ -356,6 +366,7 @@ class BracketPolicy(AbstractPolicy):
     n_slots: int = eqx.field(static=True)
     max_visits: int = eqx.field(default=24, static=True)
     max_search: int = eqx.field(default=8, static=True)
+    refits_reach_policy: bool = eqx.field(default=True, static=True)
 
     def declare(self):
         """The campaign drain the policy ends with."""
@@ -379,8 +390,12 @@ class BracketPolicy(AbstractPolicy):
 
         # Kickoff: the catalog row of star `kick`.
         kicking = kick < n
-        # Fresh: every visit made has been read by a refit.
-        stale = jnp.any(n_vis > belief.n_obs.astype(F64))
+        # Fresh: every report visit made has been read by a refit. A block produces
+        # a block outcome, not a report row, so it is not a visit a refit reads.
+        n_blocks = jnp.sum(flags > 0.5, axis=1).astype(F64)
+        stale = jnp.any(n_vis - n_blocks > belief.n_obs.astype(F64))
+        if not self.refits_reach_policy:
+            stale = jnp.asarray(False)
         next_day = ((tick // per_day) + 1) * per_day + 1
 
         node_ticks = belief.ref_tick[:, None] + jnp.round(

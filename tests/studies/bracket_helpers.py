@@ -48,17 +48,26 @@ def fixture_channel(source, **kw):
     )
 
 
-def prior_summary(channel, n_stars):
-    """The empty first-tier summary the observer starts from."""
-    return DecisionSummary.zeros(
+def prior_summary(channel, n_stars, p_new=0.0):
+    """The first-tier summary the observer starts from (`p_new` everywhere)."""
+    summary = DecisionSummary.zeros(
         n_stars, N_SLOTS, N_GRID, channel.n_modes, channel.n_block_modes, n_an=1
     )
+    return eqx.tree_at(lambda x: x.p_new, summary, summary.p_new + p_new)
 
 
-def build(run=True, horizon_d=HORIZON_D, budget_d=BUDGET_D, arm="oracle", **settings):
+def build(
+    run=True,
+    horizon_d=HORIZON_D,
+    budget_d=BUDGET_D,
+    arm="oracle",
+    p_new=0.0,
+    **settings,
+):
     """`(source, study, executor, truths, roots, run)` of `arm` (the oracle by default).
 
-    `settings` go to the arm's boundary (a posterior arm needs `occupancy`).
+    `p_new` is the prior chance of a new planet per star, node and mode. `settings` go
+    to the arm's boundary (a posterior arm needs `occupancy`).
     """
     source = fixture_source()
     channel = fixture_channel(source)
@@ -73,7 +82,7 @@ def build(run=True, horizon_d=HORIZON_D, budget_d=BUDGET_D, arm="oracle", **sett
         arm=arm,
         horizon_d=horizon_d,
         budget_d=budget_d,
-        observer=br.SummaryObserver(prior=prior_summary(channel, n_stars)),
+        observer=br.SummaryObserver(prior=prior_summary(channel, n_stars, p_new)),
         policy=br.BracketPolicy(block_mode, budget_d, N_SLOTS),
     )
     executor = br.BoundExecutor(boundary=br.bracket_boundary(study, arm, **settings))
