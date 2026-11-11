@@ -34,7 +34,11 @@ Declared conventions:
 - Local zodiacal light is `zodi_fn_leinert` at each node's epoch and the target's
   coordinates. The exozodi surface brightness at 1 AU is
   `n_exozodi * F_1zodi(lambda) * (L / Lsun)`, with `F_1zodi` the wavelength-only
-  value of `zodi_fn_ayo` (one zodi seen face-on at equivalent insolation).
+  value of `zodi_fn_ayo` (one zodi seen face-on at equivalent insolation). With
+  `stellar_exozodi` it is instead the V-band value of one zodi (22 mag/arcsec^2
+  around the Sun) times the host's V-band luminosity and its own colour, which is
+  `n_exozodi * 10^(-0.4 * 22) * 10^(0.4 * 4.83) * (d / 10 pc)^2 * f_lambda / F0`:
+  the host's flux density at lambda scaled to a common distance.
 - Thermal emission is evaluated with the declared `eps_warm_T_cold` (0 switches it
   off whatever the temperature).
 - Detector quantum efficiency and dQE (a survival fraction) enter only where
@@ -80,12 +84,14 @@ import functools
 import hashlib
 import json
 import math
+from pathlib import Path
 
 import equinox as eqx
 import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
+from astropy.io import fits
 from hwoutils.constants import (
     AU2m,
     Mearth2kg,
@@ -502,6 +508,7 @@ class SummaryReport(eqx.Module):
     bg_multiplier: float
     ppfact: float
     eps_warm_T_cold: float
+    stellar_exozodi: bool = eqx.field(static=True)
     nodes: jax.Array
     weights: jax.Array
     field_radius_lod: float
@@ -524,6 +531,7 @@ class SummaryReport(eqx.Module):
         n_time_nodes,
         field_radius_lod,
         leakage_step_lod,
+        stellar_exozodi=False,
     ):
         """Validate the declarations and cache the nominal scene."""
         if not isinstance(detector_spec, DetectorSpec):
@@ -552,6 +560,7 @@ class SummaryReport(eqx.Module):
         self.bg_multiplier = float(bg_multiplier)
         self.ppfact = float(ppfact)
         self.eps_warm_T_cold = float(eps_warm_T_cold)
+        self.stellar_exozodi = bool(stellar_exozodi)
         x, w = np.polynomial.legendre.leggauss(n_time_nodes)
         self.nodes = jnp.asarray(x, dtype=jnp.float64)
         self.weights = jnp.asarray(w, dtype=jnp.float64)
@@ -579,6 +588,8 @@ class SummaryReport(eqx.Module):
         eps_warm_T_cold=0.0,
         n_time_nodes=8,
         diameter_m=None,
+        aperture_radius_lod=None,
+        stellar_exozodi=False,
     ):
         """Build the summary path on a response package.
 
@@ -591,9 +602,17 @@ class SummaryReport(eqx.Module):
         wavelength in the same way: the response is used achromatically in lambda/D,
         so lambda/D in arcsec, the stellar and zodiacal fluxes and the exozodi all
         follow the report's wavelength; `bin_width_nm` is the band width there.
+        `aperture_radius_lod` is the radius of the circular photometric aperture
+        [lambda/D of the response's circumscribed aperture] that sets the core
+        throughput, area and pixel count; None keeps the package default.
+        `stellar_exozodi` gives the exozodi the host's own colour (see `prepare`).
         """
         path = fetch_pinned_yip() if yip_path is None else yip_path
-        backend = EqxCoronagraph(path)
+        backend = (
+            EqxCoronagraph(path)
+            if aperture_radius_lod is None
+            else EqxCoronagraph(path, aperture_radius_lod=aperture_radius_lod)
+        )
         header_wavelength_nm, header_diameter_m = backend.stellar_frame
         wavelength_nm = header_wavelength_nm if wavelength_nm is None else wavelength_nm
         diameter_m = header_diameter_m if diameter_m is None else diameter_m
@@ -621,6 +640,7 @@ class SummaryReport(eqx.Module):
             n_time_nodes=n_time_nodes,
             field_radius_lod=backend.OWA,
             leakage_step_lod=PROFILE_STEP_PIX * backend.stellar_pixel_scale_lod,
+            stellar_exozodi=stellar_exozodi,
         )
 
     # -- Cached factors ----------------------------------------------------
@@ -661,6 +681,24 @@ class SummaryReport(eqx.Module):
         star = jy_to_photons_per_nm_per_m2(scene.star_flux_density_jy, wl)
         exposure = self._exposure(jnp.asarray(0.0))
         one_zodi = zodi_fn_ayo(self.observatory, exposure, scene)
+        if self.stellar_exozodi:
+            # Surface brightness at 1 AU of one zodi: 22 mag/arcsec^2 in V around a
+            # solar-luminosity star, scaled by the host's V-band luminosity and by
+            # its colour m_lambda - V. That product is the host's own flux density
+            # at lambda scaled to a common distance, so the V band cancels.
+            exozodi_1au = (
+                jnp.asarray(scene.n_exozodi)
+                * 10.0 ** (-0.4 * EXOZODI_V_MAG_PER_ARCSEC2)
+                * 10.0 ** (0.4 * SUN_ABSOLUTE_V_MAG)
+                * (jnp.asarray(scene.dist_pc) / 10.0) ** 2
+                * (star / zero_point)
+            )
+        else:
+            exozodi_1au = (
+                jnp.asarray(scene.n_exozodi)
+                * one_zodi
+                * jnp.asarray(scene.luminosity_lsun)
+            )
         diam_lod = jnp.asarray(scene.star_diameter_mas) / (1000.0 * self.lod_arcsec)
         grid = self.leakage_grid
         response = self.optical_path.coronagraph
@@ -679,9 +717,7 @@ class SummaryReport(eqx.Module):
         return PreparedScene(
             zero_point=jnp.asarray(zero_point, dtype=jnp.float64),
             star_ratio=star / zero_point,
-            exozodi_1au=jnp.asarray(scene.n_exozodi)
-            * one_zodi
-            * jnp.asarray(scene.luminosity_lsun),
+            exozodi_1au=exozodi_1au,
             dist_pc=jnp.asarray(scene.dist_pc, dtype=jnp.float64),
             star_mass_kg=jnp.asarray(scene.star_mass_kg, dtype=jnp.float64),
             stellar_diam_lod=diam_lod,
@@ -1299,6 +1335,8 @@ def calibration_id(report, law):
 
 # Exozodi level the first profile passes explicitly (its `exozodi` convention).
 PROFILE_N_EXOZODI = 3.0
+EXOZODI_V_MAG_PER_ARCSEC2 = 22.0  # V-band surface brightness of one zodi at 1 AU
+SUN_ABSOLUTE_V_MAG = 4.83
 
 
 class _ChannelAssets(eqx.Module):
@@ -1809,6 +1847,27 @@ def circumscribed_diameter_m(inscribed_m, obscured_area_fraction):
     return float(inscribed_m) / (1.0 - float(obscured_area_fraction))
 
 
+@functools.lru_cache(maxsize=4)
+def _obscured_fraction(yip_path=None):
+    """The obscured area fraction in the response package header."""
+    path = fetch_pinned_yip() if yip_path is None else yip_path
+    return float(fits.getheader(Path(path) / "stellar_intens.fits")["OBSCURED"])
+
+
+def survey_aperture_radius_lod(survey, yip_path=None):
+    """The photometric aperture radius of a survey [lambda/D, circumscribed].
+
+    The profile gives it in lambda/D of the inscribed diameter
+    (``photometric_aperture_inscribed_lod``); the response is tabulated on the
+    circumscribed aperture, so the radius is multiplied by
+    ``circumscribed / inscribed``. None when the profile does not set it.
+    """
+    r = survey.get("photometric_aperture_inscribed_lod")
+    if r is None:
+        return None
+    return float(r) / (1.0 - _obscured_fraction(yip_path))
+
+
 def _mode_assets(profile, detector, diameter_m, n_time_nodes, epoch_jd, law):
     """The report, observing context and law at one aperture diameter.
 
@@ -1859,6 +1918,8 @@ def _mode_assets(profile, detector, diameter_m, n_time_nodes, epoch_jd, law):
                 bin_width_nm=m["bin_width_nm"],
                 optical_throughput=m["optics_throughput"],
                 ppfact=survey["post_processing_factor"],
+                aperture_radius_lod=survey_aperture_radius_lod(survey),
+                stellar_exozodi=survey.get("exozodi_model") == "stellar_color",
             )
         )
     ids = [calibration_id(r, law) for r in reports]
@@ -2557,8 +2618,8 @@ class ObservingModeChannel(AbstractChannelModel):
         a face-on circular orbit at the star's Earth-equivalent insolation, so its
         phase angle is 90 degrees at every epoch. `short_of(planet budget,
         planet-free budget)` is positive while the requirement is not met; the time
-        is found by bisection in log time between 1 s and 1e9 s, and is infinite where even
-        1e9 s is short.
+        is found by bisection in log time between 1 s and 1e9 s, and is infinite where
+        even 1e9 s is short.
         """
         scene = prepared.scene
         a_au = jnp.sqrt(jnp.asarray(scene.luminosity_lsun, F64))

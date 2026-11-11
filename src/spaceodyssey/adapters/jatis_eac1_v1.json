@@ -9,6 +9,8 @@
     {"name": "aperture", "statement": "The survey aperture is given as the inscribed diameter; lambda/D and the collecting area use the circumscribed diameter, inscribed / (1 - obscured area fraction), with the response's obscured area fraction as the central obscuration."},
     {"name": "detection", "statement": "Detection is the event counts >= 7 limit_counts (the imaging mode's required signal-to-noise ratio); a null is the complementary event at a realized science duration t > 0."},
     {"name": "characterization", "statement": "Characterization is graded on the signal-to-noise ratio of one spectral channel of width lambda/R at the IFS wavelength over the integration, with the planet counted in the noise; the spectrum is delivered when it reaches 5. The response throughput applies as it does in detection, with no separate cut at the inner working angle."},
+    {"name": "photometric_aperture", "statement": "The photometric aperture is a circle of radius 0.7 lambda/D of the inscribed diameter, which is 0.7 times circumscribed/inscribed lambda/D of the response's circumscribed aperture; it sets the core throughput, the aperture area and the pixel count in both modes."},
+    {"name": "exozodi_colour", "statement": "One zodi of exozodi is 22 mag/arcsec^2 in V at 1 AU around a star of the Sun's V-band luminosity (absolute V magnitude 4.83), and takes the host's own colour: the surface brightness at 1 AU is n * 10^(-0.4 * 22) * 10^(0.4 * 4.83) * (d / 10 pc)^2 * f_lambda / F0, so it scales with the host's V-band luminosity and its flux density at the mode wavelength rather than the bolometric luminosity times a solar colour."},
     {"name": "overhead", "statement": "Every observation, detection or characterization, occupies the settling time plus the coronagraph overhead before its science interval."},
     {"name": "photon_counting_efficiency", "statement": "The photon-counting efficiency 0.99 is carried as dQE, which scales the planet and the background alike; the baseline applies it to the planet counts only (a 0.5 percent effect on the integration time)."}
   ],
@@ -29,6 +31,8 @@
     "inscribed_diameter_m": 8.0,
     "overhead_d": {"settling": 0.041666666666666664, "coronagraph": 0.1},
     "post_processing_factor": 30.0,
+    "photometric_aperture_inscribed_lod": 0.7,
+    "exozodi_model": "stellar_color",
     "detector": {
       "name": "jatis-noiseless",
       "family": "photon counting",
