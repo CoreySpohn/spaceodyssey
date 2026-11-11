@@ -18,8 +18,12 @@ from importlib import resources
 from spaceodyssey.core.enums import Audience
 
 FIRST_SUMMARY_V1 = "first-summary-v1"
+JATIS_EAC1_V1 = "jatis-eac1-v1"
 
-_FILES = {FIRST_SUMMARY_V1: "first_summary_v1.json"}
+_FILES = {
+    FIRST_SUMMARY_V1: "first_summary_v1.json",
+    JATIS_EAC1_V1: "jatis_eac1_v1.json",
+}
 
 # Fields every payload column and every error-budget boundary must state.
 COLUMN_FIELDS = ("name", "unit", "sign", "measure", "audience")
@@ -34,12 +38,46 @@ _AUDIENCES = {
 }
 
 
+def _named(xs):
+    """Whether `xs` is a list of objects that each carry a ``name``."""
+    return isinstance(xs, list) and all(isinstance(x, dict) and "name" in x for x in xs)
+
+
+def _merge(base, over):
+    """`base` with `over` laid on it: objects merge by key, named-entry lists by name.
+
+    Any other value in `over` replaces the base value.
+    """
+    if isinstance(base, dict) and isinstance(over, dict):
+        out = dict(base)
+        for key, value in over.items():
+            out[key] = _merge(base[key], value) if key in base else value
+        return out
+    if _named(base) and _named(over):
+        by_name = {x["name"]: i for i, x in enumerate(base)}
+        out = list(base)
+        for entry in over:
+            if entry["name"] in by_name:
+                out[by_name[entry["name"]]] = entry
+            else:
+                out.append(entry)
+        return out
+    return over
+
+
 def load_profile(label=FIRST_SUMMARY_V1):
-    """The profile table `label` as a plain JSON object."""
+    """The profile table `label` as a plain JSON object.
+
+    A table with an ``extends`` key names a base profile; its own entries are laid on
+    the base (objects merge by key, lists of named entries by name) and the result no
+    longer carries the key.
+    """
     if label not in _FILES:
         raise KeyError(f"unknown profile {label!r}; known: {sorted(_FILES)}")
     text = resources.files(__package__).joinpath(_FILES[label]).read_text("utf-8")
-    return json.loads(text)
+    table = json.loads(text)
+    base = table.pop("extends", None)
+    return table if base is None else _merge(load_profile(base), table)
 
 
 def audience_flags(names):

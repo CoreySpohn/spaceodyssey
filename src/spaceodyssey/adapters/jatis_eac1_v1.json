@@ -1,0 +1,65 @@
+{
+  "label": "jatis-eac1-v1",
+  "extends": "first-summary-v1",
+  "status": "draft",
+  "summary": "Survey observing model on the JATIS baseline (Spohn et al. 2026, JATIS 12(4) 041010, Table 3): visible imaging detection at 500 nm and IFS characterization at 910 nm behind the EAC1 AAVC charge-4 response.",
+  "conventions": [
+    {"name": "systematic_floor", "statement": "The systematic noise floor is the stellar leakage divided by the post-processing factor (ppfact 30), in both modes."},
+    {"name": "response_wavelength", "statement": "The response package is used achromatically in lambda/D: each mode evaluates it at its own wavelength, so working angles in arcsec scale with the mode wavelength."},
+    {"name": "aperture", "statement": "The survey aperture is given as the inscribed diameter; lambda/D and the collecting area use the circumscribed diameter, inscribed / (1 - obscured area fraction), with the response's obscured area fraction as the central obscuration."},
+    {"name": "detection", "statement": "Detection is the event counts >= 7 limit_counts (the imaging mode's required signal-to-noise ratio); a null is the complementary event at a realized science duration t > 0."},
+    {"name": "characterization", "statement": "Characterization is graded on the signal-to-noise ratio of one spectral channel of width lambda/R at the IFS wavelength over the integration, with the planet counted in the noise; the spectrum is delivered when it reaches 5. The response throughput applies as it does in detection, with no separate cut at the inner working angle."},
+    {"name": "overhead", "statement": "Every observation, detection or characterization, occupies the settling time plus the coronagraph overhead before its science interval."},
+    {"name": "photon_counting_efficiency", "statement": "The photon-counting efficiency 0.99 is carried as dQE, which scales the planet and the background alike; the baseline applies it to the planet counts only (a 0.5 percent effect on the integration time)."}
+  ],
+  "keepout": {
+    "sun_min_deg": 45.0,
+    "sun_max_deg": 180.0,
+    "earth_min_deg": 0.0,
+    "earth_max_deg": 180.0,
+    "settling_time_d": 0.14166666666666666,
+    "certification_step_d": 0.25,
+    "angle_rate_bound_deg_per_day": 3.0
+  },
+  "payload_columns": [
+    {"name": "detected", "unit": "1", "sign": "flag: 1 detection, 0 null or no science", "measure": "whether measured counts reached the reporting threshold times limit_counts", "audience": ["observer", "policy", "scorer"]}
+  ],
+  "survey": {
+    "reference": "Spohn et al. 2026, JATIS 12(4) 041010, Table 3",
+    "inscribed_diameter_m": 8.0,
+    "overhead_d": {"settling": 0.041666666666666664, "coronagraph": 0.1},
+    "post_processing_factor": 30.0,
+    "detector": {
+      "name": "jatis-noiseless",
+      "family": "photon counting",
+      "quantum_efficiency": 0.9,
+      "dqe": 0.99,
+      "dqe_meaning": "survival_fraction",
+      "dark_current_rate_e_per_s": 0.0,
+      "read_noise_e": 0.0,
+      "clock_induced_charge_rate_e_per_frame": 0.0,
+      "pixel_scale_arcsec": 0.00485,
+      "cadence": "fixed_frame"
+    },
+    "modes": {
+      "detection": {
+        "wavelength_nm": 500.0,
+        "bin_width_nm": 100.0,
+        "optics_throughput": 0.3439,
+        "optics_note": "instrument 0.362 times telescope 0.95",
+        "frame_time_s": 100.0,
+        "snr_required": 7.0
+      },
+      "characterization": {
+        "wavelength_nm": 910.0,
+        "resolving_power": 140.0,
+        "bin_width_nm": 6.5,
+        "optics_throughput": 0.29165,
+        "optics_note": "instrument 0.307 times telescope 0.95",
+        "frame_time_s": 300.0,
+        "snr_required": 5.0
+      }
+    },
+    "integration_grid": {"min_d": 0.041666666666666664, "max_d": 60.0, "n": 12}
+  }
+}
