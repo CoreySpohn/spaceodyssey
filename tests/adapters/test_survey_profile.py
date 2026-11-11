@@ -26,7 +26,7 @@ from spaceodyssey.adapters.physical_profile import (
 from spaceodyssey.adapters.skyscapes import StarSpec, star_spec_from_model
 from spaceodyssey.studies import bracket as br
 
-BANDS = ((500.0, 100.0), (910.0, 6.5))
+BANDS = ((500.0, 100.0), (910.0, 6.5), (551.0, 88.0))  # detection, IFS, V
 EPOCH_JD = 2462502.5
 
 
@@ -114,7 +114,7 @@ medium = pytest.mark.medium(reason="builds two reports on the response package")
 def test_band_flux_is_the_mean_over_the_band(stars):
     """The 500 nm flux is a band mean: positive and unlike the 910 nm flux."""
     for star in stars:
-        assert [c for c, _ in star.band_fluxes_jy] == [500.0, 910.0]
+        assert [c for c, _ in star.band_fluxes_jy] == [500.0, 910.0, 551.0]
         assert star.flux_at(500.0) > 0 and star.flux_at(910.0) > 0
         assert star.flux_at(500.0) != star.flux_at(910.0)
         assert star.flux_density_jy == pytest.approx(star.flux_at(500.0), rel=0.2)
@@ -141,10 +141,11 @@ def _spec():
 
 
 @medium
-def test_lambda_over_d_zodi_and_exozodi_follow_the_report_wavelength(channel):
+def test_lambda_over_d_zodi_and_exozodi_follow_the_report_wavelength(channel, stars):
     """Each report's lambda/D, zero point and (exo)zodi are those of its wavelength."""
     built = channel.assets()
     d = channel.diameter_m
+    channel_star = stars[0]
     for report, wl in ((built.report, 500.0), (built.char_report, 910.0)):
         assert report.wavelength_nm == wl
         expected = wl * 1e-9 / d * 206264.80624709636
@@ -160,9 +161,27 @@ def test_lambda_over_d_zodi_and_exozodi_follow_the_report_wavelength(channel):
             bin_width_nm=jnp.asarray(report.bin_width_nm),
             position_angle_deg=jnp.asarray(0.0),
         )
+        # The host's own colour: n 10^(-0.4 22) L_V/L_V,sun (f_lambda/F0)/(f_V/F0_V),
+        # written out with the V band explicit; it equals the V-free form.
+        flux_ratio = float(
+            jy_to_photons_per_nm_per_m2(scene.star_flux_density_jy, wl) / zero
+        )
+        v_mag = -2.5 * math.log10(channel_star.flux_at(551.0) / 3631.0)
+        v_flux_ratio = 10.0 ** (-0.4 * v_mag)
+        abs_v = v_mag - 5.0 * math.log10(float(scene.dist_pc) / 10.0)
+        lum_v = 10.0 ** (-0.4 * (abs_v - 4.83))
+        ez = (
+            float(scene.n_exozodi)
+            * 10.0 ** (-0.4 * 22.0)
+            * lum_v
+            * flux_ratio
+            / v_flux_ratio
+        )
+        assert float(prepared.exozodi_1au) == pytest.approx(ez, rel=1e-9)
+        # and it is not the bolometric-luminosity form of the baseline profile
         zodi = zodi_fn_ayo(report.observatory, exposure, scene)
-        ez = float(scene.n_exozodi * zodi * scene.luminosity_lsun)
-        assert float(prepared.exozodi_1au) == pytest.approx(ez, rel=1e-12)
+        old_form = float(scene.n_exozodi * zodi * scene.luminosity_lsun)
+        assert float(prepared.exozodi_1au) != pytest.approx(old_form, rel=0.05)
     ratio = built.report.lod_arcsec / built.char_report.lod_arcsec
     assert float(ratio) == pytest.approx(500.0 / 910.0)
 
@@ -331,3 +350,42 @@ def test_a_survey_channel_needs_the_band_fluxes():
         jx.ObservingModeChannel.from_stars(
             [_spec()], n_slots=1, epoch_jd=EPOCH_JD, profile=JATIS_EAC1_V1, n_grid=2
         )
+
+
+@medium
+def test_the_photometric_aperture_is_that_of_the_inscribed_diameter(channel):
+    """Both survey reports use a core of 0.7 lambda/D of the inscribed diameter."""
+    ratio = 1.0 / (1.0 - 0.17481001240599225)
+    want = math.pi * (0.7 * ratio) ** 2
+    for report in (channel.assets().report, channel.assets().char_report):
+        area = float(report.optical_path.coronagraph.core_area(20.0, 500.0))
+        assert area == pytest.approx(want, rel=0.03)
+    assert jx.survey_aperture_radius_lod(jx.survey_table(JATIS_EAC1_V1)) == (
+        pytest.approx(0.7 * ratio)
+    )
+    assert jx.survey_aperture_radius_lod({}) is None
+
+
+@medium
+def test_solved_times_follow_the_closed_form_of_the_rates(channel):
+    """With a noiseless detector the times are the closed form of the term rates.
+
+    Detection: t = SNR^2 C_b / (C_p^2 - (SNR C_sp)^2) with the planet out of the noise;
+    characterization: the same with the planet counted in C_b. The rates are the
+    report's own planet, leakage, zodi and exozodi terms for the Earth twin.
+    """
+    subject = 0
+    built = channel.assets()
+    for report, char, snr, t_solved in (
+        (built.report, False, 7.0, float(channel.detect_time(subject))),
+        (built.char_report, True, 5.0, float(channel.characterize_time(subject))),
+    ):
+        prepared = channel._prepared(subject, nominal=True, char=char)
+        planet = _face_on_planet(prepared.scene, a_au=math.sqrt(1.0))
+        planet["Mp"] = jnp.asarray(5.972e24)
+        r = report.rates(prepared, planet, jnp.asarray([EPOCH_JD]))
+        c_p, c_sp = float(r.planet[0]), float(r.floor[0])
+        c_b = float(r.leakage[0] + r.zodi[0] + r.exozodi[0])
+        c_b += c_p if char else 0.0
+        closed = snr**2 * c_b / (c_p**2 - (snr * c_sp) ** 2) / 86400.0
+        assert t_solved == pytest.approx(closed, rel=1e-3)
