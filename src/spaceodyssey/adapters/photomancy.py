@@ -477,6 +477,8 @@ class DecisionSummary(eqx.Module):
     ess: jax.Array  # [n, S], Kish effective size
     status: jax.Array  # I64 [n, S], slot fit code (`SLOT_NEVER_FIT` before any fit)
     revealed: jax.Array  # I64 [n, S], class a delivered block revealed, 0 for none
+    n_spectra: jax.Array  # I64 [n, S], delivered blocks (spectra) of the slot read
+    n_blocks: jax.Array  # I64 [n], block rows of the star read
     aux: jax.Array  # [n_an]
 
     @classmethod
@@ -497,6 +499,8 @@ class DecisionSummary(eqx.Module):
             ess=jnp.zeros((n, s), F64),
             status=jnp.full((n, s), SLOT_NEVER_FIT, I64),
             revealed=jnp.zeros((n, s), I64),
+            n_spectra=jnp.zeros((n, s), I64),
+            n_blocks=jnp.zeros(n, I64),
             aux=jnp.zeros(n_an, F64),
         )
 
@@ -777,6 +781,8 @@ def _truth_entry(channel, entry, settings):
         "ln_period_q": keep(leaves.ln_period_q),
         "ess": keep(leaves.ess),
         "revealed": jnp.zeros(n_slots, I64),
+        "n_spectra": jnp.zeros(n_slots, I64),
+        "n_blocks": jnp.zeros((), I64),
     }
     # without a catalog row nothing was read: the leaves are zero, not row 0's values
     out = {k: jnp.where(has_cat, v, jnp.zeros_like(v)) for k, v in leaves_out.items()}
@@ -1700,9 +1706,11 @@ class ReportRefit(AbstractRefitBoundary):
         A block row the audience may read carries, per slot, the true class plus
         `REVEAL_OFFSET` where the block met its requirement and zero elsewhere. The
         `revealed` leaf takes that code and `p_class` takes 1 for class 1 and 0 for
-        any other class; the kernel's own posterior is not changed, and every other
-        leaf stays. An entry that was not computed (an audience that cannot read the
-        reports) is left as it is.
+        any other class; `n_spectra` counts the delivered blocks of each slot and
+        `n_blocks` the block rows read, so a policy can tell a block that has not been
+        read from one that fell short. The kernel's own posterior is not changed, and
+        every other leaf stays. An entry that was not computed (an audience that cannot
+        read the reports) is left as it is.
         """
         names = study.caps.kind_names
         spec = tuple(name for name, _, _ in slice_spec(study))
@@ -1720,8 +1728,11 @@ class ReportRefit(AbstractRefitBoundary):
                 continue
             rows = req.rows.valid[w, a, s] & (req.rows.kind[w, a, s] == kind)
             code = req.rows.payload[w, a, s][rows][:, columns].max(axis=0, initial=0.0)
+            body = req.rows.payload[w, a, s][rows][:, columns]
             code = np.rint(code).astype(np.int64)
             pieces["revealed"][w, a, s] = code
+            pieces["n_spectra"][w, a, s] = (body > 0.5).sum(axis=0)
+            pieces["n_blocks"][w, a, s] = rows.sum()
             seen = code > 0
             pieces["p_class"][w, a, s] = np.where(
                 seen,
