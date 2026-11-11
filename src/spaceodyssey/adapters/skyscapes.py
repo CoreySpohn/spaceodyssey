@@ -541,7 +541,9 @@ class StarSpec:
     """A host star as the study uses it: plain numbers, one per subject.
 
     `flux_density_jy` is the stellar flux density at the band center, read from the
-    star the universe files hold.
+    star the universe files hold. `band_fluxes_jy` holds more bands as
+    ``(wavelength_nm, flux_density_jy)`` pairs, one per observing mode of a survey
+    that observes in several bands (`flux_at` reads them).
     """
 
     name: str
@@ -552,6 +554,24 @@ class StarSpec:
     luminosity_lsun: float
     diameter_mas: float
     flux_density_jy: float
+    band_fluxes_jy: tuple = ()
+
+    def flux_at(self, wavelength_nm=None):
+        """Flux density [Jy] in the band centred on `wavelength_nm`.
+
+        `None` is the star's own band-center flux, `flux_density_jy`. A wavelength
+        must be one the spec was built with (`band_fluxes_jy`).
+        """
+        if wavelength_nm is None:
+            return self.flux_density_jy
+        for center, flux in self.band_fluxes_jy:
+            if math.isclose(center, float(wavelength_nm), rel_tol=1e-9):
+                return flux
+        have = [c for c, _ in self.band_fluxes_jy]
+        raise ValueError(
+            f"star {self.name!r} has no flux at {wavelength_nm} nm; "
+            f"band fluxes were built for {have}"
+        )
 
 
 class PopulationTruth(PhysicalTruth):
@@ -659,13 +679,50 @@ def _stored_planets(path, system, wavelength_nm):
     return out
 
 
-def _star_spec(system, hip_name, wavelength_nm, epoch_jd):
+def _star_spec(system, hip_name, wavelength_nm, epoch_jd, bands_nm=()):
     """The `StarSpec` of a loaded system's star."""
-    return _spec_of_star(system.star, hip_name, wavelength_nm, epoch_jd)
+    return _spec_of_star(
+        system.star, hip_name, wavelength_nm, epoch_jd, bands_nm=bands_nm
+    )
 
 
-def _spec_of_star(star, hip_name, wavelength_nm, epoch_jd, luminosity_lsun=None):
-    """The `StarSpec` of a skyscapes `Star`, reading its flux at `wavelength_nm`."""
+BAND_POINTS = 9  # wavelengths averaged across a band
+
+
+def _band_flux_jy(star, epoch_jd, center_nm, width_nm):
+    """Flux density [Jy] of `star` in a band: its mean photon flux, read at the center.
+
+    The photon flux density per nm is averaged over `BAND_POINTS` wavelengths across
+    the band (a single point for a zero width), then expressed in Jy at `center_nm`.
+    """
+    points = jnp.linspace(
+        center_nm - width_nm / 2, center_nm + width_nm / 2, BAND_POINTS
+    )
+    if not width_nm > 0:
+        points = jnp.asarray([center_nm], F64)
+    photons = jnp.ravel(star.spec_flux_density(points, epoch_jd))
+    n = points.shape[0]
+    photons = photons.reshape(n, -1)[:, 0]
+    if not bool(jnp.all(jnp.isfinite(photons))):
+        raise ValueError(
+            f"the star's flux table does not cover the {center_nm} nm band "
+            f"(width {width_nm} nm)"
+        )
+    return float(photons_per_nm_per_m2_to_jy(jnp.mean(photons), center_nm))
+
+
+def _spec_of_star(
+    star, hip_name, wavelength_nm, epoch_jd, luminosity_lsun=None, bands_nm=()
+):
+    """The `StarSpec` of a skyscapes `Star`, reading its flux at `wavelength_nm`.
+
+    `bands_nm` are ``(center_nm, width_nm)`` bands whose mean flux density the spec
+    also carries (`StarSpec.band_fluxes_jy`).
+    """
+    band_fluxes = tuple(
+        (float(c), _band_flux_jy(star, epoch_jd, float(c), float(w)))
+        for c, w in bands_nm
+    )
     photons = star.spec_flux_density(jnp.asarray(wavelength_nm, F64), epoch_jd)
     flux_jy = photons_per_nm_per_m2_to_jy(jnp.ravel(photons)[0], wavelength_nm)
     return StarSpec(
@@ -679,6 +736,7 @@ def _spec_of_star(star, hip_name, wavelength_nm, epoch_jd, luminosity_lsun=None)
         ),
         diameter_mas=float(star.diameter_arcsec) / mas2arcsec,
         flux_density_jy=float(flux_jy),
+        band_fluxes_jy=band_fluxes,
     )
 
 
@@ -694,6 +752,7 @@ def star_spec_from_model(
     dec_deg=0.0,
     wavelength_nm=1000.0,
     epoch_jd=J2000_JD,
+    bands_nm=(),
 ):
     """A `StarSpec` whose flux is a PHOENIX model atmosphere, not a scene file.
 
@@ -701,7 +760,10 @@ def star_spec_from_model(
     `mass_msun` and `radius_rsun` (solar metallicity, gravity capped at the grid edge
     of log g = 5), scaled to `dist_pc`; the flux
     density is read at `wavelength_nm`. `luminosity_lsun` is the catalog value, which
-    is what the exoEarth-candidate box uses, and is kept as given.
+    is what the exoEarth-candidate box uses, and is kept as given. `bands_nm` are
+    ``(center_nm, width_nm)`` bands whose mean flux density the spec also carries,
+    one per observing mode of a survey (the JATIS baseline reads ``(500, 100)`` and
+    ``(910, 6.5)``).
     """
     radius_m = radius_rsun * Rsun2m
     logg = math.log10(G_CGS * mass_msun * Msun2kg * 1e3 / (radius_m * 1e2) ** 2)
@@ -715,7 +777,9 @@ def star_spec_from_model(
         ra_deg=ra_deg,
         dec_deg=dec_deg,
     )
-    return _spec_of_star(star, name, wavelength_nm, epoch_jd, luminosity_lsun)
+    return _spec_of_star(
+        star, name, wavelength_nm, epoch_jd, luminosity_lsun, bands_nm=bands_nm
+    )
 
 
 class ExoVistaWorldSource(AbstractWorldSource):
@@ -765,6 +829,7 @@ class ExoVistaWorldSource(AbstractWorldSource):
         support=None,
         wavelength_nm=1000.0,
         epoch_jd=None,
+        bands_nm=(),
     ):
         """Read `files[w][s]`, star `s` of universe `w`, into a world source.
 
@@ -796,7 +861,9 @@ class ExoVistaWorldSource(AbstractWorldSource):
                 system = from_exovista(path, load_disk=False)
                 t0 = float(system.planets[0].orbit.t0_d[0]) if system.planets else 0.0
                 epoch = t0 if epoch is None else epoch
-                spec = _star_spec(system, _hip_name(path), wavelength_nm, epoch)
+                spec = _star_spec(
+                    system, _hip_name(path), wavelength_nm, epoch, bands_nm
+                )
                 if stars[s] is None:
                     stars[s] = spec
                 elif stars[s] != spec:
