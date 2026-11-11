@@ -571,6 +571,7 @@ class SummaryReport(eqx.Module):
         orbit_epoch_jd,
         observatory,
         yip_path=None,
+        wavelength_nm=None,
         bin_width_nm=100.0,
         optical_throughput=0.5,
         bg_multiplier=1.0,
@@ -586,11 +587,15 @@ class SummaryReport(eqx.Module):
         fraction. Without `yip_path` the pinned package is fetched through yippy's
         hash-checked loader. A `diameter_m` replaces the header diameter: the
         response stays in units of lambda/D, so the aperture axis moves the angular
-        scale and the collecting area together.
+        scale and the collecting area together. A `wavelength_nm` replaces the header
+        wavelength in the same way: the response is used achromatically in lambda/D,
+        so lambda/D in arcsec, the stellar and zodiacal fluxes and the exozodi all
+        follow the report's wavelength; `bin_width_nm` is the band width there.
         """
         path = fetch_pinned_yip() if yip_path is None else yip_path
         backend = EqxCoronagraph(path)
-        wavelength_nm, header_diameter_m = backend.stellar_frame
+        header_wavelength_nm, header_diameter_m = backend.stellar_frame
+        wavelength_nm = header_wavelength_nm if wavelength_nm is None else wavelength_nm
         diameter_m = header_diameter_m if diameter_m is None else diameter_m
         optical_path = OpticalPath(
             primary=SimplePrimary(
@@ -1762,11 +1767,57 @@ class _ModeAssets(eqx.Module):
     context: eqx.Module
     law: ReportingLaw
     calibration_id: int
+    char_report: SummaryReport | None = None
+
+
+def survey_table(profile):
+    """The ``survey`` table of a profile (its observing modes), or None."""
+    return load_profile(profile).get("survey")
+
+
+def survey_detector(survey, mode):
+    """The `DetectorSpec` of survey mode `mode` (detection or characterization)."""
+    d = survey["detector"]
+    return DetectorSpec(
+        d["name"],
+        d["family"],
+        d["quantum_efficiency"],
+        d["dqe"],
+        d["dqe_meaning"],
+        d["dark_current_rate_e_per_s"],
+        d["read_noise_e"],
+        d["clock_induced_charge_rate_e_per_frame"],
+        survey["modes"][mode]["frame_time_s"],
+        d["pixel_scale_arcsec"],
+        d["cadence"],
+    )
+
+
+def survey_grid_d(survey, n=None):
+    """The log-spaced integration times [d] of a survey profile, `n` values."""
+    g = survey["integration_grid"]
+    n = g["n"] if n is None else n
+    return tuple(float(x) for x in np.geomspace(g["min_d"], g["max_d"], n))
+
+
+def circumscribed_diameter_m(inscribed_m, obscured_area_fraction):
+    """The circumscribed diameter of an aperture of inscribed diameter `inscribed_m`.
+
+    The response and the collecting area are expressed on the circumscribed
+    aperture: ``inscribed / (1 - obscured area fraction)``.
+    """
+    return float(inscribed_m) / (1.0 - float(obscured_area_fraction))
 
 
 def _mode_assets(profile, detector, diameter_m, n_time_nodes, epoch_jd, law):
-    """The report, observing context and law at one aperture diameter."""
+    """The report, observing context and law at one aperture diameter.
+
+    A profile with a ``survey`` table builds one report per observing mode: the
+    imaging detection report and the IFS characterization report, each at its own
+    wavelength, band, throughput and post-processing factor.
+    """
     entry = load_profile(profile)
+    survey = entry.get("survey")
     clock = PhysicalClock.from_jd(epoch_jd, entry["time"]["tick_length_s"])
     context = context_from_profile(entry, clock)
     placeholder = SummaryScene(
@@ -1779,16 +1830,43 @@ def _mode_assets(profile, detector, diameter_m, n_time_nodes, epoch_jd, law):
         star_diameter_mas=0.0,
         n_exozodi=PROFILE_N_EXOZODI,
     )
-    report = SummaryReport.from_yip(
-        DetectorSpec(*detector),
-        placeholder,
-        orbit_epoch_jd=epoch_jd,
-        observatory=context.observatory,
-        n_time_nodes=n_time_nodes,
-        diameter_m=diameter_m,
-    )
     law = ReportingLaw(*law)
-    return _ModeAssets(report, context, law, calibration_id(report, law))
+    if survey is None:
+        report = SummaryReport.from_yip(
+            DetectorSpec(*detector),
+            placeholder,
+            orbit_epoch_jd=epoch_jd,
+            observatory=context.observatory,
+            n_time_nodes=n_time_nodes,
+            diameter_m=diameter_m,
+        )
+        return _ModeAssets(report, context, law, calibration_id(report, law))
+    reports = []
+    for mode, spec in (
+        ("detection", DetectorSpec(*detector)),
+        ("characterization", survey_detector(survey, "characterization")),
+    ):
+        m = survey["modes"][mode]
+        reports.append(
+            SummaryReport.from_yip(
+                spec,
+                placeholder,
+                orbit_epoch_jd=epoch_jd,
+                observatory=context.observatory,
+                n_time_nodes=n_time_nodes,
+                diameter_m=diameter_m,
+                wavelength_nm=m["wavelength_nm"],
+                bin_width_nm=m["bin_width_nm"],
+                optical_throughput=m["optics_throughput"],
+                ppfact=survey["post_processing_factor"],
+            )
+        )
+    ids = [calibration_id(r, law) for r in reports]
+    digest = hashlib.blake2b(
+        "|".join(map(str, ids)).encode(), digest_size=CALIBRATION_ID_BYTES
+    )
+    combined = int.from_bytes(digest.digest(), "big") or 1
+    return _ModeAssets(reports[0], context, law, combined, reports[1])
 
 
 @functools.lru_cache(maxsize=8)
@@ -1888,6 +1966,9 @@ class ObservingModeChannel(AbstractChannelModel):
     block_snr_required: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, F64))
     block_rate_divisor: float = eqx.field(static=True)
     calibration: int = eqx.field(static=True)
+    survey: bool = eqx.field(default=False, static=True, kw_only=True)
+    char_scenes: SummaryScene | None = eqx.field(default=None, kw_only=True)
+    char_leakage: jax.Array | None = eqx.field(default=None, kw_only=True)
 
     def __check_init__(self):
         """Refuse malformed declarations."""
@@ -1921,22 +2002,71 @@ class ObservingModeChannel(AbstractChannelModel):
         law=None,
         n_time_nodes=8,
         n_exozodi=PROFILE_N_EXOZODI,
-        exposures_s=DETECTION_EXPOSURES_S,
-        block_days=BLOCK_DAYS,
-        block_snr_required=BLOCK_SNR_REQUIRED,
-        block_rate_divisor=BLOCK_RATE_DIVISOR,
+        exposures_s=None,
+        block_days=None,
+        block_snr_required=None,
+        block_rate_divisor=None,
+        n_grid=None,
     ):
         """The channel of `stars` (objects with `StarSpec`'s fields).
 
         `diameter_m` defaults to the response header's; `catalog_mass_kg` to the
         stars' own masses. Each host's leakage table is computed here, once.
+
+        With the default profile the detection exposures are `DETECTION_EXPOSURES_S`
+        and the block modes the fixed `BLOCK_DAYS` lengths. A profile with a
+        ``survey`` table (`JATIS_EAC1_V1`) instead builds two reports, imaging
+        detection and IFS characterization: the detection exposures and the
+        characterization times are the profile's log-spaced grid of `n_grid` values
+        (default the profile's), the detection threshold and the characterization
+        requirement are the modes' required signal-to-noise ratios, `diameter_m`
+        defaults to the circumscribed aperture of the profile's inscribed diameter,
+        and every star needs the fluxes of both bands (`StarSpec.band_fluxes_jy`).
         """
         stars = tuple(stars)
-        detector = dataclasses.astuple(detector or DetectorSpec.fixture())
-        law = law or ReportingLaw()
+        survey = survey_table(profile)
+        if survey is None:
+            exposures_s = DETECTION_EXPOSURES_S if exposures_s is None else exposures_s
+            block_days = BLOCK_DAYS if block_days is None else block_days
+            block_snr_required = (
+                BLOCK_SNR_REQUIRED if block_snr_required is None else block_snr_required
+            )
+            block_rate_divisor = (
+                BLOCK_RATE_DIVISOR if block_rate_divisor is None else block_rate_divisor
+            )
+            detector = detector or DetectorSpec.fixture()
+            law = law or ReportingLaw()
+            wl_det = wl_char = None
+        else:
+            grid = survey_grid_d(survey, n_grid)
+            exposures_s = (
+                tuple(d * d2s for d in grid) if exposures_s is None else exposures_s
+            )
+            block_days = grid if block_days is None else block_days
+            modes = survey["modes"]
+            wl_det = modes["detection"]["wavelength_nm"]
+            wl_char = modes["characterization"]["wavelength_nm"]
+            block_snr_required = (
+                modes["characterization"]["snr_required"]
+                if block_snr_required is None
+                else block_snr_required
+            )
+            block_rate_divisor = (
+                1.0 if block_rate_divisor is None else block_rate_divisor
+            )
+            detector = detector or survey_detector(survey, "detection")
+            law = law or ReportingLaw(threshold=modes["detection"]["snr_required"])
+        detector = dataclasses.astuple(detector)
         law = (law.threshold, law.kappa, law.corr)
         if diameter_m is None:
-            diameter_m = float(load_profile(profile)["response"]["diameter_m"])
+            response = load_profile(profile)["response"]
+            diameter_m = (
+                float(response["diameter_m"])
+                if survey is None
+                else circumscribed_diameter_m(
+                    survey["inscribed_diameter_m"], response["obscured_area_fraction"]
+                )
+            )
         args = (
             profile,
             detector,
@@ -1946,18 +2076,37 @@ class ObservingModeChannel(AbstractChannelModel):
             law,
         )
         built = _build_mode_assets(*args)
-        scenes = SummaryScene(
-            **{
-                name: jnp.asarray(
-                    [getattr(_star_scene(st, n_exozodi), name) for st in stars],
-                    jnp.float64,
-                )
-                for name in SummaryScene.__dataclass_fields__
-            }
-        )
+
+        def stacked(wavelength_nm):
+            return SummaryScene(
+                **{
+                    name: jnp.asarray(
+                        [
+                            getattr(_star_scene(st, n_exozodi, wavelength_nm), name)
+                            for st in stars
+                        ],
+                        jnp.float64,
+                    )
+                    for name in SummaryScene.__dataclass_fields__
+                }
+            )
+
+        scenes = stacked(wl_det)
         tables = jnp.stack(
-            [built.report.leakage_table(_star_scene(st, n_exozodi)) for st in stars]
+            [
+                built.report.leakage_table(_star_scene(st, n_exozodi, wl_det))
+                for st in stars
+            ]
         )
+        char_scenes = char_tables = None
+        if survey is not None:
+            char_scenes = stacked(wl_char)
+            char_tables = jnp.stack(
+                [
+                    built.char_report.leakage_table(_star_scene(st, n_exozodi, wl_char))
+                    for st in stars
+                ]
+            )
         if catalog_mass_kg is None:
             catalog_mass_kg = scenes.star_mass_kg
         digest = hashlib.blake2b(digest_size=CALIBRATION_ID_BYTES)
@@ -1966,6 +2115,10 @@ class ObservingModeChannel(AbstractChannelModel):
         for leaf in jax.tree_util.tree_leaves(scenes):
             digest.update(np.asarray(leaf).tobytes())
         digest.update(np.asarray(catalog_mass_kg, np.float64).tobytes())
+        if survey is not None:
+            digest.update(np.asarray(char_tables).tobytes())
+            for leaf in jax.tree_util.tree_leaves(char_scenes):
+                digest.update(np.asarray(leaf).tobytes())
         if float(block_snr_required) != BLOCK_SNR_REQUIRED:
             # the default keeps the calibration id of channels built before the knob
             digest.update(np.float64(block_snr_required).tobytes())
@@ -1985,6 +2138,9 @@ class ObservingModeChannel(AbstractChannelModel):
             block_snr_required=float(block_snr_required),
             block_rate_divisor=float(block_rate_divisor),
             calibration=int.from_bytes(digest.digest(), "big") or 1,
+            survey=survey is not None,
+            char_scenes=char_scenes,
+            char_leakage=char_tables,
         )
 
     # -- Modes ---------------------------------------------------------------
@@ -2046,15 +2202,23 @@ class ObservingModeChannel(AbstractChannelModel):
 
     # -- Scenes and planets ----------------------------------------------------
 
-    def _prepared(self, subject, *, nominal, mass_kg=None):
-        """The prepared scene of one star: true, or the belief's (catalog mass)."""
+    def _prepared(self, subject, *, nominal, mass_kg=None, char=False):
+        """The prepared scene of one star: true, or the belief's (catalog mass).
+
+        `char` selects the characterization report's scene on a survey channel (the
+        host's flux and leakage in the IFS band); otherwise the detection report's.
+        """
         built = self.assets()
-        scene = jax.tree_util.tree_map(lambda x: x[subject], self.scenes)
+        report, scenes, leakage = built.report, self.scenes, self.leakage
+        if char and self.survey:
+            report, scenes = built.char_report, self.char_scenes
+            leakage = self.char_leakage
+        scene = jax.tree_util.tree_map(lambda x: x[subject], scenes)
         if nominal:
             scene = eqx.tree_at(
                 lambda s: s.star_mass_kg, scene, self.catalog_mass_kg[subject]
             )
-        prepared = built.report.prepare(scene, self.leakage[subject])
+        prepared = report.prepare(scene, leakage[subject])
         if mass_kg is not None:
             prepared = eqx.tree_at(
                 lambda p: p.star_mass_kg, prepared, jnp.asarray(mass_kg, jnp.float64)
@@ -2178,8 +2342,8 @@ class ObservingModeChannel(AbstractChannelModel):
 
     def _block_row(self, truth, subject, index, key, context):
         """A block mode's row: true accumulated signal-to-noise per slot."""
-        interval, valid, _ = self._interval(context, settle=False)
-        prepared = self._prepared(subject, nominal=False)
+        interval, valid, _ = self._interval(context, settle=self.survey)
+        prepared = self._prepared(subject, nominal=False, char=True)
         planets = self._slot_planets(truth, subject)
         present = truth.present[subject]
         interval = ScienceInterval(
@@ -2252,6 +2416,8 @@ class ObservingModeChannel(AbstractChannelModel):
         outer working angles of the response; the detector term counts frames over
         the observable time.
         """
+        if self.survey:
+            return self._characterize(prepared, planet, interval)
         report = self.assets().report
         times = report.node_times_jd(interval)
         r = report.rates(prepared, planet, times)
@@ -2263,6 +2429,18 @@ class ObservingModeChannel(AbstractChannelModel):
         budget = report.budget_from_rates(prepared, r, duration * share, w)
         snr = _scaled_snr(budget, self.block_rate_divisor)
         return jnp.where(share > 0, snr, 0.0), share
+
+    def _characterize(self, prepared, planet, interval):
+        """``(signal-to-noise, 1)`` of one IFS spectral channel over `interval`.
+
+        The signal-to-noise ratio is that of the characterization report's band, one
+        channel of width lambda/R, with the planet in the noise. The response applies
+        as it does in detection: no separate cut at the inner working angle, so the
+        observable fraction is 1.
+        """
+        report = self.assets().char_report
+        budget = report.budget(prepared, planet, interval)
+        return _scaled_snr(budget, 1.0), jnp.ones((), F64)
 
     # -- The belief's views of the channel ---------------------------------------
 
@@ -2352,25 +2530,36 @@ class ObservingModeChannel(AbstractChannelModel):
         """Scaled signal-to-noise of a block from day `start_d`, per draw ``(n, 8)``."""
         length_s = jnp.asarray(self.block_days, F64)[block_mode] * d2s
         start = self.epoch_jd + jnp.asarray(start_d, F64)
+        if self.survey:
+            # the observation starts with its overhead; the science follows it
+            start = start + self.overhead_d
         interval = ScienceInterval(start + 0.5 * length_s * s2d, length_s)
 
         def one(row):
             planet, mass = self._belief_planet(row)
-            prepared = self._prepared(subject, nominal=True, mass_kg=mass)
+            prepared = self._prepared(subject, nominal=True, mass_kg=mass, char=True)
             return self._block(prepared, planet, interval)[0]
 
         return jax.vmap(one)(jnp.asarray(elements, F64))
 
-    def block_time(self, subject):
-        """Days a reference Earth twin at quadrature needs to reach the requirement.
+    @property
+    def overhead_d(self):
+        """Days an observation spends settling before its science interval."""
+        built = self.assets()
+        return float(built.context.settle_ticks) / float(
+            built.context.clock.ticks_per_day
+        )
+
+    def _twin_time(self, subject, report, prepared, short_of):
+        """Days an Earth twin at quadrature needs until `short_of(budget, ref)` clears.
 
         The twin has the Earth's radius and mass, the albedo `REFERENCE_ALBEDO` and
         a face-on circular orbit at the star's Earth-equivalent insolation, so its
-        phase angle is 90 degrees at every epoch. The accumulation is rate-scaled
-        (`block_rate_divisor`), and the time is found by bisection in log time.
+        phase angle is 90 degrees at every epoch. `short_of(planet budget,
+        planet-free budget)` is positive while the requirement is not met; the time
+        is found by bisection in log time between 1 s and 1e9 s, and is infinite where even
+        1e9 s is short.
         """
-        report = self.assets().report
-        prepared = self._prepared(subject, nominal=True)
         scene = prepared.scene
         a_au = jnp.sqrt(jnp.asarray(scene.luminosity_lsun, F64))
         twin = nominal_planet(
@@ -2384,24 +2573,77 @@ class ObservingModeChannel(AbstractChannelModel):
             Ag=REFERENCE_ALBEDO,
         )
         twin["Mp"] = jnp.asarray(Mearth2kg, F64)
+        free = planet_free(twin)
         mid = jnp.asarray(report.orbit_epoch_jd, F64)
 
-        def snr_at(log_seconds):
-            seconds = jnp.exp(log_seconds)
-            interval = ScienceInterval(mid, seconds)
-            budget = report.budget(prepared, twin, interval)
-            return _scaled_snr(budget, self.block_rate_divisor)
+        def short_at(log_seconds):
+            interval = ScienceInterval(mid, jnp.exp(log_seconds))
+            return short_of(
+                report.budget(prepared, twin, interval),
+                report.budget(prepared, free, interval),
+            )
 
         def step(_, bounds):
             lo, hi = bounds
             half = 0.5 * (lo + hi)
-            below = snr_at(half) < self.block_snr_required
+            below = short_at(half) > 0
             return jnp.where(below, half, lo), jnp.where(below, hi, half)
 
-        lo, hi = jax.lax.fori_loop(
-            0, _BISECTION_STEPS, step, (jnp.log(1e2), jnp.log(1e9))
-        )
-        return jnp.exp(0.5 * (lo + hi)) * s2d
+        top = jnp.log(1e9)
+        lo, hi = jax.lax.fori_loop(0, _BISECTION_STEPS, step, (jnp.log(1.0), top))
+        days = jnp.exp(0.5 * (lo + hi)) * s2d
+        return jnp.where(short_at(top) > 0, jnp.inf, days)
+
+    def block_time(self, subject):
+        """Days a reference Earth twin at quadrature needs to reach the requirement.
+
+        The accumulation is rate-scaled (`block_rate_divisor`) on a default-profile
+        channel; on a survey channel it is the IFS characterization time,
+        `characterize_time`.
+        """
+        if self.survey:
+            return self.characterize_time(subject)
+        built = self.assets()
+        prepared = self._prepared(subject, nominal=True)
+
+        def short(budget, _):
+            snr = _scaled_snr(budget, self.block_rate_divisor)
+            return self.block_snr_required - snr
+
+        return self._twin_time(subject, built.report, prepared, short)
+
+    def detect_time(self, subject):
+        """Days a reference Earth twin at quadrature needs to be detected.
+
+        The integration at which the expected planet counts equal the reporting
+        threshold times the planet-free noise (`ReportingLaw.limit_counts`), the
+        50 percent point of `detect_probability`; the overhead is not included.
+        """
+        built = self.assets()
+        prepared = self._prepared(subject, nominal=True)
+
+        def short(budget, reference):
+            return (
+                built.law.threshold * built.law.limit_counts(reference) - budget.planet
+            )
+
+        return self._twin_time(subject, built.report, prepared, short)
+
+    def characterize_time(self, subject):
+        """Days a reference Earth twin at quadrature needs for the IFS requirement.
+
+        The signal-to-noise ratio of one spectral channel (`_characterize`) reaches
+        `block_snr_required`; the overhead is not included. Survey channels only.
+        """
+        if not self.survey:
+            raise ValueError("characterize_time needs a survey profile")
+        built = self.assets()
+        prepared = self._prepared(subject, nominal=True, char=True)
+
+        def short(budget, _):
+            return self.block_snr_required - _scaled_snr(budget, 1.0)
+
+        return self._twin_time(subject, built.char_report, prepared, short)
 
     def report_data(self, subject, rows):
         """`ReportData` of the visit-report rows `rows` (``[R, width]``) of one star."""
@@ -2532,10 +2774,17 @@ class ObservingModeChannel(AbstractChannelModel):
         return self.assets().report.budget(prepared, planet, interval)
 
 
-def _star_scene(star, n_exozodi):
-    """The `SummaryScene` of a host described by a `StarSpec`."""
+def _star_scene(star, n_exozodi, wavelength_nm=None):
+    """The `SummaryScene` of a host described by a `StarSpec`.
+
+    `wavelength_nm` selects the band the star's flux is read in
+    (`StarSpec.flux_at`); `None` is the spec's own band-center flux.
+    """
+    flux = (
+        star.flux_density_jy if wavelength_nm is None else star.flux_at(wavelength_nm)
+    )
     return SummaryScene(
-        star_flux_density_jy=float(star.flux_density_jy),
+        star_flux_density_jy=float(flux),
         dist_pc=float(star.dist_pc),
         star_mass_kg=float(star.mass_msun) * Msun2kg,
         luminosity_lsun=float(star.luminosity_lsun),

@@ -183,8 +183,10 @@ def channel_table(channel, caps, *, budget_unit_s=None):
     """The `ChannelTable` of the observing modes of `channel`.
 
     A detection mode occupies the settling time plus its exposure; a block mode its
-    length; the catalog mode one tick. Telescope modes charge their occupancy in days
-    to the shared resource; the catalog mode charges nothing.
+    length (plus the settling time on a survey channel, whose characterization
+    observations carry the same overhead as detections); the catalog mode one tick.
+    Telescope modes charge their occupancy in days to the shared resource; the
+    catalog mode charges nothing.
     """
     built = channel.assets()
     clock = built.context.clock
@@ -197,7 +199,8 @@ def channel_table(channel, caps, *, budget_unit_s=None):
         lane.append(LANE_TELESCOPE)
         kind.append(KIND_VISIT)
     for days in channel.block_days:
-        occupancy.append(round(days * per_day))
+        # a survey characterization settles like a detection; a block is its length
+        occupancy.append((settle if channel.survey else 0) + round(days * per_day))
         lane.append(LANE_TELESCOPE)
         kind.append(KIND_BLOCK)
     occupancy.append(CATALOG_TICKS)
@@ -391,6 +394,8 @@ class BracketPolicy(AbstractPolicy):
         flags = stars[:, 3:]
         charged, kick, stopped = pstate[n * stride : n * stride + 3]
         belief = view.belief
+        # the mode counts are the summary's own, so any channel's grids fit
+        n_detect, n_block = belief.p_det.shape[-1], belief.p_block.shape[-1]
         cost = ch.cost[:, SHARED_RESOURCE]
         remaining = self.budget_d - charged
         tick = view.tick
@@ -415,7 +420,7 @@ class BracketPolicy(AbstractPolicy):
             N_NODES - 1,
         ).astype(I64)
         s_ix = jnp.arange(n)
-        weight = jnp.maximum(cost[:N_DETECT], 1e-9)
+        weight = jnp.maximum(cost[:n_detect], 1e-9)
 
         # 1. Block.
         lod = study.channel_model.assets().report.lod_arcsec
@@ -431,7 +436,7 @@ class BracketPolicy(AbstractPolicy):
         bs = jnp.argmax(block_score.reshape(-1))
         block_star, block_slot = bs // slots, bs % slots
         do_block = block_score.reshape(-1)[bs] > 0
-        block_channel = N_DETECT + block_mode[block_star, block_slot]
+        block_channel = n_detect + block_mode[block_star, block_slot]
 
         # 2. Follow-up.
         known = (belief.n_det >= 1) | (belief.p_class >= 0.5)
@@ -444,9 +449,9 @@ class BracketPolicy(AbstractPolicy):
         flat = pd_val.reshape(n, -1)
         fu_best = flat.argmax(axis=1)
         fu_score = flat.max(axis=1)
-        fu_slot = fu_best // (N_NODES * N_DETECT)
-        fu_node = (fu_best // N_DETECT) % N_NODES
-        fu_mode = fu_best % N_DETECT
+        fu_slot = fu_best // (N_NODES * n_detect)
+        fu_node = (fu_best // n_detect) % N_NODES
+        fu_mode = fu_best % n_detect
         fu_p = belief.p_det[s_ix, fu_slot, fu_node, fu_mode]
         fu_ok = (
             (fu_score > 0)
@@ -470,7 +475,7 @@ class BracketPolicy(AbstractPolicy):
         sp_flat = jnp.where(sp_ok, sp_val, -1.0).reshape(-1)
         sb = jnp.argmax(sp_flat)
         do_search = sp_flat[sb] > 0
-        search_star, search_mode = sb // N_DETECT, sb % N_DETECT
+        search_star, search_mode = sb // n_detect, sb % n_detect
 
         star = jnp.where(do_block, block_star, jnp.where(do_follow, fs, search_star))
         channel = jnp.where(
@@ -492,7 +497,7 @@ class BracketPolicy(AbstractPolicy):
             [EffectKind.STOP, EffectKind.OBSERVE, EffectKind.WAIT, EffectKind.OBSERVE],
             EffectKind.WAIT,
         )
-        cat_channel = N_DETECT + N_BLOCK
+        cat_channel = n_detect + n_block
         eff_star = jnp.where(observe_cat, jnp.minimum(kick.astype(I64), n - 1), star)
         eff_channel = jnp.where(observe_cat, cat_channel, channel)
         wake = jnp.where(stale & ~kicking, next_day, tick + per_day)
