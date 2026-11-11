@@ -214,6 +214,7 @@ require_tier_reason = true
 "tests/adapters/test_reporting_law.py" = 1602
 "tests/adapters/test_skyscapes_scene.py" = 653
 "tests/adapters/test_summary_channel.py" = 416
+"tests/adapters/test_world_source_draw.py" = 446
 "tests/anchors/test_profile_table.py" = 10
 "tests/codec/test_checkpoint_store.py" = 32
 "tests/codec/test_digest.py" = 15

@@ -32,6 +32,12 @@ the number of planets a generator drew. Slots hold the planets inside a declared
 is the geometric albedo whose Lambert phase curve reproduces the file's contrast at
 the band center at the first epoch (the file's own spectra are not carried).
 
+`ExoVistaWorldSource.from_draws` builds the same arrays without files: it draws each
+world's planets with `skyscapes.population.draw_population` (the occurrence-rate
+generator, pure JAX) and fills slots by the same rules. The albedo there is the
+planet type's geometric albedo at the band center, and the star's flux comes from a
+PHOENIX model atmosphere (`star_spec_from_model`), not from a scene file.
+
 `diagnose(truth, record, ...)` recomputes truth-side geometry for a record from
 the truth and the record identity (subject, start and end ticks): the science
 midpoint epoch, the sky offsets, the separation, the phase angle, the
@@ -49,6 +55,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 from hwoutils.constants import (
+    J2000_JD,
     G,
     Mearth2kg,
     Mjup2kg,
@@ -70,8 +77,15 @@ from orbix.orbit import KeplerianOrbit
 from photomancy.orbit.data import OrbitData
 from photomancy.orbit.forward import predict_photometry
 from photomancy.orbit.model import build_model
-from skyscapes.io import from_exovista, get_earth_like_planet_indices
+from skyscapes.io import from_exovista, from_phoenix, get_earth_like_planet_indices
 from skyscapes.physical_model import LambertianPhysicalModel
+from skyscapes.population import (
+    draw_population,
+    earth_like,
+    load_occurrence_table,
+    load_planet_types,
+    sky_elements,
+)
 from skyscapes.scene import BlackbodyStar, Planet, Star, System
 
 from spaceodyssey.core.enums import F64
@@ -570,6 +584,8 @@ _FILLER = {
     "Ag": 0.0,
 }
 _TRUTH_FIELDS = tuple(f.name for f in dataclasses.fields(PhysicalTruth))
+PHOENIX_LOGG_MAX = 5.0  # the model grid ends here; compact dwarfs are read at its edge
+G_CGS = 6.6743e-8  # cm^3 g^-1 s^-2, for the surface gravity handed to PHOENIX
 
 
 def _lambert_albedo(system, planet, wavelength_nm):
@@ -645,7 +661,11 @@ def _stored_planets(path, system, wavelength_nm):
 
 def _star_spec(system, hip_name, wavelength_nm, epoch_jd):
     """The `StarSpec` of a loaded system's star."""
-    star = system.star
+    return _spec_of_star(system.star, hip_name, wavelength_nm, epoch_jd)
+
+
+def _spec_of_star(star, hip_name, wavelength_nm, epoch_jd, luminosity_lsun=None):
+    """The `StarSpec` of a skyscapes `Star`, reading its flux at `wavelength_nm`."""
     photons = star.spec_flux_density(jnp.asarray(wavelength_nm, F64), epoch_jd)
     flux_jy = photons_per_nm_per_m2_to_jy(jnp.ravel(photons)[0], wavelength_nm)
     return StarSpec(
@@ -654,10 +674,48 @@ def _star_spec(system, hip_name, wavelength_nm, epoch_jd):
         dist_pc=float(star.dist_pc),
         ra_deg=float(star.ra_deg),
         dec_deg=float(star.dec_deg),
-        luminosity_lsun=float(star.luminosity_lsun),
+        luminosity_lsun=float(
+            star.luminosity_lsun if luminosity_lsun is None else luminosity_lsun
+        ),
         diameter_mas=float(star.diameter_arcsec) / mas2arcsec,
         flux_density_jy=float(flux_jy),
     )
+
+
+def star_spec_from_model(
+    name,
+    *,
+    mass_msun,
+    dist_pc,
+    luminosity_lsun,
+    teff_k,
+    radius_rsun,
+    ra_deg=0.0,
+    dec_deg=0.0,
+    wavelength_nm=1000.0,
+    epoch_jd=J2000_JD,
+):
+    """A `StarSpec` whose flux is a PHOENIX model atmosphere, not a scene file.
+
+    The model is `skyscapes.io.from_phoenix` at `teff_k` and the surface gravity of
+    `mass_msun` and `radius_rsun` (solar metallicity, gravity capped at the grid edge
+    of log g = 5), scaled to `dist_pc`; the flux
+    density is read at `wavelength_nm`. `luminosity_lsun` is the catalog value, which
+    is what the exoEarth-candidate box uses, and is kept as given.
+    """
+    radius_m = radius_rsun * Rsun2m
+    logg = math.log10(G_CGS * mass_msun * Msun2kg * 1e3 / (radius_m * 1e2) ** 2)
+    logg = min(logg, PHOENIX_LOGG_MAX)
+    star = from_phoenix(
+        teff_k,
+        logg,
+        Ms_kg=mass_msun * Msun2kg,
+        dist_pc=dist_pc,
+        radius_m=radius_m,
+        ra_deg=ra_deg,
+        dec_deg=dec_deg,
+    )
+    return _spec_of_star(star, name, wavelength_nm, epoch_jd, luminosity_lsun)
 
 
 class ExoVistaWorldSource(AbstractWorldSource):
@@ -769,6 +827,128 @@ class ExoVistaWorldSource(AbstractWorldSource):
             occupancy=jnp.asarray(occupancy),
             stars=tuple(stars),
             epoch_jd=float(epoch),
+            support=support,
+        )
+
+    @classmethod
+    def from_draws(
+        cls,
+        keys,
+        stars,
+        *,
+        n_slots,
+        support=None,
+        wavelength_nm=1000.0,
+        epoch_jd=J2000_JD,
+        config=None,
+    ):
+        """Draw one world per key from the occurrence-rate generator.
+
+        `keys` is ``[n_worlds]`` PRNG keys (world `w` depends on `keys[w]` alone) and
+        `stars` the `StarSpec` of each host; the draw is
+        `skyscapes.population.draw_population` over the stars' masses and
+        luminosities. See `from_population` for the slot rules.
+        """
+        occurrence, types = load_occurrence_table(), load_planet_types()
+        mass = jnp.asarray([s.mass_msun for s in stars], F64)
+        lum = jnp.asarray([s.luminosity_lsun for s in stars], F64)
+        population = eqx.filter_jit(
+            lambda ks: jax.lax.map(
+                lambda k: draw_population(k, occurrence, types, lum, mass, config), ks
+            )
+        )(jnp.asarray(keys))
+        return cls.from_population(
+            population,
+            stars,
+            n_slots=n_slots,
+            support=support,
+            wavelength_nm=wavelength_nm,
+            epoch_jd=epoch_jd,
+            types=types,
+        )
+
+    @classmethod
+    def from_population(
+        cls,
+        population,
+        stars,
+        *,
+        n_slots,
+        support=None,
+        wavelength_nm=1000.0,
+        epoch_jd=J2000_JD,
+        types=None,
+    ):
+        """Build a world source from drawn `PlanetPopulation` leaves ``[W, S, P]``.
+
+        The slot, class and drop rules are those of `from_files`: slots hold the
+        planets inside `support`, the first `n_slots` by descending peak flux ratio;
+        `klass` is 1 inside the exoEarth-candidate box (counted over all planets,
+        `dropped_class1` among those that did not reach a slot). Orbits are at
+        `epoch_jd` (the epoch of the ExoVista files is J2000). The geometric albedo is
+        the planet type's at `wavelength_nm`.
+        """
+        support = SupportRange() if support is None else support
+        types = load_planet_types() if types is None else types
+        n_stars = len(stars)
+        if population.present.shape[1] != n_stars:
+            raise ValueError("the population needs one star axis entry per star")
+        if n_slots > population.present.shape[2]:
+            raise ValueError("n_slots exceeds the drawn planets per star")
+        mass_msun = jnp.asarray([s.mass_msun for s in stars], F64)
+        lum = np.asarray([s.luminosity_lsun for s in stars], np.float64)[None, :, None]
+        sky = jax.vmap(lambda p: sky_elements(p, mass_msun))(population)
+        present = np.asarray(population.present)
+        a_au = np.where(present, np.asarray(sky.a_au, np.float64), 1.0)
+        e = np.where(present, np.asarray(sky.e, np.float64), 0.0)
+        mass_kg = np.asarray(population.mass_mearth, np.float64) * Mearth2kg
+        star_kg = (np.asarray(mass_msun) * Msun2kg)[None, :, None]
+        mu = G * (star_kg + mass_kg)
+        period_d = np.asarray(period_a(a_au, mu), np.float64)
+        n = np.asarray(mean_motion(a_au, mu), np.float64)
+        rp_au = np.asarray(population.radius_rearth, np.float64) * Rearth2AU
+        albedo = np.asarray(
+            types.geometric_albedo(population.type_index, wavelength_nm), np.float64
+        )
+        w_rad = np.asarray(sky.w_rad, np.float64)
+        planets = {
+            "period_d": period_d,
+            "e": e,
+            "cos_i": np.cos(np.asarray(sky.i_rad, np.float64)),
+            "W_rad": np.asarray(sky.W_rad, np.float64),
+            "cos_w": np.cos(w_rad),
+            "sin_w": np.sin(w_rad),
+            "tp_jd": epoch_jd - np.asarray(sky.M0_rad, np.float64) / n,
+            "Mp_kg": mass_kg,
+            "Rp_AU": rp_au,
+            "Ag": albedo,
+        }
+        klass = present & np.asarray(
+            earth_like(a_au, np.asarray(population.radius_rearth, np.float64), lum)
+        )
+        low, high = support.period_d
+        inside = present & (period_d >= low) & (period_d <= high) & (e < support.e_max)
+        peak = albedo * (rp_au / (a_au * (1.0 - e))) ** 2
+        order = np.argsort(np.where(inside, -peak, np.inf), axis=-1, kind="stable")
+        order = order[..., :n_slots]
+        kept = np.take_along_axis(inside, order, axis=-1)
+        kept_class = np.take_along_axis(klass, order, axis=-1) & kept
+        leaves = {}
+        for name in _TRUTH_FIELDS:
+            taken = np.take_along_axis(planets[name], order, axis=-1)
+            leaves[name] = np.where(kept, taken, _FILLER.get(name, 0.0))
+        population_truth = PopulationTruth(
+            **{k: jnp.asarray(v, F64) for k, v in leaves.items()},
+            present=jnp.asarray(kept),
+            klass=jnp.asarray(kept_class.astype(np.int64)),
+        )
+        return cls(
+            population=population_truth,
+            dropped=jnp.asarray(present.sum(-1) - kept.sum(-1)),
+            dropped_class1=jnp.asarray(klass.sum(-1) - kept_class.sum(-1)),
+            occupancy=jnp.asarray(kept_class.sum(-1)),
+            stars=tuple(stars),
+            epoch_jd=float(epoch_jd),
             support=support,
         )
 
