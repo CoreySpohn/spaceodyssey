@@ -312,6 +312,7 @@ require_tier_reason = true
 "tests/studies/test_bracket_arms.py" = 50
 "tests/studies/test_bracket.py" = 565
 "tests/studies/test_bracket_batteries.py" = 709
+"tests/studies/test_bracket_characterization.py" = 1203
 "tests/studies/test_bracket_outcomes.py" = 1209
 "tests/studies/test_bracket_survey.py" = 600
 "tests/studies/test_gradients.py" = 206

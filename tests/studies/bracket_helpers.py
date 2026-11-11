@@ -63,6 +63,7 @@ def build(
     p_new=0.0,
     block_snr_required=None,
     channel=None,
+    policy_kw=None,
     **settings,
 ):
     """`(source, study, executor, truths, roots, run)` of `arm` (the oracle by default).
@@ -70,7 +71,8 @@ def build(
     `p_new` is the prior chance of a new planet per star, node and mode. `settings` go
     to the arm's boundary (a posterior arm needs `occupancy`). `block_snr_required`
     sets the channel's block requirement (its default when `None`); `channel` replaces
-    the fixture's own channel (it must observe the fixture's stars).
+    the fixture's own channel (it must observe the fixture's stars); `policy_kw` are
+    extra `BracketPolicy` arguments.
     """
     source = fixture_source()
     knob = (
@@ -85,7 +87,7 @@ def build(
         horizon_d=horizon_d,
         budget_d=budget_d,
         observer=br.SummaryObserver(prior=prior_summary(channel, n_stars, p_new)),
-        policy=br.BracketPolicy(budget_d, N_SLOTS),
+        policy=br.BracketPolicy(budget_d, N_SLOTS, **(policy_kw or {})),
     )
     executor = br.BoundExecutor(boundary=br.bracket_boundary(study, arm, **settings))
     roots = jnp.stack(
