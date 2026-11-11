@@ -1,9 +1,9 @@
 {
- "cache": "cold: the Pilot quick_ref job runs the whole quick tier with no JAX compile cache, so every program compiles; the warm quick tier of ci.yml is compared against it, which can only be lenient",
- "commit": "97753d57564770664fca3b73c26840d0681dacf2",
- "run_id": "42402352841",
- "source": "Pilot run 42402352841, job 128492675530 (Quick tier cold at 97753d5, py3.12, ubuntu-latest), the last commit before the Slice 2b build; quick-cold-summary wall (pytest: 1 failed, 1965 passed in 434.47 s)",
- "status": "provisional: the Slice 2 close-out quick-tier summary replaces it when that run exists",
- "tests": 1966,
- "wall_s": 434.46
+ "cache": "warm: the CI run's quick tier with the JAX compile cache restored from the previous commit, the same condition the gated quick tier runs under; a cold run at 895a8dd took 858.9 s (Pilot run 42957119671), so a cold pin would leave the increase limit nothing to catch",
+ "commit": "58d5effad42af5e7607217f18bf32a8f755a1d3f",
+ "run_id": "42915753187",
+ "source": "CI run 42915753187, job 130177747902 (Quick tier at 58d5eff, py3.12, ubuntu-latest), the last green quick tier before the block-decided claim; quick summary wall (pytest: 2057 passed in 478.11 s)",
+ "status": "replaces the provisional cold pin at 97753d5 (434.46 s, 1966 tests)",
+ "tests": 2057,
+ "wall_s": 478.11
 }
