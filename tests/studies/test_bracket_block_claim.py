@@ -139,12 +139,18 @@ def _decide(build_out, tick_d=0.0, **leaves):
     return int(effects.channel_index[0]), stars
 
 
+# The policy tests compile the whole bracket policy once per file (about 17 s on the
+# hosted runner), over the unit budget.
+POLICY_REASON = "compiles the bracket policy decision program"
+
+
 def _slots(built, value, dtype=jnp.int64):
     """A ``[n_stars, n_slots]`` array that is `value` at slot 0 of star 0."""
     shape = (built[1].caps.n_subjects, N_SLOTS)
     return jnp.zeros(shape, dtype).at[0, 0].set(value)
 
 
+@pytest.mark.medium(reason=POLICY_REASON)
 def test_a_candidate_is_blocked_and_a_revealed_slot_is_not():
     """Rule 1 acts on a candidate; a revealed slot (class 1 or not) gets no block."""
     built = _study()
@@ -156,6 +162,7 @@ def test_a_candidate_is_blocked_and_a_revealed_slot_is_not():
         assert channel < br.N_DETECT
 
 
+@pytest.mark.medium(reason=POLICY_REASON)
 def test_a_revealed_slot_is_not_followed_up():
     """A one-detection slot is followed up; once a block revealed it, it is not."""
     built = _study()
