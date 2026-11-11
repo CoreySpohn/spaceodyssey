@@ -2,6 +2,7 @@
 
 import dataclasses
 import functools
+from types import SimpleNamespace
 
 import equinox as eqx
 import jax
@@ -23,7 +24,8 @@ from spaceodyssey.studies.bracket import (
     ArmsResult,
     OutcomeTable,
     SummaryObserver,
-    claimed_slots,
+    candidate_slots,
+    confirmed_slots,
 )
 
 A = np.array([3.0, 5.0, 4.0, 8.0, 6.0])
@@ -90,8 +92,8 @@ def test_the_log_ratio_of_a_zero_mean_is_undefined():
     assert np.isnan(value) and np.isnan(se)
 
 
-def test_a_claim_needs_detections_class_status_and_a_tight_position():
-    """Each condition alone withholds the claim; all together grant it."""
+def test_a_candidate_needs_detections_class_status_and_a_tight_position():
+    """Each condition alone withholds the nomination; all together grant it."""
     lod = 0.04
 
     def belief(**override):
@@ -105,10 +107,10 @@ def test_a_claim_needs_detections_class_status_and_a_tight_position():
         leaves.update({k: jnp.asarray(v) for k, v in override.items()})
         return dataclasses.replace(base, **leaves)
 
-    assert bool(claimed_slots(belief(), lod)[0, 0])
+    assert bool(candidate_slots(belief(), lod)[0, 0])
     withheld = {
         "two detections": {"n_det": [[2]]},
-        "class probability under 0.5": {"p_class": [[0.49]]},
+        "class probability under the bar": {"p_class": [[0.19]]},
         "degraded refit": {"status": [[int(RefitStatus.DEGRADED)]]},
         "no refit yet": {"status": [[int(RefitStatus.NO_SUPPORT)]]},
         "failed refit": {"status": [[int(RefitStatus.FAILED)]]},
@@ -116,7 +118,18 @@ def test_a_claim_needs_detections_class_status_and_a_tight_position():
         "wide scatter": {"scatter": [[1.5 * lod]]},
     }
     for reason, change in withheld.items():
-        assert not bool(claimed_slots(belief(**change), lod)[0, 0]), reason
+        assert not bool(candidate_slots(belief(**change), lod)[0, 0]), reason
+    # host arrays: the rule is plain comparisons, so no program is compiled
+    low = jax.tree_util.tree_map(np.asarray, belief(p_class=[[0.15]]))
+    assert not bool(candidate_slots(low, lod)[0, 0])
+    assert bool(candidate_slots(low, lod, 0.1)[0, 0]), "the bar is a parameter"
+
+
+def test_only_a_revealed_class_one_slot_is_confirmed():
+    """Confirmation is the revealed class, not the class probability."""
+    # host arrays and only the leaves the rule reads: no program is compiled
+    belief = SimpleNamespace(p_class=np.ones((1, 3)), revealed=np.asarray([[0, 1, 2]]))
+    assert np.array_equal(np.asarray(confirmed_slots(belief))[0], [0, 0, 1])
 
 
 def test_an_arm_paired_with_itself_has_zero_gap_and_zero_error():
@@ -135,7 +148,7 @@ def _install():
 
     def run(old, new):
         out = observer.install(old, new, 0)
-        return out, claimed_slots(out, 1.0)
+        return out, candidate_slots(out, 1.0)
 
     return eqx.filter_jit(run)
 

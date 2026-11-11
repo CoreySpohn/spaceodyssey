@@ -136,6 +136,7 @@ from yippy.performance import PROFILE_STEP_PIX
 from spaceodyssey.adapters.photomancy import (
     CATALOG_FIELDS,
     ELEMENTS,
+    REVEAL_OFFSET,
     catalog_kind,
 )
 from spaceodyssey.adapters.physical_context import (
@@ -1670,7 +1671,9 @@ VISIT_SLOT = (
 # reads them needs only the slot count.
 VISIT_REST = VISIT_SLOT[1:]
 BLOCK_HEADER = ("time_d", "block_s")
-BLOCK_SLOT = ("block_snr", "observable_fraction")
+BLOCK_SLOT = ("block_snr", "observable_fraction", "revealed_class")
+# Per-slot block columns any audience may read; the others are scorer-only.
+BLOCK_RELEASED = ("revealed_class",)
 
 
 def _flat(header, slot, n_slots):
@@ -1707,11 +1710,27 @@ def visit_report_kind(n_slots, audience=EVERYONE):
     )
 
 
+def reveal_columns(n_slots):
+    """Positions of the `revealed_class` columns of a `block_outcome` row, per slot."""
+    names = block_columns(n_slots)
+    return tuple(column_index(names, f"revealed_class_{s}") for s in range(n_slots))
+
+
 def block_outcome_kind(n_slots):
-    """The `block_outcome` kind: scorer-only, so no audience reads a block's truth."""
+    """The `block_outcome` kind: the signal-to-noise columns are scorer-only.
+
+    The `revealed_class` column of each slot is released to every audience: it holds
+    the slot's true class (plus `REVEAL_OFFSET`) where the block met its requirement
+    and zero elsewhere, so a block that was not delivered reveals nothing.
+    """
+
+    def audience(name):
+        released = name.rsplit("_", 1)[0] in BLOCK_RELEASED
+        return EVERYONE if released else Audience.SCORER
+
     return RecordKind(
         BLOCK_KIND_NAME,
-        tuple(PayloadColumn(n, Audience.SCORER) for n in block_columns(n_slots)),
+        tuple(PayloadColumn(n, audience(n)) for n in block_columns(n_slots)),
     )
 
 
@@ -1824,7 +1843,10 @@ class ObservingModeChannel(AbstractChannelModel):
     - Block modes write a `block_outcome`: per slot, the signal-to-noise ratio of
       one spectral channel accumulated over the block while the planet lies inside
       the response working angles, with every photon rate divided by
-      `block_rate_divisor`, and the fraction of the block that was observable.
+      `block_rate_divisor`, the fraction of the block that was observable, and the
+      slot's true class where the signal-to-noise ratio met `block_snr_required`
+      (a block at that ratio decides class membership; the column is the only one
+      of the row an observer or policy may read).
     - The catalog mode writes the `truth_catalog`: the slots' elements and scale,
       for the registry's audiences to open or close by group.
 
@@ -1974,6 +1996,10 @@ class ObservingModeChannel(AbstractChannelModel):
     def n_channels(self):
         """Channels the model realizes: detections, blocks, then the catalog."""
         return self.n_detect + self.n_block + 1
+
+    def reveal_columns(self):
+        """Positions of the per-slot `revealed_class` columns of a block row."""
+        return reveal_columns(self.n_slots)
 
     @property
     def catalog_mode(self):
@@ -2153,8 +2179,11 @@ class ObservingModeChannel(AbstractChannelModel):
         live = present & valid
         snr = jnp.where(live, snr, 0.0)
         observable = jnp.where(live, observable, 0.0)
+        delivered = live & (snr >= self.block_snr_required)
+        revealed = jnp.where(delivered, truth.klass[subject] + REVEAL_OFFSET, 0)
         head = jnp.stack([interval.midpoint_jd, interval.duration_s])
-        return jnp.concatenate([head, jnp.stack([snr, observable], -1).reshape(-1)])
+        body = jnp.stack([snr, observable, revealed.astype(F64)], -1)
+        return jnp.concatenate([head, body.reshape(-1)])
 
     def _catalog_row(self, truth, subject, index, key, context):
         """The catalog mode's row: every slot in the layout of `CATALOG_FIELDS`.

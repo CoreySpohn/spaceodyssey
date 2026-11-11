@@ -83,6 +83,7 @@ def test_the_table_reads_the_observer_summary_not_the_policy_summary(built):
         zeros,
         n_det=zeros.n_det.at[:, 0, 0].set(3),
         p_class=zeros.p_class.at[:, 0, 0].set(1.0),
+        revealed=zeros.revealed.at[:, 0, 0].set(br.CLASS_ONE + br.REVEAL_OFFSET),
     )
     observer_only = eqx.tree_at(
         lambda c: (c.belief, c.pbelief), run.carry, (held, zeros)
@@ -92,8 +93,10 @@ def test_the_table_reads_the_observer_summary_not_the_policy_summary(built):
     none = br.outcome_table(dataclasses.replace(run, carry=policy_only), truths, study)
     assert got.slot["claimed"][:, 0, 0].all()
     assert not none.slot["claimed"].any()
-    total = got.world["confirmed"] + got.world["false_claims"]
+    total = got.world["confirmed"]
     np.testing.assert_array_equal(total, np.ones(N_WORLDS))
+    real = np.asarray(truths.present & (truths.klass == 1))[:, 0, 0]
+    np.testing.assert_array_equal(got.world["false_claims"], ~real)
 
 
 def _decide(built, budget_d):

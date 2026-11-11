@@ -428,6 +428,7 @@ CATALOG_FIELDS = (
 CATALOG_GROUPS = ("existence", "ephemeris", "class")
 CATALOG_KIND_NAME = "truth_catalog"
 REPORT_KIND_NAME = "visit_report"
+BLOCK_KIND_NAME = "block_outcome"
 
 
 def catalog_kind(n_slots, audiences=None, *, name=CATALOG_KIND_NAME):
@@ -476,6 +477,7 @@ class DecisionSummary(eqx.Module):
     ln_period_q: jax.Array  # [n, S, 3], 16, 50 and 84 percent quantiles
     ess: jax.Array  # [n, S], Kish effective size
     status: jax.Array  # I64 [n, S], slot fit code (`SLOT_NEVER_FIT` before any fit)
+    revealed: jax.Array  # I64 [n, S], class a delivered block revealed, 0 for none
     aux: jax.Array  # [n_an]
 
     @classmethod
@@ -495,6 +497,7 @@ class DecisionSummary(eqx.Module):
             ln_period_q=jnp.zeros((n, s, 3), F64),
             ess=jnp.zeros((n, s), F64),
             status=jnp.full((n, s), SLOT_NEVER_FIT, I64),
+            revealed=jnp.zeros((n, s), I64),
             aux=jnp.zeros(n_an, F64),
         )
 
@@ -775,6 +778,7 @@ def _truth_entry(channel, entry, settings):
         "p_class": keep(leaves.p_class),
         "ln_period_q": keep(leaves.ln_period_q),
         "ess": keep(leaves.ess),
+        "revealed": jnp.zeros(n_slots, I64),
     }
     # without a catalog row nothing was read: the leaves are zero, not row 0's values
     out = {k: jnp.where(has_cat, v, jnp.zeros_like(v)) for k, v in leaves_out.items()}
@@ -846,6 +850,11 @@ SLOT_NO_SUPPORT = int(RefitStatus.NO_SUPPORT)
 SLOT_DEGRADED = int(RefitStatus.DEGRADED)
 SLOT_FAILED = int(RefitStatus.FAILED)
 SLOT_KEPT = (SLOT_NO_SUPPORT, SLOT_FAILED)
+
+# The class code of an Earth-like planet in a truth, and the offset a block row adds
+# to a class before it is released (zero is "nothing revealed").
+CLASS_ONE = 1
+REVEAL_OFFSET = 1
 
 # Draws of the first tier's fixed prior cloud, and the factor a retry multiplies the
 # proposals (or the draws) by.
@@ -1501,6 +1510,7 @@ class ReportRefit(AbstractRefitBoundary):
         *,
         catalog_kind=CATALOG_KIND_NAME,
         report_kind=REPORT_KIND_NAME,
+        block_kind=BLOCK_KIND_NAME,
         n_grid=N_GRID,
         spacing_d=GRID_SPACING_D,
         block_snr=BLOCK_SNR,
@@ -1563,6 +1573,7 @@ class ReportRefit(AbstractRefitBoundary):
         self.n_particles = int(n_particles)
         self.catalog_kind = str(catalog_kind)
         self.report_kind = str(report_kind)
+        self.block_kind = str(block_kind)
         self.n_grid = int(n_grid)
         self.spacing_d = float(spacing_d)
         self.block_snr = float(block_snr)
@@ -1604,6 +1615,7 @@ class ReportRefit(AbstractRefitBoundary):
             "truth_groups": list(self.truth_groups),
             "catalog_kind": self.catalog_kind,
             "report_kind": self.report_kind,
+            "block_kind": self.block_kind,
             "n_grid": self.n_grid,
             "spacing_d": self.spacing_d,
             "block_snr": self.block_snr,
@@ -1687,8 +1699,48 @@ class ReportRefit(AbstractRefitBoundary):
         """Answer every dirty entry: `[W, 2, n_subjects, ...]` slices and statuses."""
         self.check(study.caps)
         if self.kernel != "truth":
-            return self._refit_posterior(study, requests)
-        return self._refit_truth(study, requests)
+            result = self._refit_posterior(study, requests)
+        else:
+            result = self._refit_truth(study, requests)
+        return self._apply_reveals(study, requests, result)
+
+    def _apply_reveals(self, study, requests, result):
+        """Write the classes delivered blocks revealed into the computed slices.
+
+        A block row the audience may read carries, per slot, the true class plus
+        `REVEAL_OFFSET` where the block met its requirement and zero elsewhere. The
+        `revealed` leaf takes that code and `p_class` takes 1 for class 1 and 0 for
+        any other class; the kernel's own posterior is not changed, and every other
+        leaf stays. An entry that was not computed (an audience that cannot read the
+        reports) is left as it is.
+        """
+        names = study.caps.kind_names
+        spec = tuple(name for name, _, _ in slice_spec(study))
+        if self.block_kind not in names or "revealed" not in spec:
+            return result
+        columns = list(study.channel_model.reveal_columns())
+        kind = names.index(self.block_kind)
+        req = jax.tree_util.tree_map(np.asarray, requests)
+        count = req.dirty.shape[2]
+        pieces = {n: np.array(x) for n, x in zip(spec, result.slices, strict=True)}
+        computed = np.asarray(result.computed)
+        for w, a, s in np.argwhere(req.dirty):
+            sa, ss = divmod(int(req.source[w, a, s]), count)
+            if not computed[w, sa, ss]:
+                continue
+            rows = req.rows.valid[w, a, s] & (req.rows.kind[w, a, s] == kind)
+            code = req.rows.payload[w, a, s][rows][:, columns].max(axis=0, initial=0.0)
+            code = np.rint(code).astype(np.int64)
+            pieces["revealed"][w, a, s] = code
+            seen = code > 0
+            pieces["p_class"][w, a, s] = np.where(
+                seen,
+                (code == CLASS_ONE + REVEAL_OFFSET).astype(np.float64),
+                pieces["p_class"][w, a, s],
+            )
+        return dataclasses.replace(
+            result, slices=tuple(jnp.asarray(pieces[n]) for n in spec)
+        )
 
     def _refit_truth(self, study, requests):
         req = jax.tree_util.tree_map(np.asarray, requests)
@@ -2069,11 +2121,14 @@ class ReportRefit(AbstractRefitBoundary):
 
 __all__ = [
     "ALBEDO",
+    "BLOCK_KIND_NAME",
     "BLOCK_SNR",
     "CATALOG_FIELDS",
     "CATALOG_GROUPS",
+    "CLASS_ONE",
     "COLUMN_NAMES",
     "ELEMENTS",
+    "REVEAL_OFFSET",
     "SHRINK_DRAWS",
     "SHRINK_GROUPS",
     "SHRINK_WIDTHS",

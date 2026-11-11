@@ -14,6 +14,7 @@ import pytest
 
 pytest.importorskip("photomancy")
 
+from spaceodyssey.adapters.jaxedith import block_outcome_kind, reveal_columns
 from spaceodyssey.adapters.photomancy import (
     CATALOG_FIELDS,
     CATALOG_GROUPS,
@@ -67,11 +68,18 @@ class StubChannel(eqx.Module):
     def luminosity(self, subject):
         return 1.0
 
+    def reveal_columns(self):
+        return reveal_columns(SLOTS)
+
 
 def make_study(open_groups=("existence", "ephemeris", "class")):
     audiences = {g: Audience.OBSERVER | Audience.POLICY for g in open_groups}
     registry = KindRegistry(
-        [catalog_kind(SLOTS, audiences), report_kind(SLOTS, EVERYONE)]
+        [
+            catalog_kind(SLOTS, audiences),
+            report_kind(SLOTS, EVERYONE),
+            block_outcome_kind(SLOTS),
+        ]
     )
     prior = DecisionSummary.zeros(N_SUBJECTS, SLOTS, GRID, MODES, BLOCKS, n_an=4)
     observer = SummaryObserver(prior=prior)
@@ -150,7 +158,7 @@ def take_world(request, w):
 def test_bytes_per_star_match_the_budget():
     """Number: bytes per star per audience at S = 4, M = 6, B = 3, G = 16."""
     size = DecisionSummary.zeros(5, 4, 16, 6, 3).bytes_per_star()
-    assert size == 5712
+    assert size == 5744
     assert abs(size - 5600) / 5600 < 0.03
 
 
@@ -257,7 +265,9 @@ def test_a_wider_registered_kind_does_not_add_phantom_slots():
     wide = RecordKind(
         "wide", tuple(PayloadColumn(f"w{i}", int(EVERYONE)) for i in range(40))
     )
-    registry = KindRegistry([catalog_kind(1, audiences), report_kind(1), wide])
+    registry = KindRegistry(
+        [catalog_kind(1, audiences), report_kind(1), block_outcome_kind(1), wide]
+    )
     prior = DecisionSummary.zeros(N_SUBJECTS, 1, GRID, MODES, BLOCKS, n_an=4)
     caps = registry.lower(
         Capacities(n_subjects=N_SUBJECTS, rows_per_subject=ROWS, refit_lanes=2),

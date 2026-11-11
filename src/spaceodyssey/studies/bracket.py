@@ -47,11 +47,14 @@ from spaceodyssey.adapters.jaxedith import (
     visit_report_kind,
 )
 from spaceodyssey.adapters.photomancy import (
+    BLOCK_KIND_NAME,
     CATALOG_KIND_NAME,
+    CLASS_ONE,
     GRID_SPACING_D,
     N_GRID,
     POSITION_LAG_D,
     REPORT_KIND_NAME,
+    REVEAL_OFFSET,
     SLOT_DEGRADED,
     SLOT_KEPT,
     SLOT_OK,
@@ -87,6 +90,10 @@ from spaceodyssey.core.snapshot import BeliefLayout
 from spaceodyssey.core.study import Clock
 from spaceodyssey.studies import toy
 
+# A candidate: three detections, a class probability of at least `CANDIDATE_CLASS`
+# (a study parameter), a refit that completed, and a predicted-position scatter under
+# one lambda over D.
+CANDIDATE_DETECTIONS, CANDIDATE_CLASS, CANDIDATE_SCATTER_LOD = 3, 0.2, 1.0
 # Kind indices of `bracket_registry`.
 KIND_NONE, KIND_PRODUCT, KIND_VISIT, KIND_BLOCK, KIND_CATALOG = range(5)
 # The telescope and the catalog lanes, and the shared budget resource column.
@@ -331,12 +338,13 @@ class BracketPolicy(AbstractPolicy):
     wakes the policy for the next. After a visit the policy waits for the next refresh
     before deciding, then in order:
 
-    1. Block: a slot that meets the claim rule (`claimed_slots`) and has no block
+    1. Block: a candidate (`candidate_slots`) with no block and no revealed class
        starts one at the smallest block mode its star's
        reference twin needs, when the current node is the one of largest `p_block`
        and that is 0.8 or more.
     2. Follow-up: a slot the belief knows (a detection, or class probability at least
-       0.5), unclaimed, with class probability at least 0.05, is observed at the node
+       0.5), not a candidate, not revealed, with class probability at least 0.05, is
+       observed at the node
        and mode of largest `p_det` per charged day at least 15 days after the star's
        last visit, when that node is the current one and `p_det` is 0.5 or more.
     3. Search: the star not visited in the last 15 days, with fewer than 8 search
@@ -352,6 +360,7 @@ class BracketPolicy(AbstractPolicy):
 
     Attributes:
         block_mode: ``int[n_stars]`` the block mode each star's reference twin needs.
+        candidate_class: The class probability a slot needs to be a candidate.
         budget_d: Telescope days the policy may spend.
         n_slots: Planet slots per star.
         max_visits, max_search: Per-star visit and search limits.
@@ -367,6 +376,7 @@ class BracketPolicy(AbstractPolicy):
     max_visits: int = eqx.field(default=24, static=True)
     max_search: int = eqx.field(default=8, static=True)
     refits_reach_policy: bool = eqx.field(default=True, static=True)
+    candidate_class: float = eqx.field(default=CANDIDATE_CLASS, static=True)
 
     def declare(self):
         """The campaign drain the policy ends with."""
@@ -411,8 +421,9 @@ class BracketPolicy(AbstractPolicy):
 
         # 1. Block.
         lod = study.channel_model.assets().report.lod_arcsec
-        claimed = claimed_slots(belief, lod)
-        want_block = claimed & (flags < 0.5)
+        candidate = candidate_slots(belief, lod, self.candidate_class)
+        open_slot = belief.revealed == 0
+        want_block = candidate & open_slot & (flags < 0.5)
         pb_mode = belief.p_block[s_ix, :, :, self.block_mode]
         pb_now = pb_mode[s_ix, :, g_cur]
         best_pb = pb_mode.max(axis=2)
@@ -425,7 +436,7 @@ class BracketPolicy(AbstractPolicy):
 
         # 2. Follow-up.
         known = (belief.n_det >= 1) | (belief.p_class >= 0.5)
-        eligible = known & ~claimed & (belief.p_class >= 0.05)
+        eligible = known & ~candidate & open_slot & (belief.p_class >= 0.05)
         late = node_ticks >= (last_tick + 15 * per_day)[:, None]
         pd_val = belief.p_det / weight[None, None, None, :]
         pd_val = jnp.where(
@@ -530,7 +541,9 @@ def project_detections(belief):
 
 # Slot leaves of a summary that a failed slot keeps (`status` takes the new code).
 _SLOT_LEAVES = tuple(
-    n for n in SUMMARY_LEAVES if n not in ("ref_tick", "n_obs", "p_new", "status")
+    n
+    for n in SUMMARY_LEAVES
+    if n not in ("ref_tick", "n_obs", "p_new", "status", "revealed")
 )
 
 
@@ -547,13 +560,14 @@ class SummaryObserver(AbstractObserver):
     prior: DecisionSummary
     catalog_kind: str = eqx.field(default=CATALOG_KIND_NAME, static=True)
     report_kind: str = eqx.field(default=REPORT_KIND_NAME, static=True)
+    block_kind: str = eqx.field(default=BLOCK_KIND_NAME, static=True)
 
     def capabilities(self):
-        """Refit only, from visit reports and the truth catalog."""
+        """Refit only, from visit reports, the truth catalog and block outcomes."""
         return ObserverCapabilities(
             incremental=False,
             refit=True,
-            refit_kinds=(self.report_kind, self.catalog_kind),
+            refit_kinds=(self.report_kind, self.catalog_kind, self.block_kind),
         )
 
     def init(self, caps):
@@ -590,11 +604,19 @@ class SummaryObserver(AbstractObserver):
             new, old = getattr(fitted, name)[subject], getattr(belief, name)[subject]
             if name == "p_new":
                 keep = dark_failed
+            elif name == "revealed":
+                return new
             elif name in _SLOT_LEAVES:
                 keep = kept.reshape(kept.shape + (1,) * (new.ndim - 1))
             else:
                 return new
-            return jnp.where(keep, old, new)
+            out = jnp.where(keep, old, new)
+            if name == "p_class":
+                # a revealed slot is decided: 1 for class 1, 0 for any other class
+                code = fitted.revealed[subject]
+                decided = (code == CLASS_ONE + REVEAL_OFFSET).astype(out.dtype)
+                out = jnp.where(code > 0, decided, out)
+            return out
 
         return eqx.tree_at(
             lambda b: tuple(getattr(b, n) for n in SUMMARY_LEAVES),
@@ -609,27 +631,30 @@ class SummaryObserver(AbstractObserver):
 
 # The study clock: one tick is a millisecond.
 TICKS_PER_DAY = 86_400_000
-# A claim: three detections, a class probability of at least this, a refit that
-# completed, and a predicted-position scatter under one lambda over D.
-CLAIM_DETECTIONS, CLAIM_CLASS, CLAIM_SCATTER_LOD = 3, 0.5, 1.0
 
 
-def claimed_slots(belief, lod_arcsec):
-    """The slots a summary lets a reader claim: ``bool[n_stars, n_slots]``.
+def candidate_slots(belief, lod_arcsec, candidate_class=CANDIDATE_CLASS):
+    """The slots a summary nominates for a block: ``bool[n_stars, n_slots]``.
 
-    A slot is claimed when it holds at least three detections, a class probability of
-    at least 0.5, a slot status of `SLOT_OK` (a fit above the size floor, never a
-    degraded, unsupported or failed one) and a predicted-position scatter under one
-    lambda over D (`lod_arcsec`, in arcsec like the summary's `scatter`). The policy
-    reads its own summary through this rule and the outcome table reads the
-    observer's, so the two cannot drift apart.
+    A slot is a candidate when it holds at least `CANDIDATE_DETECTIONS` detections, a
+    class probability of at least `candidate_class`, a slot status of `SLOT_OK` (a fit
+    above the size floor, never a degraded, unsupported or failed one) and a
+    predicted-position scatter under one lambda over D (`lod_arcsec`, in arcsec like
+    the summary's `scatter`). Imaging nominates; only a delivered block decides the
+    class (`confirmed_slots`). The policy reads its own summary through this rule and
+    the outcome table reads the observer's, so the two cannot drift apart.
     """
     return (
-        (belief.n_det >= CLAIM_DETECTIONS)
-        & (belief.p_class >= CLAIM_CLASS)
+        (belief.n_det >= CANDIDATE_DETECTIONS)
+        & (belief.p_class >= candidate_class)
         & (belief.status == SLOT_OK)
-        & (belief.scatter < CLAIM_SCATTER_LOD * lod_arcsec)
+        & (belief.scatter < CANDIDATE_SCATTER_LOD * lod_arcsec)
     )
+
+
+def confirmed_slots(belief):
+    """The slots a delivered block revealed as class 1: ``bool[n_stars, n_slots]``."""
+    return belief.revealed == CLASS_ONE + REVEAL_OFFSET
 
 
 @dataclasses.dataclass(frozen=True)
@@ -641,19 +666,25 @@ class OutcomeTable:
     ``[W]``.
 
     Slot leaves: `present`, `klass`, `n_det` (visits that detected it), `detected`,
-    `detected_again`, `claimed` (the observer's final summary meets `claimed_slots`),
-    `claim_error_lod` (distance of the claimed position from the truth at the same
-    epoch, in lambda over D, NaN when not claimed), `block_attempted`,
-    `block_delivered` (a block on a present class-1 slot that met the signal-to-noise
-    requirement) and `block_snr`.
+    `detected_again`, `candidate` (the observer's final summary meets
+    `candidate_slots` at the table's `candidate_class`), `revealed` (the class a
+    delivered block revealed in the observer's final summary, `-1` for none),
+    `claimed` (the slot is confirmed: revealed class 1), `claim_error_lod` (distance
+    of the claimed position from the truth at the same epoch, in lambda over D, NaN
+    when not claimed), `block_attempted`, `block_delivered` (a block on a present
+    class-1 slot that met the signal-to-noise requirement), `block_snr` and
+    `block_days` (telescope days of the slot's block, NaN for none).
 
     Star leaves: `visited`, `n_visits`, `t_search`, `t_followup`, `t_block` (telescope
     days) and `dropped` (planets the slots could not hold).
 
-    World leaves: `confirmed` (claims on present class-1 slots), `false_claims`,
-    `delivered`, `charged` (telescope days spent), `low_ess` (slots whose last refit
-    was degraded, `SLOT_DEGRADED`) and `no_funds` (admissions refused for lack of
-    budget).
+    World leaves: `confirmed` (slots revealed class 1 in the observer's summary at the
+    horizon), `false_claims` (claimed slots whose truth is not a present class-1
+    planet; zero by construction, so a nonzero value flags a bug), `wasted_blocks`
+    and `wasted_days` (blocks, and their telescope days, on slots whose truth is not
+    a present class-1 planet, delivered or not), `delivered`, `charged` (telescope
+    days spent), `low_ess` (slots whose last refit was degraded, `SLOT_DEGRADED`) and
+    `no_funds` (admissions refused for lack of budget).
     """
 
     slot: dict
@@ -696,7 +727,15 @@ def _rows_of(log, w, kind):
     return rows[np.argsort(log["end_tick"][w][rows], kind="stable")]
 
 
-def outcome_table(result, truths, study, *, dropped=None, check_detection=False):
+def outcome_table(
+    result,
+    truths,
+    study,
+    *,
+    dropped=None,
+    check_detection=False,
+    candidate_class=CANDIDATE_CLASS,
+):
     """The `OutcomeTable` of a `run_worlds` result.
 
     Args:
@@ -705,6 +744,8 @@ def outcome_table(result, truths, study, *, dropped=None, check_detection=False)
         study: The `Study` that ran.
         dropped: Optional ``[W, n_stars]`` planets the slots could not hold (the
             source's `dropped` rows of those worlds); zeros when not given.
+        candidate_class: The class probability a slot needs to be a candidate; the
+            policy's own value for a study run with another one.
         check_detection: Also fill the slot leaves `det_expected` and `det_variance`:
             the sum over the slot's visits of the channel's detection probability
             at the true elements, and of its Bernoulli variance. It makes one
@@ -745,6 +786,7 @@ def outcome_table(result, truths, study, *, dropped=None, check_detection=False)
     variance = np.zeros((n_w, n, n_slots))
     channel = study.channel_model
     block_snr = np.full((n_w, n, n_slots), np.nan)
+    block_days = np.full((n_w, n, n_slots), np.nan)
     stride = 3 + n_slots
     ordinals = np.asarray(carry.pstate)[:, : n * stride].reshape(n_w, n, stride)[
         :, :, 3:
@@ -778,15 +820,17 @@ def outcome_table(result, truths, study, *, dropped=None, check_detection=False)
             s = int(log["subject"][w, r])
             count[s] += 1
             star["n_block"][w, s] += 1
-            star["t_block"][w, s] += (
-                log["end_tick"][w, r] - log["start_tick"][w, r]
-            ) / TICKS_PER_DAY
+            days = (log["end_tick"][w, r] - log["start_tick"][w, r]) / TICKS_PER_DAY
+            star["t_block"][w, s] += days
             for k in np.flatnonzero(ordinals[w, s] == count[s]):
                 block_snr[w, s, k] = log["payload"][w, r, snr_cols[k]]
+                block_days[w, s, k] = days
     belief = carry.belief
     lod = float(study.channel_model.assets().report.lod_arcsec)
-    claimed = np.asarray(claimed_slots(belief, lod))
-    real = present & (klass == 1)
+    candidate = np.asarray(candidate_slots(belief, lod, candidate_class))
+    claimed = np.asarray(confirmed_slots(belief))
+    code = np.asarray(belief.revealed)
+    real = present & (klass == CLASS_ONE)
     attempted = ordinals > 0.5
     delivered = attempted & (block_snr >= BLOCK_SNR_REQUIRED) & real
     error = _claim_error(study, truths, belief, claimed, last_det_jd)
@@ -796,9 +840,12 @@ def outcome_table(result, truths, study, *, dropped=None, check_detection=False)
     )
     budget = float(np.asarray(study.budget)[-1, SHARED_RESOURCE])
     balance = np.asarray(carry.ledger.balance)[:, -1, SHARED_RESOURCE]
+    wasted = attempted & ~real
     world = {
-        "confirmed": (claimed & real).sum(axis=(1, 2)),
+        "confirmed": claimed.sum(axis=(1, 2)),
         "false_claims": (claimed & ~real).sum(axis=(1, 2)),
+        "wasted_blocks": wasted.sum(axis=(1, 2)),
+        "wasted_days": np.where(wasted, block_days, 0.0).sum(axis=(1, 2)),
         "delivered": delivered.sum(axis=(1, 2)),
         "charged": budget - balance,
         "low_ess": (np.asarray(belief.status) == SLOT_DEGRADED).sum(axis=(1, 2)),
@@ -812,11 +859,14 @@ def outcome_table(result, truths, study, *, dropped=None, check_detection=False)
         "n_det": n_det,
         "detected": n_det > 0,
         "detected_again": n_det > 1,
+        "candidate": candidate,
+        "revealed": np.where(code > 0, code - REVEAL_OFFSET, -1),
         "claimed": claimed,
         "claim_error_lod": error,
         "block_attempted": attempted,
         "block_delivered": delivered,
         "block_snr": block_snr,
+        "block_days": block_days,
     }
     if check_detection:
         slot["det_expected"] = expected
@@ -898,7 +948,15 @@ class ArmsResult:
 
 
 def run_arms(
-    arms, truths, roots, n_steps, *, executor=None, dropped=None, check_detection=False
+    arms,
+    truths,
+    roots,
+    n_steps,
+    *,
+    executor=None,
+    dropped=None,
+    check_detection=False,
+    candidate_class=CANDIDATE_CLASS,
 ):
     """Run every arm on the same truths and roots; return their `ArmsResult`.
 
@@ -911,12 +969,18 @@ def run_arms(
             it. Defaults to `BoundExecutor`.
         dropped: Passed to `outcome_table`.
         check_detection: Passed to `outcome_table`.
+        candidate_class: Passed to `outcome_table`.
     """
     tables = {}
     for name, (study, boundary) in arms.items():
         base = BoundExecutor() if executor is None else executor
         run = base.run(study, truths, roots, n_steps, refit=boundary)
         tables[name] = outcome_table(
-            run, truths, study, dropped=dropped, check_detection=check_detection
+            run,
+            truths,
+            study,
+            dropped=dropped,
+            check_detection=check_detection,
+            candidate_class=candidate_class,
         )
     return ArmsResult(table=tables)

@@ -364,4 +364,4 @@ def test_degraded_slots_reach_the_outcome_table(world):
     table = br.outcome_table(run, truths, built)
     assert int(table.world["low_ess"][0]) == n_degraded
     assert int(table.world["low_ess"][1]) == 0
-    assert not np.asarray(br.claimed_slots(belief, 1.0)).any()
+    assert not np.asarray(br.candidate_slots(belief, 1.0)).any()
