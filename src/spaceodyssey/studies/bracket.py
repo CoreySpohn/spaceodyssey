@@ -38,7 +38,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from spaceodyssey.adapters.jaxedith import (
-    BLOCK_SNR_REQUIRED,
     block_columns,
     block_outcome_kind,
     column_index,
@@ -339,9 +338,10 @@ class BracketPolicy(AbstractPolicy):
     before deciding, then in order:
 
     1. Block: a candidate (`candidate_slots`) with no block and no revealed class
-       starts one at the smallest block mode its star's
-       reference twin needs, when the current node is the one of largest `p_block`
-       and that is 0.8 or more.
+       starts one at its own shortest block mode whose `p_block` at the current node
+       is 0.8 or more and is the largest over the slot's nodes for that mode (modes
+       are ordered by length). A candidate no mode serves is not blocked now; it is
+       tried again when a refit moves its forecast.
     2. Follow-up: a slot the belief knows (a detection, or class probability at least
        0.5), not a candidate, not revealed, with class probability at least 0.05, is
        observed at the node
@@ -359,7 +359,6 @@ class BracketPolicy(AbstractPolicy):
     (the refusal is the budget binding) and stops, else it stops at the horizon.
 
     Attributes:
-        block_mode: ``int[n_stars]`` the block mode each star's reference twin needs.
         candidate_class: The class probability a slot needs to be a candidate.
         budget_d: Telescope days the policy may spend.
         n_slots: Planet slots per star.
@@ -370,7 +369,6 @@ class BracketPolicy(AbstractPolicy):
             `bracket_study` sets it from the arm.
     """
 
-    block_mode: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, I64))
     budget_d: float = eqx.field(static=True)
     n_slots: int = eqx.field(static=True)
     max_visits: int = eqx.field(default=24, static=True)
@@ -424,15 +422,16 @@ class BracketPolicy(AbstractPolicy):
         candidate = candidate_slots(belief, lod, self.candidate_class)
         open_slot = belief.revealed == 0
         want_block = candidate & open_slot & (flags < 0.5)
-        pb_mode = belief.p_block[s_ix, :, :, self.block_mode]
-        pb_now = pb_mode[s_ix, :, g_cur]
-        best_pb = pb_mode.max(axis=2)
-        block_ok = want_block & (pb_now >= 0.8) & (pb_now >= best_pb)
+        pb_now = belief.p_block[s_ix, :, g_cur, :]
+        best_pb = belief.p_block.max(axis=2)
+        mode_ok = (pb_now >= 0.8) & (pb_now >= best_pb)
+        block_ok = want_block & mode_ok.any(axis=-1)
+        block_mode = jnp.argmax(mode_ok, axis=-1)
         block_score = jnp.where(block_ok, 1.0, -1.0)
         bs = jnp.argmax(block_score.reshape(-1))
         block_star, block_slot = bs // slots, bs % slots
         do_block = block_score.reshape(-1)[bs] > 0
-        block_channel = N_DETECT + self.block_mode[block_star]
+        block_channel = N_DETECT + block_mode[block_star, block_slot]
 
         # 2. Follow-up.
         known = (belief.n_det >= 1) | (belief.p_class >= 0.5)
@@ -573,6 +572,17 @@ class SummaryObserver(AbstractObserver):
     def init(self, caps):
         """The prior summary of every star."""
         return self.prior
+
+    def expired(self, summary, tick, caps):
+        """The stars whose forecast window the clock has reached its last node of.
+
+        A summary forecasts `N_NODES` epochs `NODE_SPACING_D` days apart from its
+        refit tick; once the policy's current node is the last one (`g_cur` in
+        `BracketPolicy.decide`) the forecast no longer moves with time, so the star
+        is renewed by a refit from the same rows.
+        """
+        elapsed = (tick - summary.ref_tick) / (NODE_SPACING_D * TICKS_PER_DAY)
+        return jnp.round(elapsed) >= N_NODES - 1
 
     def init_summary(self, caps):
         """The policy starts from the same prior."""
@@ -832,7 +842,7 @@ def outcome_table(
     code = np.asarray(belief.revealed)
     real = present & (klass == CLASS_ONE)
     attempted = ordinals > 0.5
-    delivered = attempted & (block_snr >= BLOCK_SNR_REQUIRED) & real
+    delivered = attempted & (block_snr >= float(channel.block_snr_required)) & real
     error = _claim_error(study, truths, belief, claimed, last_det_jd)
     star["visited"] = (star["n_visits"] > 0).astype(np.float64)
     star["dropped"] = (

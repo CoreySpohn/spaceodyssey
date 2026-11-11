@@ -38,7 +38,11 @@ from spaceodyssey.core.records import (
     record_none,
     write_log,
 )
-from spaceodyssey.core.refresh import refresh_enabled, schedule_refresh
+from spaceodyssey.core.refresh import (
+    expired_subjects,
+    refresh_enabled,
+    schedule_refresh,
+)
 from spaceodyssey.core.snapshot import snapshot_fingerprint, snapshot_view
 
 
@@ -500,8 +504,21 @@ def h_refresh(c, ev, study, truth, root):
 
 
 def h_wait(c, ev, study, truth, root):
-    """Mark a wait event as eligible to wake its audience."""
-    return _tree_set(c, woke=jnp.asarray(True)), _emit(0, 0), record_none(study.caps)
+    """Mark a wait event as eligible to wake its audience, and renew expired summaries.
+
+    A subject whose policy summary the observer reports expired (`expired_subjects`)
+    is marked dirty for both audiences and a checkpoint is queued, so the next
+    checkpoint refits it from the rows it already has. The replay applies the same
+    rule at each wait.
+    """
+    c = _tree_set(c, woke=jnp.asarray(True))
+    if refresh_enabled(study.caps):
+        due = expired_subjects(
+            study.observer, study.caps, c.pbelief, c.refresh_status[1], c.tick
+        )
+        c = _tree_set(c, refresh_dirty=c.refresh_dirty | due[None, :])
+        c = schedule_refresh(c, due.any(), study)
+    return c, _emit(0, 0), record_none(study.caps)
 
 
 def h_process(c, ev, study, truth, root):

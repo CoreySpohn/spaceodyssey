@@ -10,7 +10,6 @@ import pathlib
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from spaceodyssey.adapters.jaxedith import ObservingModeChannel
 from spaceodyssey.adapters.photomancy import GRID_SPACING_D, N_GRID, DecisionSummary
@@ -62,20 +61,21 @@ def build(
     budget_d=BUDGET_D,
     arm="oracle",
     p_new=0.0,
+    block_snr_required=None,
     **settings,
 ):
     """`(source, study, executor, truths, roots, run)` of `arm` (the oracle by default).
 
     `p_new` is the prior chance of a new planet per star, node and mode. `settings` go
-    to the arm's boundary (a posterior arm needs `occupancy`).
+    to the arm's boundary (a posterior arm needs `occupancy`). `block_snr_required`
+    sets the channel's block requirement (its default when `None`).
     """
     source = fixture_source()
-    channel = fixture_channel(source)
+    knob = (
+        {} if block_snr_required is None else {"block_snr_required": block_snr_required}
+    )
+    channel = fixture_channel(source, **knob)
     n_stars = len(source.stars)
-    needed = np.asarray([float(channel.block_time(s)) for s in range(n_stars)])
-    block_mode = [
-        next((i for i, d in enumerate(channel.block_days) if d >= t), 2) for t in needed
-    ]
     study = br.bracket_study(
         source,
         channel,
@@ -83,7 +83,7 @@ def build(
         horizon_d=horizon_d,
         budget_d=budget_d,
         observer=br.SummaryObserver(prior=prior_summary(channel, n_stars, p_new)),
-        policy=br.BracketPolicy(block_mode, budget_d, N_SLOTS),
+        policy=br.BracketPolicy(budget_d, N_SLOTS),
     )
     executor = br.BoundExecutor(boundary=br.bracket_boundary(study, arm, **settings))
     roots = jnp.stack(

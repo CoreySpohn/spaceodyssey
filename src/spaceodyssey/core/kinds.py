@@ -186,6 +186,16 @@ class AbstractObserver(eqx.Module):
         """Analyze the whole full belief after a fold or an install."""
         return belief
 
+    def expired(self, summary, tick, caps):
+        """The subjects whose summary a refit without new rows would renew: ``bool[n]``.
+
+        A summary that forecasts over a window from its refit tick runs out as time
+        passes. The core marks every expired subject whose last policy refit installed
+        for a refit at the next wait, so the policy reads current forecasts. The
+        default never expires: a summary without a window needs no renewal.
+        """
+        return jnp.zeros(caps.n_subjects, bool)
+
 
 class AbstractProcess(eqx.Module):
     """Contract for event seeding and process transitions."""

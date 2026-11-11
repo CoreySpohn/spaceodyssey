@@ -155,6 +155,21 @@ def schedule_refresh(c, mark, study):
     )
 
 
+def expired_subjects(observer, caps, pbelief, status, tick):
+    """The subjects a wait renews: ``bool[n_subjects]``.
+
+    A subject is renewed when the observer reports its policy summary expired at
+    `tick` (`AbstractObserver.expired`) and the last policy refit of the subject
+    installed (`status`, `Carry.refresh_status` of the policy audience). A refit that
+    installed nothing leaves the summary as it was, so renewing it would repeat the
+    same refit at every wait.
+    """
+    installed = jnp.isin(
+        status, jnp.asarray([int(x) for x in INSTALLING_STATUSES], I64)
+    )
+    return observer.expired(pbelief, tick, caps) & installed
+
+
 # ---- subject slices ---------------------------------------------------------------
 
 

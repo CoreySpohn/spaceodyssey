@@ -26,7 +26,7 @@ from spaceodyssey.core.records import (
     Record,
     masked_record,
 )
-from spaceodyssey.core.refresh import refresh_enabled
+from spaceodyssey.core.refresh import expired_subjects, refresh_enabled
 from spaceodyssey.core.snapshot import named_leaves
 
 
@@ -299,6 +299,7 @@ def replay_run(run, roots, carry, trace, *, refit=None, executor=None):
     belief = observer.init(caps)
     pbelief = observer.init_summary(caps)
     dirty = np.zeros(np.shape(carry.refresh_dirty), dtype=bool)
+    status = np.full(np.shape(carry.refresh_status), -1, dtype=np.int64)
     accepted, released = set(), set()  # slots an audience has received
     obs_acq, pub_acq = set(), {}  # acquisition ids received, with released revisions
     pending = None
@@ -313,7 +314,7 @@ def replay_run(run, roots, carry, trace, *, refit=None, executor=None):
         if at["kind"] == EventKind.REFRESH:
             ordinal = at["acquisition_index"]
             if pending is None:
-                state = (belief, pbelief, dirty, accepted, released, phase)
+                state = (belief, pbelief, dirty, status, accepted, released, phase)
                 pending = _hold(study, carry, roots, boundary, at, state)
             else:
                 if pending["ordinal"] != ordinal:
@@ -339,6 +340,7 @@ def replay_run(run, roots, carry, trace, *, refit=None, executor=None):
                     refused.append((ordinal, bits))
                 belief, pbelief = new.belief, new.pbelief
                 dirty = np.array(new.refresh_dirty)
+                status = np.array(new.refresh_status)
                 n_checkpoints += 1
                 n_products += written
                 pending = None
@@ -354,6 +356,11 @@ def replay_run(run, roots, carry, trace, *, refit=None, executor=None):
                 incremental,
                 refit_kinds,
             )
+        elif at["kind"] == EventKind.WAIT and dirty.size:
+            due = expired_subjects(
+                observer, caps, pbelief, jnp.asarray(status[1]), at["tick"]
+            )
+            dirty |= np.asarray(due)[None, :]
         if wake[step]:
             phase = _phase_after(phase, at["tick"], bounds)
     ours = belief_leaves(_Pair(belief, pbelief), layout)
@@ -460,7 +467,7 @@ def _bound(run, refit, executor):
 
 def _hold(study, carry, roots, boundary, at, state):
     """Refit a frozen replay world at its hold step: request, boundary, install."""
-    belief, pbelief, dirty, accepted, released, phase = state
+    belief, pbelief, dirty, status, accepted, released, phase = state
     ordinal, n_log = at["acquisition_index"], at["n_log"]
     log = carry.log
     # The id counter is not in the trace: a checkpoint that wrote rows reserved ids from
@@ -480,6 +487,7 @@ def _hold(study, carry, roots, boundary, at, state):
         **_visible(carry, n_log, accepted, released),
         refresh=held,
         refresh_dirty=jnp.asarray(dirty),
+        refresh_status=jnp.asarray(status),
         belief=belief,
         pbelief=pbelief,
         n_log=jnp.asarray(n_log, I64),

@@ -400,7 +400,6 @@ ELEMENTS = ("ln_period", "ecc", "cos_i", "node", "argp", "tau", "ln_mass", "ln_l
 
 N_GRID = 16
 GRID_SPACING_D = 15.0
-BLOCK_SNR = 10.0
 POSITION_LAG_D = 60.0
 ALBEDO = 0.3
 
@@ -604,7 +603,6 @@ def summarize(
     tick_days=None,
     n_grid=N_GRID,
     spacing_d=GRID_SPACING_D,
-    block_snr=BLOCK_SNR,
     albedo=ALBEDO,
     position_lag_d=POSITION_LAG_D,
 ):
@@ -624,7 +622,8 @@ def summarize(
     blocks = jnp.arange(channel.n_block_modes)
 
     def block(mode, start):
-        return channel.block_snr(subject, mode, start, elements) >= block_snr
+        snr = channel.block_snr(subject, mode, start, elements)
+        return snr >= channel.block_snr_required
 
     met = jax.vmap(lambda t: jax.vmap(lambda b: block(b, t))(blocks))(times)
     p_block = jnp.einsum("gbn,n->gb", met.astype(F64), w)
@@ -748,7 +747,6 @@ def _truth_entry(channel, entry, settings):
             class1=is1[None],
             n_grid=settings.n_grid,
             spacing_d=settings.spacing_d,
-            block_snr=settings.block_snr,
             albedo=settings.albedo,
             position_lag_d=settings.position_lag_d,
         )
@@ -796,7 +794,6 @@ class _Settings:
     report_cols: tuple
     n_grid: int
     spacing_d: float
-    block_snr: float
     albedo: float
     position_lag_d: float
 
@@ -992,7 +989,6 @@ class _PostSettings:
     n_slots: int
     n_grid: int
     spacing_d: float
-    block_snr: float
     albedo: float
     position_lag_d: float
     n_particles: int
@@ -1262,7 +1258,6 @@ def _fit_lane(channel, lane, st, engine, scale):
         last_det_d=jnp.where(last >= 0, last_d, lane.tick * channel.tick_days),
         n_grid=st.n_grid,
         spacing_d=st.spacing_d,
-        block_snr=st.block_snr,
         albedo=st.albedo,
         position_lag_d=st.position_lag_d,
     )
@@ -1394,7 +1389,6 @@ def _shrink_lane(channel, lane, st, engine, scale):
         last_det_d=jnp.where(last >= 0, last_d, lane.tick * channel.tick_days),
         n_grid=st.n_grid,
         spacing_d=st.spacing_d,
-        block_snr=st.block_snr,
         albedo=st.albedo,
         position_lag_d=st.position_lag_d,
     )
@@ -1513,7 +1507,6 @@ class ReportRefit(AbstractRefitBoundary):
         block_kind=BLOCK_KIND_NAME,
         n_grid=N_GRID,
         spacing_d=GRID_SPACING_D,
-        block_snr=BLOCK_SNR,
         albedo=ALBEDO,
         position_lag_d=POSITION_LAG_D,
         occupancy=None,
@@ -1576,7 +1569,6 @@ class ReportRefit(AbstractRefitBoundary):
         self.block_kind = str(block_kind)
         self.n_grid = int(n_grid)
         self.spacing_d = float(spacing_d)
-        self.block_snr = float(block_snr)
         self.albedo = float(albedo)
         self.position_lag_d = float(position_lag_d)
         self.occupancy = None if occupancy is None else float(occupancy)
@@ -1618,7 +1610,6 @@ class ReportRefit(AbstractRefitBoundary):
             "block_kind": self.block_kind,
             "n_grid": self.n_grid,
             "spacing_d": self.spacing_d,
-            "block_snr": self.block_snr,
             "albedo": self.albedo,
             "position_lag_d": self.position_lag_d,
         }
@@ -1690,7 +1681,6 @@ class ReportRefit(AbstractRefitBoundary):
             report_cols=tuple(range(n_slots)),
             n_grid=self.n_grid,
             spacing_d=self.spacing_d,
-            block_snr=self.block_snr,
             albedo=self.albedo,
             position_lag_d=self.position_lag_d,
         ), len(report_row)
@@ -1813,7 +1803,6 @@ class ReportRefit(AbstractRefitBoundary):
             n_slots=channel.n_slots,
             n_grid=self.n_grid,
             spacing_d=self.spacing_d,
-            block_snr=self.block_snr,
             albedo=self.albedo,
             position_lag_d=self.position_lag_d,
             n_particles=self.n_particles,
@@ -2122,7 +2111,6 @@ class ReportRefit(AbstractRefitBoundary):
 __all__ = [
     "ALBEDO",
     "BLOCK_KIND_NAME",
-    "BLOCK_SNR",
     "CATALOG_FIELDS",
     "CATALOG_GROUPS",
     "CLASS_ONE",

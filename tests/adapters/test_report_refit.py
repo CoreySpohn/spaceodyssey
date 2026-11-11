@@ -46,6 +46,7 @@ class StubChannel(eqx.Module):
     n_modes: int = eqx.field(static=True, default=MODES)
     n_block_modes: int = eqx.field(static=True, default=BLOCKS)
     tick_days: float = eqx.field(static=True, default=1.0)
+    block_snr_required: float = 10.0
 
     @staticmethod
     def _phase(time_d, el):

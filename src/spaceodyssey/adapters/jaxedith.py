@@ -1865,7 +1865,10 @@ class ObservingModeChannel(AbstractChannelModel):
         epoch_jd: Orbit epoch and tick 0 of the study.
         n_slots: Planet slots per star.
         exposures_s, block_days: The mode tables.
-        block_snr_required, block_rate_divisor: The block requirement.
+        block_snr_required: The block requirement, a traced scalar (a numeric knob
+            of a study: another value does not recompile) shared by the realization,
+            the belief's block probabilities and the outcome table.
+        block_rate_divisor: The photon-rate divisor of the block signal-to-noise.
         calibration: Digest of the declarations and the hosts.
     """
 
@@ -1882,7 +1885,7 @@ class ObservingModeChannel(AbstractChannelModel):
     n_slots: int = eqx.field(static=True)
     exposures_s: tuple = eqx.field(static=True)
     block_days: tuple = eqx.field(static=True)
-    block_snr_required: float = eqx.field(static=True)
+    block_snr_required: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, F64))
     block_rate_divisor: float = eqx.field(static=True)
     calibration: int = eqx.field(static=True)
 
@@ -1894,7 +1897,13 @@ class ObservingModeChannel(AbstractChannelModel):
             raise ValueError("n_slots must be a positive integer")
         if not self.exposures_s or not self.block_days:
             raise ValueError("a channel needs detection exposures and block lengths")
-        _finite("block_snr_required", self.block_snr_required, low=0.0, low_open=True)
+        if not isinstance(self.block_snr_required, jax.core.Tracer):
+            _finite(
+                "block_snr_required",
+                float(self.block_snr_required),
+                low=0.0,
+                low_open=True,
+            )
         _finite("block_rate_divisor", self.block_rate_divisor, low=1.0)
         _finite("diameter_m", self.diameter_m, low=0.0, low_open=True)
 
@@ -1957,6 +1966,9 @@ class ObservingModeChannel(AbstractChannelModel):
         for leaf in jax.tree_util.tree_leaves(scenes):
             digest.update(np.asarray(leaf).tobytes())
         digest.update(np.asarray(catalog_mass_kg, np.float64).tobytes())
+        if float(block_snr_required) != BLOCK_SNR_REQUIRED:
+            # the default keeps the calibration id of channels built before the knob
+            digest.update(np.float64(block_snr_required).tobytes())
         return cls(
             scenes=scenes,
             leakage=tables,

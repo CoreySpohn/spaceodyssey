@@ -12,6 +12,7 @@ import pytest
 
 from spaceodyssey.adapters import jaxedith as jx
 from spaceodyssey.adapters.photomancy import N_GRID, SLOT_KEPT, SLOT_OK, DecisionSummary
+from spaceodyssey.core import index_world, replay_run
 from spaceodyssey.core.enums import Audience
 from spaceodyssey.studies import bracket as br
 
@@ -36,8 +37,8 @@ def test_a_blocks_class_column_is_the_only_one_an_observer_may_read():
 
 
 @functools.cache
-def _oracle():
-    return build(budget_d=BUDGET_D)
+def _oracle(block_snr_required=None):
+    return build(budget_d=BUDGET_D, block_snr_required=block_snr_required)
 
 
 def _block_rows(run, truths, study):
@@ -54,9 +55,17 @@ def _block_rows(run, truths, study):
 
 
 @pytest.mark.slow(reason="compiles the chunked refresh driver once")
-def test_a_confirmed_slot_is_class_one_and_only_a_delivered_block_reveals():
-    """Over every world: no false claim, and no reveal without a delivered block."""
-    _, study, _, truths, _, run = _oracle()
+@pytest.mark.parametrize("required", [None, 5.0])
+def test_a_confirmed_slot_is_class_one_and_only_a_delivered_block_reveals(required):
+    """Over every world: no false claim, and no reveal without a delivered block.
+
+    Fails if the realization, the belief or the outcome table reads another block
+    requirement than the channel's `block_snr_required` (checked at its default and
+    at 5, the characterization requirement of a lower resolving power).
+    """
+    _, study, _, truths, _, run = _oracle(required)
+    threshold = float(study.channel_model.block_snr_required)
+    assert threshold == (jx.BLOCK_SNR_REQUIRED if required is None else required)
     table = br.outcome_table(run, truths, study)
     present, klass = np.asarray(truths.present), np.asarray(truths.klass)
     slot = table.slot
@@ -72,7 +81,7 @@ def test_a_confirmed_slot_is_class_one_and_only_a_delivered_block_reveals():
     rows = _block_rows(run, truths, study)
     assert rows, "no block was started"
     for w, s, payload in rows:
-        met = (payload[snr] >= jx.BLOCK_SNR_REQUIRED) & present[w, s]
+        met = (payload[snr] >= threshold) & present[w, s]
         expected = np.where(met, klass[w, s] + br.REVEAL_OFFSET, 0)
         np.testing.assert_array_equal(payload[list(rev)], expected)
         delivered[w, s] |= met
@@ -178,3 +187,82 @@ def test_a_revealed_slot_is_not_followed_up():
             **one,
         )
         assert stars[:, 1].sum() == 0.0, f"code {code} was followed up"
+
+
+def _p_block(built, *by_mode):
+    """`p_block` zero but for slot 0 of star 0: one node curve per block mode."""
+    n = built[1].caps.n_subjects
+    out = jnp.zeros((n, N_SLOTS, N_GRID, br.N_BLOCK))
+    for mode, curve in enumerate(by_mode):
+        out = out.at[0, 0, :, mode].set(jnp.asarray(curve, jnp.float64))
+    return out
+
+
+@pytest.mark.medium(reason=POLICY_REASON)
+def test_a_candidate_takes_the_shortest_block_mode_that_can_succeed():
+    """Each candidate is blocked at its own shortest mode that is good now and here.
+
+    Fails if a mode that cannot reach the requirement (p_block 0 at every node) is
+    chosen because a fixed per-star mode said so, if a longer mode is skipped when the
+    shorter one is better at a later node only, or if a candidate no mode serves is
+    blocked anyway.
+    """
+    built = _study()
+    flat, none = np.ones(N_GRID), np.zeros(N_GRID)
+    later = np.full(N_GRID, 0.85)
+    later[5] = 1.0
+    cases = [
+        ((flat, flat, flat), 0),
+        ((none, flat, flat), 1),
+        ((none, none, flat), 2),
+        ((later, flat, flat), 1),
+    ]
+    for curves, mode in cases:
+        channel, stars = _decide(built, p_block=_p_block(built, *curves))
+        assert channel == br.N_DETECT + mode, curves
+        assert stars[0, 3] == 1.0
+    channel, stars = _decide(built, p_block=_p_block(built, none, none, none))
+    assert stars[:, 3:].sum() == 0.0, "a candidate no mode serves was blocked"
+    assert channel < br.N_DETECT
+
+
+@pytest.mark.slow(reason="a refresh study past its forecast window, replayed")
+def test_a_star_past_its_forecast_window_is_refit_without_new_rows():
+    """The summary is renewed before its clock passes the last forecast node.
+
+    Fails if a star's forecast freezes at its last node once the clock is past the
+    window (the policy then never sees the node a block would succeed at), or if the
+    wait-time renewal is not reproduced by `replay_run`.
+    """
+    horizon_d = 2.0 * br.N_NODES * br.NODE_SPACING_D
+    _, study, executor, _, roots, run = build(horizon_d=horizon_d, budget_d=BUDGET_D)
+    last = np.asarray(run.carry.pbelief.ref_tick)
+    now = np.asarray(run.carry.tick)
+    window = (br.N_NODES - 1) * br.NODE_SPACING_D * br.TICKS_PER_DAY
+    assert (now[:, None] - last <= window).all(), "a forecast window ran out"
+    for w in range(roots.shape[0]):
+        replay_run(
+            study,
+            roots[w],
+            index_world(run.carry, w),
+            index_world(run.trace, w),
+            refit=executor.boundary,
+        )
+
+
+def test_the_observer_expires_a_summary_at_its_last_node():
+    """`expired` is true from the last node on and false before it.
+
+    Fails if the renewal threshold drifts from the policy's current-node rule
+    (`g_cur` reaching the last node).
+    """
+    zeros = DecisionSummary.zeros(2, 3, N_GRID, 1, 1, n_an=1)
+    zeros = dataclasses.replace(zeros, ref_tick=jnp.asarray([0, 0]))
+    observer = br.SummaryObserver(prior=zeros)
+    caps = types.SimpleNamespace(n_subjects=2)
+    day = br.TICKS_PER_DAY
+    spacing = br.NODE_SPACING_D
+    before = (br.N_NODES - 1.6) * spacing * day
+    at_last = (br.N_NODES - 1.4) * spacing * day
+    assert not observer.expired(zeros, jnp.asarray(round(before)), caps).any()
+    assert observer.expired(zeros, jnp.asarray(round(at_last)), caps).all()
