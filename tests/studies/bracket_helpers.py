@@ -62,19 +62,21 @@ def build(
     arm="oracle",
     p_new=0.0,
     block_snr_required=None,
+    channel=None,
     **settings,
 ):
     """`(source, study, executor, truths, roots, run)` of `arm` (the oracle by default).
 
     `p_new` is the prior chance of a new planet per star, node and mode. `settings` go
     to the arm's boundary (a posterior arm needs `occupancy`). `block_snr_required`
-    sets the channel's block requirement (its default when `None`).
+    sets the channel's block requirement (its default when `None`); `channel` replaces
+    the fixture's own channel (it must observe the fixture's stars).
     """
     source = fixture_source()
     knob = (
         {} if block_snr_required is None else {"block_snr_required": block_snr_required}
     )
-    channel = fixture_channel(source, **knob)
+    channel = channel or fixture_channel(source, **knob)
     n_stars = len(source.stars)
     study = br.bracket_study(
         source,
