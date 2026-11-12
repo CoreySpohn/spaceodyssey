@@ -8,7 +8,7 @@ from spaceodyssey import core
 from spaceodyssey.core import FindingCode, Severity, StudyGraph, preflight
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core.preflight_cases import CLEAN, SEEDED, SEEDED_IN_CONTEXT
 
 
@@ -84,7 +84,7 @@ def test_unknown_declaration_names_fail_at_construction():
 
 
 def test_graph_crosses_truth_only_at_measures():
-    graph = StudyGraph.from_study(toy.survey_1())
+    graph = StudyGraph.from_study(builder.survey_1())
     kinds = {n.name: (str(n.kind), str(n.side)) for n in graph.nodes.values()}
     assert kinds["world"] == ("source", "truth")
     assert kinds["channel[0]"] == ("measure", "truth")
@@ -107,7 +107,7 @@ def test_preflight_runs_nothing(monkeypatch):
     for cls in (CompiledExecutor, HostExecutor):
         monkeypatch.setattr(cls, "run", refuse)
     monkeypatch.setattr(core.handlers, "step", refuse)
-    assert preflight(toy.survey_1()) == []
+    assert preflight(builder.survey_1()) == []
 
 
 def test_preflight_reports_counts(capsys):
@@ -296,8 +296,8 @@ def test_upstream_hash_passes_fails_and_is_unverified_through_the_context():
     from spaceodyssey.core.preflight.checks import PreflightContext
     from tests.codec.test_document import TOY_KINDS
 
-    upstream = dump_study(toy.survey_1(), TOY_KINDS)
-    other = dump_study(toy.survey_1(horizon_tick=900), TOY_KINDS)
+    upstream = dump_study(builder.survey_1(), TOY_KINDS)
+    other = dump_study(builder.survey_1(horizon_tick=900), TOY_KINDS)
     study = _upstream_study(upstream.content_hash)
     right = PreflightContext(upstream_document=upstream)
     wrong = PreflightContext(upstream_document=other)
@@ -326,7 +326,7 @@ def _table_of(n_rows):
         audience=[3] * n_rows,
         payload=[[1.0]] * n_rows,
     )
-    return toy.survey_1(process=PreMissionImporter(table=table))
+    return builder.survey_1(process=PreMissionImporter(table=table))
 
 
 @pytest.mark.parametrize(
@@ -364,10 +364,12 @@ def test_a_hook_finding_outside_the_study_falls_back_to_its_component():
     from tests.codec.test_preflight_json import LocatorProcess
 
     for subject, index in (("missing", None), ("policy", None), ("policy", 3)):
-        study = toy.survey_1(process=LocatorProcess(subject=subject, index=index))
+        study = builder.survey_1(process=LocatorProcess(subject=subject, index=index))
         found = preflight(study)
         assert [locator(f) for f in found] == [("process", None, "", ())]
-    kept = preflight(toy.survey_1(process=LocatorProcess(subject="policy", index=0)))
+    kept = preflight(
+        builder.survey_1(process=LocatorProcess(subject="policy", index=0))
+    )
     assert [locator(f) for f in kept] == [("policy", 0, "", ())]
 
 

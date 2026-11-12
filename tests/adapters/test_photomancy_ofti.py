@@ -37,7 +37,7 @@ from spaceodyssey.core.refresh import (
     gather_refit_rows,
     revision_set_digest,
 )
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from spaceodyssey.studies.physical import ParticleObserver
 from spaceodyssey.studies.scripted import ScriptedRecords
 from tests.core.helpers import worlds
@@ -130,8 +130,10 @@ def ofti_study(ticks=(10, 40, 70), every=100, registry=REGISTRY):
         kinds=(ASTROMETRY,) * n,
         table=table,
     )
-    schedule = RefreshSchedule(every, 0, *toy.PRODUCT_CHANNELS, toy.PRODUCT_KIND)
-    return toy.survey_1(
+    schedule = RefreshSchedule(
+        every, 0, *builder.PRODUCT_CHANNELS, builder.PRODUCT_KIND
+    )
+    return builder.survey_1(
         caps,
         observer=observer,
         refresh=schedule,

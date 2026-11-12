@@ -25,7 +25,7 @@ from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.conformance.invariants import balance_conserved
 from spaceodyssey.core.enums import F64, AdmissionCode, Disposition, EffectKind, Scope
 from spaceodyssey.core.executors.base import histories_equal
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from tests.core.helpers import one_world, worlds
 from tests.core.program_helpers import (
     ScriptedPrograms,
@@ -97,7 +97,7 @@ def _four_channel_study(rows, *, free_cost=0.0, free_balance=0.0):
     defaults program 1 has no credit and its channel debits nothing.
     """
     caps = Capacities(n_programs=2, n_effects=3, n_channels=4)
-    study = toy.survey_1(caps=caps, policies=(ScriptedPrograms(script=rows),))
+    study = builder.survey_1(caps=caps, policies=(ScriptedPrograms(script=rows),))
     cost = study.channels.cost.at[3].set(free_cost)
     channels = dataclasses.replace(study.channels, cost=cost, charge=cost)
     budget = study.budget.at[caps.n_assets + 1].set(free_balance)
@@ -234,8 +234,8 @@ def test_a_one_program_study_has_the_history_of_survey_1():
     script = (*(observe(n, s, c, 0) for n, (s, c) in enumerate(plan)), end(5))
     caps = Capacities()
     policy = _PlanScript(script=script, n_plan=len(plan))
-    scripted = toy.survey_1(caps=caps, policies=(policy,))
-    plain = toy.survey_1(caps=caps)
+    scripted = builder.survey_1(caps=caps, policies=(policy,))
+    plain = builder.survey_1(caps=caps)
     assert caps.n_programs == 1 and plain.caps.n_programs == 1
     truths, roots = worlds(1, caps)
     a = run_on("compiled", scripted, truths, roots, 60).history(0)

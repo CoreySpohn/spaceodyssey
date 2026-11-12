@@ -25,7 +25,7 @@ from spaceodyssey.core.enums import (
     effect_mask,
 )
 from spaceodyssey.core.refresh import MaskedBatchRefit
-from spaceodyssey.studies import catalog, oracle
+from spaceodyssey.studies import builder, catalog, oracle
 from spaceodyssey.studies import toy as kinds
 from spaceodyssey.studies.scripted import ScriptedRecords, scripted_study
 from spaceodyssey.studies.toy import RECORD_AUXILIARY
@@ -596,7 +596,7 @@ def stop_grid():
 
     def make_case(scope_name, scope, disp_name, disp):
         def make_study():
-            return kinds.survey_1(
+            return builder.survey_1(
                 policies=(
                     kinds.FixedPlanPolicy(
                         plan=((0, 10), (1, 10), (0, 10), (1, 10), (0, 10)),
@@ -678,9 +678,9 @@ def frozen(plan=PLAN5, **kw):
 
 
 HAND_STUDIES = {
-    "baseline": lambda: kinds.survey_1(),
-    "wait": lambda: kinds.survey_1(policies=(frozen(wait_at=1),)),
-    "stop_lane_close": lambda: kinds.survey_1(
+    "baseline": lambda: builder.survey_1(),
+    "wait": lambda: builder.survey_1(policies=(frozen(wait_at=1),)),
+    "stop_lane_close": lambda: builder.survey_1(
         policies=(
             frozen(
                 bundle_at=1,
@@ -690,7 +690,7 @@ HAND_STUDIES = {
             ),
         )
     ),
-    "stop_campaign_abort": lambda: kinds.survey_1(
+    "stop_campaign_abort": lambda: builder.survey_1(
         policies=(
             frozen(
                 bundle_at=1,
@@ -700,16 +700,16 @@ HAND_STUDIES = {
             ),
         )
     ),
-    "cancel_live": lambda: kinds.survey_1(
+    "cancel_live": lambda: builder.survey_1(
         policies=(
             frozen(plan=((0, 10), (1, 10), (1, 10), (0, 10)), bundle_at=1, cancel_at=2),
         )
     ),
-    "coincident": lambda: kinds.survey_1(
+    "coincident": lambda: builder.survey_1(
         policies=(frozen(plan=((0, 11), (1, 12)), bundle_at=0, wait_at=1),)
     ),
     "bundle": lambda: _retimed_bundle_study(),
-    "phase_switch": lambda: kinds.survey_1(
+    "phase_switch": lambda: builder.survey_1(
         policies=(
             frozen(plan=((0, 10), (1, 10), (0, 10))),
             frozen(plan=((0, 12), (1, 12))),
@@ -725,7 +725,7 @@ def _retimed_bundle_study():
     Channel 12 occupies its lane for 125 ticks instead of 50, so the bundle's records
     release together at 260 and one decision sees both.
     """
-    base = kinds.survey_1(policies=(frozen(bundle_at=1),))
+    base = builder.survey_1(policies=(frozen(bundle_at=1),))
     occupancy = base.channels.occupancy_ticks.at[2].set(125)
     return eqx.tree_at(lambda st: st.channels.occupancy_ticks, base, occupancy)
 
@@ -736,7 +736,7 @@ def _coalesced_release_study():
     Channel 12 occupies its lane for 125 ticks, so its record (no latency) releases at
     130, the tick the channel 10 record (done at 110, latency 20) releases.
     """
-    base = kinds.survey_1(policies=(frozen(bundle_at=0),))
+    base = builder.survey_1(policies=(frozen(bundle_at=0),))
     occupancy = base.channels.occupancy_ticks.at[2].set(125)
     return eqx.tree_at(lambda st: st.channels.occupancy_ticks, base, occupancy)
 
@@ -753,7 +753,7 @@ def _unaffordable_bundle_study():
 
 def _forbidden_effect_study():
     """A phase that permits Observe only, under a plan that also asks to Stop."""
-    return kinds.survey_1(
+    return builder.survey_1(
         policies=(frozen(bundle_at=0, stop_at=1),),
         permitted_effects=(effect_mask(EffectKind.OBSERVE),),
     )
@@ -800,7 +800,7 @@ def _refresh_study():
         revisions=(0, 1),
         statuses=(int(RecordStatus.COMPLETED),) * 2,
     )
-    return kinds.survey_refresh(130, process=process)
+    return builder.survey_refresh(130, process=process)
 
 
 def _refresh_boundary():
@@ -814,7 +814,7 @@ def _delayed_release_study():
     Channel 11 (latency 20) logs records of the extra kind, which only the observer in
     `kinds.py` interprets.
     """
-    base = kinds.survey_1(policies=(frozen(plan=((0, 10), (1, 11), (0, 10))),))
+    base = builder.survey_1(policies=(frozen(plan=((0, 10), (1, 11), (0, 10))),))
     kind = base.channels.kind.at[1].set(RECORD_AUXILIARY)
     return eqx.tree_at(lambda st: st.channels.kind, base, kind)
 
@@ -875,7 +875,7 @@ def build_corpus():
         ),
         _case(
             "cancel_stale",
-            lambda: kinds.survey_1(
+            lambda: builder.survey_1(
                 policies=(frozen(bundle_at=1, cancel_at=2, cancel_gen_offset=-1),)
             ),
             None,
@@ -911,13 +911,13 @@ def build_corpus():
         ),
         _case(
             "overflow_stall",
-            lambda: kinds.survey_1(policies=(kinds.SpinWaitPolicy(),)),
+            lambda: builder.survey_1(policies=(kinds.SpinWaitPolicy(),)),
             None,
             (lambda h: h.flags[2] and not h.flags[0],),
         ),
         _case(
             "overflow_log",
-            lambda: kinds.survey_1(caps=Capacities(n_log=4)),
+            lambda: builder.survey_1(caps=Capacities(n_log=4)),
             None,
             (
                 lambda h: h.flags[3] and h.n_records == 4,

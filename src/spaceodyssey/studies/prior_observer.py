@@ -63,7 +63,7 @@ from spaceodyssey.core.refresh import (
     observer_refit_kernel,
     take_subject,
 )
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from spaceodyssey.studies.premission import (
     PedigreeRule,
     PreMissionImporter,
@@ -558,9 +558,9 @@ def prior_study(table, rule=PedigreeRule.EXCLUDE_PRIOR, *, refit_every=0, **over
     caps = prior_registry().lower(caps, observer)
     if refit_every:
         overrides["refresh"] = RefreshSchedule(
-            refit_every, 0, *toy.PRODUCT_CHANNELS, PRODUCT_INDEX
+            refit_every, 0, *builder.PRODUCT_CHANNELS, PRODUCT_INDEX
         )
-    return toy.survey_1(
+    return builder.survey_1(
         caps, process=PreMissionImporter(table=table), observer=observer, **overrides
     )
 

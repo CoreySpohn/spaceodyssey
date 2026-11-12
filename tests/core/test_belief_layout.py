@@ -27,7 +27,7 @@ from spaceodyssey.core.battery.replay_latency import _count_moved_updates
 from spaceodyssey.core.conformance.folds import CountingObserver, fold_counts, plain
 from spaceodyssey.core.enums import F64, I64
 from spaceodyssey.core.records import record_none
-from spaceodyssey.studies import oracle, toy
+from spaceodyssey.studies import builder, oracle, toy
 from tests.core.helpers import one_world
 
 
@@ -77,7 +77,7 @@ def test_a_layout_without_a_usable_count_leaf_is_refused(count_leaf, summary):
 
 def test_the_fingerprint_reads_the_declared_count_leaf():
     """Fails if the fingerprint reads `n` by name instead of the layout's count leaf."""
-    study = toy.survey_1()
+    study = builder.survey_1()
     truth, _ = one_world()
     view = snapshot_view(init_carry(study, truth), Audience.POLICY, study.caps)
     z = jnp.zeros(study.caps.n_subjects, I64)
@@ -133,11 +133,11 @@ class UndeclaredObserver(MomentObserver):
 def test_the_carry_holds_the_declared_types_and_a_mismatch_is_refused():
     """Fails if `pbelief` is not the summary type, or an undeclared one is accepted."""
     truth, _ = one_world()
-    carry = init_carry(toy.survey_1(observer=MomentObserver()), truth)
+    carry = init_carry(builder.survey_1(observer=MomentObserver()), truth)
     assert isinstance(carry.belief, MeanBelief)
     assert isinstance(carry.pbelief, MomentSummary)
     with pytest.raises(ValueError, match="does not describe the summary"):
-        toy.survey_1(observer=UndeclaredObserver())
+        builder.survey_1(observer=UndeclaredObserver())
 
 
 class SpareBelief(eqx.Module):
@@ -157,7 +157,7 @@ def _two_step_trace(caps):
 
 def test_the_comparator_reads_the_layout_leaf_names():
     """Fails if the history names belief leaves itself, or keeps a zero-size leaf."""
-    study = toy.survey_1()
+    study = builder.survey_1()
     truth, _ = one_world()
     carry = init_carry(study, truth)
     b = carry.belief
@@ -183,7 +183,7 @@ def test_the_comparator_reads_the_layout_leaf_names():
 def test_the_fold_counter_wraps_any_declared_layout():
     """Fails if the conformance fold counter assumes `MeanBelief` for either type."""
     counted = CountingObserver(inner=MomentObserver())
-    study = toy.survey_1(observer=counted)  # refused unless the layout matches init
+    study = builder.survey_1(observer=counted)  # refused unless the layout matches init
     truth, _ = one_world()
     carry = init_carry(study, truth)
     assert isinstance(plain(carry.pbelief), MomentSummary)
@@ -237,7 +237,7 @@ class ReservedObserver(MomentObserver):
 
 def test_the_fold_counter_never_shadows_an_observer_field():
     """Fails if `counts`, `ids` or `value` of a summary read the counter's state."""
-    caps = toy.survey_1().caps
+    caps = builder.survey_1().caps
     summary = CountingObserver(inner=ShadowObserver()).init_summary(caps)
     assert summary.counts.shape == (caps.n_subjects,)
     fields = (summary.counts, summary.ids, summary.value)
@@ -319,4 +319,4 @@ class ProjectedObserver(toy.ToyRunningMean):
 def test_a_study_refuses_a_layout_that_misdescribes_the_observer(observer, message):
     """Fails if a layout's node types or projection shapes are not checked."""
     with pytest.raises(ValueError, match=message):
-        toy.survey_1(observer=observer)
+        builder.survey_1(observer=observer)

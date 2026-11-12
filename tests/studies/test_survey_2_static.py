@@ -8,7 +8,7 @@ import pytest
 
 from spaceodyssey.core.battery.result import tree_bits_equal
 from spaceodyssey.core.enums import EffectKind
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from tests.studies.scenarios.survey_2 import (
     GaussianMean,
     RevisitPolicy,
@@ -21,7 +21,7 @@ def test_the_plain_survey_is_survey_1_with_another_policy():
     """Fails if the plain survey changes more than its policy, or the ignoring
     policy requests different parameters (including inactive effect columns).
     """
-    study, base = survey_2(), toy.survey_1()
+    study, base = survey_2(), builder.survey_1()
     assert study.caps == base.caps
     assert study.channels.id.tolist() == base.channels.id.tolist()
     assert int(study.refresh.every_ticks) == int(base.refresh.every_ticks)

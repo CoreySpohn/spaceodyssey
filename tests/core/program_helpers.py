@@ -8,7 +8,7 @@ from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, I64, Disposition, EffectKind, Scope
 from spaceodyssey.core.snapshot import EffectTable
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 
 SCRIPT_ROWS = 8
 NONE = -1  # a script row that matches no decision
@@ -129,4 +129,4 @@ def two_program_study(*rows, n_programs=2, **overrides):
     """The toy study with `n_programs` programs and a scripted policy."""
     caps = Capacities(n_programs=n_programs, n_effects=3)
     policy = ScriptedPrograms(script=rows)
-    return toy.survey_1(caps=caps, policies=(policy,), **overrides)
+    return builder.survey_1(caps=caps, policies=(policy,), **overrides)

@@ -40,7 +40,7 @@ from spaceodyssey.core.events import empty_event_row
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.core.kinds import AbstractPolicy
-from spaceodyssey.studies import oracle, toy
+from spaceodyssey.studies import builder, effect_rows, oracle
 from tests.core.helpers import one_world, worlds
 from tests.core.mutants import _clone
 from tests.core.refund_helpers import (
@@ -72,8 +72,8 @@ def _study(on=True, quantum=1.0, n_programs=1, permitted=None):
         n_programs=n_programs,
     )
     if permitted is None:
-        return toy.survey_1(caps=caps)
-    return toy.survey_1(caps=caps, permitted_effects=(permitted,))
+        return builder.survey_1(caps=caps)
+    return builder.survey_1(caps=caps, permitted_effects=(permitted,))
 
 
 @functools.cache
@@ -400,7 +400,7 @@ def _layout_study(n_assets, n_programs, budget=None, quantum=1.0):
         budget = jnp.arange(rows * caps.n_resources, dtype=jnp.float64)
         budget = budget.reshape(rows, caps.n_resources)
     lane_asset = [0, 0] if n_assets == 1 else [0, 1]
-    return toy.survey_1(caps=caps, lane_asset=lane_asset, budget=budget)
+    return builder.survey_1(caps=caps, lane_asset=lane_asset, budget=budget)
 
 
 def _layouts_are_told_apart():
@@ -469,7 +469,7 @@ def test_a_study_that_shows_no_balances_judges_no_range():
     """The range rule belongs to the flag: an off study keeps any budget."""
     caps = Capacities(n_lanes=2, n_channels=2)
     table = jnp.full((5, 3), 1.0e30, jnp.float64)
-    toy.survey_1(caps=caps, budget=table)
+    builder.survey_1(caps=caps, budget=table)
 
 
 def test_mutant_study_without_the_range_check_fails_the_range_test(monkeypatch):
@@ -495,7 +495,7 @@ def test_a_negative_channel_cost_is_refused_while_balances_are_shown(cost):
     with pytest.raises(ValueError, match="debit that is not negative"):
         study_module._check_balance_range(bad)
     with pytest.raises(ValueError, match="debit that is not negative"):
-        toy.survey_1(
+        builder.survey_1(
             caps=bad.caps,
             lane_asset=[0, 1],
             budget=bad.budget,
@@ -589,7 +589,7 @@ class _Script(AbstractPolicy):
         table = jnp.asarray(self.rows, I64)[self._index(view)]
         kind = table[:, 0]
         stop = kind == K.STOP
-        eff = toy._effects(
+        eff = effect_rows.effects(
             study.caps,
             kind=kind,
             tick=table[:, 1],
@@ -640,7 +640,7 @@ REFUND_AHEAD = _script(
 def _refund_study(on=True, quantum=1.0):
     registry, kind = oracle.oracle_registry()
     caps = registry.lower(Capacities(snapshot_balances=on, balance_quantum=quantum))
-    return toy.survey_1(caps=caps, policies=(_Learner(REFUND_AHEAD),)), kind
+    return builder.survey_1(caps=caps, policies=(_Learner(REFUND_AHEAD),)), kind
 
 
 class _BalanceService(oracle.ToyOracleService):
@@ -872,7 +872,7 @@ def test_a_receipt_released_between_a_decision_and_its_request_refuses_the_query
     registry, kind = oracle.oracle_registry()
     caps = registry.lower(Capacities(n_effects=3, refunds=True, snapshot_balances=True))
     ch = refund_study().channels
-    study = toy.survey_1(
+    study = builder.survey_1(
         caps=caps,
         channels=ch,
         budget=jnp.full((caps.n_balance_rows, caps.n_resources), BALANCE),

@@ -13,7 +13,7 @@ from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import I64, Audience
 from spaceodyssey.core.lift import traced
 from spaceodyssey.core.snapshot import MeanBelief
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 
 CATALOG_CHANNEL_ID = 13
 CATALOG_DELAY_TICKS = 150
@@ -57,7 +57,7 @@ def catalog_study(**overrides):
     kind = register_catalog(registry)
     caps = registry.lower(Capacities(n_channels=4))
     overrides.setdefault("observer", CatalogObserver(catalog_kind=kind))
-    base = toy.survey_1(caps=caps, **overrides)
+    base = builder.survey_1(caps=caps, **overrides)
     index = 3
     channels = base.channels
     channels = eqx.tree_at(

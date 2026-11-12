@@ -14,7 +14,7 @@ from spaceodyssey.core import (
     snapshot_view,
 )
 from spaceodyssey.core.enums import Purpose
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core import record_helpers as rh
 from tests.core.corpus import CORPUS, CORPUS_BY_NAME, PLAN5
 from tests.core.helpers import N_STEPS_CORPUS, worlds
@@ -101,7 +101,7 @@ def _recovery(study, n_worlds=32):
 
 
 def _reconstructing_study():
-    return toy.survey_1(policies=(rh.ReconstructionPolicy(plan=PLAN5),))
+    return builder.survey_1(policies=(rh.ReconstructionPolicy(plan=PLAN5),))
 
 
 def test_policy_cannot_recover_truth():

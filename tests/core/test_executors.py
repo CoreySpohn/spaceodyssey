@@ -19,7 +19,7 @@ from spaceodyssey.core.executors.base import (
 )
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
-from spaceodyssey.studies import toy as kinds
+from spaceodyssey.studies import builder
 from tests.core.corpus import HAND_HISTORIES, HAND_INVARIANTS, HAND_ROWS, HAND_STUDIES
 from tests.core.helpers import history_of, worlds
 
@@ -27,7 +27,7 @@ N_STEPS = 40
 
 
 def test_baseline_hand_history_both_executors():
-    st = kinds.survey_1()
+    st = builder.survey_1()
     truths, roots = worlds(8)
     cs, ts = CompiledExecutor().run(st, truths, roots, N_STEPS)
     layout = st.observer.layout(st.caps)
@@ -65,31 +65,31 @@ def test_hand_histories_match_across_executors_and_policy_forms(name, form):
 
 
 def test_n_dec_equals_woken_steps():
-    cs, ts = CompiledExecutor().run(kinds.survey_1(), *worlds(4), N_STEPS)
+    cs, ts = CompiledExecutor().run(builder.survey_1(), *worlds(4), N_STEPS)
     assert jnp.array_equal(cs.n_dec, ts.wake.sum(axis=1))
 
 
 def test_histories_equal_detects_one_tick():
-    h = history_of(kinds.survey_1())
+    h = history_of(builder.survey_1())
     ev = (*h.events[:3], (131, Stage.RELEASE, EventKind.RELEASE), *h.events[4:])
     g = dataclasses.replace(h, events=ev)
     assert not histories_equal(h, g).ok
 
 
 def test_histories_equal_detects_a_float_difference():
-    h = history_of(kinds.survey_1())
+    h = history_of(builder.survey_1())
     floats = dict(h.floats, payload=h.floats["payload"] + 1e-8)
     g = dataclasses.replace(h, floats=floats)
     assert histories_equal(h, g).max_abs > 1e-9 and not histories_equal(h, g).ok
 
 
 def test_empty_run_is_flagged_vacuous():
-    h = history_of(kinds.survey_1(), n_steps=1)
+    h = history_of(builder.survey_1(), n_steps=1)
     assert h.n_records == 0 and histories_equal(h, h).vacuous
 
 
 def test_scan_worlds_differ_but_are_reproducible():
-    st = kinds.survey_1()
+    st = builder.survey_1()
     truths, roots = worlds(4)
     c1, _ = CompiledExecutor().run(st, truths, roots, N_STEPS)
     c2, _ = CompiledExecutor().run(st, truths, roots, N_STEPS)
@@ -98,7 +98,7 @@ def test_scan_worlds_differ_but_are_reproducible():
 
 
 def test_no_flag_trips_on_baseline():
-    cs, _ = CompiledExecutor().run(kinds.survey_1(), *worlds(4), N_STEPS)
+    cs, _ = CompiledExecutor().run(builder.survey_1(), *worlds(4), N_STEPS)
     for name in (
         "overflow",
         "stalled",
@@ -119,10 +119,10 @@ def test_executors_are_compiled_once():
         return core.wake_by_audience(carry, ev)
 
     truths, roots = worlds(2)
-    CompiledExecutor().run(kinds.survey_1(), truths, roots, 12, wake_fn=counting_wake)
+    CompiledExecutor().run(builder.survey_1(), truths, roots, 12, wake_fn=counting_wake)
     n = len(traces)
     assert n >= 1
-    CompiledExecutor().run(kinds.survey_1(), truths, roots, 12, wake_fn=counting_wake)
+    CompiledExecutor().run(builder.survey_1(), truths, roots, 12, wake_fn=counting_wake)
     assert len(traces) == n  # equal study structure: no retrace
 
 
@@ -146,8 +146,8 @@ def test_policy_draws_respect_declared_phase_coupling(form, shared):
         shared=((core.Purpose.POLICY, ("phase",)),) if shared else ()
     )
     studies = (
-        kinds.survey_1(policies=(_DrawingWait(),), coupling=coupling),
-        kinds.survey_1(
+        builder.survey_1(policies=(_DrawingWait(),), coupling=coupling),
+        builder.survey_1(
             policies=(_DrawingWait(), _DrawingWait()),
             phase_until=(100, 1000),
             coupling=coupling,
@@ -171,7 +171,7 @@ def test_policy_draws_respect_declared_phase_coupling(form, shared):
 
 @pytest.mark.parametrize("field", ["micro", "sid", "acquisition_id"])
 def test_canonical_history_detects_corrupted_identities(field):
-    study = kinds.survey_1()
+    study = builder.survey_1()
     truths, roots = worlds(1)
     carry, trace = HostExecutor().run(study, index_world(truths, 0), roots[0], 20)
     layout = study.observer.layout(study.caps)

@@ -9,7 +9,7 @@ from spaceodyssey.core import CompiledExecutor, HostExecutor, RunResult
 from spaceodyssey.core.carry import Carry, Trace
 from spaceodyssey.core.executors import base
 from spaceodyssey.core.records import Record, RecordLog
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from tests.core.helpers import worlds
 
 
@@ -24,7 +24,7 @@ def _field_paths(cls, prefix):
 
 
 RESULT_FIELDS = (*_field_paths(Carry, "carry"), *_field_paths(Trace, "trace"))
-_STUDY = toy.survey_1()
+_STUDY = builder.survey_1()
 _LAYOUT = _STUDY.observer.layout(_STUDY.caps)
 # The belief fields' leaves come from the observer layout; mutate each of the toy's.
 # The conditional refresh leaves are zero-size in a study without the protocol; the

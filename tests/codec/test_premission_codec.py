@@ -39,7 +39,7 @@ from spaceodyssey.core.enums import RecordStatus
 from spaceodyssey.core.preflight import preflight
 from spaceodyssey.core.preflight.checks import PreflightContext
 from spaceodyssey.core.records import empty_log
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from spaceodyssey.studies.conformance import CORPUS
 from spaceodyssey.studies.precursor import export_records, table_digest, verify_lineage
 from spaceodyssey.studies.premission import (
@@ -52,8 +52,8 @@ from tests.codec.test_document import TOY_KINDS
 from tests.codec.test_run_document_runs import EXECUTORS, _corpus_document, _hash_pin
 
 RESOLVER = KindResolver({**TOY_KINDS, **PREMISSION_KINDS})
-UPSTREAM = dump_study(toy.survey_1(), TOY_KINDS)
-OTHER = dump_study(toy.survey_1(horizon_tick=900), TOY_KINDS)
+UPSTREAM = dump_study(builder.survey_1(), TOY_KINDS)
+OTHER = dump_study(builder.survey_1(horizon_tick=900), TOY_KINDS)
 DECLARED = "/study/process/table/upstream_hash"
 PAYLOAD = "/study/process/table/payload/file"
 N_ROWS = 6
@@ -76,7 +76,7 @@ def _table(declared=UPSTREAM.content_hash, order=None):
 
 
 def _study(table):
-    return toy.survey_1(process=PreMissionImporter(table=table))
+    return builder.survey_1(process=PreMissionImporter(table=table))
 
 
 def _stored(tmp_path, table=None):
@@ -404,7 +404,7 @@ def test_the_writer_refuses_a_files_directory_reached_through_a_link(tmp_path):
 # ---- export from an upstream run ----------------------------------------------------
 
 MEASUREMENT = toy.RECORD_MEASUREMENT
-SOURCE = toy.survey_1()  # the upstream study: horizon 1000
+SOURCE = builder.survey_1()  # the upstream study: horizon 1000
 SUBJECTS = {0: 1, 1: 2, 2: 3}
 ONE = {0: 0, 1: 0}  # two upstream subjects mapped to one downstream subject
 PRODUCERS = {10: 60}
@@ -549,7 +549,7 @@ def test_export_places_the_upstream_end_at_tick_zero():
     table = _export(2).table
     assert _ints(table.start_offset) == [280 - 1000, 180 - 1000, 180 - 1000]
     assert _ints(table.end_offset) == [295 - 1000, 195 - 1000, 195 - 1000]
-    later = _export(2, study=toy.survey_1(horizon_tick=1300)).table
+    later = _export(2, study=builder.survey_1(horizon_tick=1300)).table
     assert _ints(later.source.revision) == [1, 1, 0]
     assert _ints(later.start_offset) == [280 - 1300, 1180 - 1300, 180 - 1300]
 

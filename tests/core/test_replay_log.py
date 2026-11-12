@@ -16,7 +16,7 @@ from spaceodyssey.core import (
     replay_run,
 )
 from spaceodyssey.core.records import write_log
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core.corpus import CORPUS, CORPUS_BY_NAME
 from tests.core.helpers import N_STEPS_CORPUS, advance_j, one_world, service_of, worlds
 from tests.core.mutants import (
@@ -112,7 +112,7 @@ def test_replay_returns_a_belief():
 
 def build_reordered_releases():
     """A run that logs revision 0 first and releases revision 1 first."""
-    study = toy.survey_1(policies=(toy.NullPolicy(),))
+    study = builder.survey_1(policies=(toy.NullPolicy(),))
     truth, root = one_world()
     carry = core.empty_carry(study.caps)
     for revision, value in ((0, 2.0), (1, 9.0)):

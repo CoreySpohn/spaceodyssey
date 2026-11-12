@@ -36,7 +36,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.kinds import AbstractObserver, AbstractPolicy
 from spaceodyssey.core.snapshot import BeliefLayout
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, effect_rows, toy
 
 LANE = 2
 MEMBERS = (12, 13)  # channel ids, on lane 2
@@ -173,12 +173,12 @@ class PairPolicy(AbstractPolicy):
         kind1 = jnp.where(pair, EffectKind.OBSERVE, EffectKind.NONE)
         channel = jnp.stack(
             [
-                toy._chan_index(study, self.members[0]),
-                toy._chan_index(study, self.members[1]),
+                effect_rows.chan_index(study, self.members[0]),
+                effect_rows.chan_index(study, self.members[1]),
             ]
         )
         channel = channel.at[0].set(jnp.where(second, channel[1], channel[0]))
-        eff = toy._effects(
+        eff = effect_rows.effects(
             study.caps,
             kind=jnp.stack([kind0, kind1]).astype(I64),
             subject=self.subject,
@@ -196,7 +196,7 @@ def survey_7(bundled=True, **overrides):
     """The toy study with the pair policy and the background observer."""
     overrides.setdefault("policies", (PairPolicy(bundled=int(bundled)),))
     overrides.setdefault("observer", BundleBackgroundObserver())
-    return toy.survey_1(survey_7_caps(), **overrides)
+    return builder.survey_1(survey_7_caps(), **overrides)
 
 
 def short_balance(study, asset=1):

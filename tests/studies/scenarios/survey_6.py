@@ -30,7 +30,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.records import KindRegistry, RecordKind
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, effect_rows, toy
 from spaceodyssey.studies.premission import PreMissionImporter, authored_table
 from spaceodyssey.studies.prior_observer import PRIOR_KIND, PriorObserver
 
@@ -111,7 +111,7 @@ class AgingValuePolicy(AbstractPolicy):
         value, _, _ = self.value(view)
         act = jnp.where(stop, EffectKind.STOP, EffectKind.OBSERVE)
         channel = jnp.argmax(study.channels.id == self.channel).astype(I64)
-        eff = toy._effects(
+        eff = effect_rows.effects(
             study.caps,
             kind=jnp.stack(
                 [
@@ -152,14 +152,14 @@ def survey_6(table=None, *, policy=None, **overrides):
     """The survey: the toy channels, the import, the prior observer, the value policy.
 
     `table` defaults to `survey_6_table()` and `policy` to `AgingValuePolicy()`; other
-    overrides follow `toy.survey_1`.
+    overrides follow `builder.survey_1`.
     """
     table = survey_6_table() if table is None else table
     observer = PriorObserver(table=table, prior_kind=PRIOR_INDEX)
     caps = overrides.pop("caps", None) or Capacities()
     caps = survey_6_registry().lower(caps, observer)
     policy = AgingValuePolicy() if policy is None else policy
-    return toy.survey_1(
+    return builder.survey_1(
         caps,
         process=PreMissionImporter(table=table),
         observer=observer,

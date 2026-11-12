@@ -29,7 +29,7 @@ from spaceodyssey.core.refresh import (
     revision_set_digest,
 )
 from spaceodyssey.core.snapshot import _superseded_in_view, visible_rows
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from tests.core.helpers import worlds
 
 N_SUBJECTS, N_LOG, N_ROWS = 6, 96, 4
@@ -117,7 +117,7 @@ def _study():
     caps = Capacities(
         n_subjects=N_SUBJECTS, n_log=N_LOG, rows_per_subject=N_ROWS, refit_lanes=2
     )
-    return toy.survey_refresh(100, caps=caps)
+    return builder.survey_refresh(100, caps=caps)
 
 
 def _random_log(caps, seed):

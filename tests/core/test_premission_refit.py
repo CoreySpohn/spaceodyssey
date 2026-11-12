@@ -39,7 +39,7 @@ from spaceodyssey.core.refresh import (
     RefreshSchedule,
     _gather,
 )
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from spaceodyssey.studies.premission import authored_table, resolve_overlap
 from spaceodyssey.studies.prior_observer import (
     PRIOR_INDEX,
@@ -193,8 +193,8 @@ def _ofti():
     "boundary",
     [
         _ofti,
-        lambda: HostLoopRefit(toy.toy_refit_fit),
-        lambda: MaskedBatchRefit(toy.toy_mean_kernel),
+        lambda: HostLoopRefit(builder.toy_refit_fit),
+        lambda: MaskedBatchRefit(builder.toy_mean_kernel),
     ],
     ids=["ofti", "host_fit", "flat_kernel"],
 )
@@ -219,7 +219,7 @@ def test_d010_refuses_a_table_prior_with_a_boundary_that_ignores_it(boundary):
     )
     assert _codes(bare, boundary()) == []
     # no checkpoint ever asks a boundary: nothing to refuse
-    off = RefreshSchedule(0, 0, *toy.PRODUCT_CHANNELS, PRODUCT_INDEX)
+    off = RefreshSchedule(0, 0, *builder.PRODUCT_CHANNELS, PRODUCT_INDEX)
     still = dataclasses.replace(study, refresh=off)
     assert _codes(still, boundary()) == []
 

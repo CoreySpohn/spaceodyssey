@@ -6,7 +6,7 @@ import pytest
 from spaceodyssey.core.enums import AdmissionCode, EventKind
 from spaceodyssey.core.executors.base import canonical_history
 from spaceodyssey.core.executors.host import HostExecutor
-from spaceodyssey.studies import toy as kinds
+from spaceodyssey.studies import builder
 from tests.core.corpus import CORPUS_BY_NAME, frozen
 from tests.core.helpers import one_world
 from tests.core.mutants import PerWakeHostExecutor
@@ -57,7 +57,7 @@ def test_per_wake_rule_would_decide_twice_and_the_first_misses_a_record():
 def test_wakes_at_distinct_ticks_stay_separate():
     # the staggered bundle releases at 185 and 260: two ticks, two decisions, and the
     # decision at 185 still meets the busy lane
-    study = kinds.survey_1(policies=(frozen(bundle_at=1),))
+    study = builder.survey_1(policies=(frozen(bundle_at=1),))
     h, _views, trace = _run(HostExecutor(), study)
     assert _decisions_at(trace, 185) == 1 and _decisions_at(trace, 260) == 1
     assert np.any(h.ints["admit_code"] == AdmissionCode.LANE_BUSY)

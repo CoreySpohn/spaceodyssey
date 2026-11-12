@@ -15,7 +15,7 @@ from spaceodyssey.core import HostExecutor, preflight
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.conformance.corpus import make_worlds
 from spaceodyssey.core.executors.base import histories_equal
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.codec.run_cases import bindings
 from tests.codec.test_document import TOY_KINDS, assert_same_pytree
 from tests.core.preflight_cases import DOC_KINDS
@@ -71,7 +71,7 @@ def test_an_enabled_feature_run_recipe_redumps_exactly(feature):
         awards=((2, 10, 80),) if feature == "awards" else (),
         disruptive=feature == "commitments",
     )
-    study = toy.survey_1(
+    study = builder.survey_1(
         caps=caps, policies=(policy,), key_version=2 if feature == "key_version" else 1
     )
     if feature == "refunds":

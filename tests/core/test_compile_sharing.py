@@ -27,7 +27,7 @@ from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.core.lift import _lifted, lift_traced
-from spaceodyssey.studies import oracle, scripted, toy
+from spaceodyssey.studies import builder, oracle, scripted, toy
 from tests.codec.test_document import TOY_KINDS
 from tests.core.prior_helpers import refit_study
 
@@ -66,7 +66,7 @@ def _same_bits(a, b):
 
 
 def _threshold(x):
-    return toy.survey_1(policies=(toy.ThresholdStopPolicy(stop_snr=x),))
+    return builder.survey_1(policies=(toy.ThresholdStopPolicy(stop_snr=x),))
 
 
 def _script(ticks=(100, 200), values=(2.0, 9.0)):
@@ -139,7 +139,7 @@ def test_kind_names_stay_out_of_the_compile_key(threshold_run):
 
 def test_marked_numbers_stay_python_numbers_and_are_lifted_for_the_call_only():
     policy = toy.StochasticPolicy(theta=0.3, n_obs=6, wait_ticks=12)
-    study = toy.survey_1(policies=(policy,))
+    study = builder.survey_1(policies=(policy,))
     assert type(policy.n_obs) is int and type(policy.wait_ticks) is int
     lifted = lift_traced(study).agenda.policies[0]
     assert lifted.n_obs.dtype == jnp.int64 and lifted.wait_ticks.dtype == jnp.int64
@@ -150,12 +150,12 @@ def test_marked_numbers_stay_python_numbers_and_are_lifted_for_the_call_only():
     assert script.ticks.dtype == jnp.int64 and script.values.dtype == jnp.float64
     assert script.kinds.shape == (0,)
     # nothing marked, nothing rebuilt
-    plain = toy.survey_1()
+    plain = builder.survey_1()
     assert lift_traced(plain.agenda) is plain.agenda
 
 
 def test_a_registry_that_names_kinds_otherwise_still_fails_the_lowering_check():
-    study = toy.survey_1()
+    study = builder.survey_1()
     renamed = dataclasses.replace(
         study,
         caps=dataclasses.replace(
@@ -171,7 +171,7 @@ KINDS = {**TOY_KINDS, ("process", "scripted.records", 1): scripted.ScriptedRecor
 
 def test_documents_are_unchanged():
     """The fields stay Python numbers, so an earlier document keeps its hash."""
-    study = toy.survey_1(policies=(toy.ThresholdStopPolicy(stop_snr=3),))
+    study = builder.survey_1(policies=(toy.ThresholdStopPolicy(stop_snr=3),))
     doc = dump_study(study, TOY_KINDS)
     assert doc.content_hash == (
         "2d7d2831f3066b73c0a1741ea3bd19e82ce1375cc3b36b26ed42e2a6b808ea9f"
@@ -189,7 +189,7 @@ def test_a_marked_policy_can_be_built_inside_a_transform():
 @pytest.mark.parametrize("bucket", [0, -16, 2.5, True, "16"])
 def test_a_bucket_must_be_a_positive_int(bucket):
     with pytest.raises(ValueError, match="bucket"):
-        _run(toy.survey_1(), 17, bucket=bucket)
+        _run(builder.survey_1(), 17, bucket=bucket)
 
 
 def _jit_of(fn):
@@ -276,7 +276,7 @@ def test_masked_refit_shares_one_program_across_values():
     carry = eqx.filter_eval_shape(init_carry, base, index_world(truths, 0))
     shape = eqx.filter_eval_shape(refresh.gather_refit_rows, carry, roots[0], base)
     requests = jax.tree.map(lambda x: jnp.zeros((1, *x.shape), x.dtype), shape)
-    boundary = toy.toy_masked_refit()
+    boundary = builder.toy_masked_refit()
     _shares_one_program(
         refresh._masked_call,
         [
@@ -428,7 +428,7 @@ def _case_study(field, x):
         return _threshold(x), None
     if field == "stochastic":
         policy = toy.StochasticPolicy(theta=0.3, n_obs=3, wait_ticks=7)
-        return toy.survey_1(policies=(policy,)), None
+        return builder.survey_1(policies=(policy,)), None
     if field == "query_at":
         return oracle.oracle_study(query_at=x)
     if field == "values":
@@ -534,7 +534,7 @@ def test_refresh_gather_and_commit_share_one_program_across_values():
     root = roots[0]
     request = refresh._gather(carry, root, base)
     requests = refresh._gather_worlds(carries, roots, base)
-    boundary = toy.toy_masked_refit()
+    boundary = builder.toy_masked_refit()
 
     def zeros(tree):
         return jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), tree)

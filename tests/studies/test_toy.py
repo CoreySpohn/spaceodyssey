@@ -4,7 +4,8 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 
-from spaceodyssey.studies.toy import ToyTruth, draw_truth, survey_1
+from spaceodyssey.studies.builder import survey_1
+from spaceodyssey.studies.toy import ToyTruth, draw_truth
 
 
 def test_world_source_draw_matches_standalone_draw():

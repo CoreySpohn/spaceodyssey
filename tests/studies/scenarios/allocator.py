@@ -39,7 +39,7 @@ from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.records import log_columns
 from spaceodyssey.core.service import AbstractHostService, Request
 from spaceodyssey.core.snapshot import effects_none
-from spaceodyssey.studies import scripted, toy
+from spaceodyssey.studies import builder, scripted, toy
 
 PROPOSAL_KIND = toy.RecordKind(
     "proposal",
@@ -343,7 +343,7 @@ def allocator_study(proposals=DEFAULT_PROPOSALS, **overrides):
             "caps", Capacities(n_programs=2, n_effects=N_EFFECTS, awards=True)
         )
     )
-    study = toy.survey_1(
+    study = builder.survey_1(
         caps=caps,
         policies=(AllocationPolicy(),),
         process=_proposal_process(proposals),

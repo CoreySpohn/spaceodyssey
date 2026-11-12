@@ -3,7 +3,7 @@
 import pytest
 
 from spaceodyssey.core.enums import RecordStatus
-from spaceodyssey.studies import toy as kinds
+from spaceodyssey.studies import builder
 from tests.core.corpus import PERTURBATIONS
 from tests.core.draw_helpers import (
     DrawingSpinPolicy,
@@ -111,7 +111,7 @@ def test_decision_count_policy_key_mutant_is_caught(executor):
 @pytest.mark.parametrize("executor", ["scan", "host"])
 def test_two_decisions_at_one_tick_draw_distinct_variates(executor):
     (world,) = run_study(
-        lambda: kinds.survey_1(policies=(DrawingSpinPolicy(),)),
+        lambda: builder.survey_1(policies=(DrawingSpinPolicy(),)),
         executor,
         n_seeds=1,
         n_steps=20,

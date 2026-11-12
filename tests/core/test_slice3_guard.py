@@ -30,7 +30,7 @@ from spaceodyssey.core.battery.metamorphic import with_zero_time_asset
 from spaceodyssey.core.capacities import OPTIONAL, Capacities
 from spaceodyssey.core.executors import base
 from spaceodyssey.core.keys import asset_coordinate
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from tests.core.corpus import frozen
 from tests.core.helpers import baseline_host_run, one_world
 
@@ -47,7 +47,7 @@ def _by_path(carry, path, trace=None):
 
 
 def _leaves_of(carry, trace):
-    layout = toy.survey_1().observer.layout(toy.survey_1().caps)
+    layout = builder.survey_1().observer.layout(builder.survey_1().caps)
     handled = np.asarray(trace.handled)
     return base._canonical_leaves(carry, trace, handled, layout)
 
@@ -76,7 +76,7 @@ def test_every_conditional_entry_names_an_inventoried_field():
 
 def test_a_default_study_holds_every_gated_field_empty():
     """Fails if a gated field has size in a study whose feature is off."""
-    study = toy.survey_1()
+    study = builder.survey_1()
     truth, _ = one_world()
     carry = eqx.filter_jit(init_carry)(study, truth)
     for path, gate in base.CONDITIONAL_FIELDS.items():
@@ -127,7 +127,7 @@ def test_control_an_open_gate_puts_the_empty_leaf_in_the_history(monkeypatch):
 
 def test_an_empty_conditional_view_leaf_is_not_hashed(monkeypatch):
     """Fails if a leaf of size zero is listed: its tag and count move the digest."""
-    study = toy.survey_1()
+    study = builder.survey_1()
     truth, _ = one_world()
     carry = eqx.filter_jit(init_carry)(study, truth)
     base_fp, _ = _fingerprint(study, carry)
@@ -140,7 +140,7 @@ def test_an_empty_conditional_view_leaf_is_not_hashed(monkeypatch):
 
 def test_control_a_nonempty_conditional_view_leaf_moves_the_digest(monkeypatch):
     """Control: a leaf with content, by contrast, is hashed and moves the digest."""
-    study = toy.survey_1()
+    study = builder.survey_1()
     truth, _ = one_world()
     carry = eqx.filter_jit(init_carry)(study, truth)
     base_fp, _ = _fingerprint(study, carry)
@@ -171,7 +171,7 @@ def test_refund_of_stays_unconditional_with_its_legacy_sentinel():
 
 def test_the_added_asset_keeps_every_existing_asset_coordinate():
     """Fails if inserting the idle facility renumbers a channel's asset."""
-    study = toy.survey_1(key_version=2)
+    study = builder.survey_1(key_version=2)
     more = with_zero_time_asset(study)
     assert more.key_version == 2
     for index in range(study.caps.n_channels):
@@ -227,7 +227,7 @@ def test_the_slice_3a_capacities_default_to_off():
 
 
 def _run(plan, key_version):
-    study = toy.survey_1(policies=(frozen(plan=plan),), key_version=key_version)
+    study = builder.survey_1(policies=(frozen(plan=plan),), key_version=key_version)
     truth, root = one_world()
     return HostExecutor().run(study, truth, root, N_STEPS)
 
@@ -345,7 +345,7 @@ def test_each_feature_owns_only_its_expected_leaves(feature):
         "commitments": Capacities(n_commitments=2),
         "balances": Capacities(snapshot_balances=True),
     }[feature]
-    study = toy.survey_1(caps=caps)
+    study = builder.survey_1(caps=caps)
     truth, _ = one_world()
     carry, trace, policy_view, observer_view = _feature_state(study, truth)
     leaves = _leaves_of(carry, trace)

@@ -12,7 +12,7 @@ from spaceodyssey.core import (
     RecordKind,
     payload_columns,
 )
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 
 
 def _kind(name, width, audience=Audience.OBSERVER | Audience.POLICY):
@@ -87,7 +87,7 @@ def test_column_readability_by_audience():
 
 
 def test_study_refuses_unregistered_kinds():
-    study = toy.survey_1()
+    study = builder.survey_1()
     bare = dataclasses.replace(study.caps, payload_audience=())
     with pytest.raises(ValueError, match="no registered record kinds"):
         dataclasses.replace(study, caps=bare)

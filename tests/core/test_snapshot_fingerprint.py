@@ -20,7 +20,7 @@ from spaceodyssey.core import (
     snapshot_fingerprint,
     snapshot_view,
 )
-from spaceodyssey.studies import catalog, toy
+from spaceodyssey.studies import builder, catalog
 from tests.core.corpus import frozen
 from tests.core.helpers import (
     N_STEPS_CORPUS,
@@ -148,7 +148,7 @@ def test_an_empty_leaf_moves_the_fingerprint(monkeypatch):
     This is why a leaf whose capacity is zero must be left out of the list, as the
     zero-width `product` column is, rather than hashed empty.
     """
-    study = toy.survey_1()
+    study = builder.survey_1()
     truth, _ = one_world()
     carry = eqx.filter_jit(init_carry)(study, truth)
     view = snapshot_view(carry, Audience.POLICY, study.caps)

@@ -23,7 +23,7 @@ from spaceodyssey.core.carry import _tree_set
 from spaceodyssey.core.conformance import refit_beliefs
 from spaceodyssey.core.enums import F64, I64, Capacity, EventKind, RefitStatus, Stage
 from spaceodyssey.core.executors import base
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core.corpus import LEAK_PLAN, LEAK_SCENARIOS
 from tests.core.helpers import worlds
 from tests.core.kit_helpers import RefitSample
@@ -114,9 +114,8 @@ def test_awaiting_without_a_boundary_on_both_executors():
 
 
 def test_no_refresh_study_ignores_a_boundary():
-    from spaceodyssey.studies import toy
 
-    study = toy.survey_1()
+    study = builder.survey_1()
     truths, roots = worlds(1)
     a = HostExecutor().run_worlds(study, truths, roots, 40)
     b = HostExecutor().run_worlds(study, truths, roots, 40, refit=masked())
@@ -238,7 +237,7 @@ def test_refresh_leaf_mutation_fails_parity(field):
 
 
 def _leak_study(process):
-    return toy.survey_refresh(
+    return builder.survey_refresh(
         100, policies=(toy.ReactivePolicy(plan=LEAK_PLAN),), process=process
     )
 
@@ -593,7 +592,7 @@ def test_belief_reading_policy_agrees_across_executors_and_reads_the_install():
 def test_order_sensitive_observer_agrees_across_executors():
     observer = RefitSample()
     assert observer.order_sensitive
-    study = toy.survey_refresh(100, observer=observer)
+    study = builder.survey_refresh(100, observer=observer)
     h, c = run_pair(study, 60, 2, 7, refit=refresh_module.MaskedBatchRefit())
     for w in range(2):
         r = histories_equal(h.history(w), c.history(w))
@@ -682,7 +681,7 @@ def test_capacity_exhaustion_refuses_the_whole_install(monkeypatch, which):
 
 def _counting_kernel(counter):
     def kernel(study, entry):
-        out = toy.toy_mean_kernel(study, entry)
+        out = builder.toy_mean_kernel(study, entry)
         jax.debug.callback(lambda: counter.append(1))
         return out
 

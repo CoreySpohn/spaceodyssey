@@ -5,7 +5,7 @@ import numpy as np
 from spaceodyssey.core import HostExecutor
 from spaceodyssey.core.executors import base
 from spaceodyssey.core.records import pedigree_of
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core.helpers import worlds
 from tests.core.refresh_helpers import (
     masked,
@@ -20,7 +20,7 @@ QUERY_DECISION = 1  # oracle_refresh_study query_at
 
 def _product_slots(carry):
     log = carry.log
-    keep = np.asarray(log.valid) & (np.asarray(log.kind) == toy.PRODUCT_KIND)
+    keep = np.asarray(log.valid) & (np.asarray(log.kind) == builder.PRODUCT_KIND)
     return np.flatnonzero(keep).tolist()
 
 
@@ -57,7 +57,7 @@ def test_refresh_products_are_indexed_by_grid_ordinal_with_revision_zero():
     for s in slots:
         assert int(log.acquisition_index[s]) * 100 == int(log.available_tick[s])
     assert {int(log.revision[s]) for s in slots} == {0}
-    assert {int(log.channel[s]) for s in slots} <= set(toy.PRODUCT_CHANNELS)
+    assert {int(log.channel[s]) for s in slots} <= set(builder.PRODUCT_CHANNELS)
 
 
 def test_service_answers_carry_the_decision_as_index():
@@ -75,7 +75,7 @@ def test_service_answers_carry_the_decision_as_index():
     answers = [
         i
         for i in np.flatnonzero(np.asarray(log.valid))
-        if int(log.kind[i]) not in (toy.RECORD_MEASUREMENT, toy.PRODUCT_KIND)
+        if int(log.kind[i]) not in (toy.RECORD_MEASUREMENT, builder.PRODUCT_KIND)
         and int(log.channel[i]) == SERVICE_CHANNEL
     ]
     assert answers
@@ -119,7 +119,7 @@ def test_a_log_length_index_for_answers_is_caught(monkeypatch):
             int(log.acquisition_index[i])
             for i in np.flatnonzero(np.asarray(log.valid))
             if int(log.channel[i]) == SERVICE_CHANNEL
-            and int(log.kind[i]) not in (toy.RECORD_MEASUREMENT, toy.PRODUCT_KIND)
+            and int(log.kind[i]) not in (toy.RECORD_MEASUREMENT, builder.PRODUCT_KIND)
         ]
         assert idx and idx != [QUERY_DECISION] * len(idx)
     finally:
@@ -140,7 +140,7 @@ def test_scripted_acquisition_ids_do_not_collide_with_refresh_products():
     ids = [int(log.acquisition_id[i]) for i in valid]
     assert len(ids) == len(set(ids)) and len(ids) >= 2, ids
     kinds = {int(log.kind[i]) for i in valid}
-    assert toy.PRODUCT_KIND in kinds  # control: a product was written
+    assert builder.PRODUCT_KIND in kinds  # control: a product was written
     scripted = [i for i in valid if int(log.kind[i]) == toy.RECORD_MEASUREMENT]
     assert [int(log.acquisition_index[i]) for i in scripted] == [4]
 
@@ -178,7 +178,7 @@ def _derived_measurement_study():
 
     derived = dc.replace(toy.MEASUREMENT_KIND, derived=True)
     registry = KindRegistry((RecordKind("none", ()), derived, toy.AUXILIARY_KIND))
-    return toy.survey_1(registry.lower(Capacities()))
+    return builder.survey_1(registry.lower(Capacities()))
 
 
 def test_replay_skips_derived_rows_like_the_live_run():

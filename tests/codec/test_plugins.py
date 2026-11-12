@@ -13,7 +13,7 @@ import pytest
 from spaceodyssey.codec import DocumentError, KindResolver, dump_study, load_study
 from spaceodyssey.core.kinds import AbstractDesign
 from spaceodyssey.plugins import RegistrationError, kinds_from_entry_points
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.codec.test_document import TOY_KINDS, LabelledDesign, assert_same_pytree
 
 
@@ -128,7 +128,7 @@ def gain_v2(cls):
 
 def v1_document(version=1):
     """survey_1 with a hand-written toy gain design stored at kind `version`."""
-    doc = json.loads(dump_study(toy.survey_1(), TOY_KINDS).to_json())
+    doc = json.loads(dump_study(builder.survey_1(), TOY_KINDS).to_json())
     doc.pop("content_hash")
     doc["study"]["design"] = {
         "$kind": ["design", "toy.gain", version],
@@ -144,7 +144,7 @@ def test_load_by_id_without_path_import(tmp_path, monkeypatch):
     """
     foreign = Entry("console_scripts", "tool", ImportError("never loaded"))
     resolver = KindResolver(kinds_from_entry_points([*entries_for(TOY_KINDS), foreign]))
-    study = toy.survey_1()
+    study = builder.survey_1()
     text = dump_study(study, resolver).to_json()
     assert_same_pytree(study, load_study(text, resolver))
 

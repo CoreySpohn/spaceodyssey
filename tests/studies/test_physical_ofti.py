@@ -40,8 +40,8 @@ from spaceodyssey.core.enums import RefitStatus
 from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.records import record_none
 from spaceodyssey.core.refresh import RefitEntry
+from spaceodyssey.studies import builder, toy
 from spaceodyssey.studies import physical as ph
-from spaceodyssey.studies import toy
 from tests.core.helpers import worlds
 
 PROFILE = load_profile()
@@ -484,7 +484,7 @@ def check_executor_parity(context, rows, refit, n_steps, observer=None):
         valid = np.asarray(log.valid)
         kind = np.asarray(log.kind)
         payload = np.asarray(log.payload)
-        products = payload[valid & (kind == toy.PRODUCT_KIND)][:, :2]
+        products = payload[valid & (kind == builder.PRODUCT_KIND)][:, :2]
         assert products[:, 0].tolist() == [RefitStatus.OK] * (2 * n)
         assert products[:, 1].tolist() == [k for k in range(1, n + 1) for _ in (0, 1)]
         summary = valid & (kind == ph.SUMMARY_KIND_INDEX)

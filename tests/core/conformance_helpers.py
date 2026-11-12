@@ -21,7 +21,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.kinds import AbstractProcess
 from spaceodyssey.core.snapshot import _digest
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from spaceodyssey.studies.conformance import CORPUS_BY_NAME
 
 N_WORLDS = 2
@@ -120,7 +120,7 @@ class ScriptedFaults(AbstractProcess):
 
 def fault_study(close_lane=False):
     """The toy survey-1 study with the scripted faults of `FAULTS`."""
-    base = toy.survey_1()
+    base = builder.survey_1()
     process = ScriptedFaults(
         rows=FAULTS,
         tie=int(core.fault_tie(base.channels, 0)),

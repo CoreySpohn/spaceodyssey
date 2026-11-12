@@ -30,6 +30,7 @@ from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
 from spaceodyssey.core.snapshot import effects_none
+from spaceodyssey.studies import builder
 from spaceodyssey.studies import toy as kinds
 from spaceodyssey.studies.premission import PreMissionImporter, authored_table
 from tests.core.corpus import frozen
@@ -41,7 +42,7 @@ STARTS = (0, 150, 300, 450, 600)
 
 def survey(policy=None, **overrides):
     """The one-subject, five-acquisition study the checks run on."""
-    return kinds.survey_1(policies=(policy or frozen(plan=PLAN),), **overrides)
+    return builder.survey_1(policies=(policy or frozen(plan=PLAN),), **overrides)
 
 
 def batched_truth(signal, n_worlds, n_subjects=4):
@@ -311,7 +312,7 @@ class WindowAgePolicy(AbstractPolicy):
 
 def epoch_study(*, absolute=False, rule="relative"):
     """The synthetic study: survey 1 with the import and the window policy."""
-    return kinds.survey_1(
+    return builder.survey_1(
         EPOCH_CAPS,
         process=EpochImporter(table=epoch_table(), absolute=absolute),
         policies=(WindowAgePolicy(rule=rule),),

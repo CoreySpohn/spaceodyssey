@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from spaceodyssey.core.enums import I64
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.codec.test_document import TOY_KINDS
 from tests.core.helpers import worlds
 from tests.studies.scenarios.survey_14 import (
@@ -30,7 +30,7 @@ def baseline(batch):
     """Survey 1 on the host: the history the no-switch study must equal on both
     executors (the executors agree within the parity bands, so one reference serves)."""
     truths, roots = batch
-    return run_on("host", toy.survey_1(), truths, roots, N_STEPS)
+    return run_on("host", builder.survey_1(), truths, roots, N_STEPS)
 
 
 @pytest.fixture(scope="module")

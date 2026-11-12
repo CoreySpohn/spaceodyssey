@@ -9,7 +9,7 @@ import pytest
 
 from spaceodyssey import core
 from spaceodyssey.core.events import empty_event_row
-from spaceodyssey.studies import oracle, toy
+from spaceodyssey.studies import builder, oracle
 from tests.core.helpers import one_world, worlds
 
 
@@ -37,7 +37,7 @@ class QueryWithSibling(core.AbstractPolicy):
 @pytest.mark.parametrize("chunk", [None, 1, 3])
 def test_result_commits_before_sibling_effects(stop, query_first, chunk):
     registry, kind = oracle.oracle_registry()
-    study = toy.survey_1(
+    study = builder.survey_1(
         caps=registry.lower(), policies=(QueryWithSibling(stop, query_first),)
     )
     truths, roots = worlds(1)
@@ -156,7 +156,7 @@ class TwoQueries(core.AbstractPolicy):
 @pytest.mark.parametrize("chunk", [None, 1, 3])
 def test_only_one_query_is_admitted_per_decision(chunk):
     registry, kind = oracle.oracle_registry()
-    study = toy.survey_1(caps=registry.lower(), policies=(TwoQueries(),))
+    study = builder.survey_1(caps=registry.lower(), policies=(TwoQueries(),))
     truth, root = one_world()
     carry = eqx.filter_jit(core.init_carry)(study, truth)
     view = core.snapshot_view(carry, core.Audience.POLICY, study.caps)

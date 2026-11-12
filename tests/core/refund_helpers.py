@@ -22,7 +22,7 @@ from spaceodyssey.core import (
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, I64, PUBLIC, ChargePricing, RecordStatus
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core.helpers import one_world
 from tests.core.program_helpers import ScriptedPrograms
 
@@ -164,7 +164,7 @@ def refund_study(
     `BALANCE`, so a debit never refuses.
     """
     caps = Capacities(n_effects=3, refunds=refunds, **(cap_kw or {}))
-    base = toy.survey_1(caps=caps)
+    base = builder.survey_1(caps=caps)
     c, r = caps.n_channels, caps.n_resources
     cost = jnp.full((c, r), 10.0, F64)
     ch = dataclasses.replace(base.channels, cost=cost, charge=cost)
@@ -192,7 +192,7 @@ def refund_study(
     budget = jnp.full((caps.n_balance_rows, r), BALANCE, F64)
     fires = (*receipts, *[OFF] * (N_RECEIPTS - len(receipts)))
     process = ScriptedReceipts(rows=fires)
-    return toy.survey_1(
+    return builder.survey_1(
         caps=caps,
         channels=ch,
         budget=budget,

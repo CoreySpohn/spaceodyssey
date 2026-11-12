@@ -23,7 +23,7 @@ from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import I64, RecordStatus
 from spaceodyssey.core.ledger import CONFIG_PAD
 from spaceodyssey.core.preflight import preflight
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from tests.codec.test_document import TOY_KINDS
 from tests.core.commitment_helpers import ScriptedCommitments, plan
 from tests.core.helpers import one_world, worlds
@@ -67,7 +67,9 @@ def config_study(script, plans=(), switches=None):
     """The toy study on `CAPS` with the scripted policy and the given timeline."""
     switches = timeline(SWITCH) if switches is None else switches
     policy = ScriptedCommitments(script=script, plan=plans)
-    study = toy.survey_1(caps=CAPS, policies=(policy,), config_switch_ticks=switches)
+    study = builder.survey_1(
+        caps=CAPS, policies=(policy,), config_switch_ticks=switches
+    )
     return dataclasses.replace(study, channel_model=ToyConfigPhotometry())
 
 
@@ -216,7 +218,7 @@ def test_the_timeline_declaration_round_trips_and_default_studies_omit_it():
     """Fails if the ticks are dropped or rebuilt with another dtype, or a study without
     a timeline writes the field (every document hash would move).
     """
-    study = toy.survey_1(
+    study = builder.survey_1(
         caps=Capacities(max_config_switches=2),
         config_switch_ticks=timeline(30, 90),
     )
@@ -226,5 +228,5 @@ def test_the_timeline_declaration_round_trips_and_default_studies_omit_it():
     assert loaded.assets.config_switch_ticks.dtype == jnp.int64
     assert loaded.assets.config_switch_ticks.tolist() == timeline(30, 90).tolist()
     assert dump_study(loaded, TOY_KINDS).to_json() == text
-    plain = json.loads(dump_study(toy.survey_1(), TOY_KINDS).to_json())
+    plain = json.loads(dump_study(builder.survey_1(), TOY_KINDS).to_json())
     assert "config_switch_ticks" not in json.dumps(plain["study"]["assets"])

@@ -1,6 +1,7 @@
 """Capacity exhaustion studies shared by status tests and the gate."""
 
 from spaceodyssey.core import PUBLIC, Capacities, Capacity
+from spaceodyssey.studies import builder
 from spaceodyssey.studies import toy as kinds
 from tests.core.helpers import worlds
 
@@ -23,5 +24,5 @@ def overflow_study(name, caps):
         process = kinds.HeartbeatProcess(
             period_ticks=10, n_fires=4, audience=PUBLIC, writes=False
         )
-        return kinds.survey_1(caps=caps, process=process)
-    return kinds.survey_1(caps=caps)
+        return builder.survey_1(caps=caps, process=process)
+    return builder.survey_1(caps=caps)

@@ -30,7 +30,7 @@ from spaceodyssey.core.checkpoint import (
     rebuild,
     tree_digest,
 )
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from tests.codec.test_document import TOY_KINDS
 
 OPS = (
@@ -444,7 +444,7 @@ class Carry(NamedTuple):
 
 def identity_run(directory, **kw):
     sink = DirectoryCheckpoint(directory, kinds=TOY_KINDS, **kw)
-    study = toy.survey_1()
+    study = builder.survey_1()
     truths = {"a": np.zeros(2)}
     roots = np.zeros(2, np.uint32)
     config = {"executor": "host", "row_axis": 0}

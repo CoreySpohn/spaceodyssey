@@ -88,7 +88,7 @@ from spaceodyssey.core.records import KindRegistry, RecordKind
 from spaceodyssey.core.refresh import REFRESH_PRODUCT_KIND, RefreshSchedule
 from spaceodyssey.core.snapshot import BeliefLayout
 from spaceodyssey.core.study import Clock
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, effect_rows
 
 # A candidate: three detections, a class probability of at least `CANDIDATE_CLASS`
 # (a study parameter), a refit that completed, and a predicted-position scatter under
@@ -379,8 +379,8 @@ def bracket_study(
     horizon = round(horizon_d * per_day)
     budget = jnp.full((caps.n_balance_rows, caps.n_resources), UNBOUNDED, F64)
     budget = budget.at[-1, SHARED_RESOURCE].set(float(budget_d))
-    schedule = RefreshSchedule(per_day, 0, *toy.PRODUCT_CHANNELS, KIND_PRODUCT)
-    study = toy.survey_1(
+    schedule = RefreshSchedule(per_day, 0, *builder.PRODUCT_CHANNELS, KIND_PRODUCT)
+    study = builder.survey_1(
         caps,
         channels=channel_table(channel, caps),
         channel_model=channel,
@@ -689,7 +689,7 @@ class BracketPolicy(AbstractPolicy):
         eff_star = jnp.where(observe_cat, jnp.minimum(kick.astype(I64), n - 1), star)
         eff_channel = jnp.where(observe_cat, cat_channel, channel)
         wake = jnp.where(stale & ~kicking, next_day, tick + per_day)
-        eff = toy._effects(
+        eff = effect_rows.effects(
             caps,
             kind=jnp.stack([kind, jnp.asarray(0, I64)]),
             subject=eff_star,

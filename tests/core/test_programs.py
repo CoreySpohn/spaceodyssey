@@ -43,7 +43,7 @@ from spaceodyssey.core.preflight import FindingCode, preflight
 from spaceodyssey.core.records import empty_log, masked_record, record_none
 from spaceodyssey.core.snapshot import effects_none
 from spaceodyssey.core.transaction import mask_effects
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from tests.core.helpers import one_world
 from tests.core.program_helpers import (
     ScriptedPrograms,
@@ -133,7 +133,7 @@ def test_the_ledger_charges_the_row_of_the_named_program():
     many = two_program_study(n_programs=3)
     rows = [int(r) for r in _resource_rows(many, 1, 2)]
     assert rows == [int(many.assets.lane_asset[1]), many.caps.n_assets + 2, 5]
-    one = toy.survey_1()
+    one = builder.survey_1()
     assert [int(r) for r in _resource_rows(one, 1, 0)][1] == one.caps.n_assets
     assert [int(r) for r in _resource_rows(one, 1)][1] == one.caps.n_assets
 
@@ -149,7 +149,7 @@ def test_control_a_program_that_is_ignored_charges_the_first_row():
 
 def test_one_program_holds_no_program_leaf():
     """Fails if a study with one program carries a program column or flag."""
-    study = toy.survey_1()
+    study = builder.survey_1()
     truth, _ = one_world()
     carry = eqx.filter_jit(init_carry)(study, truth)
     assert carry.ev.program is None and carry.request.program is None
@@ -358,7 +358,7 @@ def test_a_producer_that_names_no_program_charges_program_zero():
     `FixedPlanPolicy` leaves the column `None`; the owner then defaults to program 0, as
     it is with one program.
     """
-    study = toy.survey_1(caps=Capacities(n_programs=2))
+    study = builder.survey_1(caps=Capacities(n_programs=2))
     truth, root = one_world(caps=study.caps)
     run = HostExecutor().run(study, truth, root, N_STEPS)
     n = int(run.carry.n_log)
@@ -375,7 +375,7 @@ def test_a_producer_that_names_no_program_charges_program_zero():
 
 def test_control_the_same_study_with_one_program_charges_no_program_row():
     """Control: with one program the effect table holds no program column at all."""
-    study = toy.survey_1()
+    study = builder.survey_1()
     assert effects_none(study.caps).program is None
     assert effects_none(Capacities(n_programs=2)).program is not None
 

@@ -30,7 +30,7 @@ from spaceodyssey.core.executors.base import run_status
 from spaceodyssey.core.keys import fold_key
 from spaceodyssey.core.preflight import FindingCode, preflight
 from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from spaceodyssey.studies.premission import (
     PAD,
     PREMISSION_KINDS,
@@ -94,7 +94,7 @@ def table(namespace=(0, 0, 0, 0), audience=(3, 3, OBS, 3), order=(0, 1, 2, 3)):
 
 
 def study_of(t):
-    return toy.survey_1(CAPS, process=PreMissionImporter(table=t))
+    return builder.survey_1(CAPS, process=PreMissionImporter(table=t))
 
 
 def one(caps=CAPS):
@@ -167,7 +167,7 @@ def test_seed_queues_one_process_event_per_written_row_and_retargets_the_kickoff
     assert int(ev.sid[kick[0]]) == 0 and int(c.next_sid) == 6
     # padding rows queue nothing and take no id
     padded = core.init_carry(study_of(table(namespace=(PAD,) * 4)), truth)
-    plain = core.init_carry(toy.survey_1(CAPS), truth)
+    plain = core.init_carry(builder.survey_1(CAPS), truth)
     moved = dataclasses.replace(
         plain.ev,
         stage=jnp.where(plain.ev.kind == EventKind.WAIT, Stage.RELEASE, plain.ev.stage),
@@ -226,7 +226,7 @@ def test_an_overflow_of_the_queue_the_log_or_the_ids_is_reported():
     for n_events, bit in ((need.queue_peak, 0), (need.queue_peak - 1, 1)):
         caps = dataclasses.replace(CAPS, n_events=n_events)
         c = core.init_carry(
-            toy.survey_1(caps, process=PreMissionImporter(table=t)), truth
+            builder.survey_1(caps, process=PreMissionImporter(table=t)), truth
         )
         assert int(c.overflow_mask) & Capacity.QUEUE_SLOTS == bit * Capacity.QUEUE_SLOTS
         assert bool(c.overflow) == bool(bit)
@@ -356,7 +356,7 @@ def test_one_initial_decision_with_and_without_a_public_zero_information_import(
     stage makes a second initial decision.
     """
     truth, root = one()
-    plain = toy.survey_1(CAPS)
+    plain = builder.survey_1(CAPS)
     zero = authored_table(
         subject=[0],
         local_index=[0],

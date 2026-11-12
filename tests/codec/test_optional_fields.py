@@ -29,7 +29,7 @@ from spaceodyssey.core.ledger import ChannelTable
 from spaceodyssey.core.records import Record, record_none
 from spaceodyssey.core.snapshot import EffectTable, effects_none
 from spaceodyssey.core.study import Study
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from spaceodyssey.studies.conformance import CORPUS
 from tests.codec.test_document import TOY_KINDS, assert_same_pytree
 
@@ -101,7 +101,7 @@ def test_the_optional_fields_are_the_ones_slice_3a_added():
 
 def test_the_encoder_omits_every_optional_field_at_its_default():
     """Fails if a default study writes a field its older documents did not hold."""
-    doc = _doc(toy.survey_1())
+    doc = _doc(builder.survey_1())
     assert not set(STUDY_FIELDS) & set(doc["study"])
     assert not set(CAP_FIELDS) & set(doc["study"]["caps"])
     assert "n_programs" in doc["study"]["caps"]  # a field with a default, not optional
@@ -132,7 +132,7 @@ def test_a_nondefault_optional_field_is_written_and_round_trips():
         max_config_switches=4,
         n_ops=3,
     )
-    study = toy.survey_1(caps=caps, key_version=2)
+    study = builder.survey_1(caps=caps, key_version=2)
     doc = _doc(study)
     assert doc["study"]["key_version"] == 2
     assert [doc["study"]["caps"][n] for n in CAP_FIELDS] == [
@@ -156,7 +156,7 @@ def test_a_missing_optional_field_loads_at_its_default():
     """Fails if the loader refuses a document that omits an optional field, or fills
     it with anything but the default.
     """
-    study = toy.survey_1()
+    study = builder.survey_1()
     loaded = load_study(json.dumps(_doc(study)), TOY_KINDS)
     assert loaded.key_version == 1
     assert [getattr(loaded.caps, n) for n in CAP_FIELDS] == [
@@ -202,7 +202,7 @@ def _resolve(document, pointer):
 )
 def test_a_field_written_at_its_default_is_refused(path, value):
     """Fails if a second document for the same study loads: it would hash apart."""
-    doc = _doc(toy.survey_1())
+    doc = _doc(builder.survey_1())
     node = doc["study"]
     for key in path[:-1]:
         node = node[key]
@@ -214,11 +214,11 @@ def test_a_field_written_at_its_default_is_refused(path, value):
 
 def test_a_wrong_typed_optional_value_is_refused_not_taken_for_the_default():
     """Fails if True loads as the integer default 1, or 1 as the bool default."""
-    doc = _doc(toy.survey_1(key_version=2))
+    doc = _doc(builder.survey_1(key_version=2))
     doc["study"]["key_version"] = True
     with pytest.raises(DocumentError):
         load_study(json.dumps(doc), TOY_KINDS)
-    doc = _doc(toy.survey_1())
+    doc = _doc(builder.survey_1())
     doc["study"]["caps"]["awards"] = 0
     with pytest.raises(DocumentError):
         load_study(json.dumps(doc), TOY_KINDS)
@@ -230,7 +230,7 @@ def test_an_explicit_null_balance_field_is_refused(name):
     caps = Capacities(
         snapshot_balances=True, balance_quantum=0.5, max_bundles=2, max_bundle_size=2
     )
-    doc = _doc(toy.survey_1(caps=caps))
+    doc = _doc(builder.survey_1(caps=caps))
     doc["study"]["caps"][name] = None
     with pytest.raises(DocumentError) as err:
         load_study(json.dumps(doc), TOY_KINDS)
@@ -240,11 +240,11 @@ def test_an_explicit_null_balance_field_is_refused(name):
 
 def test_a_required_field_still_cannot_be_missing():
     """Fails if optionality leaks to a field without the marker."""
-    doc = _doc(toy.survey_1())
+    doc = _doc(builder.survey_1())
     del doc["study"]["refresh"]  # has a default, but is not optional
     with pytest.raises(DocumentError, match="'refresh' is missing"):
         load_study(json.dumps(doc), TOY_KINDS)
-    doc = _doc(toy.survey_1())
+    doc = _doc(builder.survey_1())
     del doc["study"]["caps"]["n_programs"]
     with pytest.raises(DocumentError, match="'n_programs' is missing"):
         load_study(json.dumps(doc), TOY_KINDS)
@@ -252,7 +252,7 @@ def test_a_required_field_still_cannot_be_missing():
 
 def test_an_unknown_field_is_still_refused():
     """Fails if the loader starts to accept fields no declaration holds."""
-    doc = _doc(toy.survey_1())
+    doc = _doc(builder.survey_1())
     doc["study"]["caps"]["awards_pending"] = 1
     with pytest.raises(DocumentError):
         load_study(json.dumps(doc), TOY_KINDS)
@@ -260,7 +260,7 @@ def test_an_unknown_field_is_still_refused():
 
 def test_control_an_encoder_that_keeps_defaults_moves_the_document(monkeypatch):
     """Control: the omission is what holds the hash; without it the text differs."""
-    study = toy.survey_1()
+    study = builder.survey_1()
     kept = _text(study)
     monkeypatch.setattr(dump_module, "at_default", lambda *a: False)
     written = _text(study)
@@ -270,7 +270,7 @@ def test_control_an_encoder_that_keeps_defaults_moves_the_document(monkeypatch):
 
 def test_control_a_loader_that_requires_every_field_refuses_the_document(monkeypatch):
     """Control: the fill is what lets an older document load."""
-    text = _text(toy.survey_1())
+    text = _text(builder.survey_1())
     monkeypatch.setattr(load_module, "is_optional_field", lambda f: False)
     with pytest.raises(DocumentError, match="is missing"):
         load_study(text, TOY_KINDS)
@@ -376,7 +376,7 @@ def test_a_populated_program_column_round_trips():
 
 
 def _refund_channel_study():
-    study = toy.survey_1(caps=dataclasses.replace(Capacities(), refunds=True))
+    study = builder.survey_1(caps=dataclasses.replace(Capacities(), refunds=True))
     n, r = study.channels.cost.shape
     channels = dataclasses.replace(
         study.channels,
@@ -401,7 +401,7 @@ def test_a_channel_refund_declaration_is_written_and_round_trips():
 
 def test_a_document_from_before_the_refund_columns_keeps_its_hash():
     """Fails if a default channel table starts writing a column: every hash moves."""
-    study = toy.survey_1()
+    study = builder.survey_1()
     before = json.loads(_text(study))["content_hash"]
     loaded = load_study(json.dumps(_doc(study)), TOY_KINDS)
     assert json.loads(_text(loaded))["content_hash"] == before
@@ -579,7 +579,7 @@ def test_a_nondefault_feature_recipe_round_trips_exactly(feature):
 
     kinds = {**TOY_KINDS, **DOC_KINDS}
     if feature == "charge":
-        study = toy.survey_1(caps=Capacities(refunds=True))
+        study = builder.survey_1(caps=Capacities(refunds=True))
         study = dataclasses.replace(
             study,
             channels=dataclasses.replace(
@@ -587,7 +587,7 @@ def test_a_nondefault_feature_recipe_round_trips_exactly(feature):
             ),
         )
     elif feature == "commitments":
-        study = toy.survey_1(
+        study = builder.survey_1(
             caps=Capacities(n_commitments=2), policies=(DocPolicy(disruptive=True),)
         )
         study = dataclasses.replace(
@@ -599,7 +599,7 @@ def test_a_nondefault_feature_recipe_round_trips_exactly(feature):
             ),
         )
     else:
-        study = toy.survey_1(
+        study = builder.survey_1(
             caps=Capacities(n_programs=2, awards=True),
             policies=(DocPolicy(programs=(0, 1), awards=((2, 10, 80), (3, 20, 90))),),
         )
@@ -638,7 +638,7 @@ def test_a_populated_record_program_round_trips():
 
 def test_an_explicit_null_key_version_is_refused():
     """Fails if a null key version loads instead of reporting its input location."""
-    doc = _doc(toy.survey_1(key_version=2))
+    doc = _doc(builder.survey_1(key_version=2))
     doc["study"]["key_version"] = None
     with pytest.raises(DocumentError) as err:
         load_study(json.dumps(doc), TOY_KINDS)

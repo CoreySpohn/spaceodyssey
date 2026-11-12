@@ -15,7 +15,7 @@ from spaceodyssey.core import (
     empty_carry,
     run_status,
 )
-from spaceodyssey.studies import toy as kinds
+from spaceodyssey.studies import builder
 from tests.core.corpus import CORPUS_BY_NAME
 from tests.core.helpers import worlds
 from tests.core.status_helpers import OVERFLOW_CASES, overflow_study, run_status_case
@@ -40,7 +40,7 @@ def test_overflow_sets_status(executor, name):
 @pytest.mark.parametrize("executor", EXECUTORS, ids=lambda e: e.__name__)
 def test_overflow_is_never_reported_complete_with_more_steps(executor):
     caps, _ = OVERFLOW_CASES["log_rows"]
-    res = run_status_case(executor, kinds.survey_1(caps=caps), caps, n_steps=120)
+    res = run_status_case(executor, builder.survey_1(caps=caps), caps, n_steps=120)
     assert res.status.tolist() == [RunStatus.OVERFLOW] * 2
 
 
@@ -54,7 +54,7 @@ def test_microstep_guard_reports_stalled(executor):
 
 @pytest.mark.parametrize("executor", EXECUTORS, ids=lambda e: e.__name__)
 def test_truncated_run_not_reported_complete(executor):
-    study = kinds.survey_1()
+    study = builder.survey_1()
     short = run_status_case(executor, study, study.caps, n_steps=5)
     assert short.status.tolist() == [RunStatus.TRUNCATED] * 2
     assert not short.complete.any() and not short.history(0).complete
@@ -76,7 +76,7 @@ def test_status_agrees_across_executors():
 
 
 def test_zero_step_budget_returns_matching_truncated_results():
-    study = kinds.survey_1()
+    study = builder.survey_1()
     truths, roots = worlds(2)
     compiled = CompiledExecutor().run_worlds(study, truths, roots, 0)
     host = HostExecutor().run_worlds(study, truths, roots, 0)

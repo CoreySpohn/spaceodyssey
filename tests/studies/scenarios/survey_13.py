@@ -35,7 +35,7 @@ from spaceodyssey.core.enums import (
 from spaceodyssey.core.kinds import AbstractChannelModel, AbstractPolicy
 from spaceodyssey.core.ledger import CONFIG_PAD
 from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, effect_rows, toy
 
 SWITCH_TICK = 100
 COMMIT_START = 200
@@ -119,7 +119,7 @@ class SwitchPolicy(AbstractPolicy):
         first = view.n_dec == 0
         again = ~first & (seen == 1) & (pstate[0] == 0)
         stop = seen >= 3
-        eff = toy._effects(
+        eff = effect_rows.effects(
             caps,
             kind=jnp.stack(
                 [
@@ -134,8 +134,8 @@ class SwitchPolicy(AbstractPolicy):
             subject=self.subject,
             channel_index=jnp.stack(
                 [
-                    toy._chan_index(study, OBSERVE_CHANNEL),
-                    toy._chan_index(study, COMMIT_CHANNEL),
+                    effect_rows.chan_index(study, OBSERVE_CHANNEL),
+                    effect_rows.chan_index(study, COMMIT_CHANNEL),
                 ]
             ),
             group=view.n_dec * caps.n_effects + jnp.arange(caps.n_effects),
@@ -152,7 +152,7 @@ def survey_13(switch_tick=SWITCH_TICK, **overrides):
     caps = survey_13_caps()
     switches = jnp.asarray([[switch_tick], [CONFIG_PAD]], I64)
     overrides.setdefault("policies", (SwitchPolicy(),))
-    study = toy.survey_1(caps, config_switch_ticks=switches, **overrides)
+    study = builder.survey_1(caps, config_switch_ticks=switches, **overrides)
     model = ConfigPhotometry(
         noise=study.channel_model.noise, gains=jnp.asarray(GAINS, F64)
     )

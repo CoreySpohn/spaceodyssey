@@ -51,7 +51,7 @@ from spaceodyssey.core.kinds import (
     AbstractWorldSource,
 )
 from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, effect_rows, toy
 from spaceodyssey.studies.premission import PreMissionImporter, authored_table
 
 STAR_LEVEL_KIND = RecordKind("star_level", (PayloadColumn("value", PUBLIC),))
@@ -241,7 +241,7 @@ class Survey18Policy(AbstractPolicy):
         subject = plans[choice, done % plans.shape[1]]
         stop = done >= self.n_obs
         channel = jnp.argmax(study.channels.id == self.channel).astype(I64)
-        eff = toy._effects(
+        eff = effect_rows.effects(
             study.caps,
             kind=jnp.stack(
                 [
@@ -319,13 +319,13 @@ def survey_18(
     `table` defaults to `survey_18_table()`; `release_delay` (one value, or one per
     row) delays its release. `policy` and `observer` replace `Survey18Policy()` and
     `Survey18Observer()` (controls); `coupling` is the weight of a star's level in
-    its planets' measurements. Other overrides follow `toy.survey_1`.
+    its planets' measurements. Other overrides follow `builder.survey_1`.
     """
     table = survey_18_table() if table is None else table
     delay = jnp.broadcast_to(_i64(release_delay), jnp.shape(table.local_index))
     caps = overrides.pop("caps", None) or Capacities()
     caps = survey_18_registry().lower(caps)
-    base = toy.survey_1(
+    base = builder.survey_1(
         caps,
         process=Survey18Importer(table=table, release_delay=delay),
         observer=Survey18Observer() if observer is None else observer,

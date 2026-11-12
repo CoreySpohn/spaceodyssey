@@ -9,7 +9,7 @@ import pytest
 from spaceodyssey.core import CompiledExecutor, HostExecutor, replay_run
 from spaceodyssey.core.enums import EffectKind, EventKind
 from spaceodyssey.core.executors.base import index_world
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.codec.run_cases import KINDS as REFRESH_KINDS
 from tests.codec.run_cases import bindings, boundary
 from tests.core.helpers import worlds
@@ -49,7 +49,7 @@ def batch():
 @pytest.fixture(scope="module")
 def survey_1_run(batch):
     truths, roots = batch
-    return run_with_actions("host", toy.survey_1(), truths, roots, N_STEPS)
+    return run_with_actions("host", builder.survey_1(), truths, roots, N_STEPS)
 
 
 @pytest.fixture(scope="module")
@@ -200,7 +200,7 @@ def test_the_run_document_round_trips(every, batch):
     study = survey_2(every)
     kw = {"refit": boundary()} if every else {}
     bound = bindings() if every else None
-    registry = toy.refresh_registry() if every else toy.toy_registry()
+    registry = builder.refresh_registry() if every else toy.toy_registry()
     original = HostExecutor().run_worlds(study, truths, roots, N_STEPS, **kw)
     doc, run = round_trip(study, registry, "host", KINDS, bindings=bound, **kw)
     assert redump(run, "host", KINDS, bindings=bound, **kw).content_hash == (
@@ -240,7 +240,8 @@ def test_replay_of_the_adaptive_run(executor, batch):
             np.testing.assert_array_equal(got, expected)
 
     products = np.flatnonzero(
-        np.asarray(carry.log.valid) & (np.asarray(carry.log.kind) == toy.PRODUCT_KIND)
+        np.asarray(carry.log.valid)
+        & (np.asarray(carry.log.kind) == builder.PRODUCT_KIND)
     )
     refresh_steps = np.asarray(trace.handled) & (
         np.asarray(trace.kind) == EventKind.REFRESH

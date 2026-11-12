@@ -24,7 +24,7 @@ from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.core.kinds import AbstractWorldSource
 from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
 from spaceodyssey.core.trajectory import TrajectoryTable, draw_walk, trajectory_key
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.codec.test_document import TOY_KINDS
 from tests.doubles import ToyEpochPhotometry
 
@@ -90,7 +90,7 @@ def _study(wait):
         (RecordKind("none", ()), RecordKind("measurement", cols), toy.AUXILIARY_KIND)
     ).lower(Capacities())
     policy = toy.FixedPlanPolicy(plan=PLAN, wait_at=1, wait_ticks=wait)
-    study = toy.survey_1(caps, policies=(policy,))
+    study = builder.survey_1(caps, policies=(policy,))
     return dataclasses.replace(
         study, channel_model=TableChannel(), world_source=TableWorldSource()
     )

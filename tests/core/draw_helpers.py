@@ -11,6 +11,7 @@ from spaceodyssey.core.enums import EffectKind, RecordStatus
 from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
+from spaceodyssey.studies import builder
 from spaceodyssey.studies import toy as kinds
 from tests.core.corpus import PERTURBATIONS, PLAN5
 from tests.core.leak_helpers import make_worlds
@@ -60,7 +61,7 @@ class WaitingReactivePolicy(kinds.ReactivePolicy):
 
 
 def _waiting(wait_at):
-    return lambda: kinds.survey_1(
+    return lambda: builder.survey_1(
         policies=(WaitingReactivePolicy(plan=PLAN5, wait_at=wait_at),)
     )
 

@@ -73,7 +73,7 @@ from spaceodyssey.core.kinds import AbstractObserver, ObserverCapabilities
 from spaceodyssey.core.records import KindRegistry, RecordKind
 from spaceodyssey.core.refresh import REFRESH_PRODUCT_KIND, RefreshSchedule
 from spaceodyssey.core.snapshot import BeliefLayout
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from spaceodyssey.studies.scripted import ScriptedRecords
 
 # The summary record's index in `physical_registry`.
@@ -620,9 +620,11 @@ def physical_study(rows, context, *, observer=None, every_ticks=None, caps=None)
     caps = Capacities(rows_per_subject=8, refit_lanes=2) if caps is None else caps
     caps = physical_registry().lower(caps, observer)
     every = context.clock.ticks_per_day if every_ticks is None else every_ticks
-    schedule = RefreshSchedule(every, 0, *toy.PRODUCT_CHANNELS, toy.PRODUCT_KIND)
+    schedule = RefreshSchedule(
+        every, 0, *builder.PRODUCT_CHANNELS, builder.PRODUCT_KIND
+    )
     horizon = int(max(rows.end_ticks)) + 2 * context.clock.ticks_per_day
-    study = toy.survey_1(
+    study = builder.survey_1(
         caps,
         observer=observer,
         refresh=schedule,

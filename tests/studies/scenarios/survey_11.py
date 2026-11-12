@@ -26,7 +26,7 @@ from spaceodyssey.core.enums import (
 from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.lift import traced
 from spaceodyssey.core.snapshot import effects_none
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from spaceodyssey.studies.scripted import SCRIPTED_CHANNEL, ScriptedRecords
 
 __all__ = [
@@ -163,7 +163,7 @@ def survey_11(*, frozen=False):
         audience=int(Audience.POLICY),
         delay=ALERT_DELAY,
     )
-    base = toy.survey_1(caps=caps)
+    base = builder.survey_1(caps=caps)
     c, r = caps.n_channels, caps.n_resources
     cost = jnp.full((c, r), COST, F64)
     table = jnp.full((c, r), ChargePricing.OCCUPANCY, I64)
@@ -176,7 +176,7 @@ def survey_11(*, frozen=False):
         .at[CHANNEL_INDEX]
         .set(jnp.asarray(SURCHARGE, F64)),
     )
-    study = toy.survey_1(
+    study = builder.survey_1(
         caps=caps,
         channels=channels,
         budget=jnp.full((caps.n_balance_rows, r), BALANCE, F64),

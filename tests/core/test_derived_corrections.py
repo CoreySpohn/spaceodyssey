@@ -12,7 +12,7 @@ from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import I64, Audience, Capacity, EventKind, RunStatus
 from spaceodyssey.core.events import empty_event_row
 from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from spaceodyssey.studies.scripted import ScriptedRecords
 from tests.core.helpers import one_world, worlds
 
@@ -38,7 +38,7 @@ def _study(kinds, revisions, ids=(4, 4), *, measurement_derived=False):
         kinds=kinds,
     )
     caps = _registry(measurement_derived).lower(Capacities())
-    return toy.survey_1(caps, policies=(toy.NullPolicy(),), process=process)
+    return builder.survey_1(caps, policies=(toy.NullPolicy(),), process=process)
 
 
 def _runs(study):

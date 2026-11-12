@@ -12,7 +12,7 @@ from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, I64, Disposition, EffectKind, Scope
 from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.snapshot import effects_none
-from spaceodyssey.studies.toy import survey_1
+from spaceodyssey.studies.builder import survey_1
 
 
 def _observation_limit(value):

@@ -15,7 +15,7 @@ from spaceodyssey.core import (
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, I64, PUBLIC, Capacity, RecordStatus
 from spaceodyssey.core.lift import traced
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 
 # The channel scripted records are written on by default: neither an admission channel
 # of the toy studies (10 to 13), a refresh product channel (90, 91) nor a service
@@ -143,7 +143,7 @@ def scripted_study(ticks, values, ids, revisions=None, statuses=None, **kw):
         statuses=tuple(statuses or (int(RecordStatus.COMPLETED),) * n),
         **kw,
     )
-    return toy.survey_1(policies=(toy.NullPolicy(),), process=process)
+    return builder.survey_1(policies=(toy.NullPolicy(),), process=process)
 
 
 def scripted_refresh_study(
@@ -151,7 +151,7 @@ def scripted_refresh_study(
 ):
     """A scripted study on a refresh grid: a refit-only observer, a silent policy.
 
-    `kw` goes to `toy.survey_refresh` (an `observer`, capacities, a `refresh`); the
+    `kw` goes to `builder.survey_refresh` (an `observer`, capacities, a `refresh`); the
     process is the scripted one.
     """
     n = len(ticks)
@@ -162,7 +162,7 @@ def scripted_refresh_study(
         revisions=tuple(revisions or (0,) * n),
         statuses=tuple(statuses or (int(RecordStatus.COMPLETED),) * n),
     )
-    return toy.survey_refresh(
+    return builder.survey_refresh(
         every, policies=(toy.NullPolicy(),), process=process, **kw
     )
 

@@ -51,3 +51,19 @@ The fifteen `studies/survey_*.py` modules and `studies/allocator.py` (about 3,60
 from `src/spaceodyssey/studies/` to `tests/studies/scenarios/`. Nothing in `src/` or the
 analysis scripts imported them; only their own tests and each other did, and those imports
 now name `tests.studies.scenarios`. They are no longer part of the installed package.
+
+## Step 5: `studies/toy.py` is split
+
+- `studies/builder.py` holds the study builder: `survey_1`, `survey_refresh`,
+  `refresh_registry`, `PRODUCT_CHANNELS`, `PRODUCT_KIND`, `toy_mean_kernel`, `toy_refit_fit`
+  and `toy_masked_refit`. `toy.survey_1` is now `builder.survey_1`.
+- `studies/effect_rows.py` holds `effects` (was the private `toy._effects`) and `chan_index`
+  (was `toy._chan_index`). `bracket.py` imports `builder` and `effect_rows` instead of `toy`;
+  its three call sites changed and nothing else.
+- `toy.py` keeps the toy kinds, their record kinds and registry, and the objective with
+  `credit_hard` (renamed helper `carry_snr`, was `_snr`).
+- The gradient experiment (`ReplayPolicy`, `forced_effects`, `credit_soft`, `d2_study`) moved
+  to `tests/studies/scenarios/toy_gradient.py`; its only consumers are the two gradient test
+  files.
+- Test and scenario call sites were rewritten mechanically (`toy.survey_1` to
+  `builder.survey_1` and so on). Entry points are unchanged: the kinds stay in `toy`.

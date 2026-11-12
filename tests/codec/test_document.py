@@ -19,7 +19,7 @@ from spaceodyssey.core.executors.base import histories_equal
 from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.core.keys import Coupling
 from spaceodyssey.core.kinds import AbstractDesign
-from spaceodyssey.studies import catalog, oracle, scripted, toy
+from spaceodyssey.studies import builder, catalog, oracle, scripted, toy
 from spaceodyssey.studies.conformance import CORPUS
 from tests.core.helpers import one_world
 
@@ -74,7 +74,7 @@ def rich_study():
     Between them the fields hold static ints and bools, a Python float, nested
     static tuples with an enum member, weakly typed arrays and a tuple of policies.
     """
-    return toy.survey_1(
+    return builder.survey_1(
         policies=(
             toy.FixedPlanPolicy(plan=((0, 10), (1, 11))),
             toy.ThresholdStopPolicy(stop_snr=2.5),
@@ -134,7 +134,7 @@ def test_reloaded_study_runs_and_reuses_the_compiled_program():
     """Fails if a reloaded study misses the host executor's jit cache (a new trace
     or compile) or runs to a different canonical history than the original.
     """
-    study = toy.survey_1()
+    study = builder.survey_1()
     truth, root = one_world()
     # Run the original here: the suite may have cleared the jit cache since any
     # earlier run of the same study.
@@ -174,7 +174,7 @@ def test_dtypes_non_finite_floats_and_negative_zero_survive():
     widened to float64.
     """
     noise = jnp.asarray([math.nan, -math.inf, -0.0], jnp.float32)
-    study = toy.survey_1(
+    study = builder.survey_1(
         policies=(
             toy.ThresholdStopPolicy(stop_snr=-0.0),
             toy.ThresholdStopPolicy(stop_snr=math.inf),
@@ -202,7 +202,7 @@ def test_dict_order_is_content():
     field that `__post_init__` derives differently is accepted.
     """
     docs = [
-        dump_study(toy.survey_1(design=LabelledDesign(labels=labels)), TOY_KINDS)
+        dump_study(builder.survey_1(design=LabelledDesign(labels=labels)), TOY_KINDS)
         for labels in ({"z": 1, "a": 2}, {"a": 2, "z": 1})
     ]
     assert docs[0].content_hash != docs[1].content_hash
@@ -238,7 +238,7 @@ def test_non_native_byte_order_is_refused(swap, where):
     on reload and in the hash.
     """
     with pytest.raises(DocumentError) as err:
-        dump_study(swap(toy.survey_1()), TOY_KINDS)
+        dump_study(swap(builder.survey_1()), TOY_KINDS)
     assert err.value.pointer == where
 
 
@@ -323,7 +323,7 @@ def test_bad_document_fails_with_a_pointer(edit, where, code):
     value its converter would coerce (a string clock, a fractional tick), a tuple
     where an array is expected, or a tag naming the wrong category of class.
     """
-    doc = json.loads(dump_study(toy.survey_1(), TOY_KINDS).to_json())
+    doc = json.loads(dump_study(builder.survey_1(), TOY_KINDS).to_json())
     doc.pop("content_hash")  # a document without a hash loads unchecked
     edit(doc)
     with pytest.raises(DocumentError) as err:
@@ -334,13 +334,13 @@ def test_bad_document_fails_with_a_pointer(edit, where, code):
 
 def _token_in_budget(token):
     """Document text with one budget element replaced by a raw JSON token."""
-    doc = json.loads(dump_study(toy.survey_1(), TOY_KINDS).to_json())
+    doc = json.loads(dump_study(builder.survey_1(), TOY_KINDS).to_json())
     doc["study"]["budget"]["data"][0][0] = "@token@"
     return json.dumps(doc).replace('"@token@"', token)
 
 
 def _repeat_a_nested_key():
-    text = dump_study(toy.survey_1(), TOY_KINDS).to_json()
+    text = dump_study(builder.survey_1(), TOY_KINDS).to_json()
     return text.replace('"budget":{', '"budget":{"shape":[1],', 1)
 
 
@@ -350,7 +350,7 @@ def _repeat_a_nested_key():
         (lambda: _token_in_budget("1e999"), "/study/budget/data/0/0"),
         (lambda: _token_in_budget("NaN"), "/study/budget/data/0/0"),
         (_repeat_a_nested_key, "/study/budget/shape"),
-        (lambda: dump_study(toy.survey_1(), TOY_KINDS).to_json()[:-1], ""),
+        (lambda: dump_study(builder.survey_1(), TOY_KINDS).to_json()[:-1], ""),
     ],
     ids=["overflow", "bare-nan", "nested-duplicate-key", "truncated"],
 )

@@ -35,7 +35,7 @@ from spaceodyssey.core.records import (
     RecordKind,
     record_none,
 )
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.codec.test_document import TOY_KINDS
 from tests.core.battery_helpers import _table
 from tests.core.helpers import one_world, worlds
@@ -86,7 +86,7 @@ def _epoch_registry():
 def _v2(**kw):
     """The five-acquisition toy study with the version-2 model, optionally delayed."""
     caps = _epoch_registry().lower(Capacities())
-    study = toy.survey_1(caps, **kw)
+    study = builder.survey_1(caps, **kw)
     return dataclasses.replace(study, channel_model=ToyEpochPhotometry())
 
 
@@ -140,7 +140,7 @@ def test_a_wide_row_or_an_unknown_version_is_refused(version, row, match):
         def realize(self, *args, context=None, **kw):
             return row
 
-    study = dataclasses.replace(toy.survey_1(), channel_model=Odd(version=version))
+    study = dataclasses.replace(builder.survey_1(), channel_model=Odd(version=version))
     truth, root = one_world()
     with pytest.raises(ValueError, match=match):
         realize_row(study, truth, _base(study), jnp.asarray(1.0, F64), root)

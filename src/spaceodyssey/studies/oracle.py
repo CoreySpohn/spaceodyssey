@@ -16,7 +16,7 @@ from spaceodyssey.core.enums import F64, I64, Audience, EffectKind
 from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.lift import traced
 from spaceodyssey.core.service import AbstractHostService
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 
 ANSWER_KIND = toy.RecordKind(
     "answer",
@@ -107,7 +107,7 @@ def oracle_study(query_at=1, subject=0, plan=DEFAULT_PLAN, **overrides):
     policy = QueryPolicy(
         inner=toy.FixedPlanPolicy(plan=plan), query_at=query_at, subject=subject
     )
-    study = toy.survey_1(caps=caps, policies=(policy,), **overrides)
+    study = builder.survey_1(caps=caps, policies=(policy,), **overrides)
     return study, ToyOracleService(kind)
 
 

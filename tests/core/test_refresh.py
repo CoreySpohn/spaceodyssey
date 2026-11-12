@@ -19,7 +19,7 @@ from spaceodyssey.core.refresh import (
     slice_spec,
     take_subject,
 )
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core.helpers import one_world
 
 
@@ -52,7 +52,7 @@ def test_refit_key_has_no_audience_input_and_is_stable():
 
 
 def test_take_put_subject_roundtrip_and_slice_size():
-    study = toy.survey_refresh(100)
+    study = builder.survey_refresh(100)
     names = study.observer.subject_leaves
     belief = study.observer.init(study.caps)
     spec = slice_spec(study)
@@ -73,18 +73,18 @@ def test_take_put_subject_roundtrip_and_slice_size():
 
 def _build(schedule, **kw):
     observer = toy.ToyRefitMean()
-    caps = toy.refresh_registry().lower(
+    caps = builder.refresh_registry().lower(
         Capacities(rows_per_subject=8, refit_lanes=2), observer
     )
-    return toy.survey_1(caps, observer=observer, refresh=schedule, **kw)
+    return builder.survey_1(caps, observer=observer, refresh=schedule, **kw)
 
 
 def test_study_without_refresh_has_no_refresh_leaves():
-    study = toy.survey_1()
+    study = builder.survey_1()
     truth = toy.draw_truth(jr.PRNGKey(0), study.caps)
     carry = eqx.filter_eval_shape(init_carry, study, truth)
     assert carry.refresh_status.size == 0
-    with_refresh = toy.survey_refresh(100)
+    with_refresh = builder.survey_refresh(100)
     truth = toy.draw_truth(jr.PRNGKey(0), with_refresh.caps)
     assert (
         eqx.filter_eval_shape(init_carry, with_refresh, truth).refresh_status.size > 0
@@ -92,15 +92,15 @@ def test_study_without_refresh_has_no_refresh_leaves():
 
 
 def test_refresh_requires_structural_capacity():
-    ok = _build(RefreshSchedule(100, 0, 90, 91, toy.PRODUCT_KIND))
+    ok = _build(RefreshSchedule(100, 0, 90, 91, builder.PRODUCT_KIND))
     assert ok.refresh.every_ticks == 100  # control: the builder is valid
     with pytest.raises(ValueError):
-        toy.survey_1(refresh=RefreshSchedule(100, 0, 90, 91, toy.PRODUCT_KIND))
+        builder.survey_1(refresh=RefreshSchedule(100, 0, 90, 91, builder.PRODUCT_KIND))
 
 
 def test_refresh_refuses_equal_product_channels():
     with pytest.raises(ValueError):
-        _build(RefreshSchedule(100, 0, 90, 90, toy.PRODUCT_KIND))
+        _build(RefreshSchedule(100, 0, 90, 90, builder.PRODUCT_KIND))
 
 
 def test_refresh_refuses_unregistered_product_kind():
@@ -110,12 +110,12 @@ def test_refresh_refuses_unregistered_product_kind():
 
 def test_refresh_refuses_negative_ticks():
     with pytest.raises(ValueError):
-        _build(RefreshSchedule(-1, 0, 90, 91, toy.PRODUCT_KIND))
+        _build(RefreshSchedule(-1, 0, 90, 91, builder.PRODUCT_KIND))
 
 
 def test_incremental_observer_without_subject_leaves_is_refused():
     with pytest.raises(ValueError):
-        toy.survey_refresh(100, observer=toy.ToyRunningMean())
+        builder.survey_refresh(100, observer=toy.ToyRunningMean())
 
 
 def _rows(capacity, triples):
@@ -170,7 +170,7 @@ def test_next_grid_tick_never_wraps_near_the_int64_limit():
 
 def test_overflowing_checkpoint_sets_the_grid_tick_overflow():
     big = np.iinfo(np.int64).max
-    study = toy.survey_refresh(big)
+    study = builder.survey_refresh(big)
     truth, _ = one_world()
     carry = init_carry(study, truth)
     carry = eqx.tree_at(lambda c: c.tick, carry, jnp.asarray(130, jnp.int64))
@@ -182,7 +182,7 @@ def test_overflowing_checkpoint_sets_the_grid_tick_overflow():
 
 def test_toy_kernel_and_host_fit_agree_bit_for_bit_on_cancelling_rows():
     """Fails if the two toy adapters sum in different orders."""
-    study = toy.survey_refresh(100)
+    study = builder.survey_refresh(100)
     kind = study.observer.measurement_kind
     rng = np.random.default_rng(4)
     big = rng.uniform(0.5e15, 1.5e15, 16)
@@ -199,10 +199,10 @@ def test_toy_kernel_and_host_fit_agree_bit_for_bit_on_cancelling_rows():
     )
     as_jax = types.SimpleNamespace(**{k: jnp.asarray(v) for k, v in vars(rows).items()})
     kernel_mean = float(
-        toy.toy_mean_kernel(study, types.SimpleNamespace(rows=as_jax))[0][0]
+        builder.toy_mean_kernel(study, types.SimpleNamespace(rows=as_jax))[0][0]
     )
     entry = types.SimpleNamespace(rows=rows)
-    fit_mean = float(toy.toy_refit_fit(study, entry)[0][0])
+    fit_mean = float(builder.toy_refit_fit(study, entry)[0][0])
     assert kernel_mean == fit_mean
     # control: a different reduction order moves the answer
     assert float(np.sum(values)) / n != fit_mean

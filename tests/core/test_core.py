@@ -24,6 +24,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.executors.compiled import CompiledExecutor
+from spaceodyssey.studies import builder
 from spaceodyssey.studies import toy as kinds
 from tests.core.corpus import HAND_HISTORIES, HAND_STUDIES, frozen
 from tests.core.helpers import (
@@ -46,7 +47,7 @@ from tests.core.helpers import (
     worlds,
 )
 
-STUDY = kinds.survey_1()
+STUDY = builder.survey_1()
 TRUTH, ROOT = one_world()
 
 
@@ -145,7 +146,7 @@ def test_an_awards_on_allocate_credits_its_recipient():
 
 
 def test_no_funds_and_lane_busy_codes():
-    zero = kinds.survey_1(budget=jnp.zeros_like(STUDY.budget))
+    zero = builder.survey_1(budget=jnp.zeros_like(STUDY.budget))
     c = eqx.filter_jit(core.init_carry)(zero, TRUTH)
     assert int(admit_j(c, observe_effect(0, 10), zero)[1][0]) == AdmissionCode.NO_FUNDS
     busy = eqx.tree_at(
@@ -176,7 +177,7 @@ def test_admission_is_cumulative_across_groups_of_a_decision():
 @pytest.mark.medium(reason="cold compilation of the transition exceeds the unit budget")
 def test_gain_enters_measurement():
     def realize_once(gain):
-        study = kinds.survey_1(design=kinds.ToyDesign(gain=gain))
+        study = builder.survey_1(design=kinds.ToyDesign(gain=gain))
         c = run_until(study, lambda c: c.n_log >= 1)
         return float(c.log.payload[0, 0]), float(c.log.payload[0, 1])
 
@@ -403,7 +404,7 @@ def test_public_release_updates_policy_belief_once():
 
 
 def test_zero_latency_cancel_does_not_violate():
-    study = kinds.survey_1(policies=(frozen(plan=((0, 12), (1, 10))),))
+    study = builder.survey_1(policies=(frozen(plan=((0, 12), (1, 10))),))
     c = run_until(study, lambda c: c.n_dec >= 1)
     c = eqx.tree_at(
         lambda x: (x.tick, x.stage),
@@ -423,7 +424,7 @@ def test_zero_latency_cancel_does_not_violate():
 
 
 def test_zero_latency_abort_does_not_violate():
-    study = kinds.survey_1(policies=(frozen(plan=((0, 12), (1, 10))),))
+    study = builder.survey_1(policies=(frozen(plan=((0, 12), (1, 10))),))
     c = run_until(study, lambda c: c.n_dec >= 1)
     c = eqx.tree_at(
         lambda x: (x.tick, x.stage),
@@ -507,7 +508,7 @@ def _release_at(c, tick):
 def test_partial_draw_key_ignores_status(bundle_state):
     study, c = bundle_state
     full = run_until(
-        kinds.survey_1(policies=(frozen(bundle_at=1),)), lambda x: x.n_log >= 3
+        builder.survey_1(policies=(frozen(bundle_at=1),)), lambda x: x.n_log >= 3
     )
     c2 = handle_event(
         c, study, TRUTH, ROOT, EventKind.CANCEL, lane=0, gen=int(c.ledger.lane_gen[0])
@@ -588,7 +589,7 @@ def test_abort_partial_is_never_released_or_folded(bundle_state):
 # The distinct adaptive-policy program and six-world drain check run nightly.
 @pytest.mark.slow(reason="one study per executor")
 def test_threshold_stop_policy_drains_after_threshold():
-    study = kinds.survey_1(policies=(kinds.ThresholdStopPolicy(stop_snr=3.0),))
+    study = builder.survey_1(policies=(kinds.ThresholdStopPolicy(stop_snr=3.0),))
     cs, ts = CompiledExecutor().run(study, *worlds(6), 80)
     for w in range(6):
         c, t = index_world(cs, w), index_world(ts, w)

@@ -36,7 +36,7 @@ from spaceodyssey.core.kinds import (
     ObserverCapabilities,
 )
 from spaceodyssey.core.snapshot import BeliefLayout, MeanBelief, project_mean
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, effect_rows, toy
 
 # The survey plan of `survey_1`: subject and channel id of each acquisition.
 SURVEY_PLAN = ((0, 10), (1, 10), (0, 10), (1, 10), (0, 10))
@@ -80,7 +80,7 @@ class RevisitPolicy(AbstractPolicy):
         channel = jnp.argmax(study.channels.id == plan[at, 1]).astype(I64)
         subject, done = self._choice(view, study)
         stop = spent | done
-        eff = toy._effects(
+        eff = effect_rows.effects(
             study.caps,
             kind=jnp.stack(
                 [
@@ -272,9 +272,9 @@ def survey_2(every_ticks=0, policy=None, **overrides):
     """
     policy = RevisitPolicy() if policy is None else policy
     if every_ticks == 0:
-        return toy.survey_1(policies=(policy,), **overrides)
+        return builder.survey_1(policies=(policy,), **overrides)
     overrides.setdefault("observer", SearchMean())
-    return toy.survey_refresh(every_ticks, policies=(policy,), **overrides)
+    return builder.survey_refresh(every_ticks, policies=(policy,), **overrides)
 
 
 __all__ = [

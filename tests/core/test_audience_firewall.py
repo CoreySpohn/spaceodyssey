@@ -11,7 +11,7 @@ from spaceodyssey import core
 from spaceodyssey.core import handlers
 from spaceodyssey.core.events import empty_event_row
 from spaceodyssey.core.records import record_none, write_log
-from spaceodyssey.studies import oracle, toy
+from spaceodyssey.studies import builder, oracle, toy
 from tests.core.helpers import one_world
 
 PUBLIC = core.Audience.OBSERVER | core.Audience.POLICY
@@ -21,7 +21,7 @@ fp_j = eqx.filter_jit(core.snapshot_fingerprint)
 
 
 def _study():
-    return toy.survey_1(policies=(toy.NullPolicy(),))
+    return builder.survey_1(policies=(toy.NullPolicy(),))
 
 
 def _add(
@@ -156,7 +156,7 @@ def test_policy_fold_hides_private_event_identity():
             audience=core.Audience.OBSERVER,
             writes=False,
         )
-        study = toy.survey_1(
+        study = builder.survey_1(
             observer=ProvenanceObserver(),
             process=process,
             policies=(toy.FixedPlanPolicy(plan=((0, 10),)),),

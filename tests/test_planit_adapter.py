@@ -14,7 +14,7 @@ from planit_py import PlanTable
 
 from spaceodyssey import core
 from spaceodyssey.adapters.planit import PlanTablePolicy, plan_table_to_ticks
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core.helpers import worlds
 
 FIXTURE = json.loads(
@@ -49,7 +49,7 @@ def study():
         n_effects=1,
         max_sid=64,
     )
-    base = toy.survey_1(
+    base = builder.survey_1(
         caps=caps,
         policies=(toy.NullPolicy(),),
         lane_asset=jnp.asarray([0, 0], jnp.int64),

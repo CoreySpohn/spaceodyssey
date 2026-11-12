@@ -25,7 +25,7 @@ from spaceodyssey.core.records import (
 )
 from spaceodyssey.core.refresh import pedigree_words
 from spaceodyssey.core.snapshot import snapshot_fingerprint
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core.refresh_helpers import oracle_refresh_study, refresh_study
 
 
@@ -62,7 +62,9 @@ def test_derived_row_is_never_in_a_revision_set_or_refit_rows():
     seen = mk(valid=one, kind=z(measurement), accepted_tick=z(1), subject=z(0))
     counts, _ = revision_set(seen, caps, Audience.OBSERVER, 0)
     assert bool(counts[0])  # control: the same row as a measurement counts
-    product = mk(valid=one, kind=z(toy.PRODUCT_KIND), accepted_tick=z(1), subject=z(0))
+    product = mk(
+        valid=one, kind=z(builder.PRODUCT_KIND), accepted_tick=z(1), subject=z(0)
+    )
     counts, _ = revision_set(product, caps, Audience.OBSERVER, 0)
     assert not bool(counts.any())
     rows = refit_rows(product, caps, Audience.OBSERVER, 0)
@@ -195,7 +197,7 @@ def test_a_derived_row_never_supersedes_a_source_row():
         released_tick=pad([1, 1]),
         **kw,
     )
-    derived = mk(kind=pad([toy.RECORD_MEASUREMENT, toy.PRODUCT_KIND]))
+    derived = mk(kind=pad([toy.RECORD_MEASUREMENT, builder.PRODUCT_KIND]))
     counts, replaced = revision_set(derived, caps, Audience.OBSERVER, 0)
     assert bool(counts[0]) and not bool(counts[1])
     assert int(replaced[0]) == -1

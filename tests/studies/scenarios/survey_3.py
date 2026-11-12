@@ -52,7 +52,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, effect_rows, toy
 from spaceodyssey.studies.premission import (
     PAD,
     PedigreeRule,
@@ -180,7 +180,7 @@ class WindowPolicy(AbstractPolicy):
         best = subjects[jnp.argmax(view.belief.mean[subjects])]
         act = jnp.where(stop, EffectKind.STOP, EffectKind.OBSERVE)
         channel = jnp.argmax(study.channels.id == self.channel).astype(I64)
-        eff = toy._effects(
+        eff = effect_rows.effects(
             study.caps,
             kind=jnp.stack(
                 [
@@ -242,7 +242,7 @@ def survey_3(
 
     `table` defaults to `survey_3_table()`; `rule` is the `PedigreeRule` the observer
     resolves overlap with. `observer` replaces the `PriorObserver` built from them (a
-    control); other overrides follow `toy.survey_1`.
+    control); other overrides follow `builder.survey_1`.
     """
     table = survey_3_table() if table is None else table
     if observer is None:
@@ -252,7 +252,7 @@ def survey_3(
     caps = overrides.pop("caps", None) or Capacities()
     caps = survey_3_registry().lower(caps, observer)
     overrides.setdefault("policies", (WindowPolicy(),))
-    return toy.survey_1(
+    return builder.survey_1(
         caps, process=WindowImporter(table=table), observer=observer, **overrides
     )
 

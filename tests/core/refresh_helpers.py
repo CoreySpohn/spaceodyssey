@@ -17,12 +17,12 @@ from spaceodyssey.core.refresh import (
     MaskedBatchRefit,
     RefreshSchedule,
 )
-from spaceodyssey.studies import oracle, toy
+from spaceodyssey.studies import builder, effect_rows, oracle, toy
 from tests.core.helpers import worlds
 
 
 def refresh_study(every=100, **kw):
-    return toy.survey_refresh(every, **kw)
+    return builder.survey_refresh(every, **kw)
 
 
 class SpyBoundary(AbstractRefitBoundary):
@@ -66,11 +66,11 @@ class CorruptInstall(AbstractRefitBoundary):
 
 
 def masked():
-    return toy.toy_masked_refit()
+    return builder.toy_masked_refit()
 
 
 def host_loop():
-    return HostLoopRefit(toy.toy_refit_fit)
+    return HostLoopRefit(builder.toy_refit_fit)
 
 
 def run_pair(study, n_steps=60, n=2, chunk=7, refit=None):
@@ -85,7 +85,7 @@ def run_pair(study, n_steps=60, n=2, chunk=7, refit=None):
 
 
 def toy_masked_for(study):
-    return MaskedBatchRefit(toy.toy_mean_kernel)
+    return MaskedBatchRefit(builder.toy_mean_kernel)
 
 
 class LeastSeenPolicy(AbstractPolicy):
@@ -99,13 +99,13 @@ class LeastSeenPolicy(AbstractPolicy):
         stop = view.n_dec >= 6
         subject = jnp.argmin(view.belief.n[:2]).astype(I64)
         none = jnp.asarray(EffectKind.NONE, I64)
-        eff = toy._effects(
+        eff = effect_rows.effects(
             study.caps,
             kind=jnp.stack(
                 [jnp.where(stop, EffectKind.STOP, EffectKind.OBSERVE), none]
             ),
             subject=subject,
-            channel_index=toy._chan_index(study, 10),
+            channel_index=effect_rows.chan_index(study, 10),
             group=view.n_dec,
             scope=Scope.CAMPAIGN,
             disposition=toy.Disposition.DRAIN,
@@ -134,7 +134,7 @@ def oracle_refresh_study(
     Returns the study and the service that answers it. With `answers_refit` a service
     answer is itself an eligible row.
     """
-    registry = toy.refresh_registry()
+    registry = builder.refresh_registry()
     kind = registry.register(oracle.ANSWER_KIND)
     observer = ToyRefitAnswers() if answers_refit else toy.ToyRefitMean()
     caps = registry.lower(Capacities(rows_per_subject=8, refit_lanes=2), observer)
@@ -143,8 +143,10 @@ def oracle_refresh_study(
         query_at=query_at,
         subject=0,
     )
-    schedule = RefreshSchedule(every, 0, *toy.PRODUCT_CHANNELS, toy.PRODUCT_KIND)
-    study = toy.survey_1(
+    schedule = RefreshSchedule(
+        every, 0, *builder.PRODUCT_CHANNELS, builder.PRODUCT_KIND
+    )
+    study = builder.survey_1(
         caps, observer=observer, refresh=schedule, policies=(policy,), **overrides
     )
     return study, oracle.ToyOracleService(kind)
@@ -169,14 +171,16 @@ def observer_only_column_study(every=100):
     )
     observer = toy.ToyRefitMean()
     caps = registry.lower(Capacities(rows_per_subject=8, refit_lanes=2), observer)
-    schedule = RefreshSchedule(every, 0, *toy.PRODUCT_CHANNELS, toy.PRODUCT_KIND)
-    return toy.survey_1(caps, observer=observer, refresh=schedule)
+    schedule = RefreshSchedule(
+        every, 0, *builder.PRODUCT_CHANNELS, builder.PRODUCT_KIND
+    )
+    return builder.survey_1(caps, observer=observer, refresh=schedule)
 
 
 def product_rows(carry):
     """The valid refresh product rows of one world as sorted tuples."""
     log = carry.log
-    keep = np.asarray(log.valid) & (np.asarray(log.kind) == toy.PRODUCT_KIND)
+    keep = np.asarray(log.valid) & (np.asarray(log.kind) == builder.PRODUCT_KIND)
     cols = [
         np.asarray(x)[keep] for x in (log.channel, log.subject, log.acquisition_index)
     ]

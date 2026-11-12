@@ -26,7 +26,7 @@ from spaceodyssey.core.executors import replay
 from spaceodyssey.core.handlers import h_release
 from spaceodyssey.core.records import record_none, write_log
 from spaceodyssey.core.refresh import AbstractRefitBoundary, RefitResult
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core.test_replay_refresh import FoldTimeMean
 
 ROOT = jnp.asarray([3, 5], jnp.uint32)
@@ -82,7 +82,7 @@ def _step(caps, **fields):
 @functools.cache
 def study():
     caps = Capacities(n_subjects=1, n_an=1, rows_per_subject=1, refit_lanes=1, n_log=4)
-    return toy.survey_refresh(100, caps=caps, policies=(toy.NullPolicy(),))
+    return builder.survey_refresh(100, caps=caps, policies=(toy.NullPolicy(),))
 
 
 def _install(c, s):
@@ -342,7 +342,7 @@ def test_replay_belief_folds_live_metadata_before_a_later_correction():
     The slow fold-time guard covers replay_run; this guards the log-only API using
     just the live release handler, without an executor compile.
     """
-    s = toy.survey_1(
+    s = builder.survey_1(
         caps=Capacities(n_log=2),
         policies=(toy.NullPolicy(),),
         observer=FoldTimeMean(),

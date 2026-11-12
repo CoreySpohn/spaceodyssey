@@ -21,6 +21,7 @@ from spaceodyssey.core.executors.base import (
 )
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
+from spaceodyssey.studies import builder
 from spaceodyssey.studies import toy as kinds
 from tests.core.corpus import CORPUS_BY_NAME
 from tests.core.helpers import CAPS, admit_j, effects_of, one_world, worlds
@@ -53,7 +54,9 @@ def with_program_funds(study, funds):
 
 
 def test_forbidden_effect_refused():
-    only_observe = kinds.survey_1(permitted_effects=(effect_mask(EffectKind.OBSERVE),))
+    only_observe = builder.survey_1(
+        permitted_effects=(effect_mask(EffectKind.OBSERVE),)
+    )
     c0 = carry0(only_observe)
     stop = effects_of(EffectKind.STOP)
     c1, codes = admit_j(c0, stop, only_observe)
@@ -61,14 +64,16 @@ def test_forbidden_effect_refused():
     r = core.tree_equal_report(c0, c1)
     assert r["max_int_diff"] == 0 and r["max_abs"] == 0.0
     # control: the same effect under a mask that permits it is admitted and queued
-    open_study = kinds.survey_1(permitted_effects=(ALL_EFFECTS,))
+    open_study = builder.survey_1(permitted_effects=(ALL_EFFECTS,))
     c2, codes = admit_j(carry0(open_study), stop, open_study)
     assert int(codes[0]) == AdmissionCode.OK
     assert int(c2.ev.valid.sum()) == int(c0.ev.valid.sum()) + 1
 
 
 def test_permitted_effect_is_admitted_under_a_narrow_mask():
-    only_observe = kinds.survey_1(permitted_effects=(effect_mask(EffectKind.OBSERVE),))
+    only_observe = builder.survey_1(
+        permitted_effects=(effect_mask(EffectKind.OBSERVE),)
+    )
     _c1, codes = admit_j(
         carry0(only_observe), observe_rows([0, 0], [0, 0], [0, 1]), only_observe
     )
@@ -76,7 +81,7 @@ def test_permitted_effect_is_admitted_under_a_narrow_mask():
 
 
 def test_each_phase_has_its_own_mask():
-    wait_then_observe = kinds.survey_1(
+    wait_then_observe = builder.survey_1(
         policies=(kinds.NullPolicy(), kinds.NullPolicy()),
         phase_until=(300, 1000),
         permitted_effects=(effect_mask(EffectKind.WAIT), effect_mask(EffectKind.STOP)),
@@ -91,7 +96,7 @@ def test_each_phase_has_its_own_mask():
 
 def test_one_mask_per_phase_is_required():
     with pytest.raises(ValueError):
-        kinds.survey_1(permitted_effects=(ALL_EFFECTS, ALL_EFFECTS))
+        builder.survey_1(permitted_effects=(ALL_EFFECTS, ALL_EFFECTS))
 
 
 # ---- Allocate requires awards -------------------------------------------------
@@ -101,7 +106,7 @@ def test_allocate_answers_unsupported_and_changes_nothing():
     """Fails if Allocate changes an awards-off carry or fails to credit a valid awards-
     on recipient.
     """
-    study = kinds.survey_1()
+    study = builder.survey_1()
     c0 = carry0(study)
     c1, codes = admit_j(c0, effects_of(EffectKind.ALLOCATE), study)
     assert int(codes[0]) == AdmissionCode.UNSUPPORTED
@@ -133,7 +138,7 @@ def test_allocate_answers_unsupported_and_changes_nothing():
 
 def test_bundle_atomic():
     # the program row holds one unit of the second resource; the bundle needs two
-    study = with_program_funds(kinds.survey_1(), 1.0)
+    study = with_program_funds(builder.survey_1(), 1.0)
     c0 = carry0(study)
     bundle = observe_rows([1, 1], [0, 2], [5, 5])
     c1, codes = admit_j(c0, bundle, study)
@@ -145,7 +150,7 @@ def test_bundle_atomic():
     assert int(c1.next_sid) == int(c0.next_sid)
     assert int(c1.ev.valid.sum()) == int(c0.ev.valid.sum())
     # control: with enough funds both rows are admitted and take indices 0 and 1
-    rich = with_program_funds(kinds.survey_1(), 2.0)
+    rich = with_program_funds(builder.survey_1(), 2.0)
     c2, codes = admit_j(carry0(rich), bundle, rich)
     assert [int(x) for x in codes] == [AdmissionCode.OK] * 2
     assert int(c2.acquisition_counts[1]) == 2
@@ -154,7 +159,7 @@ def test_bundle_atomic():
 
 
 def test_separate_groups_are_admitted_one_by_one():
-    study = with_program_funds(kinds.survey_1(), 1.0)
+    study = with_program_funds(builder.survey_1(), 1.0)
     rows = observe_rows([1, 1], [0, 2], [5, 6])
     c1, codes = admit_j(carry0(study), rows, study)
     assert [int(x) for x in codes] == [AdmissionCode.OK, AdmissionCode.NO_FUNDS]
@@ -163,7 +168,7 @@ def test_separate_groups_are_admitted_one_by_one():
 
 def test_group_refusal_names_the_first_refused_row():
     # lane 0 is busy for the first row; the second row alone would pass
-    study = kinds.survey_1()
+    study = builder.survey_1()
     busy = eqx.tree_at(
         lambda c: c.ledger.lane_busy_until,
         carry0(study),
@@ -174,7 +179,7 @@ def test_group_refusal_names_the_first_refused_row():
 
 
 def test_group_on_one_lane_is_refused_whole():
-    study = kinds.survey_1()
+    study = builder.survey_1()
     c0 = carry0(study)
     c1, codes = admit_j(c0, observe_rows([0, 1], [0, 0], [5, 5]), study)
     assert [int(x) for x in codes] == [AdmissionCode.LANE_BUSY] * 2
@@ -182,7 +187,7 @@ def test_group_on_one_lane_is_refused_whole():
 
 
 def test_group_needs_queue_room_for_every_row():
-    study = kinds.survey_1()
+    study = builder.survey_1()
     c0 = carry0(study)
     free = ~np.asarray(c0.ev.valid)
     keep = np.flatnonzero(free)[:1]  # leave exactly one free slot

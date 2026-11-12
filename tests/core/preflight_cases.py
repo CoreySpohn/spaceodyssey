@@ -30,11 +30,12 @@ from spaceodyssey.core.ledger import CONFIG_PAD
 from spaceodyssey.core.preflight import FindingCode as C
 from spaceodyssey.core.preflight.checks import PreflightContext
 from spaceodyssey.core.refresh import HostLoopRefit, MaskedBatchRefit
-from spaceodyssey.studies import catalog, toy
+from spaceodyssey.studies import builder, catalog, toy
 from spaceodyssey.studies.premission import PreMissionImporter, authored_table
 from spaceodyssey.studies.prior_observer import prior_study
 from tests.core.corpus import CORPUS, frozen
 from tests.core.prior_helpers import EXTERNAL, refit_study, summaries
+from tests.studies.scenarios import toy_gradient
 
 
 class StatedObserver(toy.ToyRunningMean):
@@ -151,7 +152,7 @@ def _with_policy(study, policy):
 
 
 def _with_model(**stated):
-    base = toy.survey_1()
+    base = builder.survey_1()
     model = StatedChannelModel(
         noise=base.channel_model.noise, stated=Declaration(**stated)
     )
@@ -164,17 +165,17 @@ def _coords_without(name):
 
 def _observer(**stated):
     return _replace(
-        toy.survey_1(), observer=StatedObserver(stated=Declaration(**stated))
+        builder.survey_1(), observer=StatedObserver(stated=Declaration(**stated))
     )
 
 
 def _policy(**stated):
-    return _with_policy(toy.survey_1(), StatedPolicy(stated=Declaration(**stated)))
+    return _with_policy(builder.survey_1(), StatedPolicy(stated=Declaration(**stated)))
 
 
 def _award_policy(**stated):
     """`survey_1` with awards on and a policy that states `stated`."""
-    study = toy.survey_1(caps=Capacities(awards=True))
+    study = builder.survey_1(caps=Capacities(awards=True))
     return _with_policy(study, StatedPolicy(stated=Declaration(**stated)))
 
 
@@ -183,19 +184,19 @@ def _bundle_policy(bundles, **caps):
     declares the bundle members `bundles`.
     """
     caps = {"max_bundles": 2, "max_bundle_size": 2, **caps}
-    study = toy.survey_1(caps=Capacities(**caps))
+    study = builder.survey_1(caps=Capacities(**caps))
     return _with_policy(study, StatedPolicy(stated=Declaration(bundles=bundles)))
 
 
 def _assets(**columns):
-    study = toy.survey_1()
+    study = builder.survey_1()
     return _replace(study, assets=dataclasses.replace(study.assets, **columns))
 
 
 def _timeline_study(ticks, switches=3):
     """`survey_1` with a configuration timeline of `switches` slots per asset."""
     caps = Capacities(max_config_switches=switches)
-    return toy.survey_1(caps=caps, config_switch_ticks=ticks)
+    return builder.survey_1(caps=caps, config_switch_ticks=ticks)
 
 
 PAD = CONFIG_PAD
@@ -203,7 +204,7 @@ PAD = CONFIG_PAD
 
 def _ops_study(table, n_ops=2):
     """`survey_1` with `n_ops` ops states and the given per-state cost table."""
-    study = toy.survey_1(caps=Capacities(n_ops=n_ops))
+    study = builder.survey_1(caps=Capacities(n_ops=n_ops))
     return _replace(
         study, channels=dataclasses.replace(study.channels, cost_by_ops=table)
     )
@@ -211,26 +212,26 @@ def _ops_study(table, n_ops=2):
 
 def _commitment_study(policy=None, **columns):
     """`survey_1` with commitments on, the given asset columns and a stated policy."""
-    study = toy.survey_1(caps=Capacities(n_commitments=2))
+    study = builder.survey_1(caps=Capacities(n_commitments=2))
     study = _replace(study, assets=dataclasses.replace(study.assets, **columns))
     return study if policy is None else _with_policy(study, policy)
 
 
 def _channel_edit(**columns):
-    study = toy.survey_1()
+    study = builder.survey_1()
     return _replace(study, channels=dataclasses.replace(study.channels, **columns))
 
 
 def _refund_channels(**columns):
     """`survey_1` with refunds on and the given refund declarations on its channels."""
-    study = toy.survey_1()
+    study = builder.survey_1()
     caps = dataclasses.replace(study.caps, refunds=True)
     channels = dataclasses.replace(study.channels, **columns)
     return _replace(study, caps=caps, channels=channels)
 
 
 def _unsupported_kind():
-    return _channel_edit(kind=toy.survey_1().channels.kind.at[2].set(9))
+    return _channel_edit(kind=builder.survey_1().channels.kind.at[2].set(9))
 
 
 def _dropped_order():
@@ -273,7 +274,7 @@ def import_study(mistake=None):
         source_index=[0, 1],
         upstream_hash="ab" * 32 if mistake == "upstream" else "",
     )
-    return toy.survey_1(process=PreMissionImporter(table=table))
+    return builder.survey_1(process=PreMissionImporter(table=table))
 
 
 # name -> (the one code the study must raise, builder, executor selected)
@@ -304,7 +305,7 @@ SEEDED = {
     "world_draw_without_world": (
         C.K001,
         lambda: _replace(
-            toy.survey_1(),
+            builder.survey_1(),
             world_source=StatedWorld(stated=Declaration(key_coords=("subject",))),
         ),
         None,
@@ -321,7 +322,7 @@ SEEDED = {
     ),
     "commitments_with_awards": (
         C.X001,
-        lambda: toy.survey_1(caps=Capacities(awards=True, n_commitments=2)),
+        lambda: builder.survey_1(caps=Capacities(awards=True, n_commitments=2)),
         None,
     ),
     "disruptive_resource_past_the_columns": (
@@ -447,7 +448,7 @@ SEEDED = {
     ),
     "config_ticks_without_capacity": (
         C.S001,
-        lambda: toy.survey_1(config_switch_ticks=jnp.zeros((2, 1), I64)),
+        lambda: builder.survey_1(config_switch_ticks=jnp.zeros((2, 1), I64)),
         None,
     ),
     "config_ticks_missing": (C.S001, lambda: _timeline_study(None), None),
@@ -490,13 +491,13 @@ SEEDED = {
     "disruptive_effect": (C.X002, lambda: _policy(disruptive=True), None),
     "balance_quantum_unread": (
         C.X002,
-        lambda: toy.survey_1(caps=Capacities(balance_quantum=0.5)),
+        lambda: builder.survey_1(caps=Capacities(balance_quantum=0.5)),
         None,
     ),
     "drain_below_campaign": (
         C.T001,
         lambda: _with_policy(
-            toy.survey_1(),
+            builder.survey_1(),
             frozen(stop_at=2, stop_scope=Scope.LANE, stop_disp=Disposition.DRAIN),
         ),
         None,
@@ -534,16 +535,16 @@ SEEDED_IN_CONTEXT = {
     "prior_with_a_boundary_that_ignores_it": (
         C.D010,
         refit_study,
-        lambda: PreflightContext(boundary=HostLoopRefit(toy.toy_refit_fit)),
+        lambda: PreflightContext(boundary=HostLoopRefit(builder.toy_refit_fit)),
     ),
 }
 
 # Correct studies and the codes they must raise (warnings only).
 _DRAIN_BELOW = {f"stop_{scope}_drain" for scope in ("lane", "asset", "program")}
 CLEAN = {
-    "survey_1": (toy.survey_1, ()),
+    "survey_1": (builder.survey_1, ()),
     "catalog_study": (catalog.catalog_study, ()),
-    "d2_study": (toy.d2_study, ()),
+    "d2_study": (toy_gradient.d2_study, ()),
     "import_study": (import_study, ()),
     "prior_study": (lambda: prior_study(summaries((7, 90, 0, 1))), ()),
     "allocate_with_awards": (
@@ -593,13 +594,13 @@ CLEAN = {
     ),
     "policy_names_held_programs": (
         lambda: _with_policy(
-            toy.survey_1(caps=Capacities(n_programs=2)),
+            builder.survey_1(caps=Capacities(n_programs=2)),
             StatedPolicy(stated=Declaration(programs=(0, 1))),
         ),
         (),
     ),
     "balances_with_a_quantum": (
-        lambda: toy.survey_1(
+        lambda: builder.survey_1(
             caps=Capacities(snapshot_balances=True, balance_quantum=0.5)
         ),
         (),

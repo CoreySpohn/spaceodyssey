@@ -23,7 +23,7 @@ from spaceodyssey.core.enums import F64, Capacity, EffectKind
 from spaceodyssey.core.executors import replay
 from spaceodyssey.core.records import pedigree_of
 from spaceodyssey.core.refresh import MaskedBatchRefit, RefreshSchedule
-from spaceodyssey.studies import oracle, toy
+from spaceodyssey.studies import builder, oracle, toy
 from spaceodyssey.studies.scripted import (
     SCRIPTED_CHANNEL,
     ScriptedRecords,
@@ -60,7 +60,7 @@ def replays(study, result, refit):
 def product_pedigrees(carry, audience=0, subject=0):
     """`{ordinal: triples}` of the product rows of one audience and subject."""
     log = carry.log
-    keep = np.asarray(log.valid) & (np.asarray(log.kind) == toy.PRODUCT_KIND)
+    keep = np.asarray(log.valid) & (np.asarray(log.kind) == builder.PRODUCT_KIND)
     out = {}
     for slot in np.flatnonzero(keep):
         who, _, triples = pedigree_of(log, slot)
@@ -150,13 +150,15 @@ class AskTwice(oracle.QueryPolicy):
 def test_replay_with_two_questions_on_one_channel():
     """Fails if two answers on one service channel collide in the replay (identity,
     pedigree or revision set), or a refit that reads them differs from the run."""
-    registry = toy.refresh_registry()
+    registry = builder.refresh_registry()
     kind = registry.register(oracle.ANSWER_KIND)
     observer = ToyRefitAnswers()
     caps = registry.lower(Capacities(rows_per_subject=8, refit_lanes=2), observer)
     policy = AskTwice(inner=toy.FixedPlanPolicy(plan=oracle.DEFAULT_PLAN), query_at=1)
-    schedule = RefreshSchedule(130, 0, *toy.PRODUCT_CHANNELS, toy.PRODUCT_KIND)
-    study = toy.survey_1(caps, observer=observer, refresh=schedule, policies=(policy,))
+    schedule = RefreshSchedule(130, 0, *builder.PRODUCT_CHANNELS, builder.PRODUCT_KIND)
+    study = builder.survey_1(
+        caps, observer=observer, refresh=schedule, policies=(policy,)
+    )
     truths, roots = worlds(1)
     result = HostExecutor().run(
         study,
@@ -239,7 +241,7 @@ def test_a_replayer_that_reads_the_final_superseded_by_is_caught(monkeypatch):
 def test_a_replayer_that_keys_a_refit_by_a_count_is_caught(monkeypatch):
     """Fails if the replay still matches a key-reading refit after its refit key is
     taken from the log length instead of the revision set."""
-    study = toy.survey_refresh(100, observer=ResampleSample())
+    study = builder.survey_refresh(100, observer=ResampleSample())
     refit = MaskedBatchRefit()
     result = run_pair(study, 60, 1, 7, refit=refit)[0]
     (out,) = replays(study, result, refit)  # control: the real keys reproduce the run
@@ -280,7 +282,7 @@ def metadata_study(ids, revisions, ticks):
         revisions=revisions,
         statuses=(0,) * len(ticks),
     )
-    return toy.survey_1(
+    return builder.survey_1(
         policies=(toy.NullPolicy(),), process=process, observer=FoldTimeMean()
     )
 

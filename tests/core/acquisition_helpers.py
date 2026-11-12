@@ -8,10 +8,10 @@ import numpy as np
 
 from spaceodyssey import core
 from spaceodyssey.core.enums import EffectKind, EventKind, RecordStatus
-from spaceodyssey.studies import toy as kinds
+from spaceodyssey.studies import builder
 from tests.core.helpers import CAPS, admit_j, advance_j, one_world
 
-STUDY = kinds.survey_1()
+STUDY = builder.survey_1()
 TRUTH, ROOT = one_world()
 N_SUBJECTS = 2
 

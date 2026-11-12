@@ -23,7 +23,7 @@ import jax.random as jr
 from spaceodyssey.core.enums import F64, I64, Purpose
 from spaceodyssey.core.kinds import AbstractChannelModel, AbstractWorldSource
 from spaceodyssey.core.trajectory import TrajectoryTable, draw_walk, trajectory_key
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 
 __all__ = [
     "FINDER",
@@ -107,14 +107,14 @@ def survey_22(*, leaky=False):
     The finder is channel 12 on lane 2 (asset 1), with the lane's transition and the
     channel's occupancy and latency all zero, so its record is released at tick 0.
     """
-    base = toy.survey_1()
+    base = builder.survey_1()
     channels = dataclasses.replace(
         base.channels,
         occupancy_ticks=base.channels.occupancy_ticks.at[2].set(0),
         latency_ticks=base.channels.latency_ticks.at[2].set(0),
     )
     plan = ((0, FINDER), *PLAN) if leaky else PLAN
-    study = toy.survey_1(
+    study = builder.survey_1(
         channels=channels,
         transition_ticks=jnp.asarray([10, 10, 0], I64),
         policies=(toy.ReactivePolicy(plan=plan),),

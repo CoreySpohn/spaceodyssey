@@ -37,7 +37,7 @@ from spaceodyssey.core.conformance import make_worlds, replay_beliefs
 from spaceodyssey.core.enums import Audience
 from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
 from spaceodyssey.core.refresh import MaskedBatchRefit, RefreshSchedule
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from spaceodyssey.studies.scripted import ScriptedRecords
 
 NOISE = 0.5
@@ -248,7 +248,7 @@ OBSERVERS = {
 def kit_study(observer):
     """The kit study run by `observer`, with its refit kinds lowered."""
     caps = toy.toy_registry().lower(Capacities(n_log=8), observer)
-    return toy.survey_1(
+    return builder.survey_1(
         caps=caps,
         observer=observer,
         policies=(toy.FixedPlanPolicy(plan=PLAN),),
@@ -345,8 +345,10 @@ def _scripted(observer, caps, ticks, values, ids, revisions=None, kinds=None):
         statuses=(0,) * len(ticks),
         kinds=tuple(kinds or ()),
     )
-    schedule = RefreshSchedule(EVERY, 0, *toy.PRODUCT_CHANNELS, toy.PRODUCT_KIND)
-    return toy.survey_1(
+    schedule = RefreshSchedule(
+        EVERY, 0, *builder.PRODUCT_CHANNELS, builder.PRODUCT_KIND
+    )
+    return builder.survey_1(
         caps,
         observer=observer,
         refresh=schedule,
@@ -361,7 +363,7 @@ def correction_study(observer):
     The first checkpoint (tick 100) installs {2, 4}, the second (tick 200) the
     corrected set {9, 4}: mean 6.5 over two rows.
     """
-    caps = toy.refresh_registry().lower(
+    caps = builder.refresh_registry().lower(
         Capacities(rows_per_subject=8, refit_lanes=2), observer
     )
     return _scripted(observer, caps, (1, 2, 150), (2.0, 4.0, 9.0), (4, 5, 4), (0, 0, 1))
@@ -389,7 +391,7 @@ class SummaryMean(RefitMean):
 def summary_registry(derived):
     """The refresh kinds with a `summary` kind at index 4, derived or not."""
     summary = RecordKind("summary", (PayloadColumn("value", PUBLIC),), derived=derived)
-    base = toy.refresh_registry()
+    base = builder.refresh_registry()
     return KindRegistry((*(base[i] for i in range(len(base))), summary))
 
 

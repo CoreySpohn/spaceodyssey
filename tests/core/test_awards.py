@@ -48,7 +48,7 @@ from spaceodyssey.core.executors.host import _adm, _close, _fp
 from spaceodyssey.core.lift import lift_traced
 from spaceodyssey.core.snapshot import EffectTable
 from spaceodyssey.core.transaction import mask_effects
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from tests.core.award_helpers import (
     ScriptedAwards,
     award,
@@ -189,7 +189,7 @@ def test_a_window_end_event_exists_only_once_an_award_is_issued():
     ends = _window_ends(_run("forfeit"))
     assert len(ends) == 1
     assert int(np.asarray(_run("forfeit").trace.tick)[ends[0]]) == 200
-    off = _host(toy.survey_1())
+    off = _host(builder.survey_1())
     assert not np.any(np.asarray(off.trace.kind)[_handled(off)] == EventKind.WINDOW_END)
     assert _ledger(off).granted is None
     assert _ledger(off).win_gen is None
@@ -408,7 +408,7 @@ def test_forged_award_counters_are_caught(name):
 
 def test_the_effect_table_without_awards_holds_no_award_column():
     """Fails if a study without awards starts to carry the Allocate columns."""
-    study = toy.survey_1()
+    study = builder.survey_1()
     eff = dataclasses.fields(EffectTable)
     from spaceodyssey.core.snapshot import effects_none
 

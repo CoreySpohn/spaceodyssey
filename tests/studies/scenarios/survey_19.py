@@ -31,7 +31,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.keys import asset_coordinate, draw_key
 from spaceodyssey.core.kinds import AbstractPolicy
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, effect_rows
 
 FACILITY_CHANNELS = (10, 12)  # on asset 0 (lane 0) and asset 1 (lane 2)
 N_ROUNDS = 2
@@ -61,12 +61,12 @@ class JointPolicy(AbstractPolicy):
         plan = ready & (rounds < self.n_rounds)
         stop = ready & (rounds >= self.n_rounds)
         kind = jnp.where(plan, EffectKind.OBSERVE, EffectKind.NONE)
-        eff = toy._effects(
+        eff = effect_rows.effects(
             study.caps,
             kind=jnp.stack([jnp.where(stop, EffectKind.STOP, kind), kind]).astype(I64),
             subject=rounds % 2,
             channel_index=jnp.stack(
-                [toy._chan_index(study, c) for c in FACILITY_CHANNELS]
+                [effect_rows.chan_index(study, c) for c in FACILITY_CHANNELS]
             ),
             lane=jnp.asarray([0, 2], I64),
             group=view.n_dec,
@@ -80,7 +80,7 @@ def survey_19(**overrides):
     """The toy study at key version 2 with the joint policy on two facilities."""
     overrides.setdefault("policies", (JointPolicy(),))
     overrides.setdefault("key_version", 2)
-    return toy.survey_1(**overrides)
+    return builder.survey_1(**overrides)
 
 
 def with_idle_facility(study):

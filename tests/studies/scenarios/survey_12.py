@@ -30,7 +30,7 @@ from spaceodyssey.core.kinds import AbstractChannelModel, AbstractPolicy
 from spaceodyssey.core.ledger import set_ops_state
 from spaceodyssey.core.lift import traced
 from spaceodyssey.core.snapshot import effects_none
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.studies.scenarios.survey_11 import ScriptedAlerts
 
 __all__ = [
@@ -188,7 +188,7 @@ def survey_12(
     caps = Capacities(
         n_effects=N_EFFECTS, refunds=True, n_ops=2, snapshot_balances=True
     )
-    base = toy.survey_1(caps=caps)
+    base = builder.survey_1(caps=caps)
     shape = (caps.n_channels, caps.n_resources)
     channels_table = dataclasses.replace(
         base.channels,
@@ -214,7 +214,7 @@ def survey_12(
         read_balance=read_balance,
         cancel_tick=cancel_tick,
     )
-    study = toy.survey_1(
+    study = builder.survey_1(
         caps=caps,
         channels=channels_table,
         budget=jnp.full((caps.n_balance_rows, caps.n_resources), BALANCE, F64),

@@ -29,7 +29,7 @@ from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import I64, EffectKind
 from spaceodyssey.core.kinds import AbstractDesign
 from spaceodyssey.core.refresh import HostLoopRefit, MaskedBatchRefit
-from spaceodyssey.studies import oracle, toy
+from spaceodyssey.studies import builder, oracle, toy
 from spaceodyssey.studies.conformance import CORPUS
 from tests.codec import run_cases
 from tests.codec.run_cases import (
@@ -82,7 +82,9 @@ def _query_run():
     """A study whose policy declares a Query, and the service that answers it."""
     registry, kind = oracle.oracle_registry()
     caps = registry.lower(Capacities())
-    study = toy.survey_1(caps, policies=(DocPolicy(effects=(int(EffectKind.QUERY),)),))
+    study = builder.survey_1(
+        caps, policies=(DocPolicy(effects=(int(EffectKind.QUERY),)),)
+    )
     return study, registry, oracle.ToyOracleService(kind)
 
 
@@ -160,7 +162,7 @@ def test_each_executor_can_bind_its_own_boundary():
 
 
 def test_boundaries_that_fit_different_models_are_refused_on_dump():
-    other = HostLoopRefit(toy.toy_refit_fit, model_hash=MODEL_HASH + 1)
+    other = HostLoopRefit(builder.toy_refit_fit, model_hash=MODEL_HASH + 1)
     with pytest.raises(DocumentError) as info:
         _dump(refit={"host": other, "compiled": boundary()})
     assert info.value.code == "D003"
@@ -168,7 +170,7 @@ def test_boundaries_that_fit_different_models_are_refused_on_dump():
 
 
 def test_a_study_without_a_service_or_refit_dumps_a_bare_run():
-    study = toy.survey_1()
+    study = builder.survey_1()
     registry = toy.toy_registry()
     doc = dump_run(
         study, registry, executor="compiled", bindings=bindings(), kinds=TOY_KINDS
@@ -239,7 +241,7 @@ def test_preflight_flags_a_callable_member_of_a_run_document():
 
 def test_the_registry_must_lower_to_the_study_capacities_on_dump():
     study, _, _ = refresh_run()
-    other = toy.refresh_registry()
+    other = builder.refresh_registry()
     with pytest.raises(DocumentError) as info:
         dump_run(study, other, executor="host", bindings=bindings(), kinds=KINDS)
     assert info.value.pointer == "/records"
@@ -398,7 +400,7 @@ def test_a_binding_at_an_older_version_goes_through_migrate():
         matches=lambda obj: False,
         describe=lambda obj, registry: {},
         build=lambda config, registry: MaskedBatchRefit(
-            toy.toy_mean_kernel, n_diag=config["n_diag"], model_hash=MODEL_HASH
+            builder.toy_mean_kernel, n_diag=config["n_diag"], model_hash=MODEL_HASH
         ),
         migrate=migrate,
     )
@@ -465,7 +467,7 @@ class ActivationDesign(AbstractDesign):
 
 
 def _with_design(design):
-    return dataclasses.replace(toy.survey_1(), design=design)
+    return dataclasses.replace(builder.survey_1(), design=design)
 
 
 def test_an_activation_function_is_refused_with_a_named_finding_and_pointer():
@@ -767,7 +769,7 @@ def test_a_malformed_no_switch_tag_is_refused_with_a_pointer(value):
 
 
 def test_a_horizon_at_the_capacity_tick_is_refused_on_load_and_dump():
-    study = toy.survey_1()
+    study = builder.survey_1()
     top = study.caps.max_tick
     doc = json.loads(dump_study(study, TOY_KINDS).to_json())
     doc.pop("content_hash")
@@ -802,7 +804,7 @@ def test_run_document_text_is_not_a_study_document_and_the_reverse():
     with pytest.raises(DocumentError) as info:
         load_study(text, KINDS)
     assert info.value.pointer == "/format" or info.value.pointer.startswith("/")
-    study_text = dump_study(toy.survey_1(), TOY_KINDS).to_json()
+    study_text = dump_study(builder.survey_1(), TOY_KINDS).to_json()
     with pytest.raises(DocumentError) as info:
         RunDocument.from_json(study_text)
     assert info.value.pointer in ("/format", "")
@@ -1105,7 +1107,7 @@ def test_a_stateful_builder_cannot_change_the_model_hash_after_validation():
     def build(config, registry):
         calls.append(1)
         hashed = MODEL_HASH if len(calls) <= 2 else 999
-        return MaskedBatchRefit(toy.toy_mean_kernel, model_hash=hashed)
+        return MaskedBatchRefit(builder.toy_mean_kernel, model_hash=hashed)
 
     kind = dataclasses.replace(base, build=build)
     table = Bindings((run_cases._service_kind(), kind))

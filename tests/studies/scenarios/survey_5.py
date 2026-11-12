@@ -22,7 +22,7 @@ from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, I64, PUBLIC, Disposition, EffectKind, Scope
 from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.snapshot import MeanBelief
-from spaceodyssey.studies import catalog, toy
+from spaceodyssey.studies import builder, catalog, effect_rows, toy
 
 # aux slots of the belief: 0 and 1 are the toy's and the catalog's own
 ROSTER_COUNT_SLOT = 2
@@ -101,7 +101,7 @@ class FollowUpPolicy(AbstractPolicy):
         follow_channel = jnp.argmax(ids == self.follow_channel).astype(I64)
         observe = due | ~spent
         kind0 = jnp.where(observe, EffectKind.OBSERVE, EffectKind.STOP)
-        eff = toy._effects(
+        eff = effect_rows.effects(
             caps,
             kind=jnp.stack([kind0, jnp.asarray(EffectKind.NONE, I64)]),
             subject=jnp.where(due, self.follow_subject, plan[at, 0]),
@@ -153,7 +153,7 @@ class AbsolutePlanPolicy(AbstractPolicy):
         following = starts[jnp.minimum(i + 1, len(self.starts) - 1)]
         channel = jnp.argmax(study.channels.id == plan[i, 1]).astype(I64)
         second = jnp.where(last, EffectKind.STOP, EffectKind.WAIT)
-        eff = toy._effects(
+        eff = effect_rows.effects(
             study.caps,
             kind=jnp.stack(
                 [
@@ -182,7 +182,7 @@ def survey_5(delay_ticks=catalog.CATALOG_DELAY_TICKS, policy=None, **overrides):
     caps = registry.lower(Capacities(n_channels=4))
     overrides.setdefault("observer", RosterObserver(catalog_kind=kind))
     policy = FollowUpPolicy() if policy is None else policy
-    base = toy.survey_1(caps=caps, policies=(policy,), **overrides)
+    base = builder.survey_1(caps=caps, policies=(policy,), **overrides)
     index = 3
     channels = base.channels
     channels = eqx.tree_at(

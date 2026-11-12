@@ -8,7 +8,8 @@ import pytest
 
 from spaceodyssey.core import Capacities, CompiledExecutor, HostExecutor
 from spaceodyssey.core.executors.base import histories_equal, index_world
-from spaceodyssey.studies.toy import ToyPhotometry, ToyTruth, survey_1
+from spaceodyssey.studies.builder import survey_1
+from spaceodyssey.studies.toy import ToyPhotometry, ToyTruth
 
 
 class ToyKnownSignal(ToyPhotometry):

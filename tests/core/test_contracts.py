@@ -11,7 +11,7 @@ import jax
 import pytest
 
 from spaceodyssey import core
-from spaceodyssey.studies.toy import survey_1
+from spaceodyssey.studies.builder import survey_1
 from tests.core.contract_helpers import (
     assert_study_typed,
     assert_typed_fields,

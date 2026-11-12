@@ -71,7 +71,7 @@ from spaceodyssey.core.keys import asset_coordinate, draw_key
 from spaceodyssey.core.kinds import AbstractPolicy, RealizeContext
 from spaceodyssey.core.ledger import ChannelTable
 from spaceodyssey.core.study import Clock
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from spaceodyssey.studies.physical import (
     FIXED_EXPOSURE_S,
     FIXED_PLAN_DAYS,
@@ -206,7 +206,7 @@ def build_study(channel, context, plan):
     )
     budget = jnp.full((caps.n_balance_rows, caps.n_resources), 1000.0)
     horizon = _days(context, 900)
-    study = toy.survey_1(
+    study = builder.survey_1(
         caps,
         channels=channels,
         channel_model=channel,

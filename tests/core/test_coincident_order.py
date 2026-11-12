@@ -11,7 +11,7 @@ from spaceodyssey.core.enums import (
     RecordStatus,
     Stage,
 )
-from spaceodyssey.studies import toy as kinds
+from spaceodyssey.studies import builder
 from tests.core.helpers import (
     CAPS,
     admit_j,
@@ -25,7 +25,7 @@ ORDERS = [CoincidentOrder.SETTLE_FIRST, CoincidentOrder.FAULT_FIRST]
 
 
 def study_with(order):
-    base = kinds.survey_1()
+    base = builder.survey_1()
     return eqx.tree_at(
         lambda s: s.channels.coincident_order,
         base,
@@ -130,7 +130,7 @@ def test_settle_first_completes_and_the_fault_finds_nothing_to_fail():
 
 
 def test_coincident_order_is_a_required_column():
-    base = kinds.survey_1().channels
+    base = builder.survey_1().channels
     fields = {
         f: getattr(base, f)
         for f in base.__dataclass_fields__

@@ -8,7 +8,7 @@ from spaceodyssey.core import battery, handlers, preflight
 from spaceodyssey.core.declarations import Declaration, Need
 from spaceodyssey.core.enums import F64, Disposition, EffectKind, Scope
 from spaceodyssey.core.preflight import FindingCode
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core.battery_helpers import (
     PLAN,
     AbsolutePlanPolicy,
@@ -201,7 +201,7 @@ def test_declared_need_requires_a_decision_in_its_own_phase():
     decl = Declaration(
         stops=((Scope.CAMPAIGN, Disposition.DRAIN),), needs=(Need(10, 10, 130),)
     )
-    study = toy.survey_1(
+    study = builder.survey_1(
         policies=(StatedPlan(plan=PLAN, stated=decl), StatedPlan(plan=PLAN)),
         phase_until=(100, 1000),
     )

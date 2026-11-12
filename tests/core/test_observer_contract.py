@@ -29,7 +29,7 @@ from spaceodyssey.core import (
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.conformance.folds import CountingObserver, fold_counts, plain
 from spaceodyssey.core.executors.replay import _row
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core.helpers import one_world
 
 N_STEPS = 40
@@ -63,7 +63,7 @@ def _registry_with_product():
 @pytest.fixture(scope="module")
 def sample_run():
     """One host run of the toy survey through the sampling observer."""
-    study = toy.survey_1(observer=toy.ToySampleObserver())
+    study = builder.survey_1(observer=toy.ToySampleObserver())
     truth, root = one_world()
     return study, root, HostExecutor().run(study, truth, root, N_STEPS)
 
@@ -148,9 +148,9 @@ def test_study_refuses_a_refit_declaration_it_cannot_honour(case, match):
     if case == "refit_only":
         observer = RefitOnlyMean()
     with pytest.raises(ValueError, match=match):
-        toy.survey_1(caps=caps, observer=observer)
+        builder.survey_1(caps=caps, observer=observer)
     # control: the properly lowered declaration builds
-    toy.survey_1(caps=lowered, observer=RefitMean())
+    builder.survey_1(caps=lowered, observer=RefitMean())
 
 
 @pytest.mark.medium(reason="over 3 s cold here, about 5 s on the runner")

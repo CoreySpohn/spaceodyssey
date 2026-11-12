@@ -18,6 +18,7 @@ from spaceodyssey.core.executors.base import (
 )
 from spaceodyssey.core.executors.compiled import CompiledExecutor
 from spaceodyssey.core.executors.host import HostExecutor
+from spaceodyssey.studies import builder
 from spaceodyssey.studies import toy as kinds
 from tests.core.corpus import HAND_STUDIES, frozen
 
@@ -41,7 +42,7 @@ def one_world(w=0, caps=CAPS):
 
 def private_channel_study(plan, channel_index=2, **kw):
     """Build a study with one observer-only channel."""
-    base = kinds.survey_1(policies=(frozen(plan=plan),), **kw)
+    base = builder.survey_1(policies=(frozen(plan=plan),), **kw)
     aud = base.channels.audience.at[channel_index].set(Audience.OBSERVER)
     return eqx.tree_at(lambda s: s.channels.audience, base, aud)
 
@@ -61,7 +62,7 @@ def hand_run(name):
 @functools.cache
 def baseline_host_run():
     """The baseline host run and its decision views, shared by record checks."""
-    study = kinds.survey_1()
+    study = builder.survey_1()
     truth, root = one_world()
     views = []
     run = HostExecutor().run(study, truth, root, 40, view_log=views)
@@ -97,7 +98,7 @@ def continue_until(c, study, truth, root, pred, max_steps=60):
 
 @functools.cache
 def _default_bundle_state():
-    return after_decision_1_bundle(kinds.survey_1(policies=(frozen(bundle_at=1),)))
+    return after_decision_1_bundle(builder.survey_1(policies=(frozen(bundle_at=1),)))
 
 
 def after_decision_1_bundle(study=None):

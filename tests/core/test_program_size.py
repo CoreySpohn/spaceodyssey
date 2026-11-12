@@ -12,7 +12,7 @@ from spaceodyssey.core import handlers
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import EffectKind, EventKind, Stage
 from spaceodyssey.core.executors.compiled import CompiledExecutor
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.core.helpers import after_decision_1_bundle, one_world, worlds
 
 
@@ -29,7 +29,7 @@ def _equations(jaxpr):
 
 
 def _admit_equations(n_effects):
-    study = toy.survey_1(caps=Capacities(n_effects=n_effects))
+    study = builder.survey_1(caps=Capacities(n_effects=n_effects))
     truth, _ = one_world(caps=study.caps)
     carry = eqx.filter_jit(core.init_carry)(study, truth)
     effects = core.effects_none(study.caps)
@@ -59,7 +59,7 @@ def _switch_branches(awards, commitments=False):
         awards=awards,
         n_commitments=2 if commitments else 0,
     )
-    study = toy.survey_1(caps=caps)
+    study = builder.survey_1(caps=caps)
     truth, root = one_world(caps=caps)
     carry = eqx.filter_jit(core.init_carry)(study, truth)
     ev = jax.tree_util.tree_map(lambda a: a[0], carry.ev)
@@ -123,7 +123,7 @@ def test_shared_branch_matches_the_handler_of_its_own_kind():
 @pytest.mark.parametrize("n_effects", (3, 4, 5))
 def test_toy_study_runs_with_a_wider_effect_table(n_effects):
     caps = Capacities(n_effects=n_effects)
-    study = toy.survey_1(caps=caps)
+    study = builder.survey_1(caps=caps)
     truths, roots = worlds(1, caps)
     result = CompiledExecutor().run(study, truths, roots, 12)
     assert bool(jnp.all(result.trace.eff_kind[..., 2:] == EffectKind.NONE))
@@ -132,7 +132,7 @@ def test_toy_study_runs_with_a_wider_effect_table(n_effects):
 
 @pytest.mark.parametrize("rows", (1, 2, 4))
 def test_admit_refuses_a_table_of_the_wrong_width(rows):
-    study = toy.survey_1(caps=Capacities(n_effects=3))
+    study = builder.survey_1(caps=Capacities(n_effects=3))
     truth, _ = one_world(caps=study.caps)
     carry = eqx.filter_jit(core.init_carry)(study, truth)
     wrong = core.effects_none(Capacities(n_effects=rows))
@@ -148,7 +148,7 @@ class _OneRow(toy.FixedPlanPolicy):
 
 def test_transition_names_the_policy_that_emits_a_short_table():
     caps = Capacities(n_effects=3)
-    study = toy.survey_1(caps=caps, policies=(_OneRow(plan=((0, 10),)),))
+    study = builder.survey_1(caps=caps, policies=(_OneRow(plan=((0, 10),)),))
     truths, roots = worlds(1, caps)
     with pytest.raises(ValueError, match=r"n_effects is 3.*policy: .*_OneRow"):
         CompiledExecutor().run(study, truths, roots, 4)
@@ -157,7 +157,7 @@ def test_transition_names_the_policy_that_emits_a_short_table():
 @pytest.mark.parametrize("rows", (1, 2, 4))
 def test_admit_refuses_a_program_column_of_the_wrong_width(rows):
     caps = Capacities(n_programs=2, n_effects=3)
-    study = toy.survey_1(caps=caps)
+    study = builder.survey_1(caps=caps)
     truth, _ = one_world(caps=caps)
     carry = eqx.filter_jit(core.init_carry)(study, truth)
     table = core.effects_none(caps)
@@ -169,7 +169,7 @@ def test_admit_refuses_a_program_column_of_the_wrong_width(rows):
 def test_a_short_policy_is_named_beside_a_correct_one():
     caps = Capacities(n_effects=3)
     good = toy.FixedPlanPolicy(plan=((0, 10),))
-    study = toy.survey_1(caps=caps, policies=(good, _OneRow(plan=((0, 10),))))
+    study = builder.survey_1(caps=caps, policies=(good, _OneRow(plan=((0, 10),))))
     truths, roots = worlds(1, caps)
     with pytest.raises(ValueError, match=r"n_effects is 3.*policy: .*_OneRow"):
         CompiledExecutor().run(study, truths, roots, 4)

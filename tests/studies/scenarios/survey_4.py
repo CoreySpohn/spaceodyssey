@@ -39,7 +39,7 @@ from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import F64, I64, PUBLIC, Disposition, EffectKind, Scope
 from spaceodyssey.core.kinds import AbstractObjective, AbstractPolicy
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, effect_rows, toy
 from spaceodyssey.studies.precursor import export_records
 from spaceodyssey.studies.premission import PAD, PreMissionImporter
 
@@ -54,7 +54,7 @@ N_OBSERVATIONS = 4
 
 def survey_4_upstream(**overrides):
     """The upstream study: the toy survey, which observes planet 1 twice."""
-    return toy.survey_1(**overrides)
+    return builder.survey_1(**overrides)
 
 
 def export_precursor(run_result, upstream_hash, *, audience=PUBLIC, study=None):
@@ -113,7 +113,7 @@ class LeastKnownPolicy(AbstractPolicy):
         subject = targets[jnp.argmin(view.belief.n[targets])]
         stop = view.n_dec >= self.n_obs
         channel = jnp.argmax(study.channels.id == self.channel).astype(I64)
-        eff = toy._effects(
+        eff = effect_rows.effects(
             study.caps,
             kind=jnp.stack(
                 [
@@ -144,11 +144,11 @@ def survey_4(table, **overrides):
     """The downstream survey: the toy channels, the precursor import, the policy.
 
     `table` is the precursor (an `Export.table`, or it padded by `without_precursor`);
-    other overrides follow `toy.survey_1`.
+    other overrides follow `builder.survey_1`.
     """
     caps = overrides.pop("caps", None) or Capacities()
     overrides.setdefault("policies", (LeastKnownPolicy(),))
-    study = toy.survey_1(caps, process=PreMissionImporter(table=table), **overrides)
+    study = builder.survey_1(caps, process=PreMissionImporter(table=table), **overrides)
     return dataclasses.replace(study, objective=LeastKnownValue())
 
 

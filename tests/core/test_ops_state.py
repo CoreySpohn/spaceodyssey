@@ -22,7 +22,7 @@ from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import F64, Audience, RecordStatus
 from spaceodyssey.core.preflight import preflight
 from spaceodyssey.core.snapshot import snapshot_view
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 from tests.codec.test_document import TOY_KINDS
 from tests.core.commitment_helpers import ScriptedCommitments, plan
 from tests.core.helpers import one_world, worlds
@@ -67,7 +67,7 @@ def ops_study(script, plans=(), *, fail=FAIL, delay=DELAY, costs=COSTS, caps=CAP
     `script` with the commitment `plans`; the failure fires at `fail` and its record is
     released `delay` ticks later. Budgets are large, so no admission is refused.
     """
-    base = toy.survey_1(caps=caps)
+    base = builder.survey_1(caps=caps)
     shape = (caps.n_channels, caps.n_resources)
     by_ops = jnp.stack([jnp.full(shape, c, F64) for c in costs])
     channels = dataclasses.replace(
@@ -86,7 +86,7 @@ def ops_study(script, plans=(), *, fail=FAIL, delay=DELAY, costs=COSTS, caps=CAP
         audience=int(Audience.POLICY),
         delay=delay,
     )
-    study = toy.survey_1(
+    study = builder.survey_1(
         caps=caps,
         channels=channels,
         budget=jnp.full((caps.n_balance_rows, caps.n_resources), 100.0, F64),
@@ -262,7 +262,7 @@ def test_the_cost_table_round_trips_and_default_studies_omit_it():
     """Fails if the table loses its dtype or shape, n_ops is dropped, or a study without
     ops writes either field (every document hash would move).
     """
-    base = toy.survey_1(caps=Capacities(n_ops=3))
+    base = builder.survey_1(caps=Capacities(n_ops=3))
     table = jnp.arange(27.0).reshape(3, 3, 3)
     channels = dataclasses.replace(base.channels, cost_by_ops=table)
     study = dataclasses.replace(base, channels=channels)
@@ -273,13 +273,13 @@ def test_the_cost_table_round_trips_and_default_studies_omit_it():
     assert loaded.channels.cost_by_ops.dtype == jnp.float64
     assert loaded.channels.cost_by_ops.tolist() == table.tolist()
     assert dump_study(loaded, TOY_KINDS).to_json() == text
-    plain = json.dumps(json.loads(dump_study(toy.survey_1(), TOY_KINDS).to_json()))
+    plain = json.dumps(json.loads(dump_study(builder.survey_1(), TOY_KINDS).to_json()))
     assert "cost_by_ops" not in plain and "n_ops" not in plain
 
 
 def test_a_study_without_ops_carries_no_ops_leaf():
     """Fails if the carry, the log or an event row holds an ops leaf at the default."""
-    study = toy.survey_1()
+    study = builder.survey_1()
     assert dataclasses.replace(study).caps.ops is False
     truth, _ = one_world(caps=study.caps)
     from spaceodyssey.core.carry import init_carry

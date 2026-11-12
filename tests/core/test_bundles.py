@@ -34,7 +34,7 @@ from spaceodyssey.core.enums import (
     RecordStatus,
 )
 from spaceodyssey.core.snapshot import effects_none
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from tests.core.award_helpers import PROGRAM_COL, ScriptedAwards, award
 from tests.core.helpers import one_world, worlds
 from tests.core.program_helpers import cancel, end, observe, wait
@@ -95,7 +95,7 @@ class ScriptedBundles(ScriptedAwards):
 def bundle_study(script=(), plan=(), awards=()):
     """The toy study on `CAPS` with a scripted policy; program rows hold 50 credit."""
     policy = ScriptedBundles(script=script, awards=awards, plan=plan)
-    study = toy.survey_1(caps=CAPS, policies=(policy,))
+    study = builder.survey_1(caps=CAPS, policies=(policy,))
     budget = study.budget
     for p in range(CAPS.n_programs):
         budget = budget.at[CAPS.n_assets + p, PROGRAM_COL].set(50.0)

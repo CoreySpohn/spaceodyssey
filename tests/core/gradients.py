@@ -19,6 +19,7 @@ from spaceodyssey import core
 from spaceodyssey.core.enums import F64
 from spaceodyssey.core.executors.host import HostExecutor
 from spaceodyssey.studies import toy as kinds
+from tests.studies.scenarios import toy_gradient
 
 D1_H = tuple(10.0 ** (-i) for i in range(1, 9))
 N_STEPS = 80
@@ -43,7 +44,9 @@ def _map_worlds(fn, truths, roots, chunk=1024):
 @eqx.filter_jit
 def _soft_values(study, truths, roots, width, n_steps):
     def one(truth, root):
-        return kinds.credit_soft(final_carry(study, truth, root, n_steps), study, width)
+        return toy_gradient.credit_soft(
+            final_carry(study, truth, root, n_steps), study, width
+        )
 
     return _map_worlds(one, truths, roots)
 
@@ -60,7 +63,7 @@ def _gap_values(study, truths, roots, width, n_steps):
     """
 
     def one(truth, root):
-        snr = kinds._snr(final_carry(study, truth, root, n_steps), study)
+        snr = kinds.carry_snr(final_carry(study, truth, root, n_steps), study)
         x = snr - study.objective.threshold
         return jnp.sum(jnp.abs(jax.nn.sigmoid(x / width) - (x > 0)))
 
@@ -90,7 +93,9 @@ def _per_world_grad(dyn, static, study, truths, roots, width, n_steps):
     def one(truth, root):
         def loss(d):
             s = eqx.tree_at(lambda x: x.design, study, eqx.combine(d, static))
-            return kinds.credit_soft(final_carry(s, truth, root, n_steps), s, width)
+            return toy_gradient.credit_soft(
+                final_carry(s, truth, root, n_steps), s, width
+            )
 
         return eqx.filter_grad(loss)(dyn).gain
 
@@ -125,7 +130,7 @@ def replay_study(study, truth, root, n_steps=N_STEPS):
     """`study` with its phase-0 policy replaced by a replay of its own recorded run."""
     table = record_effects(study, truth, root, n_steps)
     return eqx.tree_at(
-        lambda s: s.agenda.policies, study, (kinds.ReplayPolicy(effects=table),)
+        lambda s: s.agenda.policies, study, (toy_gradient.ReplayPolicy(effects=table),)
     )
 
 
@@ -195,7 +200,11 @@ def _forced_credit(study, truths, roots, m, n_steps):
     s = eqx.tree_at(
         lambda x: x.agenda.policies,
         study,
-        (kinds.ReplayPolicy(effects=kinds.forced_effects(study.caps, study, m)),),
+        (
+            toy_gradient.ReplayPolicy(
+                effects=toy_gradient.forced_effects(study.caps, study, m)
+            ),
+        ),
     )
     return _hard_values(s, truths, roots, n_steps)[0]
 

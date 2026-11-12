@@ -32,7 +32,7 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.records import log_columns
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder
 from tests.core.conformance_helpers import ScriptedFaults
 from tests.core.helpers import worlds
 from tests.core.program_helpers import ScriptedPrograms, observe, wait
@@ -137,7 +137,9 @@ def survey_study(*, fuel=FUEL_DRY, stops=True, faults=((FAULT_TICK, 2, 2, 2),)):
     `(tick, lane, channel index, generation)`.
     """
     caps = Capacities(n_effects=N_EFFECTS, snapshot_balances=True)
-    study = toy.survey_1(caps=caps, policies=(FuelWatch(script=SCRIPT, stops=stops),))
+    study = builder.survey_1(
+        caps=caps, policies=(FuelWatch(script=SCRIPT, stops=stops),)
+    )
     cost = jnp.zeros_like(study.channels.cost).at[:, 0].set(jnp.asarray(COST))
     channels = dataclasses.replace(study.channels, cost=cost, charge=cost)
     budget = study.budget.at[DRY, 0].set(fuel).at[WET, 0].set(FUEL_WET)

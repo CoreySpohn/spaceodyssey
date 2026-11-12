@@ -17,6 +17,7 @@ from spaceodyssey.core.enums import (
     effect_mask,
 )
 from spaceodyssey.core.study import Agenda
+from spaceodyssey.studies import builder
 from spaceodyssey.studies import toy as kinds
 from tests.core.helpers import admit_j, effects_of, one_world
 
@@ -55,7 +56,7 @@ def carry0(study):
 def test_allocate_outside_the_level_is_forbidden_and_changes_nothing(level, code):
     """Fails if a level-1 policy's Allocate reaches the unsupported branch or moves
     the carry, or if level 3 (which permits Allocate) refuses it as forbidden."""
-    study = with_levels(kinds.survey_1(), (level,))
+    study = with_levels(builder.survey_1(), (level,))
     c0 = carry0(study)
     c1, codes = admit_j(c0, effects_of(EffectKind.ALLOCATE), study)
     assert int(codes[0]) == code
@@ -109,7 +110,7 @@ def test_level_masks_match_the_table_and_are_nested():
         assert LEVEL_EFFECTS[level] == effect_mask(*kinds_permitted), level
     for lower, upper in itertools.pairwise(LEVEL_EFFECTS):
         assert lower & upper == lower
-    agenda = kinds.survey_1().agenda
+    agenda = builder.survey_1().agenda
     assert agenda.levels.tolist() == [len(LEVEL_EFFECTS) - 1]
     assert agenda.effective_effects().tolist() == [ALL_EFFECTS]
 
@@ -118,7 +119,7 @@ def test_effective_mask_is_the_phase_mask_and_the_level_mask():
     """Fails if admission reads the phase mask or the level mask alone, or applies
     one phase's level to another phase."""
     study = with_levels(
-        kinds.survey_1(
+        builder.survey_1(
             policies=(kinds.NullPolicy(), kinds.NullPolicy(), kinds.NullPolicy()),
             phase_until=(300, 600, 1000),
         ),
@@ -144,4 +145,4 @@ def test_unknown_level_or_count_is_refused(levels):
     """Fails if a level outside the table is accepted (indexing would clip it to a
     real mask) or a phase has no level."""
     with pytest.raises(ValueError, match="level"):
-        with_levels(kinds.survey_1(), levels)
+        with_levels(builder.survey_1(), levels)
