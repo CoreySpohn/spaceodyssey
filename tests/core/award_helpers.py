@@ -90,13 +90,13 @@ def award_study(
 ):
     """The toy study with two programs and awards on; the program rows hold
     `program_credit` of the program-scoped resource, so awards are what pay."""
-    from spaceodyssey.studies import toy
+    from spaceodyssey.studies import builder
 
     caps = Capacities(
         n_programs=2, n_effects=3, awards=True, refunds=refunds, **(caps_extra or {})
     )
     policy = (policy_cls or ScriptedAwards)(script=script, awards=awards)
-    study = toy.survey_1(caps=caps, policies=(policy,), **overrides)
+    study = builder.survey_1(caps=caps, policies=(policy,), **overrides)
     budget = study.budget
     for p in range(caps.n_programs):
         budget = budget.at[caps.n_assets + p, PROGRAM_COL].set(program_credit)

@@ -76,7 +76,7 @@ def commitment_study(
     Asset 0 holds `activations` of resource column `DISRUPTIVE_COL` beyond what its
     channels cost, and names that column as its disruptive resource.
     """
-    from spaceodyssey.studies import toy
+    from spaceodyssey.studies import builder
 
     caps = Capacities(
         n_effects=3,
@@ -84,7 +84,7 @@ def commitment_study(
         n_programs=n_programs,
         refunds=refunds,
     )
-    study = toy.survey_1(
+    study = builder.survey_1(
         caps=caps,
         policies=(ScriptedCommitments(script=script, plan=plans),),
         **overrides,
