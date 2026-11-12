@@ -6,6 +6,7 @@ study runs; the run test checks the block log against the outcome table.
 
 import dataclasses
 import functools
+import math
 import types
 
 import jax
@@ -26,7 +27,7 @@ N_STARS = 2
 
 @functools.cache
 def _built():
-    return build(run=False)
+    return build(run=False, policy_kw={"retire_after": br.RETIRE_AFTER})
 
 
 def _state(n_char=1, retire_after=br.RETIRE_AFTER, **slot):
@@ -44,12 +45,22 @@ def _state(n_char=1, retire_after=br.RETIRE_AFTER, **slot):
     return jnp.asarray(pstate)
 
 
-def _decide(pstate=None, tick_d=0.0, policy_kw=None, survey=None, **leaves):
+def _decide(
+    pstate=None, tick_d=0.0, policy_kw=None, survey=None, infinite=(), **leaves
+):
     """`(effects, new state)` of one decision on a candidate at slot 0 of star 0."""
     _, study, _, _, _, _ = _built()
     policy = dataclasses.replace(
-        study.agenda.policies[0], budget_d=1000.0, **(policy_kw or {})
+        study.agenda.policies[0], **{"budget_d": 1000.0, **(policy_kw or {})}
     )
+    if len(infinite):
+        # channels whose solved time is infinite: an infeasible requirement
+        cost = study.channels.cost.at[jnp.asarray(infinite), br.SHARED_RESOURCE].set(
+            jnp.inf
+        )
+        study = dataclasses.replace(
+            study, channels=dataclasses.replace(study.channels, cost=cost)
+        )
     if survey is not None:
         study = dataclasses.replace(
             study,
@@ -179,7 +190,7 @@ def _search_case(reserve_d, budget_d):
     return _decide_budget({"reserve_d": reserve_d, "budget_d": budget_d}, **leaves)
 
 
-def _decide_budget(kw, **leaves):
+def _decide_budget(kw, pstate=None, **leaves):
     _, study, _, _, _, _ = _built()
     policy = dataclasses.replace(study.agenda.policies[0], **kw)
     n = N_STARS
@@ -193,7 +204,8 @@ def _decide_budget(kw, **leaves):
     view = types.SimpleNamespace(
         belief=belief, tick=jnp.asarray(0), n_dec=jnp.asarray(1)
     )
-    effects, new, _ = policy.decide(_state(), view, study, jax.random.key(0))
+    pstate = _state() if pstate is None else pstate
+    effects, new, _ = policy.decide(pstate, view, study, jax.random.key(0))
     return effects, new
 
 
@@ -261,14 +273,17 @@ def test_default_capacities_scale_with_stars_and_horizon():
     assert big.max_tick > 1825 * days
     assert big.n_pstate == br.pstate_size(150, 4)
     small = br.default_capacities(2, 6, n_channels=10, horizon_d=120.0)
-    assert (small.n_log, small.rows_per_subject, small.max_sid) == (1024, 32, 4096)
+    assert (small.n_log, small.max_sid) == (1024, 4096)
+    assert small.rows_per_subject >= 1 + 24 + br.block_log_len(6) + 3
     legacy = br.default_capacities(2, 6, n_channels=10)
     assert (legacy.n_log, legacy.rows_per_subject, legacy.max_sid) == (1024, 32, 4096)
-    longer = br.default_capacities(150, 4, n_channels=25, horizon_d=1825.0, n_char=4)
+    longer = br.default_capacities(150, 4, n_channels=25, horizon_d=1825.0, n_char=2)
     assert longer.rows_per_subject > big.rows_per_subject
-    assert longer.n_pstate == br.pstate_size(150, 4, 4)
+    assert longer.n_pstate == br.pstate_size(150, 4, 2)
     with pytest.raises(ValueError, match="max_tick"):
         br.default_capacities(150, 4, n_channels=25, horizon_d=60_000.0)
+    with pytest.raises(ValueError, match="max_tick"):
+        br.default_capacities(150, 4, n_channels=25, horizon_d=1825.0, n_char=4)
 
 
 @pytest.mark.slow(reason="compiles the chunked refresh driver once")
@@ -279,7 +294,9 @@ def test_the_block_log_maps_every_block_row_to_its_slot():
     do not add up to the blocks run, or if a slot is confirmed with fewer than n_char
     spectra.
     """
-    _, study, _, truths, _, run = build(budget_d=30.0, policy_kw={"n_char": 2})
+    _, study, _, truths, _, run = build(
+        budget_d=30.0, policy_kw={"n_char": 2, "retire_after": 3}
+    )
     carry = run.carry
     assert not bool(np.any(np.asarray(carry.overflow)))
     table = br.outcome_table(run, truths, study)
@@ -291,3 +308,142 @@ def test_the_block_log_maps_every_block_row_to_its_slot():
     # the outcome table confirms at the policy's n_char unless told otherwise
     one = br.outcome_table(run, truths, study, n_char=1)
     assert (table.world["confirmed"] <= one.world["confirmed"]).all()
+
+
+def test_capacities_cover_every_visit_block_and_renewal_a_star_can_add():
+    """`n_log` and `rows_per_subject` are bounds: the visit cap, the block log, refits.
+
+    Each star holds a catalog row, `max_visits` visits and `block_log_len` blocks; each
+    visit, block and forecast renewal adds `REFIT_ROWS` refit products. Fails if the
+    log is sized from a typical visit count instead of the policy's cap.
+    """
+    n, slots, horizon = 150, 4, 1825.0
+    for max_visits, n_char, retire in ((24, 1, 3), (24, 2, 3), (40, 1, 1), (8, 1, 3)):
+        caps = br.default_capacities(
+            n,
+            slots,
+            n_channels=25,
+            horizon_d=horizon,
+            n_char=n_char,
+            retire_after=retire,
+            max_visits=max_visits,
+        )
+        blocks = br.block_log_len(slots, n_char, retire)
+        renewals = math.ceil(horizon / br.RENEWAL_D) + 1
+        per_star = 1 + max_visits + blocks
+        refits = br.REFIT_ROWS * (max_visits + blocks + renewals)
+        assert caps.n_log >= n * (per_star + refits)
+        assert caps.rows_per_subject >= per_star
+        assert caps.max_sid >= 2 * n * (per_star + refits)
+        assert caps.max_tick > horizon * br.TICKS_PER_DAY
+
+
+@pytest.mark.medium(reason=POLICY_REASON)
+def test_a_slot_no_longer_mode_serves_is_retired_and_holds_no_reserve():
+    """A failure that no longer mode can follow retires the slot.
+
+    Fails if the stranded slot keeps counting as an open track, so that the reserve
+    holds its remaining detections and spectrum back from blind searches.
+    """
+    study = _built()[1]
+    cost = np.asarray(study.channels.cost[:, br.SHARED_RESOURCE])
+    model = study.channel_model
+    over_det = cost[0] - model.exposures_s[0] / 86_400.0
+    over_char = cost[br.N_DETECT] - model.block_days[0]
+    reserve = 2 * (15.0 + over_det) + (15.0 + over_char)
+    tight = float(reserve + cost[0] - 0.1)
+    p_new = jnp.zeros((N_STARS, N_GRID, br.N_DETECT)).at[1, :, 0].set(0.5)
+    base = {
+        "n_det": _at(1),
+        "p_det": jnp.zeros((N_STARS, N_SLOTS, N_GRID, br.N_DETECT)),
+        "p_new": p_new,
+        "n_blocks": _read(1),
+    }
+    top = br.N_BLOCK - 1
+    served = jnp.zeros((N_STARS, N_SLOTS, N_GRID, br.N_BLOCK)).at[0, 0].set(1.0)
+    short = served.at[0, 0, :, 1:].set(0.0)
+    cases = {
+        # mode 0 failed with every longer mode forecast low
+        "forecast": (_state(att=1, last_mode=0, last_ord=1, n_blk=1), short, True),
+        "longest": (_state(att=1, last_mode=top, last_ord=1, n_blk=1), served, True),
+        # a longer mode still serves the slot: it stays open and holds its reserve
+        "open": (_state(att=1, last_mode=0, last_ord=1, n_blk=1), served, False),
+    }
+    for name, (pstate, p_block, retired) in cases.items():
+        leaves = {**base, "p_block": p_block}
+        kw = {"reserve_d": 15.0, "budget_d": tight}
+        effects, _ = _decide_budget(kw, pstate=pstate, **leaves)
+        searched = (
+            int(effects.kind[0]) == EffectKind.OBSERVE
+            and int(effects.subject[0]) == 1
+            and int(effects.channel_index[0]) == 0
+        )
+        assert searched == retired, name
+
+
+@pytest.mark.medium(reason=POLICY_REASON)
+def test_a_block_the_budget_cannot_cover_is_not_run_as_a_visit():
+    """Budget gone mid-retry: no stand-in visit, no visit counted, the policy waits.
+
+    Fails if the unaffordable block runs the cheapest visit (and would again at every
+    decision until the budget is gone).
+    """
+    study = _built()[1]
+    cost = np.asarray(study.channels.cost[:, br.SHARED_RESOURCE])
+    failed = _state(att=1, last_mode=1, last_ord=1, n_blk=1)
+    retry = br.N_DETECT + 2
+    between = float((cost[retry] + cost[0]) / 2)
+    assert cost[0] <= between < cost[retry]
+    effects, new = _decide(failed, policy_kw={"budget_d": between}, n_blocks=_read(1))
+    assert int(effects.kind[0]) == EffectKind.WAIT
+    assert new[1] == 0 and new[N_STARS * (3 + N_SLOTS)] == 0, "a visit was charged"
+    # the same state with room runs the retry
+    effects, _ = _decide(failed, n_blocks=_read(1))
+    assert int(effects.channel_index[0]) == retry
+    # nothing fits at all: still no visit
+    effects, new = _decide(
+        failed, policy_kw={"budget_d": float(cost[0]) / 2}, n_blocks=_read(1)
+    )
+    assert int(effects.kind[0]) == EffectKind.WAIT and new[1] == 0
+
+
+@pytest.mark.medium(reason=POLICY_REASON)
+def test_n_char_two_retires_after_failures_that_follow_a_success():
+    """After one delivered spectrum, three failures in a row retire; two do not.
+
+    The success clears the failure count, so the run of failures starts from zero.
+    Fails if the success is not forgiven or if the slot is retired early.
+    """
+    kw = {"n_char": 2}
+    one = {"revealed": _at(CLASS_ONE_CODE), "n_spectra": _at(1), "n_blocks": _read(4)}
+    # blocks: success, fail, fail: the third failure is the next one read
+    two_failed = _state(
+        n_char=2, att=3, cons=1, seen=1, last_mode=1, last_ord=3, n_blk=3
+    )
+    effects, _ = _decide(two_failed, policy_kw=kw, **{**one, "n_blocks": _read(3)})
+    assert _chose_block(effects), "two failures after a success are not retirement"
+    three = _state(n_char=2, att=4, cons=2, seen=1, last_mode=1, last_ord=4, n_blk=4)
+    effects, _ = _decide(three, policy_kw=kw, **one)
+    assert not _chose_block(effects), "three failures after a success retire the slot"
+
+
+@pytest.mark.medium(reason=POLICY_REASON)
+def test_a_mode_of_infinite_time_is_never_chosen():
+    """Channels with an infinite cost (an infeasible requirement) are never picked.
+
+    Fails if a block or a search is started on a mode that cannot finish.
+    """
+    blocks = range(br.N_DETECT, br.N_DETECT + br.N_BLOCK)
+    effects, _ = _decide(infinite=tuple(blocks))
+    assert not _chose_block(effects) and int(effects.kind[0]) == EffectKind.WAIT
+    p_new = jnp.zeros((N_STARS, N_GRID, br.N_DETECT)).at[1, :, 0].set(0.5)
+    leaves = {
+        "p_new": p_new,
+        "p_det": jnp.zeros((N_STARS, N_SLOTS, N_GRID, br.N_DETECT)),
+        "p_block": jnp.zeros((N_STARS, N_SLOTS, N_GRID, br.N_BLOCK)),
+    }
+    effects, _ = _decide(**leaves)
+    assert int(effects.kind[0]) == EffectKind.OBSERVE, "the finite search runs"
+    assert int(effects.subject[0]) == 1 and int(effects.channel_index[0]) == 0
+    effects, _ = _decide(infinite=(0,), **leaves)
+    assert int(effects.kind[0]) == EffectKind.WAIT

@@ -389,3 +389,29 @@ def test_solved_times_follow_the_closed_form_of_the_rates(channel):
         c_b += c_p if char else 0.0
         closed = snr**2 * c_b / (c_p**2 - (snr * c_sp) ** 2) / 86400.0
         assert t_solved == pytest.approx(closed, rel=1e-3)
+
+
+@medium
+def test_a_requirement_above_the_floor_limit_has_infinite_time(channel):
+    """Where the closed-form denominator is not positive the solved time is infinite.
+
+    The signal-to-noise ratio of a noiseless detector saturates at C_p / C_sp, so a
+    requirement above it has `C_p^2 - (SNR C_sp)^2 <= 0` and no finite time; one below
+    it has the closed-form time.
+    """
+    built = channel.assets()
+    prepared = channel._prepared(0, nominal=True, char=True)
+    planet = _face_on_planet(prepared.scene, a_au=math.sqrt(1.0))
+    planet["Mp"] = jnp.asarray(5.972e24)
+    r = built.char_report.rates(prepared, planet, jnp.asarray([EPOCH_JD]))
+    c_p, c_sp = float(r.planet[0]), float(r.floor[0])
+    limit = c_p / c_sp
+
+    def solve(snr):
+        def short(budget, _):
+            return snr - jx._scaled_snr(budget, 1.0)
+
+        return float(channel._twin_time(0, built.char_report, prepared, short))
+
+    assert math.isinf(solve(1.5 * limit))
+    assert math.isfinite(solve(0.5 * limit))
