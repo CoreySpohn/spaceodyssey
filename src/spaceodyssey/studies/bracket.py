@@ -106,6 +106,18 @@ FIRST_CHANNEL_ID = 10
 # consecutive failed blocks that retire a slot, and the time held back per remaining
 # detection or characterization of an open track on a survey channel (days).
 BLOCK_P, SURVEY_BLOCK_P, RETIRE_AFTER, SURVEY_RESERVE_D = 0.8, 0.95, 3, 15.0
+# Failed blocks that retire a slot on a first-summary channel: one block per slot.
+FIRST_SUMMARY_RETIRE_AFTER = 1
+
+
+def default_retire_after(survey):
+    """The default `BracketPolicy.retire_after` of a survey or first-summary channel.
+
+    `RETIRE_AFTER` on a survey channel, one block per slot on a first-summary one.
+    """
+    return RETIRE_AFTER if survey else FIRST_SUMMARY_RETIRE_AFTER
+
+
 # Per-slot block state in `pstate`: attempts started, consecutive failures settled,
 # spectra seen when the last attempt started, mode of the last attempt, its ordinal on
 # the star, and the first mode a retry may use.
@@ -188,9 +200,8 @@ def pstate_size(n_subjects, n_slots, n_char=1, retire_after=RETIRE_AFTER):
 
 # Days between forecast renewals of a summary, and the per-star rows a long study holds.
 RENEWAL_D = GRID_SPACING_D * (N_GRID - 1)
-# Rows a star typically adds to the log over a study: visits and blocks. The rest are
-# refit products, two per renewal and two per visit or block refit.
-VISITS_PER_STAR, BLOCKS_PER_STAR = 4, 1
+# Refit products one renewal, visit or block adds to the log.
+REFIT_ROWS = 2
 MAX_VISITS = 24
 
 
@@ -210,32 +221,32 @@ def default_capacities(
     counting-row and id capacities are the fixed small-study values (`n_log` 1024,
     `rows_per_subject` 32, `max_sid` 4096). With it they scale with the study:
 
-    - `n_log` holds the catalog, visit and block rows of every star plus the refit
-      products (two per renewal per star, one renewal per `RENEWAL_D`, plus two per
-      visit or block refit), with a quarter spare, in steps of 256.
-    - `rows_per_subject` holds the catalog row, `max_visits` visits and the blocks a
-      star can start in that time (at most `retire_after * n_char` per slot, and a few
-      per quarter), plus three spare.
-    - `max_sid` is the next power of two above two ids per log row, one per day for the
-      policy's waits and eight per star; it must leave `max_tick` above the horizon.
+    These are upper bounds that hold whatever the visit times, not typical counts. A
+    star holds one catalog row, at most `max_visits` visits and at most
+    `block_log_len` blocks (`retire_after * n_char` per slot); each visit and block
+    adds `REFIT_ROWS` refit products, and each forecast renewal (one per `RENEWAL_D`)
+    adds as many.
 
-    The small studies keep their values: a 120-day, two-star study needs no more than
-    the fixed ones.
+    - `n_log` holds those rows of every star, with a quarter spare, in steps of 256.
+    - `rows_per_subject` holds the catalog row, the visits and the blocks of a star,
+      plus three spare.
+    - `max_sid` is the next power of two above two ids per row, one per day for the
+      policy's waits and eight per star; it must leave `max_tick` above the horizon,
+      so a bound that needs more ids than that allows is refused.
+
+    A study never gets less than the fixed values.
     """
     n_pstate = pstate_size(n_subjects, n_slots, n_char, retire_after)
     n_log, rows, max_sid = 1024, 32, 4096
     if horizon_d is not None:
         renewals = math.ceil(horizon_d / RENEWAL_D) + 1
-        per_star = 1 + VISITS_PER_STAR + BLOCKS_PER_STAR
-        refits = renewals + VISITS_PER_STAR + BLOCKS_PER_STAR
-        need = n_subjects * (per_star + 2 * refits)
+        blocks = block_log_len(n_slots, n_char, retire_after)
+        per_star = 1 + max_visits + blocks
+        refits = REFIT_ROWS * (renewals + max_visits + blocks)
+        need = n_subjects * (per_star + refits)
         n_log = max(n_log, 256 * math.ceil(1.25 * need / 256))
-        blocks = min(
-            block_log_len(n_slots, n_char, retire_after),
-            2 + math.ceil(horizon_d / 90.0),
-        )
-        rows = max(rows, 1 + max_visits + blocks + 3)
-        ids = 2 * n_log + 2 * math.ceil(horizon_d) + 8 * n_subjects
+        rows = max(rows, per_star + 3)
+        ids = 2 * need + 2 * math.ceil(horizon_d) + 8 * n_subjects
         max_sid = max(max_sid, 1 << (ids - 1).bit_length())
     caps = Capacities(
         n_subjects=n_subjects,
@@ -338,6 +349,10 @@ def bracket_study(
     if isinstance(policy, BracketPolicy):
         reaches = bool(arm.report_audience & Audience.POLICY)
         policy = dataclasses.replace(policy, refits_reach_policy=reaches)
+        if policy.retire_after is None:
+            policy = dataclasses.replace(
+                policy, retire_after=default_retire_after(bool(channel.survey))
+            )
     built = channel.assets()
     n_stars = int(channel.catalog_mass_kg.shape[0])
     if len(source.stars) != n_stars:
@@ -462,9 +477,11 @@ class BracketPolicy(AbstractPolicy):
     The wait is for refits to read the report visits (search and follow-up); the
     visits that start a block are not counted, since a refit never reads them.
 
-    No star gets more than 24 visits. A choice that does not fit the budget falls back
-    to the cheapest visit; when not even that fits the policy attempts one more visit
-    (the refusal is the budget binding) and stops, else it stops at the horizon.
+    No star gets more than 24 visits. A block the budget cannot cover is not started;
+    the policy takes another action or waits. A follow-up or search that does not fit
+    falls back to the cheapest visit; when not even that fits the policy attempts one
+    more visit (the refusal is the budget binding) and stops, else it stops at the
+    horizon. A failed slot no longer mode serves counts as retired.
 
     Attributes:
         candidate_class: The class probability a slot needs to be a candidate.
@@ -477,8 +494,9 @@ class BracketPolicy(AbstractPolicy):
             `bracket_study` sets it from the arm.
         n_char: Spectra a slot needs to count as characterized; the first reveals the
             class.
-        retire_after: Consecutive failed blocks that retire a slot (one reproduces a
-            single block per slot).
+        retire_after: Consecutive failed blocks that retire a slot (one is a single
+            block per slot); `None` is one on a first-summary channel and
+            `RETIRE_AFTER` (three) on a survey channel.
         block_p: Probability a block needs to start; `None` is 0.8 on a first-summary
             channel and 0.95 (the survey scheduler's) on a survey channel.
         followup_p: Detection probability a follow-up needs to start.
@@ -494,7 +512,7 @@ class BracketPolicy(AbstractPolicy):
     refits_reach_policy: bool = eqx.field(default=True, static=True)
     candidate_class: float = eqx.field(default=CANDIDATE_CLASS, static=True)
     n_char: int = eqx.field(default=1, static=True)
-    retire_after: int = eqx.field(default=RETIRE_AFTER, static=True)
+    retire_after: int | None = eqx.field(default=None, static=True)
     block_p: float | None = eqx.field(default=None, static=True)
     followup_p: float = eqx.field(default=0.5, static=True)
     reserve_d: float | None = eqx.field(default=None, static=True)
@@ -513,7 +531,11 @@ class BracketPolicy(AbstractPolicy):
         stars = pstate[: n * stride].reshape(n, stride)
         last_tick, n_vis, n_search = stars[:, 0], stars[:, 1], stars[:, 2]
         charged, kick, stopped = pstate[n * stride : n * stride + 3]
-        log_len = block_log_len(slots, self.n_char, self.retire_after)
+        survey = bool(model.survey)
+        retire_after = self.retire_after
+        if retire_after is None:
+            retire_after = default_retire_after(survey)
+        log_len = block_log_len(slots, self.n_char, retire_after)
         ext = n * stride + 3
         mid = ext + n * slots * SLOT_FIELDS
         slot_state = pstate[ext:mid].reshape(n, slots, SLOT_FIELDS)
@@ -522,7 +544,6 @@ class BracketPolicy(AbstractPolicy):
             slot_state[..., i] for i in range(SLOT_FIELDS)
         )
         belief = view.belief
-        survey = bool(model.survey)
         block_p = self.block_p
         if block_p is None:
             block_p = SURVEY_BLOCK_P if survey else BLOCK_P
@@ -565,13 +586,21 @@ class BracketPolicy(AbstractPolicy):
         eff_cons = jnp.where(settled, jnp.where(won, 0.0, cons + 1.0), cons)
         eff_floor = jnp.where(settled, jnp.where(won, 0.0, last_mode + 1.0), floor)
         pending = (att > 0.5) & (last_ord > n_read)
-        retired = eff_cons >= self.retire_after - 0.5
-        capped = att >= block_log_len(1, self.n_char, self.retire_after) - 0.5
+        retired = eff_cons >= retire_after - 0.5
+        # An open, unretired slot cannot reach `n_char * retire_after` attempts (each
+        # run of failures is shorter than `retire_after`, and a success ends a run, at
+        # most `n_char - 1` times), so the cap only guards the length of the block log.
+        capped = att >= block_log_len(1, self.n_char, retire_after) - 0.5
         char_open = belief.revealed == 0
         if self.n_char > 1:
             char_open |= (belief.revealed == CLASS_ONE + REVEAL_OFFSET) & (
                 belief.n_spectra < self.n_char
             )
+        # A failed slot whose forecast serves no longer mode is stranded: retired.
+        best_pb = belief.p_block.max(axis=2)
+        longer = jnp.arange(n_block)[None, None, :] >= eff_floor[:, :, None] - 0.5
+        served = jnp.any(longer & (best_pb >= block_p), axis=-1)
+        retired |= (eff_floor > 0.5) & ~served
         open_track = char_open & ~retired & ~capped
         tryable = open_track & ~pending
 
@@ -580,11 +609,11 @@ class BracketPolicy(AbstractPolicy):
         candidate = candidate_slots(belief, lod, self.candidate_class)
         want_block = candidate & tryable
         pb_now = belief.p_block[s_ix, :, g_cur, :]
-        best_pb = belief.p_block.max(axis=2)
-        longer = jnp.arange(n_block)[None, None, :] >= eff_floor[:, :, None] - 0.5
         mode_ok = (pb_now >= block_p) & (pb_now >= best_pb) & longer
-        block_ok = want_block & mode_ok.any(axis=-1)
         block_mode = jnp.argmax(mode_ok, axis=-1)
+        # a block the budget cannot cover is not started (no stand-in visit)
+        affordable = cost[n_detect + block_mode] <= remaining
+        block_ok = want_block & mode_ok.any(axis=-1) & affordable
         block_score = jnp.where(block_ok, 1.0, -1.0)
         bs = jnp.argmax(block_score.reshape(-1))
         block_star, block_slot = bs // slots, bs % slots
@@ -674,7 +703,6 @@ class BracketPolicy(AbstractPolicy):
             disposition=Disposition.DRAIN,
         )
         observing = (kind == EffectKind.OBSERVE) & ~observe_cat
-        # A block that did not fit ran as the cheapest visit: it starts no block.
         is_block = observing & do_block & fits
         row = star
         is_search = observing & ~is_block & ~do_follow
@@ -1030,7 +1058,9 @@ def outcome_table(
     policy = study.agenda.policies[0]
     if n_char is None:
         n_char = getattr(policy, "n_char", 1)
-    retire = getattr(policy, "retire_after", RETIRE_AFTER)
+    retire = getattr(policy, "retire_after", None)
+    if retire is None:
+        retire = default_retire_after(bool(channel.survey))
     pstate = np.asarray(carry.pstate)
     mid = n * (3 + n_slots) + 3 + n * n_slots * SLOT_FIELDS
     length = block_log_len(n_slots, getattr(policy, "n_char", 1), retire)
