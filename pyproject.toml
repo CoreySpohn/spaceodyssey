@@ -22,7 +22,7 @@ dependencies = [
     "jax>=0.9.0",
     "jaxlib>=0.9.0",
     "numpy>=2.1.2",
-    "photomancy>=0.3",
+    "photomancy>=0.5.0",
     "planit-py>=0.2.0",
     "hwoutils>=1.10.0",
     "zodi>=1.1.0",
@@ -96,14 +96,13 @@ Documentation = "https://spaceodyssey.readthedocs.io"
 # through photomancy's NumPyro model, and summary radiometry through jaxedith on a
 # yippy response.
 physical = [
-    # jaxedith's fixed-frame variance and QE handling, optixstuff's dQE default and
-    # skyscapes' FlatStar diameter are on main but unreleased; .github/sibling-pins.txt
-    # pins those commits. Each floor moves to the first release that carries them.
-    "skyscapes>=2.1",
+    # jaxedith's fixed-frame variance and QE handling (2.1.0), optixstuff's dQE default
+    # (4.1.0) and skyscapes' FlatStar diameter and zodi delegation (2.2.0).
+    "skyscapes>=2.2.0",
     "orbix>=3.0",
     "numpyro>=0.21.0",
-    "jaxedith>=2.0",
-    "optixstuff>=4.0",
+    "jaxedith>=2.1.0",
+    "optixstuff>=4.1.0",
     # EqxCoronagraph.stellar_frame and stellar_pixel_scale_lod arrived in 2.12.0.
     "yippy>=2.12.0",
     "interpax>=0.3",
