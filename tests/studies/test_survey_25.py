@@ -16,8 +16,8 @@ from spaceodyssey.core.enums import Audience, Disposition, EffectKind, Scope
 from spaceodyssey.core.executors.base import histories_equal, index_world
 from spaceodyssey.core.preflight import preflight
 from spaceodyssey.core.snapshot import EFFECT_FIELDS, snapshot_view
-from spaceodyssey.studies.survey_25 import NetworkPolicy, survey_25
 from spaceodyssey.studies.toy import ToyTruth
+from tests.studies.scenarios.survey_25 import NetworkPolicy, survey_25
 
 
 def reference_actions(policy, view, study):

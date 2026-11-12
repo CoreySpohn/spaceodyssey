@@ -31,7 +31,7 @@ from spaceodyssey.core.ledger import set_ops_state
 from spaceodyssey.core.lift import traced
 from spaceodyssey.core.snapshot import effects_none
 from spaceodyssey.studies import toy
-from spaceodyssey.studies.survey_11 import ScriptedAlerts
+from tests.studies.scenarios.survey_11 import ScriptedAlerts
 
 __all__ = [
     "BALANCE",

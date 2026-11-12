@@ -10,7 +10,7 @@ from spaceodyssey.core.declarations import Declaration, Need
 from spaceodyssey.core.preflight import preflight
 from spaceodyssey.core.records import record_none
 from spaceodyssey.studies import catalog
-from spaceodyssey.studies.survey_5 import (
+from tests.studies.scenarios.survey_5 import (
     CANDIDATE_ID_BASE,
     LAST_CANDIDATE_SLOT,
     ROSTER_COUNT_SLOT,

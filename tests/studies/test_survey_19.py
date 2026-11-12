@@ -18,7 +18,8 @@ from spaceodyssey.core import HostExecutor, handlers
 from spaceodyssey.core.enums import AdmissionCode, EffectKind
 from spaceodyssey.core.keys import asset_coordinate
 from spaceodyssey.core.preflight import preflight
-from spaceodyssey.studies.survey_19 import (
+from tests.core.helpers import one_world
+from tests.studies.scenarios.survey_19 import (
     FACILITY_CHANNELS,
     N_ROUNDS,
     counting_asset,
@@ -26,7 +27,6 @@ from spaceodyssey.studies.survey_19 import (
     survey_19,
     with_idle_facility,
 )
-from tests.core.helpers import one_world
 
 N_STEPS = 100
 OK = int(AdmissionCode.OK)

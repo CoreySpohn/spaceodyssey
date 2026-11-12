@@ -1,6 +1,6 @@
 """Survey 11, targets of opportunity: an alert makes the policy cancel the exposure.
 
-The study (`spaceodyssey.studies.survey_11`) runs channel 10 on lane 0, writes an
+The study (`tests.studies.scenarios.survey_11`) runs channel 10 on lane 0, writes an
 alert at tick 40 that the policy reads 15 ticks later, and has the policy cancel the
 live work in that tick, then start the subject again. The merge-time guard runs it
 once on the host executor and holds every check to that run; the checks are plain
@@ -25,7 +25,8 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.executors.base import GO_TOLERANCE, index_world
 from spaceodyssey.core.records import log_columns
-from spaceodyssey.studies.survey_11 import (
+from tests.core.helpers import handle_event, one_world, pending_done_row, worlds
+from tests.studies.scenarios.survey_11 import (
     ALERT_CHANNEL,
     ALERT_DELAY,
     ALERT_FIRE,
@@ -36,7 +37,6 @@ from spaceodyssey.studies.survey_11 import (
     SUBJECT,
     survey_11,
 )
-from tests.core.helpers import handle_event, one_world, pending_done_row, worlds
 from tests.studies.survey_helpers import run_on, same_histories
 
 pytestmark = pytest.mark.medium(

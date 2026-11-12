@@ -1,6 +1,6 @@
 """Survey 24: the latent is drawn under its own purpose and shown only by a record.
 
-(`spaceodyssey.studies.survey_24`.) The draw is checked on its own: changing any other
+(`scenarios.survey_24`.) The draw is checked on its own: changing any other
 purpose's salt leaves the table alone and moves that purpose's stream, changing its own
 moves only the table. Two truths that differ only in the latent run on the host
 executor: no policy view and no observer belief changes before the first realization,
@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from spaceodyssey.core.enums import EventKind, Purpose
-from spaceodyssey.studies.survey_24 import (
+from tests.studies.scenarios.survey_24 import (
     N_PURPOSES,
     TARGET,
     TrajectoryWorldSource,

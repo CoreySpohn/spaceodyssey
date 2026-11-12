@@ -9,7 +9,7 @@ import pytest
 from spaceodyssey.core.battery.result import tree_bits_equal
 from spaceodyssey.core.enums import EffectKind
 from spaceodyssey.studies import toy
-from spaceodyssey.studies.survey_2 import (
+from tests.studies.scenarios.survey_2 import (
     GaussianMean,
     RevisitPolicy,
     SearchMean,

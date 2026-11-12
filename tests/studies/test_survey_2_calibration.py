@@ -9,7 +9,7 @@ import pytest
 
 from spaceodyssey.core import CompiledExecutor
 from spaceodyssey.core.conformance import check_calibration, make_worlds
-from spaceodyssey.studies.survey_2 import (
+from tests.studies.scenarios.survey_2 import (
     GaussianMean,
     GaussianSignals,
     gaussian_pit,

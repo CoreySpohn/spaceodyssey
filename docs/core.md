@@ -42,7 +42,7 @@ again for the same acquisition. See [Records](records.md) for the full contract.
 
 The host executor supports Python-form policies through `decide_py`. The compiled
 executor requires array-compatible decisions, including fixed output shapes and
-no Python branches on traced values. `studies.survey_25.NetworkPolicy` demonstrates
+no Python branches on traced values. `NetworkPolicy` in `tests/studies/scenarios/survey_25.py` demonstrates
 an `eqx.nn.MLP` inside the scan: released means and counts, normalized tick and
 normalized decision count produce subject/channel logits. The network stays
 fixed during the run, and a separate decision limit ends the campaign with a drain.

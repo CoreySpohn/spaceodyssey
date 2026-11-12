@@ -11,13 +11,13 @@ import pytest
 
 from spaceodyssey.core import CompiledExecutor, HostExecutor, battery
 from spaceodyssey.core.preflight import preflight
-from spaceodyssey.studies.survey_6 import (
+from tests.core.helpers import worlds
+from tests.studies.scenarios.survey_6 import (
     AGE,
     AgingValuePolicy,
     survey_6,
     survey_6_table,
 )
-from tests.core.helpers import worlds
 from tests.studies.survey_helpers import run_on, same_histories
 
 N_STEPS = 40

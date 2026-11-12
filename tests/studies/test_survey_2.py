@@ -10,15 +10,15 @@ from spaceodyssey.core import CompiledExecutor, HostExecutor, replay_run
 from spaceodyssey.core.enums import EffectKind, EventKind
 from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.studies import toy
-from spaceodyssey.studies.survey_2 import (
+from tests.codec.run_cases import KINDS as REFRESH_KINDS
+from tests.codec.run_cases import bindings, boundary
+from tests.core.helpers import worlds
+from tests.studies.scenarios.survey_2 import (
     SURVEY_PLAN,
     RevisitPolicy,
     SearchMean,
     survey_2,
 )
-from tests.codec.run_cases import KINDS as REFRESH_KINDS
-from tests.codec.run_cases import bindings, boundary
-from tests.core.helpers import worlds
 from tests.studies.survey_helpers import (
     action_projection,
     redump,

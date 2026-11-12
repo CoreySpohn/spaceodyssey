@@ -26,7 +26,7 @@ from spaceodyssey.core.battery.truth_swap import first_truth_dependent_release
 from spaceodyssey.core.enums import F64, PUBLIC, Audience, Purpose
 from spaceodyssey.core.preflight import preflight
 from spaceodyssey.studies import toy
-from spaceodyssey.studies.survey_18 import (
+from tests.studies.scenarios.survey_18 import (
     BRIGHT,
     FAINT,
     N_OBSERVATIONS,

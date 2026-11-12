@@ -1,6 +1,6 @@
 """Survey 12: a failure sets the ops state; cost and floor follow; a record reports it.
 
-The study (`spaceodyssey.studies.survey_12`) fails asset 0 at tick 100 and writes a
+The study (`tests.studies.scenarios.survey_12`) fails asset 0 at tick 100 and writes a
 notice released 25 ticks later. Five host runs share one compiled structure (every
 number that differs is a leaf): the fixed plan with a cancel, the record-reading
 policy at equal costs with the declared delay and with it doubled, the same policy at
@@ -15,7 +15,8 @@ import pytest
 
 from spaceodyssey.core import HostExecutor
 from spaceodyssey.core.enums import EffectKind, RecordStatus
-from spaceodyssey.studies.survey_12 import (
+from tests.core.helpers import one_world
+from tests.studies.scenarios.survey_12 import (
     COSTS,
     DELAY,
     FAIL,
@@ -23,7 +24,6 @@ from spaceodyssey.studies.survey_12 import (
     FLOORS,
     survey_12,
 )
-from tests.core.helpers import one_world
 
 pytestmark = pytest.mark.slow(
     reason="one compiled structure shared by five host runs, about 15 s cold"

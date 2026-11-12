@@ -44,3 +44,10 @@ their decision counts. Bumping `.github/jax-pin.txt` without regenerating the ma
 that is the declared re-baseline. Existing digests, fingerprints and the pin's source
 commit are unchanged; only the statistics and `_jaxlib` were added (the pin was captured
 again from the same runs, and every pre-existing entry was checked equal).
+
+## Step 4: the study scenarios live in tests
+
+The fifteen `studies/survey_*.py` modules and `studies/allocator.py` (about 3,600 lines) moved
+from `src/spaceodyssey/studies/` to `tests/studies/scenarios/`. Nothing in `src/` or the
+analysis scripts imported them; only their own tests and each other did, and those imports
+now name `tests.studies.scenarios`. They are no longer part of the installed package.

@@ -12,7 +12,8 @@ import pytest
 
 from spaceodyssey.core import HostExecutor
 from spaceodyssey.core.preflight import preflight
-from spaceodyssey.studies.survey_13 import (
+from tests.core.helpers import one_world
+from tests.studies.scenarios.survey_13 import (
     COMMIT_CHANNEL,
     COMMIT_START,
     GAINS,
@@ -20,7 +21,6 @@ from spaceodyssey.studies.survey_13 import (
     SWITCH_TICK,
     survey_13,
 )
-from tests.core.helpers import one_world
 
 N_STEPS = 100
 

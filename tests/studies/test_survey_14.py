@@ -6,12 +6,12 @@ import pytest
 
 from spaceodyssey.core.enums import I64
 from spaceodyssey.studies import toy
-from spaceodyssey.studies.survey_14 import (
+from tests.codec.test_document import TOY_KINDS
+from tests.core.helpers import worlds
+from tests.studies.scenarios.survey_14 import (
     SECOND_PHASE_PLAN,
     survey_14,
 )
-from tests.codec.test_document import TOY_KINDS
-from tests.core.helpers import worlds
 from tests.studies.survey_helpers import redump, round_trip, run_on, same_histories
 
 # Cold setup plus call exceeds 30 s for every case (42-54 s in isolated probes).

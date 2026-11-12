@@ -26,7 +26,9 @@ from spaceodyssey.core.snapshot import snapshot_fingerprint, snapshot_view
 from spaceodyssey.studies import toy
 from spaceodyssey.studies.premission import PAD, PedigreeRule, authored_table
 from spaceodyssey.studies.prior_observer import PriorObserver
-from spaceodyssey.studies.survey_3 import (
+from tests.core.helpers import worlds
+from tests.core.prior_helpers import imported_beliefs
+from tests.studies.scenarios.survey_3 import (
     EXTERNAL,
     FALLBACK_WAIT,
     HI_COLUMN,
@@ -42,8 +44,6 @@ from spaceodyssey.studies.survey_3 import (
     survey_3,
     survey_3_table,
 )
-from tests.core.helpers import worlds
-from tests.core.prior_helpers import imported_beliefs
 from tests.studies.survey_helpers import (
     run_on,
     run_with_actions,

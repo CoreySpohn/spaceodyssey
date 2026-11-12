@@ -7,7 +7,7 @@ subject four times; the observer's belief is the running mean of the sampled val
 the latent reaches the observer's view only through a released record.
 """
 
-from spaceodyssey.studies.survey_22 import (
+from tests.studies.scenarios.survey_22 import (
     N_PURPOSES,
     TARGET,
     TICKS,

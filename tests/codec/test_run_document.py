@@ -1130,7 +1130,7 @@ def test_a_missing_schema_version_or_study_is_a_document_error_not_a_key_error()
 @pytest.fixture(scope="module")
 def allocator_recipe():
     """The allocator document and decoded recipe, with explicit registrations."""
-    from spaceodyssey.studies import allocator
+    from tests.studies.scenarios import allocator
 
     kinds = {
         **TOY_KINDS,
@@ -1169,7 +1169,7 @@ def test_the_allocator_recipe_round_trips_process_policy_and_committee(
     """Fails if the allocator loses proposal configuration, policy type or committee
     binding on a run document round trip.
     """
-    from spaceodyssey.studies import allocator
+    from tests.studies.scenarios import allocator
 
     study, doc, loaded, kinds, table = allocator_recipe
     assert type(loaded.study.process) is allocator.ProposalRecords

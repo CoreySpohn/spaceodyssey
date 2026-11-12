@@ -9,8 +9,8 @@ from spaceodyssey.codec import dump_study, load_run
 from spaceodyssey.core.enums import I64
 from spaceodyssey.core.preflight import preflight
 from spaceodyssey.studies import toy
-from spaceodyssey.studies.survey_14 import no_switch, survey_14
 from tests.codec.test_document import TOY_KINDS
+from tests.studies.scenarios.survey_14 import no_switch, survey_14
 from tests.studies.survey_helpers import round_trip
 
 SWITCH = 300

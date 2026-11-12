@@ -29,9 +29,9 @@ import pytest
 from spaceodyssey.core import RunStatus
 from spaceodyssey.core.enums import AdmissionCode, Audience, EffectKind
 from spaceodyssey.core.executors.base import index_world
-from spaceodyssey.studies import allocator as al
 from spaceodyssey.studies import toy
 from tests.core.helpers import worlds
+from tests.studies.scenarios import allocator as al
 from tests.studies.survey_helpers import run_with_actions, same_histories
 
 N_STEPS = 200

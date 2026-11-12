@@ -47,7 +47,9 @@ from spaceodyssey.core.records import empty_log
 from spaceodyssey.studies import toy
 from spaceodyssey.studies.precursor import verify_lineage
 from spaceodyssey.studies.premission import PREMISSION_KINDS
-from spaceodyssey.studies.survey_4 import (
+from tests.codec.test_document import TOY_KINDS
+from tests.core.helpers import one_world, worlds
+from tests.studies.scenarios.survey_4 import (
     N_OBSERVATIONS,
     PRECURSOR_CHANNEL,
     RV_CHANNEL,
@@ -60,8 +62,6 @@ from spaceodyssey.studies.survey_4 import (
     without_precursor,
     zero_information,
 )
-from tests.codec.test_document import TOY_KINDS
-from tests.core.helpers import one_world, worlds
 from tests.studies.survey_helpers import run_on, same_histories
 
 OBS, POL = int(Audience.OBSERVER), int(Audience.POLICY)

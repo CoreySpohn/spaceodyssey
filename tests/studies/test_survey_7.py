@@ -15,7 +15,8 @@ import pytest
 from spaceodyssey.core import HostExecutor
 from spaceodyssey.core.enums import AdmissionCode
 from spaceodyssey.core.preflight import preflight
-from spaceodyssey.studies.survey_7 import (
+from tests.core.helpers import one_world
+from tests.studies.scenarios.survey_7 import (
     LANE,
     MEMBERS,
     BundleBackgroundObserver,
@@ -26,7 +27,6 @@ from spaceodyssey.studies.survey_7 import (
     survey_7_caps,
     two_backgrounds,
 )
-from tests.core.helpers import one_world
 
 N_STEPS = 100
 OK, NO_FUNDS = int(AdmissionCode.OK), int(AdmissionCode.NO_FUNDS)

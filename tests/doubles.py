@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import jax.random as jr
 
 from spaceodyssey.core.kinds import AbstractChannelModel
-from spaceodyssey.studies.survey_12 import OpsFailure as OpsFailure
+from tests.studies.scenarios.survey_12 import OpsFailure as OpsFailure
 
 
 class ToyEpochPhotometry(AbstractChannelModel):

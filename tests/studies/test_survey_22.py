@@ -1,6 +1,6 @@
 """Survey 22: a trajectory-table swap moves the target and nothing the policy read.
 
-Two truths that differ only in the trajectory table (`spaceodyssey.studies.survey_22`)
+Two truths that differ only in the trajectory table (`scenarios.survey_22`)
 run on the host executor, once on the clean study and once on the leaky one (a finder
 channel realized and released at tick 0 whose payload is the table's position). The
 invariance check compares every policy view handed out before the first release of a
@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from spaceodyssey.core.enums import Purpose, RecordStatus
-from spaceodyssey.studies.survey_22 import (
+from tests.studies.scenarios.survey_22 import (
     FINDER,
     N_PURPOSES,
     TARGET,

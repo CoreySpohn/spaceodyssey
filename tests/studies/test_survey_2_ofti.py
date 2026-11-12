@@ -8,9 +8,9 @@ import pytest
 pytest.importorskip("photomancy")
 
 from spaceodyssey.core.enums import EffectKind
-from spaceodyssey.studies.survey_2 import OrbitSearchObserver, RevisitPolicy
 from tests.adapters.test_photomancy_ofti import REGISTRY, ofti_study, refit
 from tests.core.helpers import worlds
+from tests.studies.scenarios.survey_2 import OrbitSearchObserver, RevisitPolicy
 from tests.studies.survey_helpers import (
     action_projection,
     run_with_actions,

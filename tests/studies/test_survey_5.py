@@ -12,7 +12,9 @@ from spaceodyssey.core.enums import EffectKind
 from spaceodyssey.core.executors.base import index_world
 from spaceodyssey.core.study import Clock
 from spaceodyssey.studies import catalog
-from spaceodyssey.studies.survey_5 import (
+from tests.codec.test_document import TOY_KINDS
+from tests.core.helpers import worlds
+from tests.studies.scenarios.survey_5 import (
     CANDIDATE_ID_BASE,
     FOLLOW_SUBJECT,
     LAST_CANDIDATE_SLOT,
@@ -23,8 +25,6 @@ from spaceodyssey.studies.survey_5 import (
     survey_5,
     survey_5_registry,
 )
-from tests.codec.test_document import TOY_KINDS
-from tests.core.helpers import worlds
 from tests.studies.survey_helpers import redump, round_trip, same_histories
 from tests.studies.test_survey_5_static import RELEASE
 
