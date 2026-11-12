@@ -365,3 +365,77 @@ def test_degraded_slots_reach_the_outcome_table(world):
     assert int(table.world["low_ess"][0]) == n_degraded
     assert int(table.world["low_ess"][1]) == 0
     assert not np.asarray(br.candidate_slots(belief, 1.0)).any()
+
+
+DAY = 86_400_000
+
+
+def test_a_renewal_summarizes_the_stored_cloud_like_a_refit(world):
+    """The same rows at a later tick: the stored cloud answers, as a refit would.
+
+    The refit key names the row set and no tick, so a refit over the same rows is the
+    same deterministic fit and only the forecast grid moves. The second request holds
+    star 0's rows (single and collapsed engines) 225 days later; with `resummary` every
+    live slot is answered from the store (hits equal the first call's misses, no new
+    miss) and the entry agrees with a plain boundary's refit to 1e-11 (relative; the
+    summary program differs, the cloud does not). The forecast moved between the two
+    ticks, so the check is not vacuous. Fails if the digest ignores a fit input, the
+    summary reads the wrong tick, or a stored cloud is summarized with another
+    slot's last detection.
+    """
+    study, channel, _, _ = world
+    truth = jax.tree_util.tree_map(lambda x: x[0], fixture_source().population)
+    rich = realize_visits(channel, truth, 0, 4, [30.0 * i for i in range(1, 7)])
+    first = visit_request(study, {0: rich}, tick=TICK)
+    later = visit_request(study, {0: rich}, tick=TICK + 225 * DAY)
+    kept = _boundary(study, 2, ess_floor=1.0, resummary=True)
+    at_first = kept.refit_batch(study, first)
+    fits = dict(kept.resummary_stats)
+    assert fits["hits"] == 0 and fits["misses"] >= 2
+    answered = kept.refit_batch(study, later)
+    assert kept.resummary_stats == {"hits": fits["misses"], "misses": fits["misses"]}
+    refit = _boundary(study, 2, ess_floor=1.0).refit_batch(study, later)
+    for audience in (0, 1):
+        want = _slices(study, refit, audience, 0)
+        got = _slices(study, answered, audience, 0)
+        assert _equal_slices(want, got, bitwise=False) < 1e-11
+    assert np.array_equal(answered.status, refit.status)
+    assert np.array_equal(answered.diagnostics, refit.diagnostics)
+    old = _slices(study, at_first, 0, 0)
+    new = _slices(study, answered, 0, 0)
+    assert not np.allclose(old["p_det"], new["p_det"])
+    assert np.array_equal(old["pos_mean"], new["pos_mean"])
+    assert np.array_equal(old["ln_period_q"], new["ln_period_q"])
+
+
+def test_the_store_falls_back_to_a_fit_when_it_cannot_answer(world):
+    """A changed row set, a weak cloud and a full store each leave the slot to a fit.
+
+    One more visit changes the report arrays (the key is the same in this harness), so
+    the digest differs and the slot is a miss. A fit below the size gate (`LOW_ESS`)
+    or with a non-finite cloud is never stored, so it is fit again at every renewal.
+    A store of capacity one keeps the latest cloud only. Fails if a stored cloud
+    answers for rows it was not fit on, or if an unsound cloud is reused.
+    """
+    study, channel, _, _ = world
+    truth = jax.tree_util.tree_map(lambda x: x[0], fixture_source().population)
+    days = [30.0 * i for i in range(1, 7)]
+    rich = realize_visits(channel, truth, 0, 4, days)
+    kept = _boundary(study, 2, ess_floor=1.0, resummary=True)
+    kept.refit_batch(study, visit_request(study, {0: rich[:5]}, tick=TICK))
+    stored = dict(kept.resummary_stats)
+    kept.refit_batch(study, visit_request(study, {0: rich}, tick=TICK + DAY))
+    assert kept.resummary_stats["hits"] == stored["hits"]
+    assert kept.resummary_stats["misses"] > stored["misses"]
+
+    elements = np.zeros((4, 8))
+    sound = (*(np.zeros(2),) * 6, 400.0, int(UpdaterStatus.OK), True, elements)
+    weak = (*sound[:7], int(UpdaterStatus.LOW_ESS), True, elements)
+    broken = (*sound[:8], False, elements)
+    probe = _boundary(study, 1, resummary=True, resummary_capacity=1)
+    for name, out in (("weak", weak), ("broken", broken)):
+        probe._store(name.encode(), out, False)
+    assert not probe._clouds
+    probe._store(b"a", sound, False)
+    probe._store(b"b", sound, True)
+    assert list(probe._clouds) == [b"b"]
