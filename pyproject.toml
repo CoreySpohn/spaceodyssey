@@ -33,33 +33,7 @@ Repository = "https://github.com/CoreySpohn/spaceodyssey"
 Documentation = "https://spaceodyssey.readthedocs.io"
 
 # Kinds a study document can name: group spaceodyssey.<family>, name <id>@<version>.
-[project.entry-points."spaceodyssey.core"]
-"study@1" = "spaceodyssey.core.study:Study"
-"clock@1" = "spaceodyssey.core.study:Clock"
-"agenda@1" = "spaceodyssey.core.study:Agenda"
-"channel_table@1" = "spaceodyssey.core.ledger:ChannelTable"
-"asset_table@1" = "spaceodyssey.core.ledger:AssetTable"
-"capacities@1" = "spaceodyssey.core.capacities:Capacities"
-"coupling@1" = "spaceodyssey.core.keys:Coupling"
-"fork@1" = "spaceodyssey.core.keys:Fork"
-"refresh_schedule@1" = "spaceodyssey.core.refresh:RefreshSchedule"
-"effect_table@1" = "spaceodyssey.core.snapshot:EffectTable"
-"stage@1" = "spaceodyssey.core.enums:Stage"
-"event_kind@1" = "spaceodyssey.core.enums:EventKind"
-"effect_kind@1" = "spaceodyssey.core.enums:EffectKind"
-"scope@1" = "spaceodyssey.core.enums:Scope"
-"disposition@1" = "spaceodyssey.core.enums:Disposition"
-"record_status@1" = "spaceodyssey.core.enums:RecordStatus"
-"purpose@1" = "spaceodyssey.core.enums:Purpose"
-"admission_code@1" = "spaceodyssey.core.enums:AdmissionCode"
-"coincident_order@1" = "spaceodyssey.core.enums:CoincidentOrder"
-"charge_rule@1" = "spaceodyssey.core.enums:ChargeRule"
-"remainder_rule@1" = "spaceodyssey.core.enums:RemainderRule"
-"audience@1" = "spaceodyssey.core.enums:Audience"
-"capacity@1" = "spaceodyssey.core.enums:Capacity"
-"run_status@1" = "spaceodyssey.core.enums:RunStatus"
-"charge_pricing@1" = "spaceodyssey.core.enums:ChargePricing"
-
+# The core kinds are the table `CORE_KINDS` in `codec/kinds.py`, not entry points.
 [project.entry-points."spaceodyssey.observer"]
 "toy.running_mean@1" = "spaceodyssey.studies.toy:ToyRunningMean"
 "toy.refit_mean@1" = "spaceodyssey.studies.toy:ToyRefitMean"
@@ -292,7 +266,6 @@ require_tier_reason = true
 "tests/core/test_replay_log.py" = 334
 "tests/core/test_replay_refresh.py" = 703
 "tests/core/test_replay_refresh_quick.py" = 230
-"tests/core/test_reserved_fields.py" = 106
 "tests/core/test_resume.py" = 206
 "tests/core/test_world_tables.py" = 192
 "tests/core/test_resume_compiled.py" = 301
@@ -346,7 +319,6 @@ require_tier_reason = true
 "tests/studies/test_survey_helpers.py" = 27
 "tests/studies/test_toy.py" = 39
 "tests/test_ci_summary.py" = 10
-"tests/test_docs_names.py" = 10
 "tests/test_internal_refs_guard.py" = 10
 "tests/test_package.py" = 10
 "tests/test_planit_adapter.py" = 252

@@ -12,7 +12,6 @@ import pytest
 
 from spaceodyssey.codec import DocumentError, KindResolver, dump_study, load_study
 from spaceodyssey.core.kinds import AbstractDesign
-from spaceodyssey.core.study import Clock
 from spaceodyssey.plugins import RegistrationError, kinds_from_entry_points
 from spaceodyssey.studies import toy
 from tests.codec.test_document import TOY_KINDS, LabelledDesign, assert_same_pytree
@@ -227,7 +226,6 @@ def _one_class_under_two_ids():
         ([Entry("spaceodyssey.widget", "toy.gain@1", toy.ToyDesign)], ("family",)),
         ([Entry("spaceodyssey.design", "toy.gain", toy.ToyDesign)], ("<id>@",)),
         ([Entry("spaceodyssey.policy", "toy.gain@1", toy.ToyDesign)], ("Policy",)),
-        ([Entry("spaceodyssey.core", "study@1", Clock)], ("core kinds",)),
         (_one_class_under_two_ids(), ("toy.gain", "toy.other", "alpha", "beta")),
     ],
     ids=[
@@ -235,7 +233,6 @@ def _one_class_under_two_ids():
         "unknown-family",
         "no-version",
         "wrong-family",
-        "core-rebound",
         "class-under-two-ids",
     ],
 )

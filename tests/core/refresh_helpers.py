@@ -13,6 +13,7 @@ from spaceodyssey.core.records import KindRegistry, PayloadColumn, RecordKind
 from spaceodyssey.core.refresh import (
     REFRESH_PRODUCT_KIND,
     AbstractRefitBoundary,
+    HostLoopRefit,
     MaskedBatchRefit,
     RefreshSchedule,
 )
@@ -69,7 +70,7 @@ def masked():
 
 
 def host_loop():
-    return toy.toy_refit_service()
+    return HostLoopRefit(toy.toy_refit_fit)
 
 
 def run_pair(study, n_steps=60, n=2, chunk=7, refit=None):

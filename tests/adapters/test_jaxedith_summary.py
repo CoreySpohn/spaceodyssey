@@ -48,7 +48,6 @@ from spaceodyssey.adapters.jaxedith import (
     ScienceInterval,
     SummaryReport,
     SummaryScene,
-    SummaryTruth,
     fetch_pinned_yip,
     nominal_planet,
 )
@@ -331,17 +330,17 @@ def test_expected_and_predict_share_one_function_and_split_components(observator
     theta = face_on(1.2)
     interval = ScienceInterval.from_start(EPOCH_JD + 60.0, 86400.0)
     predicted = report.predict(theta, interval)
-    same = report.expected(SummaryTruth(toy_scene(), theta), interval)
+    same = report.budget(report.prepare(toy_scene()), theta, interval)
     for a, b in zip(jax.tree.leaves(predicted), jax.tree.leaves(same), strict=True):
         assert np.array_equal(np.asarray(a), np.asarray(b))
-    truth = SummaryTruth(toy_scene(n_exozodi=6.0, star_flux_density_jy=84.0), theta)
-    true = report.expected(truth, interval)
+    scene = toy_scene(n_exozodi=6.0, star_flux_density_jy=84.0)
+    true = report.budget(report.prepare(scene), theta, interval)
     # twice the dust around a star twice as bright: four times the exozodi
     np.testing.assert_allclose(true.exozodi, 4.0 * predicted.exozodi, rtol=1e-12)
     np.testing.assert_allclose(true.planet, 2.0 * predicted.planet, rtol=1e-12)
     np.testing.assert_allclose(true.leakage, 2.0 * predicted.leakage, rtol=1e-12)
     np.testing.assert_allclose(true.zodi, predicted.zodi, rtol=1e-12)
-    dusty = report.expected(SummaryTruth(toy_scene(n_exozodi=6.0), theta), interval)
+    dusty = report.budget(report.prepare(toy_scene(n_exozodi=6.0)), theta, interval)
     np.testing.assert_allclose(dusty.exozodi, 2.0 * predicted.exozodi, rtol=1e-12)
     assert float(dusty.planet) == float(predicted.planet)
     assert float(dusty.leakage) == float(predicted.leakage)

@@ -46,7 +46,6 @@ from spaceodyssey.core.records import (
 )
 from spaceodyssey.core.refresh import (
     REFRESH_PRODUCT_KIND,
-    HostLoopRefit,
     MaskedBatchRefit,
     RefreshSchedule,
 )
@@ -180,17 +179,6 @@ class ToyRefitMean(ToyRunningMean):
         return ObserverCapabilities(
             incremental=False, refit=True, refit_kinds=("measurement",)
         )
-
-
-class ToySolveAnalysis(ToyRunningMean):
-    """Analysis stage: a small linear solve written back into `aux`."""
-
-    def analyze(self, belief):
-        """Write a small linear solve into the auxiliary state."""
-        n_an = belief.aux.shape[0]
-        m, n = belief.mean[:n_an], belief.n[:n_an].astype(F64)
-        a = jnp.outer(m, m) + jnp.diag(1.0 + n + 0.1 * jnp.arange(n_an))
-        return MeanBelief(belief.mean, belief.n, jnp.linalg.solve(a, m + 1.0))
 
 
 class SampleBelief(eqx.Module):
@@ -892,11 +880,6 @@ def toy_refit_fit(study, entry):
 def toy_masked_refit():
     """The toy refit as an array kernel: a `MaskedBatchRefit` of `toy_mean_kernel`."""
     return MaskedBatchRefit(toy_mean_kernel)
-
-
-def toy_refit_service():
-    """The toy refit as a host loop: a `HostLoopRefit` of `toy_refit_fit`."""
-    return HostLoopRefit(toy_refit_fit)
 
 
 def d2_study(theta=0.3, **overrides):

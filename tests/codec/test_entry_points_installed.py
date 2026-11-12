@@ -43,10 +43,10 @@ def kind_refs(node):
 
 def test_installed_kinds_round_trip_every_corpus_study():
     """Fails if the installed entry points differ from the pyproject table (stale
-    metadata), if an installed entry fails to load or validate, if the core group
-    differs from CORE_KINDS, if a corpus study (or the codec's rich toy study) holds a
-    kind with no entry point or does not round-trip through the installed resolver,
-    or if a registered kind is held by none of them and so is never round-tripped.
+    metadata), if an installed entry fails to load or validate, if a corpus study
+    (or the codec's rich toy study) holds a kind with no entry point or does not
+    round-trip through the installed resolver, or if a registered kind is held by none
+    of them and so is never round-tripped.
     """
     table = tomllib.loads(PYPROJECT.read_text())["project"]["entry-points"]
     declared = {
@@ -63,7 +63,6 @@ def test_installed_kinds_round_trip_every_corpus_study():
     assert installed == declared, "installed metadata is stale; reinstall the package"
 
     kinds = installed_kinds()
-    assert {ref: cls for ref, cls in kinds.items() if ref[0] == "core"} == CORE_KINDS
     resolver = installed_resolver()
     used = set()
     studies = [rich_study(), *(case.make_study() for case in CORPUS)]
@@ -86,7 +85,7 @@ def test_installed_kinds_round_trip_every_corpus_study():
         doc = dump_study(study, resolver)
         assert_same_pytree(study, load_study(doc.to_json(), resolver))
         used |= kind_refs(doc.study)
-    assert set(kinds) - set(CORE_KINDS) <= used
+    assert set(kinds) <= used
 
 
 @dataclasses.dataclass(frozen=True)

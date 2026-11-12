@@ -397,20 +397,20 @@ def test_a_lifted_array_or_tracer_of_the_dtype_is_kept():
 # spellings of a float and the sequence fields, the host executor the spellings of an
 # int; the cases of one study share the program of its first.
 _BASE_DIGEST = {
-    "stop_snr/bool/compiled": "4ae2dc0d9b4946a5",
-    "stop_snr/int/compiled": "fa3501a248069127",
-    "stop_snr/int_large_exact/compiled": "69482bb9835e4514",
-    "stop_snr/integral/compiled": "fa3501a248069127",
-    "stop_snr/float_sub/compiled": "fa3501a248069127",
-    "query_at/bool/host": "ee391845288a8003",
-    "query_at/int/host": "ff680283f820bb5c",
-    "query_at/int_large_exact/host": "f6781172491b172a",
-    "stochastic/n_obs_3/compiled": "05b4e1821b033c6d",
-    "values/seq_int/compiled": "90a351073f0941af",
-    "values/seq_mixed/compiled": "90a351073f0941af",
-    "values/seq_list/compiled": "90a351073f0941af",
-    "ticks/seq_int/compiled": "2b3598674cbcc5b1",
-    "ticks/seq_list/compiled": "2b3598674cbcc5b1",
+    "stop_snr/bool/compiled": "6f4310d401209ad7",
+    "stop_snr/int/compiled": "8495051f00d0949d",
+    "stop_snr/int_large_exact/compiled": "0a57f456363f5b46",
+    "stop_snr/integral/compiled": "8495051f00d0949d",
+    "stop_snr/float_sub/compiled": "8495051f00d0949d",
+    "query_at/bool/host": "a0a0e844fae1a18f",
+    "query_at/int/host": "17402673351f7d1c",
+    "query_at/int_large_exact/host": "a23e4f6d0d9ac5e7",
+    "stochastic/n_obs_3/compiled": "b3903ed7fca18533",
+    "values/seq_int/compiled": "b2eeecf393f8001d",
+    "values/seq_mixed/compiled": "b2eeecf393f8001d",
+    "values/seq_list/compiled": "b2eeecf393f8001d",
+    "ticks/seq_int/compiled": "253217d12a93c9a7",
+    "ticks/seq_list/compiled": "253217d12a93c9a7",
 }
 
 

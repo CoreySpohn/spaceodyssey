@@ -8,16 +8,16 @@ class::
     "toy.fixed_plan@1" = "spaceodyssey.studies.toy:FixedPlanPolicy"
 
 The family is the document group of the kind and names the abstract base its
-class must subclass (`FAMILIES`); the `core` group holds only the core's own
-kinds (`CORE_KINDS`). An id is lowercase words joined by dots, and the version is
+class must subclass (`FAMILIES`); the core's own kinds are the table `CORE_KINDS`
+and are never entry points. An id is lowercase words joined by dots, and the version is
 a positive integer equal to the default of the class's `version` field when it
 has one. `installed_resolver()` reads the installed entry points and builds the
 `KindResolver` the codec takes; the codec itself never imports by name.
 
 An entry point of an optional extra is declared with extras syntax
 (`"module:Class [physical]"`). In an install without that extra the entry is skipped
-rather than failing the whole table: `installed_missing()` names it, and the
-installed resolver refuses it only when a document asks for that kind.
+rather than failing the whole table; the installed resolver refuses it only when a
+document asks for that kind.
 
 This module sits outside the core, which may not load code dynamically.
 """
@@ -30,7 +30,6 @@ from importlib.metadata import (
 
 from spaceodyssey.codec.document import DocumentError, pointer
 from spaceodyssey.codec.kinds import (
-    CORE_KINDS,
     KindResolver,
     declared_version,
 )
@@ -50,7 +49,6 @@ from spaceodyssey.core.kinds import (
 GROUP_PREFIX = "spaceodyssey."
 
 FAMILIES = {
-    "core": None,
     "observer": AbstractObserver,
     "policy": AbstractPolicy,
     "process": AbstractProcess,
@@ -164,7 +162,7 @@ def kinds_from_entry_points(entries):
     Entries outside the `spaceodyssey.` groups are ignored, and entries of an extra
     that is not installed are skipped (see `scan_entry_points`). A group naming no
     family, a malformed name, an object that fails to load, a class of the wrong
-    family or version, a core entry that differs from `CORE_KINDS`, and one
+    family or version, and one
     `(group, id)` registered twice or one class registered under two ids (naming
     both entries and their distributions) each raise `RegistrationError`.
     """
@@ -174,12 +172,6 @@ def kinds_from_entry_points(entries):
 def _checked(entry, ref, cls):
     """The class of one entry, checked against its family and version."""
     base = FAMILIES[ref[0]]
-    if base is None:
-        if CORE_KINDS.get(ref) is not cls:
-            raise RegistrationError(
-                f"{_origin(entry)}: the core group holds only the core kinds"
-            )
-        return cls
     if not (isinstance(cls, type) and issubclass(cls, base)):
         raise RegistrationError(
             f"{_origin(entry)}: a {ref[0]} kind subclasses {base.__name__}"
@@ -198,11 +190,6 @@ def _checked(entry, ref, cls):
 def installed_kinds():
     """The kinds the installed distributions register through entry points."""
     return kinds_from_entry_points(entry_points())
-
-
-def installed_missing():
-    """The kinds skipped for a missing extra, as `(group, id, version)` to extras."""
-    return scan_entry_points(entry_points())[1]
 
 
 class InstalledResolver(KindResolver):

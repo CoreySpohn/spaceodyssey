@@ -34,7 +34,6 @@ from spaceodyssey.adapters.jaxedith import (
     JaxedithSummaryChannel,
     ScienceInterval,
     SummaryScene,
-    SummaryTruth,
     planet_free,
     sample_report,
 )
@@ -350,7 +349,7 @@ def _offline_row(
         "Lambda": truth.Ag[0] * truth.Rp_AU[0] ** 2,
         "Mp": mp,
     }
-    expected = report.expected(SummaryTruth(scene, planet), interval)
+    expected = report.budget(report.prepare(scene), planet, interval)
     limit = law.limit_counts(report.predict(planet_free(nominal), interval))
     return sample_report(
         key,

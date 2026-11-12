@@ -3,19 +3,34 @@
 import functools
 
 import equinox as eqx
+import jax
+import jax.numpy as jnp
 import numpy as np
 
 from spaceodyssey import core
 from spaceodyssey.core import CompiledExecutor, HostExecutor
 from spaceodyssey.core.conformance import run_case
 from spaceodyssey.core.conformance.corpus import N_STEPS, make_worlds
-from spaceodyssey.core.enums import Audience, Disposition, EventKind, Scope, Stage
+from spaceodyssey.core.enums import (
+    I64,
+    Audience,
+    Disposition,
+    EventKind,
+    Scope,
+    Stage,
+)
 from spaceodyssey.core.kinds import AbstractProcess
-from spaceodyssey.core.snapshot import digest_ints
+from spaceodyssey.core.snapshot import _digest
 from spaceodyssey.studies import toy
 from spaceodyssey.studies.conformance import CORPUS_BY_NAME
 
 N_WORLDS = 2
+
+
+def digest_ints(words, salt=0):
+    """Order-sensitive 64-bit digest of an integer array, as an int64."""
+    h = _digest(jnp.asarray(words), salt)
+    return jax.lax.bitcast_convert_type(h, I64)
 
 
 @functools.cache

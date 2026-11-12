@@ -10,12 +10,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.constants import Msun2kg, mas2arcsec
 from orbix.kepler import markley_solve_trig
 from skyscapes.io import from_exovista
+from skyscapes.scene import Star, System
 
 from spaceodyssey.adapters.jaxedith import column_index, visit_columns
 from spaceodyssey.adapters.photomancy import CATALOG_FIELDS, ELEMENTS
-from spaceodyssey.adapters.skyscapes import geometry, population_system
+from spaceodyssey.adapters.skyscapes import _planet, geometry
+from spaceodyssey.core.enums import F64
 from spaceodyssey.core.kinds import RealizeContext
 from tests.studies.bracket_helpers import (
     N_SLOTS,
@@ -52,6 +55,46 @@ def _context(channel, start_d, length_s):
 
 def _truth(source, world):
     return jax.tree_util.tree_map(lambda x: x[world], source.population)
+
+
+def population_system(source, truth, subject):
+    """The skyscapes `System` of one star's slots (truth side); absent are fillers.
+
+    `truth` is one world's `PopulationTruth` (no world axis). Planet `k` of the
+    system is slot `k`.
+    """
+    spec = source.stars[subject]
+    ms_kg = spec.mass_msun * Msun2kg
+    star = Star(
+        Ms_kg=ms_kg,
+        dist_pc=spec.dist_pc,
+        wavelengths_nm=jnp.asarray([900.0, 1100.0], F64),
+        times_jd=jnp.asarray([source.epoch_jd], F64),
+        flux_density_jy=jnp.full((2, 1), spec.flux_density_jy, F64),
+        ra_deg=spec.ra_deg,
+        dec_deg=spec.dec_deg,
+        diameter_arcsec=spec.diameter_mas * mas2arcsec,
+        luminosity_lsun=spec.luminosity_lsun,
+        metadata={"name": spec.name},
+        interpolation_method="linear",
+    )
+    planets = tuple(
+        _planet(
+            star,
+            truth.period_d[subject, k],
+            truth.e[subject, k],
+            truth.cos_i[subject, k],
+            truth.W_rad[subject, k],
+            truth.cos_w[subject, k],
+            truth.sin_w[subject, k],
+            truth.tp_jd[subject, k],
+            truth.Mp_kg[subject, k],
+            truth.Rp_AU[subject, k],
+            truth.Ag[subject, k],
+        )
+        for k in range(truth.period_d.shape[1])
+    )
+    return System(star=star, planets=planets, trig_solver=markley_solve_trig)
 
 
 def _one(system, k):

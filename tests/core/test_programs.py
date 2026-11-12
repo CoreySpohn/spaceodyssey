@@ -178,7 +178,7 @@ def test_control_two_programs_add_exactly_the_program_leaves():
 
 # The leaves of a default carry, as on `main` before programs (the scan's StableHLO is
 # the same text; the change record holds the digest comparison).
-N_DEFAULT_CARRY_LEAVES = 134
+N_DEFAULT_CARRY_LEAVES = 133
 
 
 # ---- P001 ---------------------------------------------------------------------------

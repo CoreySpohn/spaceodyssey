@@ -128,12 +128,6 @@ class CoincidentOrder(IntEnum):
     FAULT_FIRST = 1
 
 
-class ChargeRule(IntEnum):
-    """How a program row is charged (reserved; only the receipt rule exists)."""
-
-    RECEIPT = 0
-
-
 class ChargePricing(IntEnum):
     """How a channel's charge is built and credited, per resource column."""
 

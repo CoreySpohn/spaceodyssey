@@ -378,12 +378,6 @@ def _digest(a, salt):
     return _mix(h ^ jnp.asarray(flat.size, jnp.uint64))
 
 
-def digest_ints(words, salt=0):
-    """Order-sensitive 64-bit digest of an integer array, as an int64."""
-    h = _digest(jnp.asarray(words), salt)
-    return jax.lax.bitcast_convert_type(h, I64)
-
-
 def conditional_view_leaves(view):
     """The leaves of a view that exist only where a feature does, in digest order.
 

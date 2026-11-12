@@ -45,7 +45,6 @@ class Ledger(eqx.Module):
     lane_gen: jax.Array
     lane_closed: jax.Array
     # reserved, read by no rule yet
-    program_charge_rule: jax.Array  # I64[P]
     valid_from_tick: jax.Array  # I64[BR]
     valid_until_tick: jax.Array  # I64[BR]
     remainder_rule: jax.Array  # I64[BR]
@@ -163,8 +162,8 @@ def _resource_rows(study, lane, program=0):
 class AssetTable(eqx.Module):
     """Per-lane asset membership and transition duration.
 
-    `freeze_ticks` and `disruptive_resource` have one entry per asset and are reserved:
-    no rule reads them yet.
+    `freeze_ticks` and `disruptive_resource` have one entry per asset: the frozen
+    horizon of an activation and the resource column a disruptive activation debits.
 
     `config_switch_ticks` (I64[A, S], `S = caps.max_config_switches`) holds each asset's
     configuration switch ticks, sorted and padded on the right with `CONFIG_PAD`; it is

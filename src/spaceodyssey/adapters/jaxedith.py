@@ -333,17 +333,6 @@ class SummaryScene(eqx.Module):
     n_exozodi: float
 
 
-class SummaryTruth(eqx.Module):
-    """The true scene and the true planet parameters of one subject.
-
-    `planet` maps photomancy's physical names (`PLANET_KEYS`, optionally `Mp` in kg)
-    to scalars.
-    """
-
-    scene: SummaryScene
-    planet: dict
-
-
 class ScienceInterval(eqx.Module):
     """One realized science interval: its midpoint (JD) and duration (s)."""
 
@@ -922,10 +911,6 @@ class SummaryReport(eqx.Module):
 
         per_node = jax.vmap(at_node)(rates.contrast, rates.separation_lod)
         return jnp.sum(self.weights * per_node) / jnp.sum(self.weights)
-
-    def expected(self, truth, interval):
-        """The true planet's budget against the true scene (truth side only)."""
-        return self.budget(self.prepare(truth.scene), truth.planet, interval)
 
     def predict(self, theta, interval):
         """A proposed planet's budget against the nominal scene."""
