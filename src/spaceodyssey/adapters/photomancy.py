@@ -24,6 +24,7 @@ Statuses, per audience and subject:
   does not.
 """
 
+import collections
 import dataclasses
 import hashlib
 import json
@@ -1254,19 +1255,7 @@ def _fit_lane(channel, lane, st, engine, scale):
         )
     elements = channel_elements(cloud.elements)
     last = jnp.max(jnp.where(lane.detected & lane.valid, lane.end_tick, -1))
-    last_d = jnp.where(last >= 0, last.astype(F64) * channel.tick_days, 0.0)
-    leaves = summarize(
-        elements,
-        jnp.zeros(elements.shape[0], F64),
-        lane.subject,
-        channel,
-        lane.tick,
-        last_det_d=jnp.where(last >= 0, last_d, lane.tick * channel.tick_days),
-        n_grid=st.n_grid,
-        spacing_d=st.spacing_d,
-        albedo=st.albedo,
-        position_lag_d=st.position_lag_d,
-    )
+    leaves = _slot_leaves(channel, lane.subject, lane.tick, last, elements, st)
     finite = jnp.all(jnp.isfinite(elements))
     return (
         leaves.p_det,
@@ -1278,6 +1267,70 @@ def _fit_lane(channel, lane, st, engine, scale):
         cloud.ess,
         cloud.status.astype(I64),
         finite,
+        elements,
+    )
+
+
+def _slot_leaves(channel, subject, tick, last, elements, st):
+    """The summary leaves of a slot's equally weighted cloud at refit tick `tick`.
+
+    `last` is the end tick of the slot's last counting detection (negative for
+    none); the predicted position is read from there, and the forecast grid starts at
+    `tick`. This is the whole of what the tick changes in a fit's answer.
+    """
+    last_d = jnp.where(last >= 0, last.astype(F64) * channel.tick_days, 0.0)
+    return summarize(
+        elements,
+        jnp.zeros(elements.shape[0], F64),
+        subject,
+        channel,
+        tick,
+        last_det_d=jnp.where(last >= 0, last_d, tick * channel.tick_days),
+        n_grid=st.n_grid,
+        spacing_d=st.spacing_d,
+        albedo=st.albedo,
+        position_lag_d=st.position_lag_d,
+    )
+
+
+class _SummaryLane(eqx.Module):
+    """One stored cloud to summarize again: no report rows, so one program for all."""
+
+    subject: jax.Array
+    tick: jax.Array
+    last: jax.Array  # end tick of the last counting detection, negative for none
+    elements: jax.Array  # [n_particles, 8], the cloud in the channel's convention
+    ess: jax.Array
+    raw: jax.Array  # the fit's photomancy status
+    live: jax.Array
+
+
+def _resummary_lane(channel, lane, st):
+    """A stored cloud's leaves at the lane's tick: the tuple of `_fit_lane`."""
+    leaves = _slot_leaves(
+        channel, lane.subject, lane.tick, lane.last, lane.elements, st
+    )
+    return (
+        leaves.p_det,
+        leaves.p_block,
+        leaves.scatter,
+        leaves.pos_mean,
+        leaves.p_class,
+        leaves.ln_period_q,
+        lane.ess,
+        lane.raw,
+        jnp.all(jnp.isfinite(lane.elements)),
+        lane.elements,
+    )
+
+
+@eqx.filter_jit
+def _resummary_lanes(channel, lanes, st):
+    """A batch of stored clouds summarized again, one output tuple per leaf."""
+    return _over_lanes(
+        _if_live(lambda lane: _resummary_lane(channel, lane, st)),
+        lanes,
+        st.lane_batch,
     )
 
 
@@ -1324,33 +1377,94 @@ def _first_tier_lane(channel, lane, st, scale):
     with `q L / (1 - q + q L)` after them, `L` the null evidence of the first tier:
     every null lowers the chance that a planet is still there to find.
     """
-    cloud, luminosity = _first_tier_cloud(channel, lane, st, scale)
+    cloud, _ = _first_tier_cloud(channel, lane, st, scale)
     elements = channel_elements(cloud.elements)
+    leaves = _first_leaves(
+        channel,
+        lane.subject,
+        lane.tick,
+        lane.n_undetected,
+        elements,
+        cloud.log_evidence,
+        st,
+    )
+    return (
+        *leaves,
+        cloud.ess,
+        cloud.status.astype(I64),
+        jnp.all(jnp.isfinite(elements)),
+        elements,
+        cloud.log_evidence,
+    )
+
+
+def _first_leaves(channel, subject, tick, n_undetected, elements, log_evidence, st):
+    """`(p_new, p_class, ln_period_q)` of a first-tier cloud at refit tick `tick`.
+
+    The tick moves only `p_new`, through the forecast grid.
+    """
     zeros = jnp.zeros(elements.shape[0], F64)
-    n_dark = jnp.maximum(lane.n_undetected, 1)
+    n_dark = jnp.maximum(n_undetected, 1)
     prior = st.occupancy / n_dark
-    occupancy = n_dark * posterior_occupancy(prior, cloud.log_evidence)
+    occupancy = n_dark * posterior_occupancy(prior, log_evidence)
     p_new = summarize_search(
         elements,
         zeros,
         occupancy,
-        lane.n_undetected,
-        lane.subject,
+        n_undetected,
+        subject,
         channel,
-        lane.tick,
+        tick,
         n_grid=st.n_grid,
         spacing_d=st.spacing_d,
         albedo=st.albedo,
     )
+    luminosity = channel.luminosity(subject)
     p_class = jnp.mean(class1_indicator(elements, luminosity, st.albedo).astype(F64))
-    finite = jnp.all(jnp.isfinite(elements))
+    return p_new, p_class, weighted_quantiles(elements[:, 0], zeros)
+
+
+class _FirstSummaryLane(eqx.Module):
+    """One stored first-tier cloud to summarize again."""
+
+    subject: jax.Array
+    tick: jax.Array
+    n_undetected: jax.Array
+    elements: jax.Array  # [n_first, 8]
+    log_evidence: jax.Array
+    ess: jax.Array
+    raw: jax.Array
+    live: jax.Array
+
+
+def _first_resummary_lane(channel, lane, st):
+    """A stored first-tier cloud's leaves at the lane's tick: `_first_tier_lane`'s."""
+    leaves = _first_leaves(
+        channel,
+        lane.subject,
+        lane.tick,
+        lane.n_undetected,
+        lane.elements,
+        lane.log_evidence,
+        st,
+    )
     return (
-        p_new,
-        p_class,
-        weighted_quantiles(elements[:, 0], zeros),
-        cloud.ess,
-        cloud.status.astype(I64),
-        finite,
+        *leaves,
+        lane.ess,
+        lane.raw,
+        jnp.all(jnp.isfinite(lane.elements)),
+        lane.elements,
+        lane.log_evidence,
+    )
+
+
+@eqx.filter_jit
+def _first_resummary_lanes(channel, lanes, st):
+    """A batch of stored first-tier clouds summarized again."""
+    return _over_lanes(
+        _if_live(lambda lane: _first_resummary_lane(channel, lane, st)),
+        lanes,
+        st.lane_batch,
     )
 
 
@@ -1408,6 +1522,7 @@ def _shrink_lane(channel, lane, st, engine, scale):
         leaves.ess,
         jnp.asarray(int(UpdaterStatus.OK), I64),
         jnp.all(jnp.isfinite(elements)),
+        elements,
     )
 
 
@@ -1430,6 +1545,38 @@ def _first_tier_lanes(channel, lanes, st, scale):
         lanes,
         st.lane_batch,
     )
+
+
+# The inputs of a slot fit that fix its cloud: the refit key (row set and star), the
+# slot and the report arrays. The refit tick and the end ticks are not among them: they
+# move only the summary of the cloud.
+_FIT_INPUTS = (
+    "subject",
+    "key",
+    "slot",
+    "epochs",
+    "sep",
+    "dmag0",
+    "limit",
+    "detected",
+    "valid",
+    "counts",
+    "ra",
+    "dec",
+    "ra_err",
+    "dec_err",
+    "corr",
+)
+
+
+def _fit_digest(item):
+    """Digest of the inputs of one slot fit (a `_FitLane` field dict)."""
+    h = hashlib.blake2b(digest_size=16)
+    for name in _FIT_INPUTS:
+        a = np.ascontiguousarray(item[name])
+        h.update(f"{name}{a.dtype.str}{a.shape}".encode())
+        h.update(a.tobytes())
+    return h.digest()
 
 
 class ReportRefit(AbstractRefitBoundary):
@@ -1497,6 +1644,20 @@ class ReportRefit(AbstractRefitBoundary):
     lane count wherever the entry sits, and agree to 1e-11 (relative) across lane
     counts (3.3e-12 measured). The stored `n_particles` is the cloud size a posterior
     kernel returns; the truth kernel ignores it and the refit key.
+
+    With `resummary` (the default) the boundary keeps the cloud of each slot it fits
+    (at most `resummary_capacity` clouds, least recently used out) and, when a later
+    request holds the same fit inputs for a slot, summarizes the stored cloud at the
+    new refit tick instead of fitting again. The refit key names the row set and no
+    tick, so a refit over the same rows is the same deterministic fit and only the
+    forecast grid moves: the answer equals a refit to rounding (the summary program
+    differs, not the cloud). A slot is stored only when its fit is `SLOT_OK`, so a
+    degraded or failed slot is always fit again; a slot absent from the store (never
+    fit, evicted, a new process after a resume, any changed input) is fit as before.
+    The setting changes no refit key, request or result, so it is not part of
+    `configuration` and the model hash. The shrinkage kernel does not use it.
+    `resummary_stats` counts the slots answered from the store (`hits`) and fit
+    (`misses`).
     """
 
     kind = "spaceodyssey.report_summary"
@@ -1529,6 +1690,8 @@ class ReportRefit(AbstractRefitBoundary):
         grid_points=GRID_POINTS,
         row_buckets=ROW_BUCKETS,
         lane_batch=1,
+        resummary=True,
+        resummary_capacity=4096,
         caps=None,
         version=1,
     ):
@@ -1566,6 +1729,12 @@ class ReportRefit(AbstractRefitBoundary):
                 groups = ()
         if lanes < 1:
             raise ValueError("lanes is at least one")
+        if resummary_capacity < 1:
+            raise ValueError("resummary_capacity is at least one")
+        self.resummary = bool(resummary) and kernel == "posterior"
+        self.resummary_capacity = int(resummary_capacity)
+        self.resummary_stats = {"hits": 0, "misses": 0}
+        self._clouds = collections.OrderedDict()
         self.kernel = kernel
         self.truth_groups = groups
         self.lanes = int(lanes)
@@ -1856,6 +2025,107 @@ class ReportRefit(AbstractRefitBoundary):
             out.extend(tuple(x[i] for x in result) for i in range(len(part)))
         return out
 
+    def _answer_from_store(self, channel, st, indexed_fits, digests):
+        """Summarize the stored clouds of the slots whose fit inputs were seen.
+
+        Returns `(answers, retried)`: the output tuple of each answered fit index and
+        the indices whose stored fit had needed the retry (the diagnostics count it as
+        the refit would). Slots without a stored cloud are left to the caller.
+        """
+        found = []
+        for k, (_, _, engine, item) in indexed_fits:
+            if engine == "shrink" or digests[k] not in self._clouds:
+                continue
+            self._clouds.move_to_end(digests[k])
+            elements, ess, raw, retried = self._clouds[digests[k]]
+            last = np.max(
+                np.where(item["detected"] & item["valid"], item["end_tick"], -1)
+            )
+            found.append(
+                (
+                    k,
+                    retried,
+                    {
+                        "subject": item["subject"],
+                        "tick": item["tick"],
+                        "last": np.asarray(last, np.int64),
+                        "elements": elements,
+                        "ess": ess,
+                        "raw": raw,
+                    },
+                )
+            )
+        if not found:
+            return {}, set()
+        fields = [f.name for f in dataclasses.fields(_SummaryLane) if f.name != "live"]
+        out = self._run_groups(
+            lambda lanes: _resummary_lanes(channel, lanes, st),
+            [item for _, _, item in found],
+            fields,
+            _SummaryLane,
+        )
+        self.resummary_stats["hits"] += len(found)
+        answers = {k: o for (k, _, _), o in zip(found, out, strict=True)}
+        return answers, {k for k, retried, _ in found if retried}
+
+    def _store(self, digest, out, retried):
+        """Keep a fit's cloud for later summaries when it is a sound one."""
+        ess, raw, finite, elements = out[6:10]
+        if slot_status(raw, finite) == SLOT_OK:
+            self._keep(digest, (elements, ess, raw, bool(retried)))
+
+    def _keep(self, digest, value):
+        """Put a cloud in the store (copies: a view would keep a lane batch alive)."""
+        copied = tuple(np.array(x) if not isinstance(x, bool) else x for x in value)
+        self._clouds[digest] = copied
+        self._clouds.move_to_end(digest)
+        while len(self._clouds) > self.resummary_capacity:
+            self._clouds.popitem(last=False)
+
+    def _answer_firsts_from_store(self, channel, st, indexed_firsts, digests):
+        """`_answer_from_store` for first-tier entries (the dark slots of a star)."""
+        found = []
+        for k, (_, item) in indexed_firsts:
+            if digests[k] not in self._clouds:
+                continue
+            self._clouds.move_to_end(digests[k])
+            elements, evidence, ess, raw, retried = self._clouds[digests[k]]
+            found.append(
+                (
+                    k,
+                    retried,
+                    {
+                        "subject": item["subject"],
+                        "tick": item["tick"],
+                        "n_undetected": item["n_undetected"],
+                        "elements": elements,
+                        "log_evidence": evidence,
+                        "ess": ess,
+                        "raw": raw,
+                    },
+                )
+            )
+        if not found:
+            return {}, set()
+        fields = [
+            f.name for f in dataclasses.fields(_FirstSummaryLane) if f.name != "live"
+        ]
+        out = self._run_groups(
+            lambda lanes: _first_resummary_lanes(channel, lanes, st),
+            [item for _, _, item in found],
+            fields,
+            _FirstSummaryLane,
+        )
+        self.resummary_stats["hits"] += len(found)
+        answers = {k: o for (k, _, _), o in zip(found, out, strict=True)}
+        return answers, {k for k, retried, _ in found if retried}
+
+    def _store_first(self, digest, out, retried):
+        """Keep a first-tier cloud for later summaries when it is a sound one."""
+        ess, raw, finite, elements, evidence = out[3:8]
+        if slot_status(raw, finite) == SLOT_OK:
+            self._keep(digest, (elements, evidence, ess, raw, bool(retried)))
+
     def _refit_posterior(self, study, requests):
         require_x64()
         # Import outside any trace: the module builds JAX constants as it loads.
@@ -2041,16 +2311,44 @@ class ReportRefit(AbstractRefitBoundary):
         ]
         low = int(UpdaterStatus.LOW_ESS)
         indexed_fits = list(enumerate(fits))
-        fit_out = run_fits(indexed_fits, 1)
-        retried_fits = [(k, fit) for k, fit in indexed_fits if fit_out[k][7] == low]
+        fit_out, stored_retries = {}, set()
+        digests = {}
+        if self.resummary:
+            digests = {k: _fit_digest(it) for k, (_, _, eng, it) in indexed_fits}
+            fit_out, stored_retries = self._answer_from_store(
+                channel, st, indexed_fits, digests
+            )
+        to_fit = [(k, fit) for k, fit in indexed_fits if k not in fit_out]
+        fit_out.update(run_fits(to_fit, 1))
+        retried_fits = [(k, fit) for k, fit in to_fit if fit_out[k][7] == low]
         fit_out.update(run_fits(retried_fits, RETRY_FACTOR))
+        if self.resummary:
+            self.resummary_stats["misses"] += len(to_fit)
+            retried_now = {k for k, _ in retried_fits}
+            for k, _ in to_fit:
+                self._store(digests[k], fit_out[k], k in retried_now)
         indexed_firsts = list(enumerate(firsts))
-        first_out = run_firsts(indexed_firsts, 1)
-        retried_firsts = [(k, f) for k, f in indexed_firsts if first_out[k][4] == low]
+        first_out, stored_first_retries, first_digests = {}, set(), {}
+        if self.resummary:
+            first_digests = {k: _fit_digest(it) for k, (_, it) in indexed_firsts}
+            first_out, stored_first_retries = self._answer_firsts_from_store(
+                channel, st, indexed_firsts, first_digests
+            )
+        first_fit = [(k, f) for k, f in indexed_firsts if k not in first_out]
+        first_out.update(run_firsts(first_fit, 1))
+        retried_firsts = [(k, f) for k, f in first_fit if first_out[k][4] == low]
         first_out.update(run_firsts(retried_firsts, RETRY_FACTOR))
-        retried_ids = {id(fits[k][0]) for k, _ in retried_fits} | {
-            id(firsts[k][0]) for k, _ in retried_firsts
-        }
+        if self.resummary:
+            self.resummary_stats["misses"] += len(first_fit)
+            retried_now = {k for k, _ in retried_firsts}
+            for k, _ in first_fit:
+                self._store_first(first_digests[k], first_out[k], k in retried_now)
+        retried_ids = (
+            {id(fits[k][0]) for k, _ in retried_fits}
+            | {id(fits[k][0]) for k in stored_retries}
+            | {id(firsts[k][0]) for k, _ in retried_firsts}
+            | {id(firsts[k][0]) for k in stored_first_retries}
+        )
 
         # Assemble the slices, the entry statuses and the diagnostics.
         per_entry = {}
@@ -2068,7 +2366,7 @@ class ReportRefit(AbstractRefitBoundary):
             codes = np.zeros(n_slots, np.int64)
             units = []
             for slot, out in item["fits"].items():
-                p_det, p_block, scatter, pos, p_class, q, ess, raw, finite = out
+                p_det, p_block, scatter, pos, p_class, q, ess, raw, finite, _ = out
                 slices["p_det"][w, a, s, slot] = p_det
                 slices["p_block"][w, a, s, slot] = p_block
                 slices["scatter"][w, a, s, slot] = scatter
@@ -2079,7 +2377,7 @@ class ReportRefit(AbstractRefitBoundary):
                 codes[slot] = slot_status(raw, finite)
                 units.append(codes[slot])
             if item["first"] is not None:
-                p_new, p_class, q, ess, raw, finite = item["first"]
+                p_new, p_class, q, ess, raw, finite, _, _ = item["first"]
                 code = slot_status(raw, finite)
                 slices["p_new"][w, a, s] = p_new
                 for slot in e["dark"]:

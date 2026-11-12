@@ -284,6 +284,13 @@ def test_default_capacities_scale_with_stars_and_horizon():
         br.default_capacities(150, 4, n_channels=25, horizon_d=60_000.0)
     with pytest.raises(ValueError, match="max_tick"):
         br.default_capacities(150, 4, n_channels=25, horizon_d=1825.0, n_char=4)
+    # A full 1059-star list over five years fits only on a longer declared tick.
+    with pytest.raises(ValueError, match="tick_length_s"):
+        br.default_capacities(1059, 4, n_channels=25, horizon_d=1826.0)
+    second = br.default_capacities(
+        1059, 4, n_channels=25, horizon_d=1826.0, ticks_per_day=86_400
+    )
+    assert second.max_tick > 1826 * 86_400
 
 
 @pytest.mark.slow(reason="compiles the chunked refresh driver once")

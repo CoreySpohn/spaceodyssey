@@ -87,7 +87,6 @@ from spaceodyssey.core.ledger import ChannelTable
 from spaceodyssey.core.records import KindRegistry, RecordKind
 from spaceodyssey.core.refresh import REFRESH_PRODUCT_KIND, RefreshSchedule
 from spaceodyssey.core.snapshot import BeliefLayout
-from spaceodyssey.core.study import Clock
 from spaceodyssey.studies import builder, effect_rows
 
 # A candidate: three detections, a class probability of at least `CANDIDATE_CLASS`
@@ -108,6 +107,10 @@ FIRST_CHANNEL_ID = 10
 BLOCK_P, SURVEY_BLOCK_P, RETIRE_AFTER, SURVEY_RESERVE_D = 0.8, 0.95, 3, 15.0
 # Failed blocks that retire a slot on a first-summary channel: one block per slot.
 FIRST_SUMMARY_RETIRE_AFTER = 1
+# Seconds in a day, and the ticks in a day of the default 1 ms clock (the clock a
+# bracket study runs on is the profile's declared `tick_length_s`).
+SECONDS_PER_DAY = 86_400.0
+TICKS_PER_DAY = 86_400_000
 
 
 def default_retire_after(survey):
@@ -214,6 +217,7 @@ def default_capacities(
     n_char=1,
     retire_after=RETIRE_AFTER,
     max_visits=MAX_VISITS,
+    ticks_per_day=None,
 ):
     """Capacities of the bracket study of `n_subjects` stars.
 
@@ -232,7 +236,9 @@ def default_capacities(
       plus three spare.
     - `max_sid` is the next power of two above two ids per row, one per day for the
       policy's waits and eight per star; it must leave `max_tick` above the horizon,
-      so a bound that needs more ids than that allows is refused.
+      so a bound that needs more ids than that allows is refused. The horizon is
+      counted in ticks of `ticks_per_day` (the profile's declared tick length;
+      `TICKS_PER_DAY` when not given), so a longer tick admits more stars.
 
     A study never gets less than the fixed values.
     """
@@ -262,10 +268,12 @@ def default_capacities(
         n_an=1,
         max_sid=max_sid,
     )
-    if horizon_d is not None and caps.max_tick < horizon_d * TICKS_PER_DAY:
+    per_day = TICKS_PER_DAY if ticks_per_day is None else int(ticks_per_day)
+    if horizon_d is not None and caps.max_tick < horizon_d * per_day:
         raise ValueError(
             f"{n_subjects} stars over {horizon_d} d need max_sid {max_sid}, which"
-            f" leaves max_tick {caps.max_tick} below the horizon"
+            f" leaves max_tick {caps.max_tick} below the horizon of"
+            f" {horizon_d * per_day} ticks; declare a longer tick_length_s"
         )
     return caps
 
@@ -346,6 +354,11 @@ def bracket_study(
     arm = _arm(arm)
     if observer is None or policy is None:
         raise ValueError("bracket_study needs an observer and a policy")
+    built = channel.assets()
+    if isinstance(observer, SummaryObserver):
+        observer = dataclasses.replace(
+            observer, ticks_per_day=built.context.clock.ticks_per_day
+        )
     if isinstance(policy, BracketPolicy):
         reaches = bool(arm.report_audience & Audience.POLICY)
         policy = dataclasses.replace(policy, refits_reach_policy=reaches)
@@ -353,7 +366,6 @@ def bracket_study(
             policy = dataclasses.replace(
                 policy, retire_after=default_retire_after(bool(channel.survey))
             )
-    built = channel.assets()
     n_stars = int(channel.catalog_mass_kg.shape[0])
     if len(source.stars) != n_stars:
         raise ValueError("the world source and the channel disagree on the stars")
@@ -366,6 +378,7 @@ def bracket_study(
         n_channels=channel.n_channels,
         horizon_d=horizon_d,
         max_visits=getattr(policy, "max_visits", MAX_VISITS),
+        ticks_per_day=built.context.clock.ticks_per_day,
         **shape,
     )
     if isinstance(policy, BracketPolicy):
@@ -393,7 +406,9 @@ def bracket_study(
         horizon_tick=horizon,
         phase_until=(horizon,),
     )
-    return dataclasses.replace(study, clock=Clock(0.001), world_source=source)
+    return dataclasses.replace(
+        study, clock=built.context.clock.clock, world_source=source
+    )
 
 
 def bracket_boundary(study, arm, **settings):
@@ -527,7 +542,7 @@ class BracketPolicy(AbstractPolicy):
         model = study.channel_model
         n, slots = caps.n_subjects, self.n_slots
         stride = 3 + slots
-        per_day = jnp.asarray(86_400_000, I64)
+        per_day = jnp.round(SECONDS_PER_DAY / study.clock.tick_length_s).astype(I64)
         stars = pstate[: n * stride].reshape(n, stride)
         last_tick, n_vis, n_search = stars[:, 0], stars[:, 1], stars[:, 2]
         charged, kick, stopped = pstate[n * stride : n * stride + 3]
@@ -804,6 +819,7 @@ class SummaryObserver(AbstractObserver):
     catalog_kind: str = eqx.field(default=CATALOG_KIND_NAME, static=True)
     report_kind: str = eqx.field(default=REPORT_KIND_NAME, static=True)
     block_kind: str = eqx.field(default=BLOCK_KIND_NAME, static=True)
+    ticks_per_day: int = eqx.field(default=TICKS_PER_DAY, static=True)
 
     def capabilities(self):
         """Refit only, from visit reports, the truth catalog and block outcomes."""
@@ -825,7 +841,7 @@ class SummaryObserver(AbstractObserver):
         `BracketPolicy.decide`) the forecast no longer moves with time, so the star
         is renewed by a refit from the same rows.
         """
-        elapsed = (tick - summary.ref_tick) / (NODE_SPACING_D * TICKS_PER_DAY)
+        elapsed = (tick - summary.ref_tick) / (NODE_SPACING_D * self.ticks_per_day)
         return jnp.round(elapsed) >= N_NODES - 1
 
     def init_summary(self, caps):
@@ -882,9 +898,6 @@ class SummaryObserver(AbstractObserver):
 
 
 # -- Outcomes and paired arms ----------------------------------------------------
-
-# The study clock: one tick is a millisecond.
-TICKS_PER_DAY = 86_400_000
 
 
 def candidate_slots(belief, lod_arcsec, candidate_class=CANDIDATE_CLASS):
@@ -1062,6 +1075,7 @@ def outcome_table(
     if retire is None:
         retire = default_retire_after(bool(channel.survey))
     pstate = np.asarray(carry.pstate)
+    per_day = round(SECONDS_PER_DAY / float(study.clock.tick_length_s))
     mid = n * (3 + n_slots) + 3 + n * n_slots * SLOT_FIELDS
     length = block_log_len(n_slots, getattr(policy, "n_char", 1), retire)
     block_log = pstate[:, mid + n : mid + n + n * length].reshape(n_w, n, length)
@@ -1073,7 +1087,7 @@ def outcome_table(
             true_elements = channel.truth_elements(truth)
         for r in _rows_of(log, w, KIND_VISIT):
             s = int(log["subject"][w, r])
-            days = (log["end_tick"][w, r] - log["start_tick"][w, r]) / TICKS_PER_DAY
+            days = (log["end_tick"][w, r] - log["start_tick"][w, r]) / per_day
             hit = log["payload"][w, r, det_cols] > 0.5
             star["n_visits"][w, s] += 1
             stage = "followup" if seen[s] else "search"
@@ -1095,7 +1109,7 @@ def outcome_table(
             s = int(log["subject"][w, r])
             count[s] += 1
             star["n_block"][w, s] += 1
-            days = (log["end_tick"][w, r] - log["start_tick"][w, r]) / TICKS_PER_DAY
+            days = (log["end_tick"][w, r] - log["start_tick"][w, r]) / per_day
             star["t_block"][w, s] += days
             k = int(block_log[w, s, count[s] - 1]) - 1
             if k < 0:
