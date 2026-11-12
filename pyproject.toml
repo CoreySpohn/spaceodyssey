@@ -237,6 +237,7 @@ require_tier_reason = true
 "tests/core/test_keys.py" = 58
 "tests/core/test_latency_shift.py" = 116
 "tests/core/test_layout.py" = 10
+"tests/core/test_layout_codec.py" = 81
 "tests/core/test_leak.py" = 98
 "tests/core/test_lints.py" = 10
 "tests/core/test_metamorphic.py" = 390

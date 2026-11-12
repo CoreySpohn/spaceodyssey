@@ -1,6 +1,9 @@
 """Records."""
 
 import dataclasses
+import itertools
+import math
+from collections.abc import Callable
 
 import equinox as eqx
 import jax
@@ -59,6 +62,92 @@ class RecordKind:
     def width(self) -> int:
         """Number of payload columns."""
         return len(self.columns)
+
+    @classmethod
+    def from_template(
+        cls,
+        name: str,
+        template,
+        audience_of: Callable[[str], int],
+        derived: bool = False,
+    ) -> "RecordKind":
+        """A kind whose columns are the leaves of `template`, in `column_names` order.
+
+        `audience_of` receives the dotted path of each leaf (for example
+        `"params.radius_rearth"`), never an indexed column name, and returns the
+        audience of every column that leaf expands to.
+        """
+        columns = []
+        for path, leaf in _leaves(template):
+            audience = audience_of(path)
+            columns.extend(
+                PayloadColumn(n, audience) for n in _leaf_columns(path, leaf.shape)
+            )
+        return cls(name, tuple(columns), derived)
+
+
+def _leaves(template):
+    """`(dotted path, leaf)` pairs of a template, depth-first in field order."""
+    flat, _ = jax.tree_util.tree_flatten_with_path(template)
+    return [
+        (jax.tree_util.keystr(path, simple=True, separator="."), leaf)
+        for path, leaf in flat
+    ]
+
+
+def _leaf_columns(path, shape):
+    """Column names of one leaf: its path, then `_<i>[_<j>...]` in C order."""
+    if not shape:
+        return [path]
+    index = itertools.product(*(range(n) for n in shape))
+    return [path + "".join(f"_{i}" for i in idx) for idx in index]
+
+
+def column_names(template) -> tuple[str, ...]:
+    """Payload column names of a template, in the order `pack` writes them."""
+    return tuple(
+        n for path, leaf in _leaves(template) for n in _leaf_columns(path, leaf.shape)
+    )
+
+
+def layout_size(template) -> int:
+    """Number of payload columns a template occupies."""
+    return sum(math.prod(leaf.shape) for _, leaf in _leaves(template))
+
+
+def pack(module):
+    """Flatten the leaves of `module` into one F64[size] payload, in field order.
+
+    An integer leaf passes through float64 exactly while its absolute value stays
+    below 2**53.
+    """
+    parts = [jnp.asarray(x, F64).reshape(-1) for x in jax.tree.leaves(module)]
+    return jnp.concatenate(parts) if parts else jnp.zeros(0, F64)
+
+
+def unpack(template, payload):
+    """Rebuild a module shaped like `template` from `payload`, F64[..., >=size].
+
+    Leading axes of `payload` are kept. Only the first `layout_size(template)`
+    columns are read, so a payload padded to a wider layout is accepted; a narrower
+    one is refused. Each leaf is cast to its template dtype.
+    """
+    payload = jnp.asarray(payload)
+    size = layout_size(template)
+    if payload.shape[-1] < size:
+        raise ValueError(
+            f"payload has {payload.shape[-1]} columns; the template needs {size}"
+        )
+    lead = payload.shape[:-1]
+    leaves, treedef = jax.tree.flatten(template)
+    out = []
+    start = 0
+    for leaf in leaves:
+        n = math.prod(leaf.shape)
+        chunk = payload[..., start : start + n]
+        out.append(chunk.reshape(*lead, *leaf.shape).astype(leaf.dtype))
+        start += n
+    return jax.tree.unflatten(treedef, out)
 
 
 class KindRegistry:
