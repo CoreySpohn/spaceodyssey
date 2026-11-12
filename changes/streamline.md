@@ -31,3 +31,16 @@ overlap, zero-weight rows, calibration, replay, and the corpus with its recorded
 invariants (`studies/conformance.py` stays: the corpus feeds the golden histories and the
 invariants). The conformance claims that lost their check are a checklist in
 `docs/how-to/observer.md`.
+
+## Step 3: golden pins are tolerance pins
+
+Each history in `golden_histories.json` and `golden_pin.json` now also carries per-leaf
+float statistics (sum, sum of absolute values, non-finite count), compared at rtol 1e-9
+under every jaxlib release. The integer digests stay exact everywhere. The float bit
+digests, the snapshot fingerprints and the fault float digests stay exact only under the
+jaxlib the manifest records as `_jaxlib`; under another release the fingerprints reduce to
+their decision counts. Bumping `.github/jax-pin.txt` without regenerating the manifest
+(`SPACEODYSSEY_WRITE_GOLDEN=1`) fails `test_the_manifest_was_written_under_the_pinned_jaxlib`:
+that is the declared re-baseline. Existing digests, fingerprints and the pin's source
+commit are unchanged; only the statistics and `_jaxlib` were added (the pin was captured
+again from the same runs, and every pre-existing entry was checked equal).

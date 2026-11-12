@@ -14,11 +14,15 @@ fixture (the corpus never handles a `FAULT`). Nothing regenerates the pin: a pin
 entry that differs fails, documented or not. It is written once, by running this file
 with `SPACEODYSSEY_CAPTURE_PIN=<full commit sha>` while no pin file exists.
 
-Float digests are bit-exact only under one jaxlib release (float64 normal draws round
-differently between releases). The goldens were taken under the release in
-`.github/jax-pin.txt`, which CI installs; a failure under another jaxlib says so, and a
-float-only move there is an environment difference before it is a regression. The pin's
-own platform note predates this finding.
+Floats are pinned two ways. Each leaf carries statistics (sum, sum of absolute values,
+non-finite count) compared at `FLOAT_RTOL`, which every jaxlib release must meet. The
+bit digest of the floats and the snapshot fingerprints are exact only under the jaxlib
+release that wrote them (float64 normal draws round differently between releases): the
+manifest records that release as `_jaxlib`, and under another one only the statistics,
+the integer digests and the decision counts are compared. A jaxlib upgrade is declared
+in `.github/jax-pin.txt`; `test_the_manifest_was_written_under_the_pinned_jaxlib` then
+fails until the manifest is regenerated (`SPACEODYSSEY_WRITE_GOLDEN=1`) under the new
+release, which is the re-baseline. The pin's own platform note predates this finding.
 """
 
 import json
@@ -48,6 +52,8 @@ PIN = Path(__file__).with_name("golden_pin.json")
 WRITE = os.environ.get("SPACEODYSSEY_WRITE_GOLDEN", "0") == "1"
 CAPTURE = os.environ.get("SPACEODYSSEY_CAPTURE_PIN", "")
 N_PINNED = 116
+FLOAT_RTOL = 1e-9
+FLOAT_ATOL = 1e-12
 JAX_PIN = Path(__file__).parents[2] / ".github" / "jax-pin.txt"
 
 
@@ -59,14 +65,29 @@ def pinned_jaxlib():
     raise AssertionError(f"{JAX_PIN} pins no jaxlib")
 
 
-def _environment(moved):
-    """The failure message for moved entries, naming a jaxlib mismatch first."""
-    running = jaxlib.__version__
-    if running == pinned_jaxlib():
-        return moved
-    return (
-        f"goldens were taken under jaxlib {pinned_jaxlib()}, this run has {running}: "
-        f"rerun under the pinned jaxlib before treating these as regressions: {moved}"
+def manifest_jaxlib():
+    """The jaxlib release the committed manifest was written under."""
+    return json.loads(MANIFEST.read_text())["_jaxlib"]
+
+
+def exact_floats():
+    """Whether bit-exact float digests and fingerprints apply to this run."""
+    return jaxlib.__version__ == manifest_jaxlib()
+
+
+def _entries(manifest):
+    """The history entries of a manifest, without its `_jaxlib` record."""
+    return {k: v for k, v in manifest.items() if k != "_jaxlib"}
+
+
+def _stats_close(got, want):
+    """Whether two `{leaf: [sum, abs sum, non-finite count]}` agree within tolerance."""
+    if set(got) != set(want):
+        return False
+    return all(
+        got[k][2] == want[k][2]
+        and np.allclose(got[k][:2], want[k][:2], rtol=FLOAT_RTOL, atol=FLOAT_ATOL)
+        for k in got
     )
 
 
@@ -75,11 +96,27 @@ def entry_key(case, executor, world):
     return f"{case}/{executor}/{world}"
 
 
+def float_stats(floats):
+    """Per float leaf: sum and sum of absolute values of the finite entries, and the
+    count of non-finite ones."""
+    out = {}
+    for name, leaf in floats.items():
+        a = np.asarray(leaf, dtype=np.float64)
+        fin = np.isfinite(a)
+        out[name] = [
+            float(a[fin].sum()),
+            float(np.abs(a[fin]).sum()),
+            int((~fin).sum()),
+        ]
+    return out
+
+
 def history_digests(history):
-    """Digests of the integer and float arrays of a canonical history."""
+    """Integer digest, float digest and float statistics of a canonical history."""
     return {
         "ints": digest(history.ints, "ints"),
         "floats": digest(history.floats, "floats"),
+        "float_stats": float_stats(history.floats),
     }
 
 
@@ -117,21 +154,34 @@ def test_manifest_covers_every_case_executor_and_world():
         for case in CORPUS:
             for executor in EXECUTORS:
                 current.update(case_digests(case.name, executor))
+        current["_jaxlib"] = jaxlib.__version__
         MANIFEST.write_text(json.dumps(current, indent=1, sort_keys=True) + "\n")
-    manifest = json.loads(MANIFEST.read_text())
-    assert set(manifest) == expected_keys()
+    assert set(_entries(json.loads(MANIFEST.read_text()))) == expected_keys()
+
+
+def test_the_manifest_was_written_under_the_pinned_jaxlib():
+    """Fails if `.github/jax-pin.txt` moved to another jaxlib without regenerating the
+    manifest: the declared upgrade is the re-baseline."""
+    assert manifest_jaxlib() == pinned_jaxlib()
 
 
 @pytest.mark.parametrize("executor", EXECUTORS)
 @pytest.mark.parametrize("case", CORPUS, ids=lambda c: c.name)
 def test_history_matches_its_golden_digest(case, executor):
     """Fails if any integer or float of a corpus history changed, by even one bit."""
-    manifest = json.loads(MANIFEST.read_text())
+    manifest = _entries(json.loads(MANIFEST.read_text()))
     got = case_digests(case.name, executor)
     assert set(got) == _case_keys(case.name, executor)  # every world ran
-    for part in ("ints", "floats"):
+    parts = ("ints", "floats") if exact_floats() else ("ints",)
+    for part in parts:
         moved = sorted(k for k in got if manifest.get(k, {}).get(part) != got[k][part])
-        assert not moved, (part, moved if part == "ints" else _environment(moved))
+        assert not moved, (part, moved)
+    off = sorted(
+        k
+        for k in got
+        if not _stats_close(got[k]["float_stats"], manifest[k]["float_stats"])
+    )
+    assert not off, ("float statistics", off)
 
 
 def test_a_one_bit_change_moves_the_digest():
@@ -205,7 +255,7 @@ def test_the_pin_names_its_commit_and_covers_every_entry():
 
 def test_the_manifest_equals_its_pin():
     """Fails if any manifest entry moved since the pin, even with a change record."""
-    manifest = json.loads(MANIFEST.read_text())
+    manifest = _entries(json.loads(MANIFEST.read_text()))
     pinned = _pin()["histories"]
     moved = sorted(k for k in pinned if manifest.get(k) != pinned[k])
     assert not moved, moved
@@ -222,8 +272,13 @@ def test_fingerprints_match_their_pin(case, executor):
         for run in runs(case.name, executor)
     }
     assert set(got) == _case_keys(case.name, executor)  # every world ran
-    moved = {k: v for k, v in got.items() if pinned[k] != v}
-    assert not moved, _environment(sorted(moved))
+    if exact_floats():
+        moved = {k: v for k, v in got.items() if pinned[k] != v}
+    else:  # the views hash float bits: only the decision counts hold across releases
+        moved = {
+            k: v for k, v in got.items() if pinned[k]["n_decisions"] != v["n_decisions"]
+        }
+    assert not moved, sorted(moved)
 
 
 def test_the_pinned_fingerprints_carry_evidence():
@@ -246,7 +301,11 @@ def test_the_fault_fixture_matches_its_pin(executor):
         assert (ints["status"] == RecordStatus.COMPLETED).sum() > 0
     pinned = _pin()["fault"]
     got = fault_digests(executor)
-    assert got == {k: pinned[k] for k in got}, _environment(sorted(got))
+    for k, v in got.items():
+        assert v["ints"] == pinned[k]["ints"], k
+        assert _stats_close(v["float_stats"], pinned[k]["float_stats"]), k
+        if exact_floats():
+            assert v["floats"] == pinned[k]["floats"], k
 
 
 def test_a_lane_closing_fault_breaks_the_fault_pin():
