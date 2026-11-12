@@ -171,5 +171,19 @@ run = CompiledExecutor().run_worlds(ewma, batch, roots, 40)
 print(check_folded_once(ewma, run, batch, roots))
 ```
 
-The kit has further checks for observers that refit, that are statistical, or that
-correct earlier records. [Core](../core.md) lists them.
+## Checklist for a new observer
+
+Run `check_folded_once` as above. Then answer each item below and cover the ones that
+apply with a test of the observer's own:
+
+- Delayed corrections: a row superseded by a later revision leaves the belief as if it
+  had never been folded (`check_delayed_correction`).
+- Derived summaries: a derived row adds nothing to the belief (`check_derived_summary`).
+- Priors: the observer declares the overlap of its prior rows with the data
+  (`check_overlap_declared`) and a zero-weight row changes nothing
+  (`check_zero_weight_rows`).
+- Calibration: for a statistical observer, the probability integral transform of the
+  truths is uniform within a declared margin over at least ten worlds
+  (`check_calibration`).
+- Refits: the refit is a function of the released rows, in release order, and of the
+  refit key; a refit and the incremental fold agree on the rows both have seen.

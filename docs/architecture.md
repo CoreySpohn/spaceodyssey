@@ -71,7 +71,7 @@ Adding a capability is meant to be a bounded, local change:
 
 1. A new world source, channel model, observer, policy or objective: implement the
    kind's abstract class, give it an integer `version`, and register it under an
-   entry point in the family's group. The family's kit runs on each registered kind.
+   entry point in the family's group.
 2. A heavyweight dependency: add it behind an optional extra, with its adapter
    module importing lazily.
 3. A genuinely new kind family: a deliberate API event with its own abstract class

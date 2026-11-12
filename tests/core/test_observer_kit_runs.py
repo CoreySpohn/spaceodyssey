@@ -17,17 +17,12 @@ import pytest
 from spaceodyssey.core import HostExecutor, handlers
 from spaceodyssey.core.conformance import (
     check_folded_once,
-    check_promotion_parity,
     replay_beliefs,
 )
 from tests.core.kit_helpers import (
-    HOST_WORLDS,
     N_STEPS,
-    NOISE,
     MeanMutant,
-    ReadyMean,
     RefitMean,
-    ResampleSample,
     first_worlds,
     kit_batch,
     kit_run,
@@ -117,36 +112,6 @@ def test_replay_presents_records_as_the_handler_did():
         replay_beliefs(study, dataclasses.replace(batch, carry=revised), roots)
 
 
-def test_promotion_parity_exact():
-    """Fails if a refit installed after any prefix of the folded rows differs from the
-    incremental belief, in release order or as `refit_rows` selects the rows, or if
-    `install` misses its subject's owned state or touches another's.
-    """
-    study, run, _, roots = kit_run("mean", "host")
-    result = check_promotion_parity(study, run, roots)
-    assert result, result.diagnostic
-    assert result.detail["n_checked"] == 8 * HOST_WORLDS
-    assert result.detail["canonical_equal"]
-
-
-def test_promotion_parity_refuses_stale_boolean_install():
-    """Fails if install can leave a subject-owned boolean stale."""
-    _, batch, _, roots = kit_run("mean", "host")
-    observer = ReadyMean()
-    study = kit_study(observer)
-    belief, summary = replay_beliefs(study, batch, roots)
-    run = dataclasses.replace(
-        batch, carry=dataclasses.replace(batch.carry, belief=belief, pbelief=summary)
-    )
-    correct = check_promotion_parity(study, run, roots)
-    assert correct, correct.diagnostic
-    result = check_promotion_parity(
-        study, run, roots, observer=ReadyMean(stale_ready=True)
-    )
-    assert not result
-    assert "install did not take the refit's ready" in result.diagnostic
-
-
 PARITY_CONTROLS = {
     "late_twice": (MeanMutant(late_twice=True), "release order"),
     "noop_install": (MeanMutant(noop_install=True), "did not take"),
@@ -157,25 +122,3 @@ PARITY_CONTROLS = {
     "canonical_only_bug": (MeanMutant(canonical_bug=True), "refit_rows"),
     "unanchored": (MeanMutant(ignore_odd=True), "do not reproduce the run"),
 }
-
-
-@pytest.mark.parametrize("control", PARITY_CONTROLS)
-def test_promotion_parity_controls(control):
-    """Fails if promotion parity passes a refit that folds its latest record twice, an
-    install that does nothing (even beside a doubled record), a refit wrong only in
-    canonical order, or an observer whose folds do not reproduce the run.
-    """
-    observer, message = PARITY_CONTROLS[control]
-    study, run, _, roots = kit_run("mean", "host")
-    result = check_promotion_parity(study, run, roots, observer=observer)
-    assert not result
-    assert message in result.diagnostic
-
-
-def test_declared_margins_need_ten_worlds():
-    """Fails if a margin is judged over fewer than ten worlds."""
-    study, run, _, roots = kit_run("sample", "host")
-    result = check_promotion_parity(
-        study, run, roots, observer=ResampleSample(noise=NOISE)
-    )
-    assert not result and "10 needed" in result.diagnostic

@@ -245,7 +245,6 @@ require_tier_reason = true
 "tests/core/test_observer_kit.py" = 220
 "tests/core/test_observer_kit_corrections.py" = 214
 "tests/core/test_observer_kit_runs.py" = 199
-"tests/core/test_observer_kit_statistics.py" = 201
 "tests/core/test_ops_state.py" = 260
 "tests/core/test_parity_corpus.py" = 382
 "tests/core/test_parity_values.py" = 10

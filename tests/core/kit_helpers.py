@@ -20,7 +20,6 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import jax.scipy.stats as jstats
 import numpy as np
 
 from spaceodyssey.core import (
@@ -64,51 +63,6 @@ class ReadyBelief(MeanBelief):
     """A running mean with subject-owned boolean state."""
 
     ready: jax.Array
-
-
-class ReadyMean(RefitMean):
-    """A boolean install mutant, with the fault off by default."""
-
-    subject_leaves = ("mean", "n", "ready")
-    stale_ready: jax.Array = _flag()
-
-    def init(self, caps):
-        belief = super().init(caps)
-        return ReadyBelief(belief.mean, belief.n, belief.aux, belief.n > 0)
-
-    def fold(self, belief, rec, caps, key=None):
-        folded = super().fold(belief, rec, caps, key=key)
-        return ReadyBelief(folded.mean, folded.n, folded.aux, folded.n > 0)
-
-    def analyze(self, belief):
-        analyzed = super().analyze(belief)
-        return ReadyBelief(analyzed.mean, analyzed.n, analyzed.aux, belief.ready)
-
-    def fold_summary(self, belief, rec, caps, key=None):
-        return RefitMean().fold_summary(belief, rec, caps, key=key)
-
-    def init_summary(self, caps):
-        return RefitMean().init_summary(caps)
-
-    def install(self, belief, fitted, subject):
-        put = super().install(belief, fitted, subject)
-        ready = belief.ready.at[subject].set(
-            jnp.where(self.stale_ready, belief.ready[subject], fitted.ready[subject])
-        )
-        return ReadyBelief(put.mean, put.n, put.aux, ready)
-
-    def layout(self, caps):
-        layout = super().layout(caps)
-        belief = layout.belief
-        return dataclasses.replace(
-            layout,
-            belief=ReadyBelief(
-                belief.mean,
-                belief.n,
-                belief.aux,
-                jax.ShapeDtypeStruct(belief.n.shape, jnp.bool_),
-            ),
-        )
 
 
 class RefitSample(toy.ToySampleObserver):
@@ -346,28 +300,6 @@ def kit_run(name, source="compiled"):
     carry = dataclasses.replace(batch.carry, belief=belief, pbelief=summary)
     run = RunResult(carry, batch.trace, observer.layout(study.caps))
     return study, run, truths, roots
-
-
-def pit_of_mean(belief, truth):
-    """Flat-prior Gaussian PIT of each subject's signal from the mean and count."""
-    n = jnp.maximum(belief.n, 1).astype(F64)
-    z = (truth.signal - belief.mean) * jnp.sqrt(n) / NOISE
-    return jstats.norm.cdf(z), belief.n > 0
-
-
-def pit_of_sample(noise):
-    """PIT of each subject's posterior draw against its signal, under `noise`.
-
-    A calibrated draw and the truth are two independent draws of one posterior, so
-    their difference has variance twice the posterior's, 2 noise^2 / n.
-    """
-
-    def pit(belief, truth):
-        n = jnp.maximum(belief.n, 1).astype(F64)
-        z = (belief.sample - truth.signal) / (noise * jnp.sqrt(2.0 / n))
-        return jstats.norm.cdf(z), belief.n > 0
-
-    return pit
 
 
 def first_worlds(tree, n):

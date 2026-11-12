@@ -13,15 +13,8 @@ from spaceodyssey.core.conformance.corpus import wake_count as wake_count
 from spaceodyssey.core.conformance.invariants import INVARIANTS as INVARIANTS
 from spaceodyssey.core.conformance.invariants import check_run as check_run
 from spaceodyssey.core.conformance.invariants import failures_of as failures_of
-from spaceodyssey.core.conformance.observer_kit import ParityMargin as ParityMargin
-from spaceodyssey.core.conformance.observer_kit import (
-    calibration_size as calibration_size,
-)
 from spaceodyssey.core.conformance.observer_kit import (
     check_calibration as check_calibration,
-)
-from spaceodyssey.core.conformance.observer_kit import (
-    check_declared_margins as check_declared_margins,
 )
 from spaceodyssey.core.conformance.observer_kit import (
     check_delayed_correction as check_delayed_correction,
@@ -36,22 +29,11 @@ from spaceodyssey.core.conformance.observer_kit import (
     check_overlap_declared as check_overlap_declared,
 )
 from spaceodyssey.core.conformance.observer_kit import (
-    check_promotion_parity as check_promotion_parity,
-)
-from spaceodyssey.core.conformance.observer_kit import (
-    check_refit_calibration as check_refit_calibration,
-)
-from spaceodyssey.core.conformance.observer_kit import (
     check_zero_weight_rows as check_zero_weight_rows,
-)
-from spaceodyssey.core.conformance.observer_kit import (
-    declared_margin as declared_margin,
 )
 from spaceodyssey.core.conformance.observer_kit import (
     refit_beliefs as refit_beliefs,
 )
-from spaceodyssey.core.conformance.observer_kit import release_order as release_order
 from spaceodyssey.core.conformance.observer_kit import (
     replay_beliefs as replay_beliefs,
 )
-from spaceodyssey.core.conformance.observer_kit import t_quantile as t_quantile

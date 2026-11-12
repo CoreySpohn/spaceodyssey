@@ -59,7 +59,7 @@ The observer accepts every row released to it and folds the first accepted revis
 an acquisition. When a later revision is accepted, the earlier rows are marked
 `superseded_by` it, and the later revision is logged but not folded again. The policy
 belief follows the same rule over the rows released to the policy. Replacing a fold with
-a refit is left to the observer kit.
+a refit is left to the observer.
 
 A snapshot reports `superseded_by` from the rows its own audience can see, so an
 observer-only revision does not show through a policy snapshot.

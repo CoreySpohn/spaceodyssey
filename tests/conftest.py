@@ -210,7 +210,6 @@ SLOW_FILES = {
     "test_observer_kit_runs.py": "observer kit on runs, one executor compile alone",
     "test_refresh_runs.py": "refresh runs compile the chunked driver per executor",
     "test_replay_refresh.py": "replay of refresh runs repeats the refresh compiles",
-    "test_observer_kit_statistics.py": GATE,
     "test_observer_kit_corrections.py": "scripted refresh runs, one compile per study",
     "test_run_document_runs.py": "a reloaded run executes on both executors",
     "test_corpus_invariants.py": GATE,

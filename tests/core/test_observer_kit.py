@@ -7,7 +7,6 @@ compile alone is over the unit budget.
 """
 
 import dataclasses
-import math
 
 import jax
 import jax.numpy as jnp
@@ -15,33 +14,19 @@ import numpy as np
 import pytest
 
 from spaceodyssey.core.conformance import (
-    ParityMargin,
-    calibration_size,
-    check_calibration,
-    check_declared_margins,
     check_delayed_correction,
     check_derived_summary,
     check_overlap_declared,
-    check_promotion_parity,
-    check_refit_calibration,
     check_zero_weight_rows,
-    declared_margin,
-    t_quantile,
 )
 from spaceodyssey.core.conformance.observer_kit import (
     _corrected_slots,
-    _set_key,
-    _shifted,
-    _stratum_failures,
 )
 from spaceodyssey.core.enums import RecordStatus
-from spaceodyssey.core.keys import refit_key
-from spaceodyssey.core.records import empty_log, log_records
-from spaceodyssey.core.refresh import revision_set_digest
+from spaceodyssey.core.records import empty_log
 from spaceodyssey.studies.premission import PedigreeRule, overlap_roles
 from spaceodyssey.studies.prior_observer import PriorObserver, prior_study
 from tests.core.kit_helpers import (
-    NOISE,
     OBSERVERS,
     KeepsSuperseded,
     RefitMean,
@@ -49,7 +34,6 @@ from tests.core.kit_helpers import (
     ResampleSample,
     correction_study,
     kit_study,
-    pit_of_mean,
 )
 from tests.core.prior_helpers import (
     EXTERNAL,
@@ -61,20 +45,6 @@ from tests.core.prior_helpers import (
 from tests.core.prior_helpers import table as prior_table
 
 STUDY = kit_study(OBSERVERS["mean"])
-
-
-def test_install_challenge_changes_every_leaf_value():
-    """Fails if booleans or large numeric values survive the install challenge."""
-    belief = (
-        jnp.asarray([False, True]),
-        jnp.asarray([0, 2**60], jnp.int64),
-        jnp.asarray([0.0, 1e20, -1e20], jnp.float64),
-    )
-    changed = _shifted(belief)
-    for got, before in zip(changed, belief, strict=True):
-        assert got.dtype == before.dtype
-        assert np.all(np.asarray(got) != np.asarray(before))
-    np.testing.assert_array_equal(changed[1], np.asarray([1, 2**60 + 1]))
 
 
 class Unowned(RefitMean):
@@ -99,37 +69,6 @@ class IntStochastic(RefitSample):
     """A stochastic leaf that is not floating point."""
 
     stochastic_leaves = ("n",)
-
-
-@pytest.mark.parametrize(
-    ("observer", "message"),
-    [
-        (Unowned(), "subject_leaves"),
-        (MisOwned(), "'spread'"),
-        (ExactStochastic(), "stochastic leaves"),
-        (IntStochastic(noise=NOISE), "'n'"),
-    ],
-    ids=["unowned", "mis_owned", "exact_stochastic", "int_stochastic"],
-)
-def test_promotion_parity_refuses_undeclared_leaf_roles(observer, message):
-    """Fails if parity judges an observer that does not name its subject-owned
-    leaves, names one its belief lacks, or declares stochastic leaves while
-    exact or on an integer leaf.
-    """
-    with pytest.raises(ValueError, match=message):
-        check_promotion_parity(STUDY, None, None, observer=observer)
-
-
-def test_declared_margins():
-    """Fails if an exact observer is asked for a margin, a declared statistical or
-    order-sensitive observer is refused, or the t quantile is off.
-    """
-    result = check_declared_margins(RefitMean())
-    assert result and not result.detail["judged_in_margin"]
-    assert check_declared_margins(RefitSample()).detail["margin"] == 0.1
-    assert check_declared_margins(ResampleSample()).detail["seeds"] == (0, 1)
-    assert t_quantile(9) == pytest.approx(2.2622, abs=1e-3)
-    assert t_quantile(1999) == pytest.approx(1.9612, abs=1e-4)
 
 
 class Undeclared(RefitSample):
@@ -196,57 +135,6 @@ MARGIN_CONTROLS = (
 )
 
 
-@pytest.mark.parametrize("cls", MARGIN_CONTROLS, ids=lambda c: c.__name__)
-def test_declared_margins_controls(cls):
-    """Fails if the kit judges an observer without a margin, seeds, standard error
-    and stochastic leaves; one sized below four standard errors; an exact one that
-    declares a margin; seeds that are not integers in [0, 2^32) (0.5 and 1.5, or 0
-    and 2^32, which fold into the same key); or a NaN margin.
-    """
-    observer = cls(noise=NOISE) if issubclass(cls, RefitSample) else cls()
-    assert not check_declared_margins(observer)
-    with pytest.raises(ValueError):
-        declared_margin(observer)
-    with pytest.raises(ValueError):
-        check_promotion_parity(STUDY, None, None, observer=observer)
-
-
-def test_margin_interval_at_its_boundary():
-    """Fails if a stratum's interval uses the normal 1.96 instead of the t quantile
-    on its worlds' degrees of freedom, or takes the degrees of freedom from every
-    seed of every world: ten worlds of twenty seeds, a mean difference of 0.055 and
-    a declared standard error of 0.02 give 0.055 + 2.262 x 0.02 = 0.1002, just
-    outside a margin of 0.1 (1.96 or 199 degrees of freedom would pass).
-    """
-    n_worlds, n_seeds = 10, 20
-    spread = np.where(np.arange(n_seeds) % 2 == 0, -0.01, 0.01)
-    promoted = np.zeros((n_worlds, 1, n_seeds, 4))
-    promoted[:, 0, :, 0] = 0.055 + spread
-    incremental = np.zeros((n_worlds, 1, 4))
-    subjects = np.zeros((n_worlds, 1), np.int64)
-    valid = np.ones((n_worlds, 1), bool)
-    declared = ParityMargin(0.1, tuple(range(n_seeds)), 0.02)
-    failures, worst = _stratum_failures(
-        "path", promoted, incremental, subjects, valid, declared
-    )
-    assert worst == pytest.approx(0.055 + t_quantile(9) * 0.02, rel=1e-9)
-    assert failures and "not inside" in failures[0]
-    assert 0.055 + 1.96 * 0.02 < 0.1 and 0.055 + t_quantile(199) * 0.02 < 0.1
-
-
-@pytest.mark.parametrize("margin", [math.nan, 0.0, -0.1, math.inf])
-def test_calibration_margin_must_be_positive_and_finite(margin):
-    """Fails if calibration (or its sizing, or refit calibration) accepts a NaN,
-    zero, negative or infinite margin, which would pass arbitrary PITs.
-    """
-    with pytest.raises(ValueError, match="positive and finite"):
-        check_calibration(None, None, pit_of_mean, margin=margin)
-    with pytest.raises(ValueError, match="positive and finite"):
-        calibration_size(margin, 4)
-    with pytest.raises(ValueError, match="positive and finite"):
-        check_refit_calibration(STUDY, None, None, None, pit_of_mean, margin=margin)
-
-
 def test_the_corrected_rows_follow_the_replacement_rule():
     """Fails if the kit's own reading of the rule keeps a superseded revision, counts
     a derived or unaccepted row or another subject's, keeps a retracted acquisition, or
@@ -289,29 +177,6 @@ def test_the_corrected_rows_follow_the_replacement_rule():
     assert _corrected_slots(log, caps, 0) == [2, 1]  # channel 19 before channel 20
     assert _corrected_slots(log, caps, 1) == [7]
     assert _corrected_slots(log, caps, 0, exclude=(1,)) == []
-
-
-def test_the_kit_refit_key_is_the_refresh_protocols():
-    """Fails if a kit refit is keyed by a seed and a subject alone, so that the set it
-    refits does not move its key, or if seed 0 is not the run's own key.
-    """
-    study = correction_study(KeepsSuperseded())
-    log = empty_log(study.caps)
-    n = study.caps.n_log
-    valid = jnp.arange(n) < 2
-    index = jnp.asarray([3, 4] + [0] * (n - 2))
-    first = log_records(log, valid=valid, acquisition_index=index)
-    second = log_records(log, valid=valid, acquisition_index=index.at[1].set(9))
-    root = jnp.asarray([0, 7], jnp.uint32)
-    subject = jnp.asarray(0)
-    key = _set_key(root, jnp.asarray(0), subject, first)
-    np.testing.assert_array_equal(
-        key, refit_key(root, subject, revision_set_digest(first))
-    )
-    other_set = _set_key(root, jnp.asarray(0), subject, second)
-    other_seed = _set_key(root, jnp.asarray(1), subject, first)
-    assert not np.array_equal(key, other_set)
-    assert not np.array_equal(key, other_seed)
 
 
 @pytest.mark.parametrize(

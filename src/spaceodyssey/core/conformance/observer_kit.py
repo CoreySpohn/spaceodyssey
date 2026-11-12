@@ -60,7 +60,6 @@ canonical refit also matched exactly.
 
 import dataclasses
 import math
-import operator
 from typing import NamedTuple
 
 import equinox as eqx
@@ -103,22 +102,6 @@ Z_975 = 1.959963984540054
 MIN_WORLDS = 10
 
 
-def t_quantile(df):
-    """The two-sided 95 percent Student t quantile with `df` degrees of freedom.
-
-    The Cornish-Fisher expansion in 1 / df (Abramowitz and Stegun 26.7.5), within
-    1e-3 of the exact value from 9 degrees of freedom, the fewest the kit uses.
-    """
-    z = Z_975
-    terms = (
-        (z**3 + z) / 4.0,
-        (5 * z**5 + 16 * z**3 + 3 * z) / 96.0,
-        (3 * z**7 + 19 * z**5 + 17 * z**3 - 15 * z) / 384.0,
-        (79 * z**9 + 776 * z**7 + 1482 * z**5 - 1920 * z**3 - 945 * z) / 92160.0,
-    )
-    return z + sum(g / df ** (i + 1) for i, g in enumerate(terms))
-
-
 def _positive(value):
     """Whether `value` is a positive, finite real number."""
     return (
@@ -126,85 +109,6 @@ def _positive(value):
         and not isinstance(value, bool)
         and math.isfinite(value)
         and value > 0
-    )
-
-
-def _integer(value):
-    """`value` as an int if it is an integer (not a bool), else None."""
-    if isinstance(value, bool):
-        return None
-    try:
-        return operator.index(value)
-    except TypeError:
-        return None
-
-
-class ParityMargin(NamedTuple):
-    """What a statistical observer declares: margin, refit seeds, standard error."""
-
-    margin: float
-    seeds: tuple[int, ...]
-    standard_error: float
-
-
-def declared_margin(observer):
-    """The `ParityMargin` of an observer judged within a margin, or None.
-
-    An observer is judged within a margin when it is `statistical` or
-    `order_sensitive`. Refuses (`ValueError`) such an observer that lacks the
-    margin, the seeds or the standard error, declares a nonpositive or non-finite
-    one, repeats a seed, or sizes its margin below four standard errors; and an
-    exact observer that declares any of them.
-    """
-    margin, seeds, se = observer.margin, observer.seeds, observer.standard_error
-    stochastic = observer.stochastic_leaves
-    if not (observer.statistical or observer.order_sensitive):
-        if margin is not None or seeds or se is not None or stochastic:
-            raise ValueError(
-                "an exact observer declares no margin, seeds, standard error or "
-                "stochastic leaves; set statistical or order_sensitive to compare "
-                "within a margin"
-            )
-        return None
-    missing = [
-        name
-        for name, value in (
-            ("margin", margin),
-            ("seeds", seeds),
-            ("standard_error", se),
-            ("stochastic_leaves", stochastic),
-        )
-        if value is None or (name in ("seeds", "stochastic_leaves") and not value)
-    ]
-    if missing:
-        raise ValueError(
-            f"an observer judged within a margin must declare {', '.join(missing)} "
-            "as class attributes"
-        )
-    if not (_positive(margin) and _positive(se)):
-        raise ValueError("margin and standard_error must be positive and finite")
-    seeds = tuple(_integer(s) for s in seeds)
-    if None in seeds:
-        raise ValueError("seeds must be integers")
-    if min(seeds) < 0 or max(seeds) >= 2**32 or len(set(seeds)) != len(seeds):
-        raise ValueError("seeds must be distinct integers in [0, 2^32)")
-    if margin < 4.0 * se:
-        raise ValueError(
-            f"a margin of {margin} is narrower than four standard errors "
-            f"({4.0 * se}); size the run as N = (4 sigma / margin)^2"
-        )
-    return ParityMargin(float(margin), seeds, float(se))
-
-
-def check_declared_margins(observer):
-    """Check 4: an observer's margin declaration is complete and consistent."""
-    try:
-        declared = declared_margin(observer)
-    except ValueError as err:
-        return make_result("declared_margins", [str(err)], judged_in_margin=True)
-    detail = {} if declared is None else declared._asdict()
-    return make_result(
-        "declared_margins", [], judged_in_margin=declared is not None, **detail
     )
 
 
@@ -381,11 +285,6 @@ def _walk(carry, trace, audience):
     return order, stamps
 
 
-def release_order(carry, trace, audience=Audience.OBSERVER):
-    """Log slots folded for `audience`, in the order the run folded them."""
-    return _walk(carry, trace, audience)[0]
-
-
 def _orders(carry, trace, audience):
     """Fold orders and fold-time stamps of every world of a batch, padded.
 
@@ -485,20 +384,6 @@ def replay_beliefs(study, run, roots, observer=None):
     return _replay(observer, study, run.carry.log, own, policy, roots)
 
 
-def _shifted(tree):
-    """Invert booleans and shift numeric values enough that each differs."""
-
-    def shift(x):
-        if x.dtype == jnp.bool_:
-            return ~x
-        one = jnp.ones((), x.dtype)
-        if jnp.issubdtype(x.dtype, jnp.integer):
-            return x + one
-        return x + jnp.maximum(one, jnp.abs(x))
-
-    return jax.tree_util.tree_map(shift, tree)
-
-
 def _seeded(root, seed):
     """The root of a declared seed: the run's own root at seed 0, another one else."""
     return jnp.where(seed == 0, root, jr.fold_in(root, seed))
@@ -523,125 +408,6 @@ def _refit_subject(observer, study, log, root, seed, subject):
     )
 
 
-@lifting_jit
-def _promotions(
-    observer, study, logs, orders, counts, accepted, released, roots, seeds
-):
-    """Incremental, promoted and install-challenge beliefs of a batch of worlds.
-
-    Per world: the belief after each of the `n_log` positions of `order` (unchanged
-    past `n`); per position and seed, the refit of the position's subject installed
-    into that belief and analyzed, once from the prefix's rows in release order and
-    once from `refit_rows` of the prefix's log; and, before analysis, the release
-    refit installed into a shifted copy of the belief, with that copy and the refit.
-    """
-    caps = study.caps
-    layout = observer.layout(caps)
-
-    def one(log, order, n, accepted, released, root):
-        pos = jnp.arange(order.shape[0])
-        rows = _presented_rows(log, order, n, (accepted, released), caps)
-        keys = fold_keys(root, rows, study)
-        seen = masked_record(rows, caps, Audience.OBSERVER)
-        _, incremental = _fold_path(
-            rows,
-            root,
-            study,
-            Audience.OBSERVER,
-            lambda b, r, k: observer.analyze(observer.fold(b, r, caps, key=k)),
-            observer.init(caps),
-        )
-        counting = (
-            rows.valid
-            & jnp.isin(rows.kind, jnp.asarray(caps.refit_kinds, I64))
-            & jnp.isin(rows.status, jnp.asarray(caps.refit_statuses, I64))
-        )
-
-        def promote(k, seed):
-            subject = rows.subject[k]
-            current = jax.tree_util.tree_map(lambda x: x[k], incremental)
-            take = counting & (pos <= k) & (rows.subject == subject)
-            first = jnp.argsort(~take, stable=True)
-            picked = jax.tree_util.tree_map(
-                lambda x: x[first], dataclasses.replace(seen, valid=take)
-            )
-            # the key names the set, not the release order the rows came in
-            in_order = jnp.lexsort(
-                (
-                    picked.revision,
-                    picked.acquisition_index,
-                    picked.channel,
-                    ~picked.valid,
-                )
-            )
-            key = _set_key(
-                root,
-                seed,
-                subject,
-                jax.tree_util.tree_map(lambda x: x[in_order], picked),
-            )
-            fitted = observer.refit(observer.init(caps), picked, caps, key, keys[first])
-            released_ = observer.analyze(observer.install(current, fitted, subject))
-            in_prefix = (
-                jnp.zeros(log.valid.shape, bool).at[order].max((pos <= k) & (pos < n))
-            )
-            prefix = dataclasses.replace(
-                log, accepted_tick=jnp.where(in_prefix, log.accepted_tick, -1)
-            )
-            canon = _refit_subject(observer, study, prefix, root, seed, subject)
-            canonical = observer.analyze(observer.install(current, canon, subject))
-            shifted = _shifted(current)
-            installed = observer.install(shifted, fitted, subject)
-            return released_, canonical, (installed, shifted, fitted)
-
-        each = jax.vmap(jax.vmap(promote, in_axes=(None, 0)), in_axes=(0, None))
-        promoted, canonical, challenge = each(pos, seeds)
-        projections = (
-            jax.vmap(layout.project)(incremental)[0],
-            jax.vmap(jax.vmap(layout.project))(promoted)[0],
-            jax.vmap(jax.vmap(layout.project))(canonical)[0],
-        )
-        return incremental, promoted, canonical, challenge, projections
-
-    return jax.vmap(one)(logs, orders, counts, accepted, released, roots)
-
-
-def _mismatch(got, want, valid, loose=()):
-    """`(index, leaf)` of the first disagreement of two batched beliefs, or None.
-
-    `valid` masks the leading axes of `got`; `want` broadcasts against `got`.
-    Integers must be equal. Floats must agree within `GO_TOLERANCE` (NaN only where
-    both are NaN), except the leaves named in `loose`, which need only be finite
-    wherever `want` is.
-    """
-    lead = valid.ndim
-    named_want = named_leaves(want)
-    for name, g in named_leaves(got).items():
-        g, w = np.asarray(g), np.asarray(named_want[name])
-        if g.dtype.kind in "biu":
-            bad = g != w
-        elif name in loose:
-            bad = ~np.isfinite(g) & np.isfinite(w)
-        else:
-            bad = ~(np.abs(g - w) <= GO_TOLERANCE) & ~(np.isnan(g) & np.isnan(w))
-        bad = np.broadcast_to(bad, np.broadcast_shapes(g.shape, w.shape))
-        bad = bad.reshape(*bad.shape[:lead], -1).any(axis=-1) & valid
-        if bad.any():
-            return tuple(int(i) for i in np.argwhere(bad)[0]), name
-    return None
-
-
-def _expand(tree, axis):
-    """Insert a unit axis in every leaf, so a belief broadcasts against its seeds."""
-    return jax.tree_util.tree_map(lambda x: np.expand_dims(np.asarray(x), axis), tree)
-
-
-def _row_label(where, subjects, seeds):
-    w, k, j = where
-    rows = f"{k + 1} row{'s' if k else ''}"
-    return f"world {w}: after {rows}, subject {int(subjects[w, k])}, seed {seeds[j]}"
-
-
 def _leaf_roles(observer, caps):
     """The subject-owned and stochastic leaf names, checked against the layout.
 
@@ -663,203 +429,6 @@ def _leaf_roles(observer, caps):
         if name not in leaves or not jnp.issubdtype(leaves[name].dtype, jnp.floating):
             raise ValueError(f"stochastic leaf {name!r} is not a float belief leaf")
     return set(owned), set(observer.stochastic_leaves)
-
-
-def _same(a, b):
-    """Elementwise equality, with NaN equal to NaN."""
-    return (a == b) | (np.isnan(a) & np.isnan(b)) if a.dtype.kind == "f" else a == b
-
-
-def _install_failures(challenge, owned, subjects, valid, seeds):
-    """Install must write the refit subject's owned state and nothing else.
-
-    Before analysis, every subject-owned leaf must hold the refit's values at the
-    refit subject and the shifted belief's values at every other subject, and every
-    other leaf must keep the shifted belief's values.
-    """
-    installed, shifted, fitted = (named_leaves(t) for t in challenge)
-    every = valid[:, :, None]
-    for name, got in installed.items():
-        got, before, refit = (np.asarray(t[name]) for t in (installed, shifted, fitted))
-        if name not in owned:
-            bad = ~_same(got, before).reshape(*got.shape[:3], -1).all(-1) & every
-            if bad.any():
-                where = tuple(int(i) for i in np.argwhere(bad)[0])
-                return [
-                    f"{_row_label(where, subjects, seeds)}: install changed the "
-                    f"shared leaf {name}"
-                ]
-            continue
-        n_subjects = got.shape[3]
-        mine = np.arange(n_subjects) == subjects[:, :, None, None]
-        mine = mine.reshape(mine.shape + (1,) * (got.ndim - 4))
-        kept = _same(got, before) | mine
-        took = _same(got, refit) | ~mine
-        for ok, what in (
-            (took, "did not take the refit's"),
-            (kept, "changed another subject's"),
-        ):
-            bad = ~ok.reshape(*got.shape[:3], -1).all(-1) & every
-            if bad.any():
-                where = tuple(int(i) for i in np.argwhere(bad)[0])
-                return [f"{_row_label(where, subjects, seeds)}: install {what} {name}"]
-    return []
-
-
-def _stratum_failures(label, promoted, incremental, subjects, valid, declared):
-    """Per (subject, depth) stratum, the projection difference judged in the margin.
-
-    The difference at the refit subject is averaged over seeds within each world;
-    each stratum's worlds give a t interval, with the standard error the larger of
-    the observed and the declared one, that must lie inside the margin. A stratum
-    with fewer than `MIN_WORLDS` worlds, or a non-finite difference, fails.
-    """
-    n_rows = subjects.shape[1]
-    take = subjects[:, :, None, None]
-    diff = np.take_along_axis(promoted, take, axis=-1)[..., 0]
-    diff = (diff - np.take_along_axis(incremental, take[:, :, 0], axis=-1)).mean(-1)
-    depth = np.stack(
-        [
-            (subjects[:, : k + 1] == subjects[:, k : k + 1]).sum(1)
-            for k in range(n_rows)
-        ],
-        axis=1,
-    )
-    strata = {}
-    for w, k in np.argwhere(valid):
-        strata.setdefault((int(subjects[w, k]), int(depth[w, k])), []).append(
-            diff[w, k]
-        )
-    failures, worst = [], 0.0
-    for (subject, rows), values in sorted(strata.items()):
-        values = np.asarray(values)
-        name = f"{label}: subject {subject} after {rows} of its rows"
-        if values.size < MIN_WORLDS:
-            failures.append(f"{name} has {values.size} worlds; {MIN_WORLDS} needed")
-            continue
-        if not np.all(np.isfinite(values)):
-            failures.append(f"{name}: a projection difference is not finite")
-            continue
-        estimate = float(values.mean())
-        observed = float(values.std(ddof=1)) / math.sqrt(values.size)
-        half = t_quantile(values.size - 1) * max(observed, declared.standard_error)
-        worst = max(worst, abs(estimate) + half)
-        if abs(estimate) + half > declared.margin:
-            failures.append(
-                f"{name}: projection difference {estimate:.4g} +/- {half:.3g} is "
-                f"not inside +/- {declared.margin}"
-            )
-    return failures, worst
-
-
-def check_promotion_parity(study, run, roots, *, observer=None):
-    """Check 3: the incremental belief equals the refit installed into it.
-
-    For each world and each prefix of the rows the observer folded, the subject of
-    the prefix's last row is refit and installed into the incremental belief after
-    that prefix, then analyzed, twice (see the module docstring on row order):
-
-    - from the prefix's counting rows (`caps.refit_kinds`, `caps.refit_statuses`)
-      in release order, counting rows first, with their fold keys;
-    - from `refit_rows` of the prefix's log.
-
-    Every leaf must match the incremental belief, integers exactly and floats within
-    the parity tolerances, with one exception: the observer's declared
-    `stochastic_leaves` need only be finite in the release-order path when it is
-    `statistical`, and in the `refit_rows` path when it is `statistical` or
-    `order_sensitive`. A path with loose leaves is judged in the observer's margin
-    instead: per stratum (the refit subject and how many of its rows the prefix
-    holds), the trace-projection difference at the refit subject, averaged over the
-    declared seeds within each world, gives a t interval over worlds with the larger
-    of the observed and declared standard errors, inside the margin, over
-    `MIN_WORLDS` worlds at least.
-
-    `install` is challenged too: the release-order refit, installed into a copy of
-    the incremental belief with booleans inverted and numeric values shifted so
-    each differs, must give the refit subject the refit's values in every leaf
-    the observer declares in
-    `subject_leaves`, keep every other subject's values there, and keep every other
-    leaf, before analysis.
-
-    `observer` defaults to the study's; another observer may be judged on the same
-    run when its folds are the study observer's. The kit's incremental path is
-    anchored to the run: after the last folded row it must equal the run's final
-    belief within the parity tolerances.
-
-    Refuses an observer that cannot refit, whose refit kinds the study's capacities
-    do not hold, or whose leaf declarations or margin declarations are missing or
-    inconsistent, and a run in which no world folded a row.
-    """
-    observer = study.observer if observer is None else observer
-    caps = study.caps
-    declared = declared_margin(observer)
-    if not observer.capabilities().refit or not caps.refit_kinds:
-        raise ValueError("promotion parity needs a refit-capable observer, lowered")
-    owned, stochastic = _leaf_roles(observer, caps)
-    seeds = (0,) if declared is None else declared.seeds
-    carry, trace = jax.device_get((run.carry, run.trace))
-    orders, counts, accepted, released = _orders(carry, trace, Audience.OBSERVER)
-    if not counts.any():
-        raise ValueError("no world folded a row; promotion parity is vacuous")
-    incremental, promoted, canonical, challenge, projections = jax.device_get(
-        _promotions(
-            observer,
-            study,
-            run.carry.log,
-            jnp.asarray(orders),
-            jnp.asarray(counts),
-            jnp.asarray(accepted),
-            jnp.asarray(released),
-            roots,
-            jnp.asarray(seeds, I64),
-        )
-    )
-    n_rows = orders.shape[1]
-    valid = np.arange(n_rows)[None, :] < counts[:, None]
-    subjects = np.take_along_axis(np.asarray(carry.log.subject), orders, axis=1)
-    worlds = np.flatnonzero(counts)
-    last = jax.tree_util.tree_map(lambda x: x[worlds, counts[worlds] - 1], incremental)
-    ran = jax.tree_util.tree_map(lambda x: x[worlds], carry.belief)
-    anchor = _mismatch(last, ran, np.ones(worlds.size, bool))
-    if anchor:
-        (i,), leaf = anchor
-        return make_result(
-            "promotion_parity",
-            [f"world {int(worlds[i])}: the folds do not reproduce the run: {leaf}"],
-        )
-    statistical, ordered = observer.statistical, observer.order_sensitive
-    by_seed = valid[:, :, None] & np.ones(len(seeds), bool)
-    current = _expand(incremental, 2)
-    failures = []
-    paths = (
-        ("release order", promoted, statistical),
-        ("refit_rows", canonical, statistical or ordered),
-    )
-    for label, beliefs, loose in paths:
-        found = _mismatch(beliefs, current, by_seed, stochastic if loose else ())
-        if found:
-            where, leaf = found
-            failures.append(
-                f"{label}: {_row_label(where, subjects, seeds)}: the installed "
-                f"refit's {leaf} differs from the incremental belief"
-            )
-    failures += _install_failures(challenge, owned, subjects, valid, seeds)
-    detail = {
-        "n_worlds": int(counts.size),
-        "n_checked": int(by_seed.sum()),
-        "canonical_equal": _mismatch(canonical, current, by_seed) is None,
-        "statistical": statistical,
-        "order_sensitive": ordered,
-    }
-    p_inc, p_rel, p_can = projections
-    for (label, _, loose), promoted_p in zip(paths, (p_rel, p_can), strict=True):
-        if loose:
-            found, worst = _stratum_failures(
-                label, promoted_p, p_inc, subjects, valid, declared
-            )
-            failures += found
-            detail[f"{label} worst"] = worst
-    return make_result("promotion_parity", failures, **detail)
 
 
 @lifting_jit
@@ -886,75 +455,6 @@ def refit_beliefs(study, run, roots, *, observer=None, seed=0):
     return _refit_all(
         observer, study, run.carry.belief, run.carry.log, roots, jnp.asarray(seed)
     )
-
-
-def check_refit_calibration(study, run, truths, roots, pit, *, margin, observer=None):
-    """Check 1 applied to refits at each subject row depth, per declared seed.
-
-    Promotion parity holds a statistical refit to the incremental belief in mean
-    only; this holds its draws to the truth at every canonical prefix parity
-    exercises. `pit` returns one PIT slot per subject. Only the refitted subject's
-    PIT counts at each prefix, pooled over subjects separately at each row depth
-    under each declared seed (or seed 0). Every depth must pass the calibration
-    margin, with worlds as the independent units for the DKW slack.
-    """
-    if not _positive(margin):
-        raise ValueError(f"a margin must be positive and finite, not {margin}")
-    observer = study.observer if observer is None else observer
-    declared = declared_margin(observer)
-    seeds = (0,) if declared is None else declared.seeds
-    carry, trace = jax.device_get((run.carry, run.trace))
-    orders, counts, accepted, released = _orders(carry, trace, Audience.OBSERVER)
-    if not counts.any():
-        raise ValueError("no world folded a row; refit calibration is vacuous")
-    canonical = _promotions(
-        observer,
-        study,
-        run.carry.log,
-        jnp.asarray(orders),
-        jnp.asarray(counts),
-        jnp.asarray(accepted),
-        jnp.asarray(released),
-        roots,
-        jnp.asarray(seeds, I64),
-    )[2]
-
-    def one(beliefs, truth):
-        return jax.vmap(jax.vmap(lambda belief: pit(belief, truth)))(beliefs)
-
-    values, counted = (np.asarray(x) for x in jax.vmap(one)(canonical, truths))
-    n_subjects = study.caps.n_subjects
-    if values.shape[3:] != (n_subjects,):
-        raise ValueError("refit calibration needs one PIT slot per subject")
-    n_rows = orders.shape[1]
-    valid = np.arange(n_rows)[None, :] < counts[:, None]
-    subjects = np.take_along_axis(np.asarray(carry.log.subject), orders, axis=1)
-    depth = np.stack(
-        [
-            (subjects[:, : k + 1] == subjects[:, k : k + 1]).sum(1)
-            for k in range(n_rows)
-        ],
-        axis=1,
-    )
-    failures, detail = [], {}
-    for j, seed in enumerate(seeds):
-        per_depth = {}
-        for rows in sorted(set(depth[valid].tolist())):
-            take = (
-                valid[:, :, None]
-                & (depth[:, :, None] == rows)
-                & (subjects[:, :, None] == np.arange(n_subjects))
-            )
-            # Each world contributes at most once per subject at this depth.
-            pits = np.where(take, values[:, :, j], 0.0).sum(axis=1)
-            used = (take & counted[:, :, j]).any(axis=1)
-            result = _calibration(pits, used, margin)
-            label = f"after {rows} of its rows"
-            per_depth[label] = result.detail
-            if not result:
-                failures.append(f"seed {seed}, {label}: {result.diagnostic}")
-        detail[f"seed {seed}"] = per_depth
-    return make_result("refit_calibration", failures, **detail)
 
 
 def _corrected_slots(log, caps, subject, exclude=()):
