@@ -57,10 +57,10 @@ import jax.numpy as jnp
 import jax.random as jr
 
 from spaceodyssey.core import Capacities, HostExecutor, RunStatus
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 
 caps = Capacities(n_subjects=2, n_an=2, n_assets=1, n_lanes=1, n_channels=1)
-study = toy.survey_1(caps=caps)
+study = builder.survey_1(caps=caps)
 truth = toy.ToyTruth(signal=jnp.array([1.0, 1.2]))
 result = HostExecutor().run(study, truth, jr.PRNGKey(0), 40)
 print(RunStatus(result.status).name, int(result.carry.log.valid.sum()), "records")

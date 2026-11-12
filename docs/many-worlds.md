@@ -43,10 +43,10 @@ from spaceodyssey.core import (
     histories_equal,
     index_world,
 )
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 
 caps = Capacities(n_subjects=2, n_an=2, n_assets=1, n_lanes=1, n_channels=1)
-study = toy.survey_1(caps=caps)
+study = builder.survey_1(caps=caps)
 ```
 
 The last line builds the study of the previous page in one call. It has two stars,

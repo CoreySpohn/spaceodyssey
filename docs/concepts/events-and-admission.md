@@ -42,10 +42,10 @@ from spaceodyssey.core import (
     RunStatus,
     Stage,
 )
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 
 caps = Capacities(n_subjects=2, n_an=2, n_assets=1, n_lanes=1, n_channels=1)
-study = toy.survey_1(caps=caps)
+study = builder.survey_1(caps=caps)
 truth = toy.ToyTruth(signal=jnp.array([1.0, 1.2]))
 key = jr.PRNGKey(0)
 

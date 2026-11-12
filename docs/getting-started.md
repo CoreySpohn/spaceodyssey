@@ -40,7 +40,7 @@ import jax.random as jr
 import numpy as np
 
 from spaceodyssey.core import Capacities, HostExecutor, RunStatus
-from spaceodyssey.studies import toy
+from spaceodyssey.studies import builder, toy
 ```
 
 ## What is the smallest campaign worth running?
@@ -71,7 +71,7 @@ meet them.
 
 ## One call builds the study and one call runs it
 
-The library ships this toy as `toy.survey_1`. It needs only the capacities, which are
+The library ships this toy as `builder.survey_1`. It needs only the capacities, which are
 the sizes of the arrays the study may fill: two subjects, one asset, one lane and one
 channel. Running it needs a truth (the simulated world, here the true brightness of
 each star, chosen by hand as 1.0 and 1.2 so later cells can compare belief with
@@ -83,7 +83,7 @@ event and a closing event, as the concepts section shows), so 40 steps is genero
 
 ```{code-cell} python
 caps = Capacities(n_subjects=2, n_an=2, n_assets=1, n_lanes=1, n_channels=1)
-study = toy.survey_1(caps=caps)
+study = builder.survey_1(caps=caps)
 truth = toy.ToyTruth(signal=jnp.array([1.0, 1.2]))
 result = HostExecutor().run(study, truth, jr.PRNGKey(0), 40)
 print(RunStatus(result.status).name, bool(result.complete))
