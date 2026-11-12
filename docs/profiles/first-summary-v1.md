@@ -34,7 +34,7 @@ Status: draft. Every entry is a proposal until it is adopted.
 - **background multiplier.** Background variance multiplier k = 1 (one roll, no differencing, known mean subtracted), passed explicitly.
 - **systematic floor.** The systematic noise floor is off in the planner and the law (ppfact infinite).
 - **thermal.** Thermal emission is off (eps_warm_T_cold = 0); the telescope temperature is inert.
-- **exozodi.** Fexozodi at 1 AU = n_ez x one-zodi surface brightness x (L / Lsun), with n_ez = 3 passed explicitly.
+- **exozodi.** Fexozodi at 1 AU takes the host's own colour: n_ez x 10^(-0.4 x 22) x 10^(0.4 x 4.83) x (d / 10 pc)^2 x f_lambda / F0, so it scales with the host's V-band luminosity and its flux density at the report wavelength, with n_ez = 3 passed explicitly.
 - **detection.** Detection is the event counts >= 5 limit_counts; a null is the complementary event at a realized science duration t > 0.
 - **cadence.** Fixed frames with integer frame counts: read noise and clock-induced charge per frame (a partial last frame counts as one), dark current per second; planned exposures are whole frames. The legacy photon-counting cadence stays available when a detector declares it, and every row records its cadence.
 

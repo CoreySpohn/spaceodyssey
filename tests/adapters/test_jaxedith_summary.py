@@ -24,7 +24,6 @@ from jaxedith import (
     count_rates_from_system_ayo,
     exptime_ayo,
     snr_ayo,
-    zodi_fn_ayo,
     zodi_fn_leinert,
 )
 from optixstuff import (
@@ -168,8 +167,12 @@ def hand_rates(report, scene, a_au, Lambda, times_jd, *, ppfact=math.inf):
         ]
     )
     zodi = common * fzodi * aperture
-    one_zodi = float(zodi_fn_ayo(None, report._exposure(0.0), None))
-    exozodi = common * scene.n_exozodi * one_zodi * scene.luminosity_lsun * aperture
+    # One zodi is 22 mag/arcsec^2 in V at 1 AU around a star of the Sun's V-band
+    # luminosity; the host's own colour makes it that host's flux density at the
+    # report wavelength scaled to 10 pc.
+    one_zodi_host = 10.0 ** (-0.4 * 22.0) * 10.0 ** (0.4 * 4.83)
+    host = one_zodi_host * (scene.dist_pc / 10.0) ** 2 * star
+    exozodi = common * scene.n_exozodi * host * aperture
     exozodi /= a_au**2  # surface brightness at 1 AU scaled to the physical radius
     spec = report.detector_spec
     n_pix = coro.area_lod2 / (spec.pixel_scale_arcsec / lod_arcsec()) ** 2
@@ -284,12 +287,13 @@ def test_hand_count_and_variance_budget(observatory):
     assert raw / report.optical_path.primary.area_m2 - 1.0 > 0.1
 
 
-def test_exozodi_scales_with_physical_radius_luminosity_and_aperture(observatory):
-    """Fails if the exozodi rate is not n_ez F_1zodi (L/Lsun) / r_AU^2 per aperture.
+def test_exozodi_scales_with_physical_radius_host_flux_and_aperture(observatory):
+    """Fails if the exozodi rate is not n_ez F_host / r_AU^2 per aperture.
 
-    At a fixed host the rate falls as 1/r_AU^2; it is linear in luminosity and in
-    the aperture solid angle; moving the same disk to another distance at the same
-    physical radius leaves it unchanged. A mutant that scales by the angular
+    At a fixed host the rate falls as 1/r_AU^2; it is linear in the host's flux
+    density and in the aperture solid angle, and the host's own colour sets it: the
+    catalog luminosity does not enter, and at a fixed flux density a host moved
+    to twice the distance is four times as luminous. A mutant that scales by the angular
     separation instead of the physical radius changes with distance.
     """
     interval = ScienceInterval.from_start(EPOCH_JD + 30.0, 3600.0)
@@ -304,12 +308,13 @@ def test_exozodi_scales_with_physical_radius_luminosity_and_aperture(observatory
 
     base = exozodi(1.0)
     np.testing.assert_allclose(exozodi(2.0), base / 4.0, rtol=1e-12)
+    np.testing.assert_allclose(exozodi(1.0, luminosity_lsun=3.0), base, rtol=1e-12)
     np.testing.assert_allclose(
-        exozodi(1.0, luminosity_lsun=3.0), 2.0 * base, rtol=1e-12
+        exozodi(1.0, star_flux_density_jy=84.0), 2.0 * base, rtol=1e-12
     )
     np.testing.assert_allclose(exozodi(1.0, n_exozodi=6.0), 2.0 * base, rtol=1e-12)
     np.testing.assert_allclose(exozodi(1.0, area_lod2=3.0), 2.0 * base, rtol=1e-12)
-    np.testing.assert_allclose(exozodi(1.0, dist_pc=20.0), base, rtol=1e-12)
+    np.testing.assert_allclose(exozodi(1.0, dist_pc=20.0), 4.0 * base, rtol=1e-12)
     # Mutant: separation in arcsec in place of the physical radius in AU.
     assert abs((base * 10.0**2) / (base * 20.0**2) - 1.0) > 0.5
 
@@ -331,7 +336,8 @@ def test_expected_and_predict_share_one_function_and_split_components(observator
         assert np.array_equal(np.asarray(a), np.asarray(b))
     truth = SummaryTruth(toy_scene(n_exozodi=6.0, star_flux_density_jy=84.0), theta)
     true = report.expected(truth, interval)
-    np.testing.assert_allclose(true.exozodi, 2.0 * predicted.exozodi, rtol=1e-12)
+    # twice the dust around a star twice as bright: four times the exozodi
+    np.testing.assert_allclose(true.exozodi, 4.0 * predicted.exozodi, rtol=1e-12)
     np.testing.assert_allclose(true.planet, 2.0 * predicted.planet, rtol=1e-12)
     np.testing.assert_allclose(true.leakage, 2.0 * predicted.leakage, rtol=1e-12)
     np.testing.assert_allclose(true.zodi, predicted.zodi, rtol=1e-12)

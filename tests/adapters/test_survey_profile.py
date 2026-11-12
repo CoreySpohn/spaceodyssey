@@ -438,3 +438,58 @@ def test_a_requirement_above_the_floor_limit_has_infinite_time(channel):
 
     assert math.isinf(solve(1.5 * limit))
     assert math.isfinite(solve(0.5 * limit))
+
+
+@medium
+def test_the_baseline_exozodi_takes_the_host_color():
+    """The default profile's exozodi follows the host's colour at the report wavelength.
+
+    Compared with the solar-colour form n * F_1zodi(lambda) * L_V (the one-zodi value
+    of the AYO local zodi), the ratio is the host's colour over the zodi's. The zodi is
+    slightly redder than the Sun, so the Sun-like host sits below one (0.81 at 1000
+    nm); a K dwarf is redder than the Sun and sits more than 30 percent above the
+    Sun-like host. A solar-colour exozodi would give the same ratio for both hosts.
+    """
+    hosts = tuple(
+        star_spec_from_model(
+            name,
+            mass_msun=mass,
+            dist_pc=dist,
+            luminosity_lsun=lum,
+            teff_k=teff,
+            radius_rsun=radius,
+            ra_deg=270.0,
+            dec_deg=66.56,
+            bands_nm=((551.0, 88.0),),
+        )
+        for name, mass, dist, lum, teff, radius in (
+            ("G dwarf", 1.0, 10.0, 1.0, 5772.0, 1.0),
+            ("K dwarf", 0.8, 6.0, 0.4, 5000.0, 0.78),
+        )
+    )
+    base = jx.ObservingModeChannel.from_stars(
+        hosts, n_slots=1, epoch_jd=EPOCH_JD, n_grid=4
+    )
+    report = base.assets().report
+    assert report.stellar_exozodi
+    wl = report.wavelength_nm
+    exposure = ExposureConfig(
+        start_time_jd=jnp.asarray(0.0),
+        exposure_time_s=jnp.asarray(0.0),
+        central_wavelength_nm=jnp.asarray(wl),
+        bin_width_nm=jnp.asarray(report.bin_width_nm),
+        position_angle_deg=jnp.asarray(0.0),
+    )
+    ratio = []
+    for k, spec in enumerate(hosts):
+        scene = jax.tree_util.tree_map(lambda x, k=k: x[k], base.scenes)
+        prepared = report.prepare(scene, base.leakage[k])
+        v_mag = -2.5 * math.log10(spec.flux_at(551.0) / 3631.0)
+        abs_v = v_mag - 5.0 * math.log10(float(scene.dist_pc) / 10.0)
+        lum_v = 10.0 ** (-0.4 * (abs_v - 4.83))
+        solar_colour = float(
+            scene.n_exozodi * zodi_fn_ayo(report.observatory, exposure, scene) * lum_v
+        )
+        ratio.append(float(prepared.exozodi_1au) / solar_colour)
+    assert 0.7 < ratio[0] < 1.0
+    assert ratio[1] > 1.3 * ratio[0]

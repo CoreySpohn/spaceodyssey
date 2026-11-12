@@ -32,13 +32,13 @@ Declared conventions:
 - The collecting area uses the linear obscuration `sqrt(OBSCURED)` of the response
   package, which records the obscured area fraction.
 - Local zodiacal light is `zodi_fn_leinert` at each node's epoch and the target's
-  coordinates. The exozodi surface brightness at 1 AU is
-  `n_exozodi * F_1zodi(lambda) * (L / Lsun)`, with `F_1zodi` the wavelength-only
-  value of `zodi_fn_ayo` (one zodi seen face-on at equivalent insolation). With
-  `stellar_exozodi` it is instead the V-band value of one zodi (22 mag/arcsec^2
-  around the Sun) times the host's V-band luminosity and its own colour, which is
-  `n_exozodi * 10^(-0.4 * 22) * 10^(0.4 * 4.83) * (d / 10 pc)^2 * f_lambda / F0`:
-  the host's flux density at lambda scaled to a common distance.
+  coordinates. The exozodi takes the host's own colour: its surface brightness at 1 AU
+  is the V-band value of one zodi (22 mag/arcsec^2 around the Sun) times the host's
+  V-band luminosity and its colour m_lambda - V, which is
+  `n_exozodi * 10^(-0.4 * 22) * 10^(0.4 * 4.83) * (d / 10 pc)^2 * f_lambda / F0`: the
+  host's flux density at lambda scaled to a common distance. With `stellar_exozodi`
+  false it is instead `n_exozodi * F_1zodi(lambda) * (L / Lsun)`, with `F_1zodi` the
+  wavelength-only value of `zodi_fn_ayo` (a solar-colour zodi), kept for comparison.
 - Thermal emission is evaluated with the declared `eps_warm_T_cold` (0 switches it
   off whatever the temperature).
 - Detector quantum efficiency and dQE (a survival fraction) enter only where
@@ -138,6 +138,7 @@ from photomancy.orbit.likelihoods import loglike_relative_astrom
 from yippy import EqxCoronagraph, fetch_yip
 from yippy.datasets import CATALOG, DATA_RELEASE_TAG
 from yippy.performance import PROFILE_STEP_PIX
+from zodi import MAG_1ZODI_V_ARCSEC2, MV_SUN, exozodi_flux_ratio_band
 
 from spaceodyssey.adapters.photomancy import (
     CATALOG_FIELDS,
@@ -531,7 +532,7 @@ class SummaryReport(eqx.Module):
         n_time_nodes,
         field_radius_lod,
         leakage_step_lod,
-        stellar_exozodi=False,
+        stellar_exozodi=True,
     ):
         """Validate the declarations and cache the nominal scene."""
         if not isinstance(detector_spec, DetectorSpec):
@@ -589,7 +590,7 @@ class SummaryReport(eqx.Module):
         n_time_nodes=8,
         diameter_m=None,
         aperture_radius_lod=None,
-        stellar_exozodi=False,
+        stellar_exozodi=True,
     ):
         """Build the summary path on a response package.
 
@@ -605,7 +606,8 @@ class SummaryReport(eqx.Module):
         `aperture_radius_lod` is the radius of the circular photometric aperture
         [lambda/D of the response's circumscribed aperture] that sets the core
         throughput, area and pixel count; None keeps the package default.
-        `stellar_exozodi` gives the exozodi the host's own colour (see `prepare`).
+        `stellar_exozodi` (default True) gives the exozodi the host's own colour (see
+        `prepare`); False keeps the solar-colour one-zodi form.
         """
         path = fetch_pinned_yip() if yip_path is None else yip_path
         backend = (
@@ -680,20 +682,24 @@ class SummaryReport(eqx.Module):
         zero_point = jy_to_photons_per_nm_per_m2(mag_to_flux_jy(0.0), wl)
         star = jy_to_photons_per_nm_per_m2(scene.star_flux_density_jy, wl)
         exposure = self._exposure(jnp.asarray(0.0))
-        one_zodi = zodi_fn_ayo(self.observatory, exposure, scene)
         if self.stellar_exozodi:
-            # Surface brightness at 1 AU of one zodi: 22 mag/arcsec^2 in V around a
-            # solar-luminosity star, scaled by the host's V-band luminosity and by
-            # its colour m_lambda - V. That product is the host's own flux density
-            # at lambda scaled to a common distance, so the V band cancels.
-            exozodi_1au = (
-                jnp.asarray(scene.n_exozodi)
-                * 10.0 ** (-0.4 * EXOZODI_V_MAG_PER_ARCSEC2)
-                * 10.0 ** (0.4 * SUN_ABSOLUTE_V_MAG)
-                * (jnp.asarray(scene.dist_pc) / 10.0) ** 2
-                * (star / zero_point)
+            # The exozodi takes the host's own colour: one zodi is 22 mag/arcsec^2 in V
+            # around a star of the Sun's V-band luminosity, scaled by the host's V-band
+            # luminosity and its colour m_lambda - V. That product is the host's flux
+            # density at lambda scaled to a common distance, so the V band cancels and
+            # the band magnitude stands in for V (colour term zero).
+            band_mag = -2.5 * jnp.log10(star / zero_point)
+            abs_band_mag = band_mag - 5.0 * jnp.log10(jnp.asarray(scene.dist_pc) / 10.0)
+            exozodi_1au = exozodi_flux_ratio_band(
+                jnp.asarray(scene.n_exozodi),
+                abs_band_mag,
+                band_mag,
+                band_mag,
+                mag_1zodi=EXOZODI_V_MAG_PER_ARCSEC2,
+                mv_sun=SUN_ABSOLUTE_V_MAG,
             )
         else:
+            one_zodi = zodi_fn_ayo(self.observatory, exposure, scene)
             exozodi_1au = (
                 jnp.asarray(scene.n_exozodi)
                 * one_zodi
@@ -1335,8 +1341,8 @@ def calibration_id(report, law):
 
 # Exozodi level the first profile passes explicitly (its `exozodi` convention).
 PROFILE_N_EXOZODI = 3.0
-EXOZODI_V_MAG_PER_ARCSEC2 = 22.0  # V-band surface brightness of one zodi at 1 AU
-SUN_ABSOLUTE_V_MAG = 4.83
+EXOZODI_V_MAG_PER_ARCSEC2 = MAG_1ZODI_V_ARCSEC2  # V surface brightness of one zodi
+SUN_ABSOLUTE_V_MAG = MV_SUN
 
 
 class _ChannelAssets(eqx.Module):
@@ -1919,7 +1925,8 @@ def _mode_assets(profile, detector, diameter_m, n_time_nodes, epoch_jd, law):
                 optical_throughput=m["optics_throughput"],
                 ppfact=survey["post_processing_factor"],
                 aperture_radius_lod=survey_aperture_radius_lod(survey),
-                stellar_exozodi=survey.get("exozodi_model") == "stellar_color",
+                stellar_exozodi=survey.get("exozodi_model", "stellar_color")
+                == "stellar_color",
             )
         )
     ids = [calibration_id(r, law) for r in reports]
