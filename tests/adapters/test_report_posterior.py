@@ -257,9 +257,11 @@ def test_a_general_orbit_agrees_with_the_channel_within_the_declared_terms(chann
     moves the planet and the likelihood by many nats. The bound is three rows at the
     declared terms: planet motion over a 320,000 s exposure (5.3e-2 nats per row at
     most) and grid interpolation (5e-3 at most). The two detections
-    and one null sit at signal-to-noise of 4 to 11.
+    sit at expected signal-to-noise of 5.8 and 9.7, above the 5-sigma detection
+    threshold (a detection row whose expected counts fall below it has zero
+    likelihood by construction), and the null at 4.5.
     """
-    base = _circular(channel, 8.0, 0.45, 0.4)
+    base = _circular(channel, 8.0, 0.5, 0.4)
     el = base.at[1].set(0.3).at[2].set(0.5).at[3].set(1.0).at[4].set(2.0).at[5].set(0.3)
     days = (85.0, 140.0, 230.0)
     ours, theirs, _ = _agreement(channel, el, 5, days, (True, False, True))

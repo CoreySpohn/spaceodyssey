@@ -142,46 +142,69 @@ def _spec():
 
 @medium
 def test_lambda_over_d_zodi_and_exozodi_follow_the_report_wavelength(channel, stars):
-    """Each report's lambda/D, zero point and (exo)zodi are those of its wavelength."""
+    """Each report's lambda/D, zero point and exozodi are those of its wavelength.
+
+    The exozodi is the host's own color,
+    n 10^(-0.4 22) L_V/L_V,sun (f_lambda/F0)/(f_V/F0_V), written out with the V band
+    explicit. The zodi (AYO) color is that of
+    scattered sunlight, so a Sun-like host nearly matches it and a cooler host departs
+    from it toward the near infrared.
+    """
     built = channel.assets()
     d = channel.diameter_m
-    channel_star = stars[0]
-    for report, wl in ((built.report, 500.0), (built.char_report, 910.0)):
-        assert report.wavelength_nm == wl
-        expected = wl * 1e-9 / d * 206264.80624709636
-        assert float(report.lod_arcsec) == pytest.approx(expected, rel=1e-12)
-        scene = jax.tree_util.tree_map(lambda x: x[0], channel.scenes)
-        prepared = report.prepare(scene, channel.leakage[0])
-        zero = jy_to_photons_per_nm_per_m2(mag_to_flux_jy(0.0), wl)
-        assert float(prepared.zero_point) == pytest.approx(float(zero), rel=1e-12)
-        exposure = ExposureConfig(
-            start_time_jd=jnp.asarray(0.0),
-            exposure_time_s=jnp.asarray(0.0),
-            central_wavelength_nm=jnp.asarray(wl),
-            bin_width_nm=jnp.asarray(report.bin_width_nm),
-            position_angle_deg=jnp.asarray(0.0),
-        )
-        # The host's own colour: n 10^(-0.4 22) L_V/L_V,sun (f_lambda/F0)/(f_V/F0_V),
-        # written out with the V band explicit; it equals the V-free form.
-        flux_ratio = float(
-            jy_to_photons_per_nm_per_m2(scene.star_flux_density_jy, wl) / zero
-        )
-        v_mag = -2.5 * math.log10(channel_star.flux_at(551.0) / 3631.0)
-        v_flux_ratio = 10.0 ** (-0.4 * v_mag)
-        abs_v = v_mag - 5.0 * math.log10(float(scene.dist_pc) / 10.0)
-        lum_v = 10.0 ** (-0.4 * (abs_v - 4.83))
-        ez = (
-            float(scene.n_exozodi)
-            * 10.0 ** (-0.4 * 22.0)
-            * lum_v
-            * flux_ratio
-            / v_flux_ratio
-        )
-        assert float(prepared.exozodi_1au) == pytest.approx(ez, rel=1e-9)
-        # and it is not the bolometric-luminosity form of the baseline profile
-        zodi = zodi_fn_ayo(report.observatory, exposure, scene)
-        old_form = float(scene.n_exozodi * zodi * scene.luminosity_lsun)
-        assert float(prepared.exozodi_1au) != pytest.approx(old_form, rel=0.05)
+    ratios = {}
+    for k, (name, spec) in enumerate(zip(("G", "K"), stars, strict=True)):
+        for report, wl, scenes, leakage in (
+            (built.report, 500.0, channel.scenes, channel.leakage),
+            (built.char_report, 910.0, channel.char_scenes, channel.char_leakage),
+        ):
+            scene = jax.tree_util.tree_map(lambda x, k=k: x[k], scenes)
+            assert report.wavelength_nm == wl
+            expected = wl * 1e-9 / d * 206264.80624709636
+            assert float(report.lod_arcsec) == pytest.approx(expected, rel=1e-12)
+            prepared = report.prepare(scene, leakage[k])
+            zero = jy_to_photons_per_nm_per_m2(mag_to_flux_jy(0.0), wl)
+            assert float(prepared.zero_point) == pytest.approx(float(zero), rel=1e-12)
+            exposure = ExposureConfig(
+                start_time_jd=jnp.asarray(0.0),
+                exposure_time_s=jnp.asarray(0.0),
+                central_wavelength_nm=jnp.asarray(wl),
+                bin_width_nm=jnp.asarray(report.bin_width_nm),
+                position_angle_deg=jnp.asarray(0.0),
+            )
+            flux_ratio = float(
+                jy_to_photons_per_nm_per_m2(scene.star_flux_density_jy, wl) / zero
+            )
+            v_mag = -2.5 * math.log10(spec.flux_at(551.0) / 3631.0)
+            v_flux_ratio = 10.0 ** (-0.4 * v_mag)
+            abs_v = v_mag - 5.0 * math.log10(float(scene.dist_pc) / 10.0)
+            lum_v = 10.0 ** (-0.4 * (abs_v - 4.83))
+            ez = (
+                float(scene.n_exozodi)
+                * 10.0 ** (-0.4 * 22.0)
+                * lum_v
+                * flux_ratio
+                / v_flux_ratio
+            )
+            assert float(prepared.exozodi_1au) == pytest.approx(ez, rel=1e-9)
+            # the same quantity in the zodi (scattered sunlight) color
+            zodi_form = float(
+                scene.n_exozodi
+                * zodi_fn_ayo(report.observatory, exposure, scene)
+                * lum_v
+            )
+            ratios[name, wl] = float(prepared.exozodi_1au) / zodi_form
+    # A Sun-like host has the color of the zodi; a K dwarf departs from it, redder
+    # hosts more so toward the near infrared.
+    # Host color over zodi color, by band. Near V (500 nm) the two agree for any host.
+    # At 910 nm the Sun-like host is within 11 percent of the zodi color (measured
+    # 0.89; the zodi is slightly redder than the Sun) and the K dwarf is 29 percent
+    # redder than the zodi, more than twice the G dwarf's departure.
+    for name in ("G", "K"):
+        assert ratios[name, 500.0] == pytest.approx(1.0, abs=0.03)
+    assert ratios["G", 910.0] == pytest.approx(1.0, abs=0.15)
+    assert ratios["K", 910.0] > 1.2
+    assert abs(ratios["K", 910.0] - 1.0) > 2.0 * abs(ratios["G", 910.0] - 1.0)
     ratio = built.report.lod_arcsec / built.char_report.lod_arcsec
     assert float(ratio) == pytest.approx(500.0 / 910.0)
 
