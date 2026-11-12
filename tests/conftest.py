@@ -248,6 +248,99 @@ SLOW_FILES = {
 }
 
 
+# Optional core features no science study uses (awards, programs, refunds and pricing
+# modes, bundles, commitments, ops states, the configuration timeline, trajectories,
+# key version 2, optional-feature documents). They are frozen: extend one only when a
+# study fails without it. Each file runs in full in the slow tier; the quick tier keeps
+# the named tests as the guard of the feature, so a break still fails a merge.
+FROZEN = "frozen feature, no science consumer"
+FROZEN_FILES = {
+    "test_survey_10.py": (
+        FROZEN + ": the committee and award window",
+        ("test_both_executors_make_the_same_awards",),
+    ),
+    "test_awards.py": (
+        FROZEN + ": awards",
+        (
+            "test_the_window_end_is_an_analyze_stage_neutral_tie_event",
+            "test_a_paired_forged_expiry_is_caught",
+        ),
+    ),
+    "test_programs.py": (
+        FROZEN + ": more than one program",
+        (
+            "test_a_program_stop_names_its_program_for_p001",
+            "test_control_a_program_that_is_ignored_charges_the_first_row",
+        ),
+    ),
+    "test_refund.py": (
+        FROZEN + ": refunds",
+        (
+            "test_a_masked_record_hides_a_resolved_refund_target",
+            "test_an_acquisition_of_the_failure_kind_is_not_a_receipt",
+        ),
+    ),
+    "test_charging.py": (
+        FROZEN + ": pricing modes",
+        (
+            "test_charge_parts_reads_the_cost_when_refunds_are_off",
+            "test_the_default_charge_is_the_cost",
+        ),
+    ),
+    "test_conservation.py": (
+        FROZEN + ": refund and pricing accounts",
+        (
+            "test_a_refund_nets_the_surcharge_out_of_the_credit",
+            "test_a_receipt_row_that_loses_its_negative_charge_is_caught",
+        ),
+    ),
+    "test_survey_11.py": (
+        FROZEN + ": commitments and pricing",
+        ("test_the_study_reads_and_cancels_on_the_alert",),
+    ),
+    "test_ops_state.py": (
+        FROZEN + ": ops states",
+        (
+            "test_the_cost_table_round_trips_and_default_studies_omit_it",
+            "test_a_study_without_ops_carries_no_ops_leaf",
+        ),
+    ),
+    "test_config_timeline.py": (
+        FROZEN + ": the configuration timeline",
+        ("test_the_timeline_declaration_round_trips_and_default_studies_omit_it",),
+    ),
+    "test_world_tables.py": (
+        FROZEN + ": trajectories",
+        (
+            "test_existing_purposes_keep_their_codes",
+            "test_a_table_study_passes_preflight_and_round_trips",
+        ),
+    ),
+    "test_realize_context.py": (
+        FROZEN + ": key version 2 contexts",
+        (
+            "test_a_wide_row_or_an_unknown_version_is_refused",
+            "test_a_version_two_study_round_trips_and_a_version_one_reference_migrates",
+        ),
+    ),
+    "test_bundles.py": (
+        FROZEN + ": bundles",
+        (
+            "test_a_bundle_pays_one_transition_in_ticks",
+            "test_a_bundle_the_lane_cannot_take_whole_is_refused_untouched",
+        ),
+    ),
+    "test_frozen_horizon.py": (
+        FROZEN + ": commitments",
+        (
+            "test_a_pending_commitment_is_conserved_the_moment_it_is_admitted",
+            "test_a_future_seeded_abort_does_not_suppress_an_earlier_cancel",
+        ),
+    ),
+    "test_run_document_features.py": (FROZEN + ": optional-feature documents", ()),
+}
+
+
 def _tier(item):
     """The budget tier of a test, by the rule the budget plugin applies."""
     if item.get_closest_marker("slow"):
@@ -261,6 +354,9 @@ def pytest_collection_modifyitems(config, items):
         if item.path.name in SLOW_FILES:
             reason = f"whole file in SLOW_FILES: {SLOW_FILES[item.path.name]}"
             item.add_marker(pytest.mark.slow(reason=reason))
+        frozen = FROZEN_FILES.get(item.path.name)
+        if frozen is not None and item.originalname not in frozen[1]:
+            item.add_marker(pytest.mark.slow(reason=frozen[0]))
         tier = _tier(item)
         # the junit file carries the tier, so the CI summary counts medium tests
         item.user_properties.append(("tier", tier))
