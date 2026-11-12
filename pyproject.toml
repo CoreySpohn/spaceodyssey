@@ -106,6 +106,8 @@ physical = [
     # EqxCoronagraph.stellar_frame and stellar_pixel_scale_lod arrived in 2.12.0.
     "yippy>=2.12.0",
     "interpax>=0.3",
+    # The response package header (obscured area fraction); yippy's own floor.
+    "astropy>=6.1",
 ]
 retrieval = ["exojax>=2.5"]
 optics = ["physicaloptix>=2.3"]
