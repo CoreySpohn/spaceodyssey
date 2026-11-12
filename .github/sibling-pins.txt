@@ -2,7 +2,6 @@
 # commit whatever version bounds other packages declare (a breaking change waiting for its
 # release tag reports the old major version). Move a pin deliberately; drop it once PyPI covers it.
 photomancy @ git+https://github.com/CoreySpohn/photomancy@706fbef9027e0f52245d5b8cdec423315aabfcf6
-jaxedith @ git+https://github.com/CoreySpohn/jaxEDITH@93e2e2de3e84b82c766e0252e66f99b7423563c8
+jaxedith @ git+https://github.com/CoreySpohn/jaxedith@dc6c344c14fea8467c00c1798d9c946a0986c487
 optixstuff @ git+https://github.com/CoreySpohn/optixstuff@735a651607741091a494b8a0f710821d71da0bb5
-skyscapes @ git+https://github.com/CoreySpohn/skyscapes@591365daf35500db4145f0992d3b190795ee7cc1
-zodi @ git+https://github.com/CoreySpohn/zodi@afce5db3a8f955a85833236ed1f6e9c5a3e27cb6
+skyscapes @ git+https://github.com/CoreySpohn/skyscapes@e076d50a4d98526484c81dbba1cd28bd5a41421f
