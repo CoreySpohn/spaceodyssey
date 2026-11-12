@@ -1645,18 +1645,19 @@ class ReportRefit(AbstractRefitBoundary):
     counts (3.3e-12 measured). The stored `n_particles` is the cloud size a posterior
     kernel returns; the truth kernel ignores it and the refit key.
 
-    With `resummary` the boundary keeps the cloud of each slot it fits (at most
-    `resummary_capacity` clouds, least recently used out) and, when a later request
-    holds the same fit inputs for a slot, summarizes the stored cloud at the new refit
-    tick instead of fitting again. The refit key names the row set and no tick, so a
-    refit over the same rows is the same deterministic fit and only the forecast grid
-    moves: the answer equals a refit to rounding (the summary program differs, not the
-    cloud). A slot is stored only when its fit is `SLOT_OK`, so a degraded or failed
-    slot is always fit again; a slot absent from the store (never fit, evicted, a new
-    process after a resume, any changed input) is fit as before. The setting changes
-    no refit key, request or result, so it is not part of `configuration` and the model
-    hash. The shrinkage kernel does not use it. `resummary_stats` counts the slots
-    answered from the store (`hits`) and fit (`misses`).
+    With `resummary` (the default) the boundary keeps the cloud of each slot it fits
+    (at most `resummary_capacity` clouds, least recently used out) and, when a later
+    request holds the same fit inputs for a slot, summarizes the stored cloud at the
+    new refit tick instead of fitting again. The refit key names the row set and no
+    tick, so a refit over the same rows is the same deterministic fit and only the
+    forecast grid moves: the answer equals a refit to rounding (the summary program
+    differs, not the cloud). A slot is stored only when its fit is `SLOT_OK`, so a
+    degraded or failed slot is always fit again; a slot absent from the store (never
+    fit, evicted, a new process after a resume, any changed input) is fit as before.
+    The setting changes no refit key, request or result, so it is not part of
+    `configuration` and the model hash. The shrinkage kernel does not use it.
+    `resummary_stats` counts the slots answered from the store (`hits`) and fit
+    (`misses`).
     """
 
     kind = "spaceodyssey.report_summary"
@@ -1689,7 +1690,7 @@ class ReportRefit(AbstractRefitBoundary):
         grid_points=GRID_POINTS,
         row_buckets=ROW_BUCKETS,
         lane_batch=1,
-        resummary=False,
+        resummary=True,
         resummary_capacity=4096,
         caps=None,
         version=1,
