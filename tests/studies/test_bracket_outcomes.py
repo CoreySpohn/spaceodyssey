@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from spaceodyssey.adapters.photomancy import N_GRID, DecisionSummary
+from spaceodyssey.core.enums import EffectKind
 from spaceodyssey.studies import bracket as br
 
 from .bracket_helpers import N_STEPS, N_WORLDS, build
@@ -121,8 +122,8 @@ def _decide(built, budget_d):
     return effects, np.asarray(new)[: n * (3 + slots)].reshape(n, 3 + slots)
 
 
-def test_a_block_that_does_not_fit_leaves_no_block_ordinal(built):
-    """At the budget edge the cheapest visit runs and no slot is marked blocked."""
+def test_a_block_that_does_not_fit_is_not_started(built):
+    """At the budget edge the block is not run, not even as a stand-in visit."""
     study = built[0]
     assert _decide(built, 1000.0)[1][0, 3] == 1.0, (
         "with the budget free the block starts"
@@ -131,5 +132,5 @@ def test_a_block_that_does_not_fit_leaves_no_block_ordinal(built):
     effects, stars = _decide(built, left)
     assert float(study.channels.cost[0, br.SHARED_RESOURCE]) < left
     assert stars[:, 3:].sum() == 0.0, "a visit set a block ordinal"
-    assert stars[0, 1] == 1.0, "the fallback visit was made"
-    assert int(effects.channel_index[0]) == 0
+    assert stars[:, 1].sum() == 0.0, "a stand-in visit was made"
+    assert int(effects.kind[0]) == EffectKind.WAIT
