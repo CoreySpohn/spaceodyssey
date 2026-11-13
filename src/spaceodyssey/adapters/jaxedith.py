@@ -143,7 +143,6 @@ from zodi import MAG_1ZODI_V_ARCSEC2, MV_SUN, exozodi_flux_ratio_band
 from spaceodyssey.adapters.photomancy import (
     CATALOG_FIELDS,
     ELEMENTS,
-    REVEAL_OFFSET,
     catalog_kind,
 )
 from spaceodyssey.adapters.physical_context import (
@@ -1650,13 +1649,11 @@ def _truth_planet(truth, subject, built):
 
 # -- Observing-mode channel ----------------------------------------------------------
 
-# Detection exposures [s] and block lengths [d] of the observing modes. A block is
-# delivered when the signal-to-noise ratio of one spectral channel reaches
-# `BLOCK_SNR_REQUIRED` with every photon rate divided by `BLOCK_RATE_DIVISOR`: a
+# Detection exposures [s] and block lengths [d] of the observing modes. The block
+# signal-to-noise ratio divides every photon rate by `BLOCK_RATE_DIVISOR`: a
 # 20 percent band at resolving power 140 holds 28 spectral channels.
 DETECTION_EXPOSURES_S = (10_000.0, 20_000.0, 40_000.0, 80_000.0, 160_000.0, 320_000.0)
 BLOCK_DAYS = (5.0, 15.0, 45.0)
-BLOCK_SNR_REQUIRED = 10.0
 BLOCK_RATE_DIVISOR = 28.0
 # The reference planet of a block's duration: an Earth twin on a face-on circular
 # orbit at the Earth's insolation, so it sits at quadrature at every epoch.
@@ -1706,9 +1703,7 @@ VISIT_SLOT = (
 # reads them needs only the slot count.
 VISIT_REST = VISIT_SLOT[1:]
 BLOCK_HEADER = ("time_d", "block_s")
-BLOCK_SLOT = ("block_snr", "observable_fraction", "revealed_class")
-# Per-slot block columns any audience may read; the others are scorer-only.
-BLOCK_RELEASED = ("revealed_class",)
+BLOCK_SLOT = ("block_snr", "observable_fraction")
 
 
 def _flat(header, slot, n_slots):
@@ -1745,27 +1740,11 @@ def visit_report_kind(n_slots, audience=EVERYONE):
     )
 
 
-def reveal_columns(n_slots):
-    """Positions of the `revealed_class` columns of a `block_outcome` row, per slot."""
-    names = block_columns(n_slots)
-    return tuple(column_index(names, f"revealed_class_{s}") for s in range(n_slots))
-
-
 def block_outcome_kind(n_slots):
-    """The `block_outcome` kind: the signal-to-noise columns are scorer-only.
-
-    The `revealed_class` column of each slot is released to every audience: it holds
-    the slot's true class (plus `REVEAL_OFFSET`) where the block met its requirement
-    and zero elsewhere, so a block that was not delivered reveals nothing.
-    """
-
-    def audience(name):
-        released = name.rsplit("_", 1)[0] in BLOCK_RELEASED
-        return EVERYONE if released else Audience.SCORER
-
+    """The `block_outcome` kind: every column is scorer-only."""
     return RecordKind(
         BLOCK_KIND_NAME,
-        tuple(PayloadColumn(n, audience(n)) for n in block_columns(n_slots)),
+        tuple(PayloadColumn(n, Audience.SCORER) for n in block_columns(n_slots)),
     )
 
 
@@ -1975,17 +1954,15 @@ class ObservingModeChannel(AbstractChannelModel):
     - Block modes write a `block_outcome`: per slot, the signal-to-noise ratio of
       one spectral channel accumulated over the block while the planet lies inside
       the response working angles, with every photon rate divided by
-      `block_rate_divisor`, the fraction of the block that was observable, and the
-      slot's true class where the signal-to-noise ratio met `block_snr_required`
-      (a block at that ratio decides class membership; the column is the only one
-      of the row an observer or policy may read).
+      `block_rate_divisor` and the fraction of the block that was observable.
+      Every block column is scorer-only.
     - The catalog mode writes the `truth_catalog`: the slots' elements and scale,
       for the registry's audiences to open or close by group.
 
     The model keeps plain declarations and per-star arrays; the report is built
     from the declarations on first use and shared. No keepout is applied: any
     interval with science time is observable. The true scene and mass are the star's
-    own; the belief side (`detect_probability`, `block_snr`, `block_time`) uses the
+    own; the belief side (`detect_probability`, `characterize_time`) uses the
     catalog mass.
 
     Attributes:
@@ -1997,9 +1974,6 @@ class ObservingModeChannel(AbstractChannelModel):
         epoch_jd: Orbit epoch and tick 0 of the study.
         n_slots: Planet slots per star.
         exposures_s, block_days: The mode tables.
-        block_snr_required: The block requirement, a traced scalar (a numeric knob
-            of a study: another value does not recompile) shared by the realization,
-            the belief's block probabilities and the outcome table.
         block_rate_divisor: The photon-rate divisor of the block signal-to-noise.
         calibration: Digest of the declarations and the hosts.
     """
@@ -2017,7 +1991,6 @@ class ObservingModeChannel(AbstractChannelModel):
     n_slots: int = eqx.field(static=True)
     exposures_s: tuple = eqx.field(static=True)
     block_days: tuple = eqx.field(static=True)
-    block_snr_required: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, F64))
     block_rate_divisor: float = eqx.field(static=True)
     calibration: int = eqx.field(static=True)
     survey: bool = eqx.field(default=False, static=True, kw_only=True)
@@ -2032,13 +2005,6 @@ class ObservingModeChannel(AbstractChannelModel):
             raise ValueError("n_slots must be a positive integer")
         if not self.exposures_s or not self.block_days:
             raise ValueError("a channel needs detection exposures and block lengths")
-        if not isinstance(self.block_snr_required, jax.core.Tracer):
-            _finite(
-                "block_snr_required",
-                float(self.block_snr_required),
-                low=0.0,
-                low_open=True,
-            )
         _finite("block_rate_divisor", self.block_rate_divisor, low=1.0)
         _finite("diameter_m", self.diameter_m, low=0.0, low_open=True)
 
@@ -2058,7 +2024,6 @@ class ObservingModeChannel(AbstractChannelModel):
         n_exozodi=PROFILE_N_EXOZODI,
         exposures_s=None,
         block_days=None,
-        block_snr_required=None,
         block_rate_divisor=None,
         n_grid=None,
     ):
@@ -2072,8 +2037,8 @@ class ObservingModeChannel(AbstractChannelModel):
         ``survey`` table (`JATIS_EAC1_V1`) instead builds two reports, imaging
         detection and IFS characterization: the detection exposures and the
         characterization times are the profile's log-spaced grid of `n_grid` values
-        (default the profile's), the detection threshold and the characterization
-        requirement are the modes' required signal-to-noise ratios, `diameter_m`
+        (default the profile's), the detection threshold is the mode's required
+        signal-to-noise ratio, `diameter_m`
         defaults to the circumscribed aperture of the profile's inscribed diameter,
         and every star needs the fluxes of both bands (`StarSpec.band_fluxes_jy`).
 
@@ -2086,9 +2051,6 @@ class ObservingModeChannel(AbstractChannelModel):
         if survey is None:
             exposures_s = DETECTION_EXPOSURES_S if exposures_s is None else exposures_s
             block_days = BLOCK_DAYS if block_days is None else block_days
-            block_snr_required = (
-                BLOCK_SNR_REQUIRED if block_snr_required is None else block_snr_required
-            )
             block_rate_divisor = (
                 BLOCK_RATE_DIVISOR if block_rate_divisor is None else block_rate_divisor
             )
@@ -2104,11 +2066,6 @@ class ObservingModeChannel(AbstractChannelModel):
             modes = survey["modes"]
             wl_det = modes["detection"]["wavelength_nm"]
             wl_char = modes["characterization"]["wavelength_nm"]
-            block_snr_required = (
-                modes["characterization"]["snr_required"]
-                if block_snr_required is None
-                else block_snr_required
-            )
             block_rate_divisor = (
                 1.0 if block_rate_divisor is None else block_rate_divisor
             )
@@ -2179,9 +2136,6 @@ class ObservingModeChannel(AbstractChannelModel):
             digest.update(np.asarray(char_tables).tobytes())
             for leaf in jax.tree_util.tree_leaves(char_scenes):
                 digest.update(np.asarray(leaf).tobytes())
-        if float(block_snr_required) != BLOCK_SNR_REQUIRED:
-            # the default keeps the calibration id of channels built before the knob
-            digest.update(np.float64(block_snr_required).tobytes())
         return cls(
             scenes=scenes,
             leakage=tables,
@@ -2195,7 +2149,6 @@ class ObservingModeChannel(AbstractChannelModel):
             n_slots=n_slots,
             exposures_s=tuple(float(x) for x in exposures_s),
             block_days=tuple(float(x) for x in block_days),
-            block_snr_required=float(block_snr_required),
             block_rate_divisor=float(block_rate_divisor),
             calibration=int.from_bytes(digest.digest(), "big") or 1,
             survey=survey is not None,
@@ -2224,10 +2177,6 @@ class ObservingModeChannel(AbstractChannelModel):
     def n_channels(self):
         """Channels the model realizes: detections, blocks, then the catalog."""
         return self.n_detect + self.n_block + 1
-
-    def reveal_columns(self):
-        """Positions of the per-slot `revealed_class` columns of a block row."""
-        return reveal_columns(self.n_slots)
 
     @property
     def catalog_mode(self):
@@ -2433,10 +2382,8 @@ class ObservingModeChannel(AbstractChannelModel):
         live = present & valid
         snr = jnp.where(live, snr, 0.0)
         observable = jnp.where(live, observable, 0.0)
-        delivered = live & (snr >= self.block_snr_required)
-        revealed = jnp.where(delivered, truth.klass[subject] + REVEAL_OFFSET, 0)
         head = jnp.stack([interval.midpoint_jd, interval.duration_s])
-        body = jnp.stack([snr, observable, revealed.astype(F64)], -1)
+        body = jnp.stack([snr, observable], -1)
         return jnp.concatenate([head, body.reshape(-1)])
 
     def _catalog_row(self, truth, subject, index, key, context):
@@ -2608,22 +2555,6 @@ class ObservingModeChannel(AbstractChannelModel):
 
         return jax.vmap(one)(jnp.asarray(elements, F64))
 
-    def block_snr(self, subject, block_mode, start_d, elements):
-        """Scaled signal-to-noise of a block from day `start_d`, per draw ``(n, 8)``."""
-        length_s = jnp.asarray(self.block_days, F64)[block_mode] * d2s
-        start = self.epoch_jd + jnp.asarray(start_d, F64)
-        if self.survey:
-            # the observation starts with its overhead; the science follows it
-            start = start + self.overhead_d
-        interval = ScienceInterval(start + 0.5 * length_s * s2d, length_s)
-
-        def one(row):
-            planet, mass = self._belief_planet(row)
-            prepared = self._prepared(subject, nominal=True, mass_kg=mass, char=True)
-            return self._block(prepared, planet, interval)[0]
-
-        return jax.vmap(one)(jnp.asarray(elements, F64))
-
     @property
     def overhead_d(self):
         """Days an observation spends settling before its science interval."""
@@ -2676,24 +2607,6 @@ class ObservingModeChannel(AbstractChannelModel):
         days = jnp.exp(0.5 * (lo + hi)) * s2d
         return jnp.where(short_at(top) > 0, jnp.inf, days)
 
-    def block_time(self, subject):
-        """Days a reference Earth twin at quadrature needs to reach the requirement.
-
-        The accumulation is rate-scaled (`block_rate_divisor`) on a default-profile
-        channel; on a survey channel it is the IFS characterization time,
-        `characterize_time`.
-        """
-        if self.survey:
-            return self.characterize_time(subject)
-        built = self.assets()
-        prepared = self._prepared(subject, nominal=True)
-
-        def short(budget, _):
-            snr = _scaled_snr(budget, self.block_rate_divisor)
-            return self.block_snr_required - snr
-
-        return self._twin_time(subject, built.report, prepared, short)
-
     def detect_time(self, subject):
         """Days a reference Earth twin at quadrature needs to be detected.
 
@@ -2711,11 +2624,11 @@ class ObservingModeChannel(AbstractChannelModel):
 
         return self._twin_time(subject, built.report, prepared, short)
 
-    def characterize_time(self, subject):
+    def characterize_time(self, subject, snr_required):
         """Days a reference Earth twin at quadrature needs for the IFS requirement.
 
         The signal-to-noise ratio of one spectral channel (`_characterize`) reaches
-        `block_snr_required`; the overhead is not included. Survey channels only.
+        `snr_required`; the overhead is not included. Survey channels only.
         """
         if not self.survey:
             raise ValueError("characterize_time needs a survey profile")
@@ -2723,7 +2636,7 @@ class ObservingModeChannel(AbstractChannelModel):
         prepared = self._prepared(subject, nominal=True, char=True)
 
         def short(budget, _):
-            return self.block_snr_required - _scaled_snr(budget, 1.0)
+            return snr_required - _scaled_snr(budget, 1.0)
 
         return self._twin_time(subject, built.char_report, prepared, short)
 

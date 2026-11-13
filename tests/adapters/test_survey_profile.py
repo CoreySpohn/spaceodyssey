@@ -130,7 +130,6 @@ def test_from_yip_defaults_to_the_header_wavelength(channel):
     assert not default.survey
     assert default.exposures_s == jx.DETECTION_EXPOSURES_S
     assert default.block_days == jx.BLOCK_DAYS
-    assert float(default.block_snr_required) == jx.BLOCK_SNR_REQUIRED
     assert default.block_rate_divisor == jx.BLOCK_RATE_DIVISOR
     assert float(default.assets().law.threshold) == 5.0
 
@@ -217,7 +216,6 @@ def test_the_channel_holds_the_survey_declarations(channel):
     np.testing.assert_allclose(channel.block_days, grid)
     np.testing.assert_allclose(channel.exposures_s, grid * 86400.0)
     assert float(channel.assets().law.threshold) == 7.0
-    assert float(channel.block_snr_required) == 5.0
     assert channel.block_rate_divisor == 1.0
     # 8 m inscribed, obscured area fraction 0.17481
     assert channel.diameter_m == pytest.approx(8.0 / (1.0 - 0.17481001240599225))
@@ -293,28 +291,6 @@ def test_ifs_snr_matches_a_hand_calculation(channel):
     snr, observable = channel._characterize(prepared, planet, interval)
     assert float(snr) == pytest.approx(expected, rel=1e-6)
     assert float(observable) == 1.0
-    # the belief's view: a face-on circular orbit in the log-parameter set of ELEMENTS
-    a_au = 1.5 * math.sqrt(0.4)
-    mass = 0.8
-    period_d = math.sqrt(a_au**3 / mass) * 365.25
-    row = jnp.asarray(
-        [math.log(period_d), 0.0, 1.0, 0.0, 0.0, 0.0, math.log(mass), math.log(0.3)]
-    )
-    mode = 2
-    via_channel = float(channel.block_snr(subject, mode, 0.0, row[None])[0])
-    belief_planet, central = channel._belief_planet(row)
-    belief = channel._prepared(subject, nominal=True, mass_kg=central, char=True)
-    seconds = channel.block_days[mode] * 86400.0
-    after = EPOCH_JD + channel.overhead_d + 0.5 * channel.block_days[mode]
-    direct = float(
-        channel._characterize(
-            belief,
-            belief_planet,
-            jx.ScienceInterval(jnp.asarray(after), jnp.asarray(seconds)),
-        )[0]
-    )
-    assert via_channel == pytest.approx(direct, rel=1e-9)
-    assert via_channel > 0
 
 
 @medium
@@ -334,8 +310,11 @@ def test_characterization_grid_and_threshold(channel):
         for d in channel.block_days
     ]
     assert snr == sorted(snr) and snr[0] < snr[-1]
-    assert float(channel.block_snr_required) == 5.0
-    delivered = [s >= float(channel.block_snr_required) for s in snr]
+    requirement = jx.survey_table(JATIS_EAC1_V1)["modes"]["characterization"][
+        "snr_required"
+    ]
+    assert requirement == 5.0
+    delivered = [s >= requirement for s in snr]
     assert delivered == sorted(delivered)
 
 
@@ -345,9 +324,8 @@ def test_solved_times_meet_their_requirements(channel):
     subject = 0
     built = channel.assets()
     t_det = float(channel.detect_time(subject))
-    t_char = float(channel.characterize_time(subject))
+    t_char = float(channel.characterize_time(subject, 5.0))
     assert 0 < t_det < t_char < 60.0
-    assert float(channel.block_time(subject)) == pytest.approx(t_char)
     # detection: expected counts equal the threshold times the planet-free noise
     prepared = channel._prepared(subject, nominal=True)
     planet = _face_on_planet(prepared.scene, a_au=1.0)
@@ -412,7 +390,7 @@ def test_solved_times_follow_the_closed_form_of_the_rates(channel):
     built = channel.assets()
     for report, char, snr, t_solved in (
         (built.report, False, 7.0, float(channel.detect_time(subject))),
-        (built.char_report, True, 5.0, float(channel.characterize_time(subject))),
+        (built.char_report, True, 5.0, float(channel.characterize_time(subject, 5.0))),
     ):
         prepared = channel._prepared(subject, nominal=True, char=char)
         planet = _face_on_planet(prepared.scene, a_au=math.sqrt(1.0))
@@ -442,10 +420,7 @@ def test_a_requirement_above_the_floor_limit_has_infinite_time(channel):
     limit = c_p / c_sp
 
     def solve(snr):
-        def short(budget, _):
-            return snr - jx._scaled_snr(budget, 1.0)
-
-        return float(channel._twin_time(0, built.char_report, prepared, short))
+        return float(channel.characterize_time(0, snr))
 
     assert math.isinf(solve(1.5 * limit))
     assert math.isfinite(solve(0.5 * limit))

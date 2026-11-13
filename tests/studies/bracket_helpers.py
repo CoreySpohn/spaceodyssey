@@ -59,9 +59,7 @@ def fixture_channel(source, **kw):
 
 def prior_summary(channel, n_stars, p_new=0.0):
     """The first-tier summary the observer starts from (`p_new` everywhere)."""
-    summary = DecisionSummary.zeros(
-        n_stars, N_SLOTS, N_GRID, channel.n_modes, channel.n_block_modes, n_an=1
-    )
+    summary = DecisionSummary.zeros(n_stars, N_SLOTS, N_GRID, channel.n_modes, n_an=1)
     return eqx.tree_at(lambda x: x.p_new, summary, summary.p_new + p_new)
 
 
@@ -71,7 +69,6 @@ def build(
     budget_d=BUDGET_D,
     arm="oracle",
     p_new=0.0,
-    block_snr_required=None,
     channel=None,
     policy_kw=None,
     source=None,
@@ -80,17 +77,13 @@ def build(
     """`(source, study, executor, truths, roots, run)` of `arm` (the oracle by default).
 
     `p_new` is the prior chance of a new planet per star, node and mode. `settings` go
-    to the arm's boundary (a posterior arm needs `occupancy`). `block_snr_required`
-    sets the channel's block requirement (its default when `None`); `channel` replaces
+    to the arm's boundary (a posterior arm needs `occupancy`). `channel` replaces
     the fixture's own channel (it must observe the fixture's stars); `policy_kw` are
     extra `BracketPolicy` arguments; `source` replaces the fixture's world source (it
     must hold `N_WORLDS` worlds of the same stars).
     """
     source = fixture_source() if source is None else source
-    knob = (
-        {} if block_snr_required is None else {"block_snr_required": block_snr_required}
-    )
-    channel = channel or fixture_channel(source, **knob)
+    channel = channel or fixture_channel(source)
     n_stars = len(source.stars)
     study = br.bracket_study(
         source,

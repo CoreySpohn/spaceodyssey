@@ -190,7 +190,7 @@ def test_a_low_ess_fit_is_retried_then_installed_as_degraded(world):
 
 def test_a_slot_never_fit_has_a_status_of_its_own():
     """The empty summary marks slots SLOT_NEVER_FIT, which no fit outcome equals."""
-    zeros = ph.DecisionSummary.zeros(2, N_SLOTS, 4, 2, 2)
+    zeros = ph.DecisionSummary.zeros(2, N_SLOTS, 4, 2)
     assert (np.asarray(zeros.status) == ph.SLOT_NEVER_FIT).all()
     codes = {int(x) for x in RefitStatus} | {int(x) for x in UpdaterStatus}
     assert ph.SLOT_NEVER_FIT not in codes
@@ -202,7 +202,7 @@ def test_a_blind_policy_keeps_its_prior_summary_to_the_horizon():
     channel = study.channel_model
     prior = prior_summary(channel, len(channel.catalog_mass_kg))
     got = jax.tree_util.tree_map(np.asarray, run.carry.pbelief)
-    for name in ("p_new", "p_det", "p_block", "n_det", "status", "p_class"):
+    for name in ("p_new", "p_det", "n_det", "status", "p_class"):
         expected = np.asarray(getattr(prior, name))
         held = np.asarray(getattr(got, name))
         assert np.array_equal(held, np.broadcast_to(expected, held.shape)), name
@@ -462,9 +462,9 @@ def test_the_store_falls_back_to_a_fit_when_it_cannot_answer(world):
     assert kept.resummary_stats["misses"] > stored["misses"]
 
     elements = np.zeros((4, 8))
-    sound = (*(np.zeros(2),) * 6, 400.0, int(UpdaterStatus.OK), True, elements)
-    weak = (*sound[:7], int(UpdaterStatus.LOW_ESS), True, elements)
-    broken = (*sound[:8], False, elements)
+    sound = (*(np.zeros(2),) * 5, 400.0, int(UpdaterStatus.OK), True, elements)
+    weak = (*sound[:6], int(UpdaterStatus.LOW_ESS), True, elements)
+    broken = (*sound[:7], False, elements)
     probe = _boundary(study, 1, resummary=True, resummary_capacity=1)
     for name, out in (("weak", weak), ("broken", broken)):
         probe._store(name.encode(), out, False)

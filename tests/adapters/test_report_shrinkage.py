@@ -148,7 +148,7 @@ def test_the_detected_slots_are_the_summary_of_the_shrinkage_cloud(world):
         )
         assert got["status"][slot] == ph.SLOT_OK
         assert got["ess"][slot] == ph.SHRINK_DRAWS
-        for name in ("p_det", "p_block", "scatter", "pos_mean", "p_class"):
+        for name in ("p_det", "scatter", "pos_mean", "p_class"):
             np.testing.assert_allclose(
                 got[name][slot],
                 np.asarray(getattr(leaves, name)),
@@ -229,7 +229,7 @@ def test_a_detected_slot_without_a_catalog_row_installs_nothing(world):
 
 
 def test_the_shrinkage_arm_runs_beside_the_oracle_on_the_fixture():
-    """`run_arms` of `oracle` and `shrinkage` completes with the expected columns."""
+    """Fails if paired arms lose matching imaging columns or telescope-use contrasts."""
     arms, truths, roots = {}, None, None
     for name, settings in (("oracle", {}), ("shrinkage", {"occupancy": 0.5, **SMALL})):
         _, study, executor, truths, roots, _ = build(run=False, arm=name, **settings)
@@ -240,7 +240,7 @@ def test_the_shrinkage_arm_runs_beside_the_oracle_on_the_fixture():
     mine = out.table["shrinkage"]
     for part in ("slot", "star", "world"):
         assert set(getattr(mine, part)) == set(getattr(reference, part))
-    mean, se, _, n = out.gap("oracle", "shrinkage", "confirmed")
+    mean, se, _, n = out.gap("oracle", "shrinkage", "charged")
     assert n == N_WORLDS and np.isfinite(mean) and np.isfinite(se)
     assert (np.asarray(mine.world["low_ess"]) == 0).all()
     jax.clear_caches()

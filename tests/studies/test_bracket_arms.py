@@ -2,7 +2,6 @@
 
 import dataclasses
 import functools
-from types import SimpleNamespace
 
 import equinox as eqx
 import jax
@@ -25,7 +24,6 @@ from spaceodyssey.studies.bracket import (
     OutcomeTable,
     SummaryObserver,
     candidate_slots,
-    confirmed_slots,
 )
 
 A = np.array([3.0, 5.0, 4.0, 8.0, 6.0])
@@ -34,14 +32,14 @@ B = np.array([2.0, 5.0, 1.0, 6.0, 6.0])
 
 def _result():
     def table(x):
-        return OutcomeTable(slot={}, star={}, world={"confirmed": x})
+        return OutcomeTable(slot={}, star={}, world={"charged": x})
 
     return ArmsResult(table={"a": table(A), "b": table(B)})
 
 
 def test_gap_matches_the_paired_closed_form():
     """Mean, standard error, correlation and n equal the textbook values."""
-    mean, se, corr, n = _result().gap("a", "b", "confirmed")
+    mean, se, corr, n = _result().gap("a", "b", "charged")
     d = A - B
     assert n == 5
     assert mean == pytest.approx(d.sum() / 5, abs=1e-12)
@@ -53,11 +51,11 @@ def test_the_log_ratio_has_a_known_answer_for_a_pure_rescaling():
     """Arm a is twice arm b world by world: value ln 2 and no paired error."""
     result = ArmsResult(
         table={
-            "a": OutcomeTable(slot={}, star={}, world={"confirmed": 2.0 * B}),
-            "b": OutcomeTable(slot={}, star={}, world={"confirmed": B}),
+            "a": OutcomeTable(slot={}, star={}, world={"charged": 2.0 * B}),
+            "b": OutcomeTable(slot={}, star={}, world={"charged": B}),
         }
     )
-    value, se = result.log_ratio("a", "b", "confirmed")
+    value, se = result.log_ratio("a", "b", "charged")
     assert value == pytest.approx(np.log(2.0), abs=1e-12)
     assert se == pytest.approx(0.0, abs=1e-12)
 
@@ -70,11 +68,11 @@ def test_the_log_ratio_error_matches_a_bootstrap_of_the_worlds():
     xb = common + rng.poisson(1.0, 300)
     result = ArmsResult(
         table={
-            "a": OutcomeTable(slot={}, star={}, world={"confirmed": xa}),
-            "b": OutcomeTable(slot={}, star={}, world={"confirmed": xb}),
+            "a": OutcomeTable(slot={}, star={}, world={"charged": xa}),
+            "b": OutcomeTable(slot={}, star={}, world={"charged": xb}),
         }
     )
-    _, se = result.log_ratio("a", "b", "confirmed")
+    _, se = result.log_ratio("a", "b", "charged")
     picks = rng.integers(0, 300, (4000, 300))
     boot = np.log(xa[picks].mean(axis=1) / xb[picks].mean(axis=1))
     assert se == pytest.approx(boot.std(ddof=1), rel=0.10)
@@ -97,7 +95,7 @@ def test_a_candidate_needs_detections_class_status_and_a_tight_position():
     lod = 0.04
 
     def belief(**override):
-        base = DecisionSummary.zeros(1, 1, N_GRID, 1, 1)
+        base = DecisionSummary.zeros(1, 1, N_GRID, 1)
         leaves = {
             "n_det": jnp.asarray([[3]]),
             "p_class": jnp.asarray([[0.9]]),
@@ -125,25 +123,18 @@ def test_a_candidate_needs_detections_class_status_and_a_tight_position():
     assert bool(candidate_slots(low, lod, 0.1)[0, 0]), "the bar is a parameter"
 
 
-def test_only_a_revealed_class_one_slot_is_confirmed():
-    """Confirmation is the revealed class, not the class probability."""
-    # host arrays and only the leaves the rule reads: no program is compiled
-    belief = SimpleNamespace(p_class=np.ones((1, 3)), revealed=np.asarray([[0, 1, 2]]))
-    assert np.array_equal(np.asarray(confirmed_slots(belief))[0], [0, 0, 1])
-
-
 def test_an_arm_paired_with_itself_has_zero_gap_and_zero_error():
     """A self pair is exactly zero with unit correlation."""
-    mean, se, corr, _ = _result().gap("a", "a", "confirmed")
+    mean, se, corr, _ = _result().gap("a", "a", "charged")
     assert (mean, se) == (0.0, 0.0)
     assert corr == pytest.approx(1.0, abs=1e-12)
-    assert _result().log_ratio("a", "a", "confirmed") == (0.0, 0.0)
+    assert _result().log_ratio("a", "a", "charged") == (0.0, 0.0)
 
 
 @functools.cache
 def _install():
     """One compiled `(install, claims)` of a two-star, three-slot summary."""
-    zeros = DecisionSummary.zeros(2, 3, N_GRID, 1, 1, n_an=1)
+    zeros = DecisionSummary.zeros(2, 3, N_GRID, 1, n_an=1)
     observer = SummaryObserver(prior=zeros)
 
     def run(old, new):
@@ -155,7 +146,7 @@ def _install():
 
 def _summary(n_det, p_class, status, p_new=0.0):
     """A two-star, three-slot summary: star 0 holds the given slot leaves."""
-    base = DecisionSummary.zeros(2, 3, N_GRID, 1, 1, n_an=1)
+    base = DecisionSummary.zeros(2, 3, N_GRID, 1, n_an=1)
     host = jax.tree_util.tree_map(np.array, base)
     host.n_det[0] = n_det
     host.p_class[0] = p_class

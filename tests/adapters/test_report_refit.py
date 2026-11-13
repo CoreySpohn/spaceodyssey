@@ -14,7 +14,7 @@ import pytest
 
 pytest.importorskip("photomancy")
 
-from spaceodyssey.adapters.jaxedith import block_outcome_kind, reveal_columns
+from spaceodyssey.adapters.jaxedith import block_outcome_kind
 from spaceodyssey.adapters.photomancy import (
     CATALOG_FIELDS,
     CATALOG_GROUPS,
@@ -35,18 +35,16 @@ from spaceodyssey.core.records import (
 from spaceodyssey.core.refresh import RefitRequest
 from spaceodyssey.studies.bracket import SummaryObserver
 
-SLOTS, GRID, MODES, BLOCKS = 2, 16, 2, 2
+SLOTS, GRID, MODES = 2, 16, 2
 N_SUBJECTS, ROWS = 4, 6
 WIDTH = len(CATALOG_FIELDS)
 
 
 class StubChannel(eqx.Module):
-    """A smooth sensitivity model with the four methods the summary reads."""
+    """A smooth sensitivity model with the three methods the summary reads."""
 
     n_modes: int = eqx.field(static=True, default=MODES)
-    n_block_modes: int = eqx.field(static=True, default=BLOCKS)
     tick_days: float = eqx.field(static=True, default=1.0)
-    block_snr_required: float = 10.0
 
     @staticmethod
     def _phase(time_d, el):
@@ -57,10 +55,6 @@ class StubChannel(eqx.Module):
         shape = jnp.exp(-0.5 * ((c - 0.2 * mode) / 0.5) ** 2)
         return 0.9 * shape * (1.0 - 0.1 * subject) * (1.0 - 0.3 * elements[:, 1])
 
-    def block_snr(self, subject, block_mode, start_d, elements):
-        c = jnp.cos(self._phase(start_d, elements))
-        return 20.0 * c**2 * (1.0 + block_mode) * 0.6 * (1.0 - 0.1 * subject)
-
     def sky_position(self, subject, time_d, elements):
         ph = self._phase(time_d, elements)
         a = 0.01 * jnp.exp(elements[:, 0] / 1.5)
@@ -68,9 +62,6 @@ class StubChannel(eqx.Module):
 
     def luminosity(self, subject):
         return 1.0
-
-    def reveal_columns(self):
-        return reveal_columns(SLOTS)
 
 
 def make_study(open_groups=("existence", "ephemeris", "class")):
@@ -82,7 +73,7 @@ def make_study(open_groups=("existence", "ephemeris", "class")):
             block_outcome_kind(SLOTS),
         ]
     )
-    prior = DecisionSummary.zeros(N_SUBJECTS, SLOTS, GRID, MODES, BLOCKS, n_an=4)
+    prior = DecisionSummary.zeros(N_SUBJECTS, SLOTS, GRID, MODES, n_an=4)
     observer = SummaryObserver(prior=prior)
     caps = registry.lower(
         Capacities(n_subjects=N_SUBJECTS, rows_per_subject=ROWS, refit_lanes=2),
@@ -157,11 +148,9 @@ def take_world(request, w):
 
 
 def test_bytes_per_star_match_the_budget():
-    """Number: bytes per star per audience at S = 4, M = 6, B = 3, G = 16."""
-    size = DecisionSummary.zeros(5, 4, 16, 6, 3).bytes_per_star()
-    # 5744 plus the spectra count per slot and the block rows read per star (40 bytes)
-    assert size == 5784
-    assert abs(size - 5600) / 5600 < 0.04
+    """Number: bytes per star per audience at S = 4, M = 6, G = 16."""
+    size = DecisionSummary.zeros(5, 4, 16, 6).bytes_per_star()
+    assert size == 4176
 
 
 def test_an_entry_does_not_depend_on_its_lane_or_batch():
@@ -270,7 +259,7 @@ def test_a_wider_registered_kind_does_not_add_phantom_slots():
     registry = KindRegistry(
         [catalog_kind(1, audiences), report_kind(1), block_outcome_kind(1), wide]
     )
-    prior = DecisionSummary.zeros(N_SUBJECTS, 1, GRID, MODES, BLOCKS, n_an=4)
+    prior = DecisionSummary.zeros(N_SUBJECTS, 1, GRID, MODES, n_an=4)
     caps = registry.lower(
         Capacities(n_subjects=N_SUBJECTS, rows_per_subject=ROWS, refit_lanes=2),
         SummaryObserver(prior=prior),

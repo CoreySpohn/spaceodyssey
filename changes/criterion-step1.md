@@ -46,3 +46,91 @@ were class 1. The largest number of planets on one star was 21. Filtering by the
 support removed real planets from the truth, so a belief was never scored against a
 planet it cannot represent. The capacity alone now bounds the truth, and the belief's
 support bounds only the refit's prior.
+
+## Imaging-only bracket policy and summary (breaking)
+
+- `DecisionSummary` and its slot leaves no longer carry `p_block`, `revealed`,
+  `n_spectra` or `n_blocks`. Summary construction no longer takes a block-mode
+  count. Refits no longer read block rows or override class probabilities from
+  revealed truth. Forecast renewal and replay remain covered in
+  `test_bracket_renewal.py`.
+- `ObservingModeChannel` removes `block_snr_required`, `block_snr`, `block_time`
+  and `reveal_columns`; `characterize_time(subject, snr_required)` requires the
+  caller's SNR requirement. Block rows temporarily retain accumulated SNR and
+  observable fraction, with every column scorer-only and no class reveal.
+- `BracketPolicy` keeps catalog kickoff, imaging follow-up and search. Block
+  selection, retries, retirement, characterization counts, reserves and the block
+  log are removed. `pstate_size(n_subjects)` now holds three values per star
+  (`last_tick`, `n_vis`, `n_search`) followed by `charged`, `kick`, `stopped`.
+  Capacity bounds hold one catalog row plus `max_visits` counting rows per star,
+  with refit and forecast-renewal products counted separately.
+- `outcome_table` removes the slot keys `revealed`, `claimed`, `claim_error_lod`,
+  `block_attempted`, `block_attempts`, `n_spectra`, `block_delivered`, `block_snr`
+  and `block_days`; the star keys `n_block` and `t_block`; and the world keys
+  `confirmed`, `false_claims`, `wasted_blocks`, `wasted_days` and `delivered`.
+  Their aggregation code and the `n_char` table/paired-run argument are removed.
+  Imaging endpoints retain their meanings, including observer-summary `candidate`.
+
+### Retired coverage and replacement guards
+
+Twenty tests pinning removed block rules are retired; two forecast-renewal tests
+move without losing their guards, and one lightweight summary/channel API guard
+is added (net nineteen fewer test functions). No parameter matrix is expanded.
+
+- Retry, retirement and spectrum-count tests removed from
+  `test_bracket_characterization.py`:
+  `test_a_block_that_fell_short_is_retried_at_a_longer_mode`,
+  `test_three_failures_in_a_row_retire_the_slot`,
+  `test_n_char_two_retires_after_failures_that_follow_a_success`,
+  `test_n_char_two_needs_two_delivered_spectra`, and
+  `test_a_slot_is_confirmed_at_the_configured_n_char`.
+  Package repeat/pass-probability and criterion-verdict properties replace the
+  old spectrum-count and confirmation guards; consecutive-failure retirement is
+  intentionally removed.
+- Selection/reserve tests removed from that file:
+  `test_the_block_and_follow_up_thresholds_are_knobs`,
+  `test_the_reserve_blocks_a_search_that_would_spend_what_an_open_track_needs`,
+  `test_a_slot_no_longer_mode_serves_is_retired_and_holds_no_reserve`,
+  `test_the_block_log_maps_every_block_row_to_its_slot`,
+  `test_a_block_the_budget_cannot_cover_is_not_run_as_a_visit`, and
+  `test_a_mode_of_infinite_time_is_never_chosen`.
+  Package selection restores unreachable/infinite-time rejection and ordering of
+  finishing packages; ledger/day capacity and admission properties restore the
+  no-overspend guard. The heuristic reserve, block log and block threshold knob
+  are intentionally removed. The combined test's follow-up threshold guard returns
+  with the replacement policy's decision harness.
+- `test_bracket_block_claim.py` is deleted after moving
+  `test_a_star_past_its_forecast_window_is_refit_without_new_rows` and
+  `test_the_observer_expires_a_summary_at_its_last_node` to
+  `test_bracket_renewal.py`. Its six removed tests are
+  `test_a_blocks_class_column_is_the_only_one_an_observer_may_read`,
+  `test_a_confirmed_slot_is_class_one_and_only_a_delivered_block_reveals`,
+  `test_a_reveal_overrides_the_class_probability_even_on_a_kept_slot`,
+  `test_a_candidate_is_blocked_and_a_revealed_slot_is_not`,
+  `test_a_revealed_slot_is_not_followed_up`, and
+  `test_a_candidate_takes_the_shortest_block_mode_that_can_succeed`.
+  Truth reveals and their class-probability override are intentionally removed;
+  criterion verdicts and package feasibility/ordering replace their scientific
+  and scheduling guards.
+- Also retired: `test_only_a_revealed_class_one_slot_is_confirmed` from
+  `test_bracket_arms.py`, `test_a_block_that_does_not_fit_is_not_started` from
+  `test_bracket_outcomes.py`, and `test_a_star_that_got_a_block_is_visited_again`
+  from `test_bracket_stale.py`. Criterion verdicts replace confirmation, package
+  admission covers funds, and imaging refit-wait tests retain the liveness guard.
+  The duplicated bracket `_decide` harnesses and block-only helpers are gone.
+- The observer-versus-policy outcome test remains: it distinguishes the two
+  summaries through imaging candidacy, which reads the observer's `n_det`, class
+  probability, status and scatter, independently of the raw row-log detections.
+- The shrinkage arm's paired gap now uses `charged`, the telescope days its imaging
+  decisions spend: the fixture oracle spent 1.11574074 days per world while the
+  shrinkage arm spent zero. This preserves a contrast that can differ between the
+  arms without manufacturing a confirmation endpoint.
+- Cold timing of the affected non-slow rule files before removal: 18 passing tests
+  in 38.55 s, sampled peak footprint 1937.3 MiB. Their capacity/renewal replacements
+  after removal: four passing tests in 5.24 s, sampled peak footprint 806.9 MiB.
+  The standalone lightweight summary/expiration checks pass in 3.31 s. These
+  timings describe the explicitly changed coverage, not a speedup at equal coverage.
+- Verification: 1766 quick-tier tests pass in 132.79 s with zero test-budget
+  violations; the focused slow renewal/replay, refit-cache and paired-arm checks
+  also pass. Per-file program budgets are regenerated from measured compilations
+  and cache loads with the standard headroom. No golden file changes.

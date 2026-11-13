@@ -120,7 +120,7 @@ def test_the_shrinkage_arm_opens_what_the_kernel_reads():
     assert arm.kernel == "shrinkage"
     assert set(arm.groups) == set(ph.SHRINK_GROUPS)
     registry = br.bracket_registry("shrinkage", n_slots=2)
-    prior = ph.DecisionSummary.zeros(4, 2, 16, 2, 2, n_an=4)
+    prior = ph.DecisionSummary.zeros(4, 2, 16, 2, n_an=4)
     observer = br.SummaryObserver(prior=prior)
     caps = registry.lower(
         Capacities(n_subjects=4, rows_per_subject=6, refit_lanes=2), observer

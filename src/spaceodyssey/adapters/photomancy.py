@@ -386,17 +386,15 @@ def photomancy_bindings():
 # policy decides from. `DecisionSummary` holds them per star; `summarize` turns one
 # slot's weighted orbit cloud into its leaves, and `ReportRefit` fills them.
 #
-# A channel the summary reads (`study.channel_model`) answers four questions, each
+# A channel the summary reads (`study.channel_model`) answers three questions, each
 # for a cloud `elements (n, 8)` in the physical order `ELEMENTS` and for one subject
 # at `time_d`, days from the study epoch:
 #
 # - `detect_probability(subject, mode, time_d, elements) -> (n,)`
-# - `block_snr(subject, block_mode, start_d, elements) -> (n,)`: the signal-to-noise
-#   ratio a block started at `start_d` accumulates (a block is `block_time` long)
 # - `sky_position(subject, time_d, elements) -> (n, 2)`: east and north, arcsec
 # - `luminosity(subject) -> float`: solar luminosities
 #
-# and carries `n_modes`, `n_block_modes` and `tick_days` (days per clock tick).
+# and carries `n_modes` and `tick_days` (days per clock tick).
 
 ELEMENTS = ("ln_period", "ecc", "cos_i", "node", "argp", "tau", "ln_mass", "ln_lam")
 
@@ -462,8 +460,8 @@ class DecisionSummary(eqx.Module):
     """What a policy decides from, per star: leaves `[n_subjects, ...]`.
 
     `S` slots, `G` future epochs spaced `GRID_SPACING_D` days from `ref_tick`, `M`
-    detection modes and `B` block modes. `aux` is the observer's per-world slot (not
-    per star) and carries no belief.
+    detection modes. `aux` is the observer's per-world slot (not per star) and
+    carries no belief.
     """
 
     ref_tick: jax.Array  # I64 [n], tick of the refit
@@ -471,38 +469,30 @@ class DecisionSummary(eqx.Module):
     p_new: jax.Array  # [n, G, M], a visit first-detects a class-1 planet
     n_det: jax.Array  # I64 [n, S], detections of the slot
     p_det: jax.Array  # [n, S, G, M], detection probability of a detected slot
-    p_block: jax.Array  # [n, S, G, B], a block started at the epoch meets its need
     scatter: jax.Array  # [n, S], predicted-position scatter, arcsec
     pos_mean: jax.Array  # [n, S, 2], predicted position, arcsec
     p_class: jax.Array  # [n, S], probability of class 1
     ln_period_q: jax.Array  # [n, S, 3], 16, 50 and 84 percent quantiles
     ess: jax.Array  # [n, S], Kish effective size
     status: jax.Array  # I64 [n, S], slot fit code (`SLOT_NEVER_FIT` before any fit)
-    revealed: jax.Array  # I64 [n, S], class a delivered block revealed, 0 for none
-    n_spectra: jax.Array  # I64 [n, S], delivered blocks (spectra) of the slot read
-    n_blocks: jax.Array  # I64 [n], block rows of the star read
     aux: jax.Array  # [n_an]
 
     @classmethod
-    def zeros(cls, n_subjects, n_slots, n_grid, n_modes, n_blocks, n_an=0):
+    def zeros(cls, n_subjects, n_slots, n_grid, n_modes, n_an=0):
         """An all-zero summary of the given capacities."""
-        n, s, g, m, b = n_subjects, n_slots, n_grid, n_modes, n_blocks
+        n, s, g, m = n_subjects, n_slots, n_grid, n_modes
         return cls(
             ref_tick=jnp.zeros(n, I64),
             n_obs=jnp.zeros(n, I64),
             p_new=jnp.zeros((n, g, m), F64),
             n_det=jnp.zeros((n, s), I64),
             p_det=jnp.zeros((n, s, g, m), F64),
-            p_block=jnp.zeros((n, s, g, b), F64),
             scatter=jnp.zeros((n, s), F64),
             pos_mean=jnp.zeros((n, s, 2), F64),
             p_class=jnp.zeros((n, s), F64),
             ln_period_q=jnp.zeros((n, s, 3), F64),
             ess=jnp.zeros((n, s), F64),
             status=jnp.full((n, s), SLOT_NEVER_FIT, I64),
-            revealed=jnp.zeros((n, s), I64),
-            n_spectra=jnp.zeros((n, s), I64),
-            n_blocks=jnp.zeros(n, I64),
             aux=jnp.zeros(n_an, F64),
         )
 
@@ -532,7 +522,6 @@ class SlotLeaves(eqx.Module):
     """One slot's summary leaves."""
 
     p_det: jax.Array  # [G, M]
-    p_block: jax.Array  # [G, B]
     scatter: jax.Array
     pos_mean: jax.Array  # [2]
     p_class: jax.Array
@@ -615,8 +604,8 @@ def summarize(
     """One slot's summary leaves from a weighted orbit cloud.
 
     `elements (n, 8)` are in the order `ELEMENTS` and `log_w (n,)` are log weights.
-    Detection and block probabilities come from the channel's own methods, so the
-    realization, the likelihood and the summary share one sensitivity model.
+    Detection probabilities come from the channel's own methods, so the realization,
+    the likelihood and the summary share one sensitivity model.
     `last_det_d` is the last detection time in days (the refit time when absent) and
     the predicted position is read `position_lag_d` later. `class1` is a per-draw
     class indicator that replaces the catalog rule when the class is known.
@@ -625,14 +614,6 @@ def summarize(
     w = _normalized(log_w)
     times = _grid_times(channel, ref_tick, tick_days, n_grid, spacing_d)
     p_det = jnp.einsum("gmn,n->gm", _detect_draws(elements, subject, channel, times), w)
-    blocks = jnp.arange(channel.n_block_modes)
-
-    def block(mode, start):
-        snr = channel.block_snr(subject, mode, start, elements)
-        return snr >= channel.block_snr_required
-
-    met = jax.vmap(lambda t: jax.vmap(lambda b: block(b, t))(blocks))(times)
-    p_block = jnp.einsum("gbn,n->gb", met.astype(F64), w)
     base = jnp.asarray(ref_tick, F64) * tick_days
     last = base if last_det_d is None else last_det_d
     xy = channel.sky_position(subject, last + position_lag_d, elements)
@@ -642,7 +623,6 @@ def summarize(
         class1 = class1_indicator(elements, channel.luminosity(subject), albedo)
     return SlotLeaves(
         p_det=p_det,
-        p_block=p_block,
         scatter=scatter,
         pos_mean=mean,
         p_class=w @ class1.astype(F64),
@@ -776,15 +756,11 @@ def _truth_entry(channel, entry, settings):
         "p_new": search_probability_truth(leaves.p_det, live),
         "n_det": n_det,
         "p_det": mask(leaves.p_det),
-        "p_block": mask(leaves.p_block),
         "scatter": keep(leaves.scatter),
         "pos_mean": keep(leaves.pos_mean),
         "p_class": keep(leaves.p_class),
         "ln_period_q": keep(leaves.ln_period_q),
         "ess": keep(leaves.ess),
-        "revealed": jnp.zeros(n_slots, I64),
-        "n_spectra": jnp.zeros(n_slots, I64),
-        "n_blocks": jnp.zeros((), I64),
     }
     # without a catalog row nothing was read: the leaves are zero, not row 0's values
     out = {k: jnp.where(has_cat, v, jnp.zeros_like(v)) for k, v in leaves_out.items()}
@@ -856,10 +832,8 @@ SLOT_DEGRADED = int(RefitStatus.DEGRADED)
 SLOT_FAILED = int(RefitStatus.FAILED)
 SLOT_KEPT = (SLOT_NO_SUPPORT, SLOT_FAILED)
 
-# The class code of an Earth-like planet in a truth, and the offset a block row adds
-# to a class before it is released (zero is "nothing revealed").
+# The class code of an Earth-like planet in a truth.
 CLASS_ONE = 1
-REVEAL_OFFSET = 1
 
 # Draws of the first tier's fixed prior cloud, and the factor a retry multiplies the
 # proposals (or the draws) by.
@@ -1247,7 +1221,6 @@ def _fit_lane(channel, lane, st, engine, scale):
     finite = jnp.all(jnp.isfinite(elements))
     return (
         leaves.p_det,
-        leaves.p_block,
         leaves.scatter,
         leaves.pos_mean,
         leaves.p_class,
@@ -1300,7 +1273,6 @@ def _resummary_lane(channel, lane, st):
     )
     return (
         leaves.p_det,
-        leaves.p_block,
         leaves.scatter,
         leaves.pos_mean,
         leaves.p_class,
@@ -1502,7 +1474,6 @@ def _shrink_lane(channel, lane, st, engine, scale):
     )
     return (
         leaves.p_det,
-        leaves.p_block,
         leaves.scatter,
         leaves.pos_mean,
         leaves.p_class,
@@ -1847,53 +1818,8 @@ class ReportRefit(AbstractRefitBoundary):
         """Answer every dirty entry: `[W, 2, n_subjects, ...]` slices and statuses."""
         self.check(study.caps)
         if self.kernel != "truth":
-            result = self._refit_posterior(study, requests)
-        else:
-            result = self._refit_truth(study, requests)
-        return self._apply_reveals(study, requests, result)
-
-    def _apply_reveals(self, study, requests, result):
-        """Write the classes delivered blocks revealed into the computed slices.
-
-        A block row the audience may read carries, per slot, the true class plus
-        `REVEAL_OFFSET` where the block met its requirement and zero elsewhere. The
-        `revealed` leaf takes that code and `p_class` takes 1 for class 1 and 0 for
-        any other class; `n_spectra` counts the delivered blocks of each slot and
-        `n_blocks` the block rows read, so a policy can tell a block that has not been
-        read from one that fell short. The kernel's own posterior is not changed, and
-        every other leaf stays. An entry that was not computed (an audience that cannot
-        read the reports) is left as it is.
-        """
-        names = study.caps.kind_names
-        spec = tuple(name for name, _, _ in slice_spec(study))
-        if self.block_kind not in names or "revealed" not in spec:
-            return result
-        columns = list(study.channel_model.reveal_columns())
-        kind = names.index(self.block_kind)
-        req = jax.tree_util.tree_map(np.asarray, requests)
-        count = req.dirty.shape[2]
-        pieces = {n: np.array(x) for n, x in zip(spec, result.slices, strict=True)}
-        computed = np.asarray(result.computed)
-        for w, a, s in np.argwhere(req.dirty):
-            sa, ss = divmod(int(req.source[w, a, s]), count)
-            if not computed[w, sa, ss]:
-                continue
-            rows = req.rows.valid[w, a, s] & (req.rows.kind[w, a, s] == kind)
-            code = req.rows.payload[w, a, s][rows][:, columns].max(axis=0, initial=0.0)
-            body = req.rows.payload[w, a, s][rows][:, columns]
-            code = np.rint(code).astype(np.int64)
-            pieces["revealed"][w, a, s] = code
-            pieces["n_spectra"][w, a, s] = (body > 0.5).sum(axis=0)
-            pieces["n_blocks"][w, a, s] = rows.sum()
-            seen = code > 0
-            pieces["p_class"][w, a, s] = np.where(
-                seen,
-                (code == CLASS_ONE + REVEAL_OFFSET).astype(np.float64),
-                pieces["p_class"][w, a, s],
-            )
-        return dataclasses.replace(
-            result, slices=tuple(jnp.asarray(pieces[n]) for n in spec)
-        )
+            return self._refit_posterior(study, requests)
+        return self._refit_truth(study, requests)
 
     def _refit_truth(self, study, requests):
         req = jax.tree_util.tree_map(np.asarray, requests)
@@ -2068,7 +1994,7 @@ class ReportRefit(AbstractRefitBoundary):
 
     def _store(self, digest, out, retried):
         """Keep a fit's cloud for later summaries when it is a sound one."""
-        ess, raw, finite, elements = out[6:10]
+        ess, raw, finite, elements = out[5:9]
         if slot_status(raw, finite) == SLOT_OK:
             self._keep(digest, (elements, ess, raw, bool(retried)))
 
@@ -2318,7 +2244,7 @@ class ReportRefit(AbstractRefitBoundary):
             )
         to_fit = [(k, fit) for k, fit in indexed_fits if k not in fit_out]
         fit_out.update(run_fits(to_fit, 1))
-        retried_fits = [(k, fit) for k, fit in to_fit if fit_out[k][7] == low]
+        retried_fits = [(k, fit) for k, fit in to_fit if fit_out[k][6] == low]
         fit_out.update(run_fits(retried_fits, RETRY_FACTOR))
         if self.resummary:
             self.resummary_stats["misses"] += len(to_fit)
@@ -2364,9 +2290,8 @@ class ReportRefit(AbstractRefitBoundary):
             codes = np.zeros(n_slots, np.int64)
             units = []
             for slot, out in item["fits"].items():
-                p_det, p_block, scatter, pos, p_class, q, ess, raw, finite, _ = out
+                p_det, scatter, pos, p_class, q, ess, raw, finite, _ = out
                 slices["p_det"][w, a, s, slot] = p_det
-                slices["p_block"][w, a, s, slot] = p_block
                 slices["scatter"][w, a, s, slot] = scatter
                 slices["pos_mean"][w, a, s, slot] = pos
                 slices["p_class"][w, a, s, slot] = p_class
@@ -2423,7 +2348,6 @@ __all__ = [
     "CLASS_ONE",
     "COLUMN_NAMES",
     "ELEMENTS",
-    "REVEAL_OFFSET",
     "SHRINK_DRAWS",
     "SHRINK_GROUPS",
     "SHRINK_WIDTHS",

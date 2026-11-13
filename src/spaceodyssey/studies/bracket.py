@@ -12,7 +12,7 @@ payload columns of the three record kinds (`ARMS`).
 
 - `bracket_registry(arm)` is the kind registry of an arm.
 - `bracket_study(...)` builds the `Study` of an arm.
-- `BracketPolicy` is the one decision rule every arm runs: block, follow-up, search.
+- `BracketPolicy` is the imaging decision rule every arm runs: follow-up, search.
 - `bracket_boundary(study, arm)` is the refit boundary an arm runs under.
 - `BoundExecutor` is the compiled executor with a boundary attached, so the batteries
   that call `run_worlds` without a `refit` argument run the arm as it is.
@@ -39,7 +39,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from spaceodyssey.adapters.jaxedith import (
-    block_columns,
     block_outcome_kind,
     column_index,
     truth_catalog_kind,
@@ -49,12 +48,9 @@ from spaceodyssey.adapters.jaxedith import (
 from spaceodyssey.adapters.photomancy import (
     BLOCK_KIND_NAME,
     CATALOG_KIND_NAME,
-    CLASS_ONE,
     GRID_SPACING_D,
     N_GRID,
-    POSITION_LAG_D,
     REPORT_KIND_NAME,
-    REVEAL_OFFSET,
     SLOT_DEGRADED,
     SLOT_KEPT,
     SLOT_OK,
@@ -99,31 +95,12 @@ LANE_TELESCOPE, LANE_CATALOG = 0, 1
 SHARED_RESOURCE = 2
 # Channel ids of the modes start here; the refresh product channels are 90 and 91.
 FIRST_CHANNEL_ID = 10
-# Characterization knobs of `BracketPolicy`: the probability a block needs to start (the
-# first-summary channel's, and the survey channel's, which is the scheduler's 0.95), the
-# consecutive failed blocks that retire a slot, and the time held back per remaining
-# detection or characterization of an open track on a survey channel (days).
-BLOCK_P, SURVEY_BLOCK_P, RETIRE_AFTER, SURVEY_RESERVE_D = 0.8, 0.95, 3, 15.0
-# Failed blocks that retire a slot on a first-summary channel: one block per slot.
-FIRST_SUMMARY_RETIRE_AFTER = 1
 # Seconds in a day, and the ticks in a day of the default 1 ms clock (the clock a
 # bracket study runs on is the profile's declared `tick_length_s`).
 SECONDS_PER_DAY = 86_400.0
 TICKS_PER_DAY = 86_400_000
 
 
-def default_retire_after(survey):
-    """The default `BracketPolicy.retire_after` of a survey or first-summary channel.
-
-    `RETIRE_AFTER` on a survey channel, one block per slot on a first-summary one.
-    """
-    return RETIRE_AFTER if survey else FIRST_SUMMARY_RETIRE_AFTER
-
-
-# Per-slot block state in `pstate`: attempts started, consecutive failures settled,
-# spectra seen when the last attempt started, mode of the last attempt, its ordinal on
-# the star, and the first mode a retry may use.
-SLOT_FIELDS = 6
 # Occupancy of the catalog mode, in ticks.
 CATALOG_TICKS = 1
 # Asset and program rows hold this much; no channel charges them.
@@ -182,27 +159,14 @@ def bracket_registry(arm, n_slots=4):
     )
 
 
-def block_log_len(n_slots, n_char=1, retire_after=RETIRE_AFTER):
-    """Blocks one star can start: a slot starts at most `retire_after * n_char`."""
-    return n_slots * n_char * retire_after
-
-
-def pstate_size(n_subjects, n_slots, n_char=1, retire_after=RETIRE_AFTER):
-    """Length of the `BracketPolicy` state vector.
-
-    Per star: last visit tick, visits, search visits and a first-block ordinal per slot;
-    after the stars, the charged days, the kickoff count and a stop flag; then the
-    per-slot block state (`SLOT_FIELDS`), the blocks started per star and each star's
-    log of the slot of every block it started, in order.
-    """
-    log = block_log_len(n_slots, n_char, retire_after)
-    per_star = SLOT_FIELDS * n_slots + 1 + log
-    return n_subjects * (3 + n_slots) + 3 + n_subjects * per_star
+def pstate_size(n_subjects):
+    """Per star: last tick, visits, searches; then charged days, kickoff and stop."""
+    return n_subjects * 3 + 3
 
 
 # Days between forecast renewals of a summary, and the per-star rows a long study holds.
 RENEWAL_D = GRID_SPACING_D * (N_GRID - 1)
-# Refit products one renewal, visit or block adds to the log.
+# Refit products one renewal or visit adds to the log.
 REFIT_ROWS = 2
 MAX_VISITS = 24
 
@@ -213,8 +177,6 @@ def default_capacities(
     *,
     n_channels,
     horizon_d=None,
-    n_char=1,
-    retire_after=RETIRE_AFTER,
     max_visits=MAX_VISITS,
     ticks_per_day=None,
 ):
@@ -225,13 +187,11 @@ def default_capacities(
     `rows_per_subject` 32, `max_sid` 4096). With it they scale with the study:
 
     These are upper bounds that hold whatever the visit times, not typical counts. A
-    star holds one catalog row, at most `max_visits` visits and at most
-    `block_log_len` blocks (`retire_after * n_char` per slot); each visit and block
-    adds `REFIT_ROWS` refit products, and each forecast renewal (one per `RENEWAL_D`)
-    adds as many.
+    star holds one catalog row and at most `max_visits` visits. Each visit and
+    forecast renewal (one per `RENEWAL_D`) adds `REFIT_ROWS` refit products.
 
     - `n_log` holds those rows of every star, with a quarter spare, in steps of 256.
-    - `rows_per_subject` holds the catalog row, the visits and the blocks of a star,
+    - `rows_per_subject` holds the catalog row and the visits of a star,
       plus three spare.
     - `max_sid` is the next power of two above two ids per row, one per day for the
       policy's waits and eight per star; it must leave `max_tick` above the horizon,
@@ -241,13 +201,12 @@ def default_capacities(
 
     A study never gets less than the fixed values.
     """
-    n_pstate = pstate_size(n_subjects, n_slots, n_char, retire_after)
+    n_pstate = pstate_size(n_subjects)
     n_log, rows, max_sid = 1024, 32, 4096
     if horizon_d is not None:
         renewals = math.ceil(horizon_d / RENEWAL_D) + 1
-        blocks = block_log_len(n_slots, n_char, retire_after)
-        per_star = 1 + max_visits + blocks
-        refits = REFIT_ROWS * (renewals + max_visits + blocks)
+        per_star = 1 + max_visits
+        refits = REFIT_ROWS * (renewals + max_visits)
         need = n_subjects * (per_star + refits)
         n_log = max(n_log, 256 * math.ceil(1.25 * need / 256))
         rows = max(rows, per_star + 3)
@@ -347,7 +306,7 @@ def bracket_study(
         horizon_d: Study length in days.
         budget_d: Telescope days on the shared row.
         caps: Capacities; defaults to `default_capacities` for this horizon, the
-            policy's `n_char` and its visit limit.
+            policy's visit limit.
         observer: The summary observer. It must be non-incremental and refit the
             visit and catalog kinds.
         policy: The decision policy.
@@ -367,16 +326,9 @@ def bracket_study(
     if isinstance(policy, BracketPolicy):
         reaches = bool(arm.report_audience & Audience.POLICY)
         policy = dataclasses.replace(policy, refits_reach_policy=reaches)
-        if policy.retire_after is None:
-            policy = dataclasses.replace(
-                policy, retire_after=default_retire_after(bool(channel.survey))
-            )
     n_stars = int(channel.catalog_mass_kg.shape[0])
     if len(source.stars) != n_stars:
         raise ValueError("the world source and the channel disagree on the stars")
-    shape = {}
-    if isinstance(policy, BracketPolicy):
-        shape = {"n_char": policy.n_char, "retire_after": policy.retire_after}
     caps = caps or default_capacities(
         n_stars,
         channel.n_slots,
@@ -384,10 +336,9 @@ def bracket_study(
         horizon_d=horizon_d,
         max_visits=getattr(policy, "max_visits", MAX_VISITS),
         ticks_per_day=built.context.clock.ticks_per_day,
-        **shape,
     )
     if isinstance(policy, BracketPolicy):
-        need = pstate_size(n_stars, channel.n_slots, **shape)
+        need = pstate_size(n_stars)
         if caps.n_pstate < need:
             raise ValueError(
                 f"caps.n_pstate is {caps.n_pstate}; the policy needs {need}"
@@ -457,72 +408,17 @@ N_DETECT, N_BLOCK = 6, 3
 
 
 class BracketPolicy(AbstractPolicy):
-    """The bracket policy: one rule over the summary, read through any arm's belief.
+    """Image known slots and search for new ones through each arm's summary.
 
-    The rule is the same in every arm; the arms differ only in what the summary
-    holds. One effect per decision.
+    Kickoff observes one catalog row per star. Subsequent decisions wait for report
+    refits, then favor follow-up of a known noncandidate slot at its best forecast
+    node and mode, followed by search. Visits are at least 15 days apart and bounded
+    by `max_visits` and `max_search`. A visit that exceeds the remaining budget
+    falls back to the cheapest mode; one refused visit stops the policy.
 
-    State in `pstate` (see `pstate_size`): per star the last visit tick, visits, search
-    visits and the ordinal of the first block of each slot; after the stars, the
-    charged days, the kickoff count and a stop flag; then, per slot, the block state
-    (attempts, consecutive failures, spectra seen, last mode, last ordinal, mode floor),
-    per star the blocks started and the slot of each block in order.
-
-    Kickoff observes the catalog mode of one star per decision; the release of its row
-    wakes the policy for the next. After a visit the policy waits for the next refresh
-    before deciding, then in order:
-
-    1. Block (characterize): a candidate (`candidate_slots`) whose class is not yet
-       revealed, or is class 1 with fewer than `n_char` spectra, that is not retired
-       and has no block awaiting its refit starts one at its own shortest block mode
-       whose `p_block` at the current node is `block_p` or more and is the largest over
-       the slot's nodes for that mode (modes are ordered by length). A block that fell
-       short (the refit that reads it reveals nothing new) is retried at a longer mode
-       than the failed one; `retire_after` consecutive failures retire the slot. A
-       candidate no mode serves is not blocked now; it is tried again when a refit
-       moves its forecast.
-    2. Follow-up: a slot the belief knows (a detection, or class probability at least
-       0.5), not a candidate, not revealed, with class probability at least 0.05, is
-       observed at the node and mode of largest `p_det` per charged day at least 15
-       days after the star's last visit, when that node is the current one and `p_det`
-       is `followup_p` or more.
-    3. Search: the star not visited in the last 15 days, with fewer than 8 search
-       visits, of largest `p_new` per charged day, when `p_new` is 0.02 or more. With a
-       reserve (`reserve_d`), a search starts only if the time left covers it plus what
-       every open track still needs: for each candidate-class slot with a detection and
-       no revealed class or retirement, its detections short of `CANDIDATE_DETECTIONS`
-       and its spectra short of `n_char`, each at `reserve_d` plus the mode's overhead.
-    4. Otherwise wait a day.
-
-    The wait is for refits to read the report visits (search and follow-up); the
-    visits that start a block are not counted, since a refit never reads them.
-
-    No star gets more than 24 visits. A block the budget cannot cover is not started;
-    the policy takes another action or waits. A follow-up or search that does not fit
-    falls back to the cheapest visit; when not even that fits the policy attempts one
-    more visit (the refusal is the budget binding) and stops, else it stops at the
-    horizon. A failed slot no longer mode serves counts as retired.
-
-    Attributes:
-        candidate_class: The class probability a slot needs to be a candidate.
-        budget_d: Telescope days the policy may spend.
-        n_slots: Planet slots per star.
-        max_visits, max_search: Per-star visit and search limits.
-        refits_reach_policy: Whether the policy's summary is ever refit. When false
-            (an arm whose report columns the policy may not read) the summary never
-            changes, so the policy never waits for a refit to read its visits.
-            `bracket_study` sets it from the arm.
-        n_char: Spectra a slot needs to count as characterized; the first reveals the
-            class.
-        retire_after: Consecutive failed blocks that retire a slot (one is a single
-            block per slot); `None` is one on a first-summary channel and
-            `RETIRE_AFTER` (three) on a survey channel.
-        block_p: Probability a block needs to start; `None` is 0.8 on a first-summary
-            channel and 0.95 (the survey scheduler's) on a survey channel.
-        followup_p: Detection probability a follow-up needs to start.
-        reserve_d: Heuristic days per remaining detection or characterization held
-            back before a blind search; `None` is none on a first-summary channel and
-            15 (the survey scheduler's) on a survey channel, and zero turns it off.
+    State holds each star's last visit tick, visit count and search count, followed
+    by charged days, the kickoff count and a stop flag. `refits_reach_policy` is
+    set by `bracket_study` from the arm's report audience.
     """
 
     budget_d: float = eqx.field(static=True)
@@ -531,11 +427,7 @@ class BracketPolicy(AbstractPolicy):
     max_search: int = eqx.field(default=8, static=True)
     refits_reach_policy: bool = eqx.field(default=True, static=True)
     candidate_class: float = eqx.field(default=CANDIDATE_CLASS, static=True)
-    n_char: int = eqx.field(default=1, static=True)
-    retire_after: int | None = eqx.field(default=None, static=True)
-    block_p: float | None = eqx.field(default=None, static=True)
     followup_p: float = eqx.field(default=0.5, static=True)
-    reserve_d: float | None = eqx.field(default=None, static=True)
 
     def declare(self):
         """The campaign drain the policy ends with."""
@@ -545,33 +437,14 @@ class BracketPolicy(AbstractPolicy):
         """One decision: kickoff, wait for a fresh summary, or act on it."""
         caps, ch = study.caps, study.channels
         model = study.channel_model
-        n, slots = caps.n_subjects, self.n_slots
-        stride = 3 + slots
+        n = caps.n_subjects
+        stride = 3
         per_day = jnp.round(SECONDS_PER_DAY / study.clock.tick_length_s).astype(I64)
         stars = pstate[: n * stride].reshape(n, stride)
         last_tick, n_vis, n_search = stars[:, 0], stars[:, 1], stars[:, 2]
         charged, kick, stopped = pstate[n * stride : n * stride + 3]
-        survey = bool(model.survey)
-        retire_after = self.retire_after
-        if retire_after is None:
-            retire_after = default_retire_after(survey)
-        log_len = block_log_len(slots, self.n_char, retire_after)
-        ext = n * stride + 3
-        mid = ext + n * slots * SLOT_FIELDS
-        slot_state = pstate[ext:mid].reshape(n, slots, SLOT_FIELDS)
-        n_blk = pstate[mid : mid + n]
-        att, cons, seen, last_mode, last_ord, floor = (
-            slot_state[..., i] for i in range(SLOT_FIELDS)
-        )
         belief = view.belief
-        block_p = self.block_p
-        if block_p is None:
-            block_p = SURVEY_BLOCK_P if survey else BLOCK_P
-        reserve_d = self.reserve_d
-        if reserve_d is None:
-            reserve_d = SURVEY_RESERVE_D if survey else 0.0
-        # the mode counts are the summary's own, so any channel's grids fit
-        n_detect, n_block = belief.p_det.shape[-1], belief.p_block.shape[-1]
+        n_detect = belief.p_det.shape[-1]
         cost = ch.cost[:, SHARED_RESOURCE]
         remaining = self.budget_d - charged
         tick = view.tick
@@ -579,9 +452,8 @@ class BracketPolicy(AbstractPolicy):
 
         # Kickoff: the catalog row of star `kick`.
         kicking = kick < n
-        # Fresh: every report visit made has been read by a refit. A block produces
-        # a block outcome, not a report row, so it is not a visit a refit reads.
-        stale = jnp.any(n_vis - n_blk > belief.n_obs.astype(F64))
+        # Fresh: every report visit made has been read by a refit.
+        stale = jnp.any(n_vis > belief.n_obs.astype(F64))
         if not self.refits_reach_policy:
             stale = jnp.asarray(False)
         next_day = ((tick // per_day) + 1) * per_day + 1
@@ -597,52 +469,10 @@ class BracketPolicy(AbstractPolicy):
         s_ix = jnp.arange(n)
         weight = jnp.maximum(cost[:n_detect], 1e-9)
 
-        # Where each slot's characterization stands. The latest attempt is settled once
-        # a refit has read its block row: it succeeded when the slot's spectra grew.
-        n_read = belief.n_blocks.astype(F64)[:, None]
-        spectra = belief.n_spectra.astype(F64)
-        settled = (att > 0.5) & (last_ord <= n_read)
-        won = spectra > seen
-        eff_cons = jnp.where(settled, jnp.where(won, 0.0, cons + 1.0), cons)
-        eff_floor = jnp.where(settled, jnp.where(won, 0.0, last_mode + 1.0), floor)
-        pending = (att > 0.5) & (last_ord > n_read)
-        retired = eff_cons >= retire_after - 0.5
-        # An open, unretired slot cannot reach `n_char * retire_after` attempts (each
-        # run of failures is shorter than `retire_after`, and a success ends a run, at
-        # most `n_char - 1` times), so the cap only guards the length of the block log.
-        capped = att >= block_log_len(1, self.n_char, retire_after) - 0.5
-        char_open = belief.revealed == 0
-        if self.n_char > 1:
-            char_open |= (belief.revealed == CLASS_ONE + REVEAL_OFFSET) & (
-                belief.n_spectra < self.n_char
-            )
-        # A failed slot whose forecast serves no longer mode is stranded: retired.
-        best_pb = belief.p_block.max(axis=2)
-        longer = jnp.arange(n_block)[None, None, :] >= eff_floor[:, :, None] - 0.5
-        served = jnp.any(longer & (best_pb >= block_p), axis=-1)
-        retired |= (eff_floor > 0.5) & ~served
-        open_track = char_open & ~retired & ~capped
-        tryable = open_track & ~pending
-
-        # 1. Block.
         lod = model.assets().report.lod_arcsec
         candidate = candidate_slots(belief, lod, self.candidate_class)
-        want_block = candidate & tryable
-        pb_now = belief.p_block[s_ix, :, g_cur, :]
-        mode_ok = (pb_now >= block_p) & (pb_now >= best_pb) & longer
-        block_mode = jnp.argmax(mode_ok, axis=-1)
-        # a block the budget cannot cover is not started (no stand-in visit)
-        affordable = cost[n_detect + block_mode] <= remaining
-        block_ok = want_block & mode_ok.any(axis=-1) & affordable
-        block_score = jnp.where(block_ok, 1.0, -1.0)
-        bs = jnp.argmax(block_score.reshape(-1))
-        block_star, block_slot = bs // slots, bs % slots
-        do_block = block_score.reshape(-1)[bs] > 0
-        block_channel = n_detect + block_mode[block_star, block_slot]
-
-        # 2. Follow-up.
         known = (belief.n_det >= 1) | (belief.p_class >= 0.5)
-        eligible = known & ~candidate & (belief.revealed == 0)
+        eligible = known & ~candidate
         eligible &= belief.p_class >= 0.05
         late = node_ticks >= (last_tick + 15 * per_day)[:, None]
         pd_val = belief.p_det / weight[None, None, None, :]
@@ -665,7 +495,6 @@ class BracketPolicy(AbstractPolicy):
         fs = jnp.argmax(jnp.where(fu_ok, fu_score, -1.0))
         do_follow = fu_ok[fs]
 
-        # 3. Search.
         rested = (tick - last_tick) >= 15 * per_day
         sp = belief.p_new[s_ix, g_cur, :]
         sp_val = sp / weight[None, :]
@@ -675,21 +504,14 @@ class BracketPolicy(AbstractPolicy):
             & (n_vis < self.max_visits)[:, None]
             & (sp >= 0.02)
         )
-        if reserve_d > 0:
-            reserve = self._reserve(
-                belief, model, cost, n_detect, open_track, reserve_d
-            )
-            sp_ok &= (cost[None, :n_detect] + reserve) <= remaining
         sp_flat = jnp.where(sp_ok, sp_val, -1.0).reshape(-1)
         sb = jnp.argmax(sp_flat)
         do_search = sp_flat[sb] > 0
         search_star, search_mode = sb // n_detect, sb % n_detect
 
-        star = jnp.where(do_block, block_star, jnp.where(do_follow, fs, search_star))
-        channel = jnp.where(
-            do_block, block_channel, jnp.where(do_follow, fu_mode[fs], search_mode)
-        )
-        act = do_block | do_follow | do_search
+        star = jnp.where(do_follow, fs, search_star)
+        channel = jnp.where(do_follow, fu_mode[fs], search_mode)
+        act = do_follow | do_search
         # Budget: a choice that does not fit falls back to the cheapest visit; when not
         # even that fits, one attempt is made and the policy stops.
         fits = cost[channel] <= remaining
@@ -705,7 +527,7 @@ class BracketPolicy(AbstractPolicy):
             [EffectKind.STOP, EffectKind.OBSERVE, EffectKind.WAIT, EffectKind.OBSERVE],
             EffectKind.WAIT,
         )
-        cat_channel = n_detect + n_block
+        cat_channel = caps.n_channels - 1
         eff_star = jnp.where(observe_cat, jnp.minimum(kick.astype(I64), n - 1), star)
         eff_channel = jnp.where(observe_cat, cat_channel, channel)
         wake = jnp.where(stale & ~kicking, next_day, tick + per_day)
@@ -723,40 +545,14 @@ class BracketPolicy(AbstractPolicy):
             disposition=Disposition.DRAIN,
         )
         observing = (kind == EffectKind.OBSERVE) & ~observe_cat
-        is_block = observing & do_block & fits
         row = star
-        is_search = observing & ~is_block & ~do_follow
+        is_search = observing & ~do_follow
         new = pstate
         new = new.at[row * stride].set(
             jnp.where(observing, tick.astype(F64), pstate[row * stride])
         )
         new = new.at[row * stride + 1].add(observing.astype(F64))
         new = new.at[row * stride + 2].add(is_search.astype(F64))
-        # block bookkeeping: the star's count and log, the slot's state, first ordinal
-        ordinal = n_blk[row] + 1.0
-        new = new.at[mid + row].add(is_block.astype(F64))
-        log_ix = (
-            mid + n + row * log_len + jnp.minimum(n_blk[row].astype(I64), log_len - 1)
-        )
-        new = new.at[log_ix].set(jnp.where(is_block, block_slot + 1.0, new[log_ix]))
-        state_ix = ext + (row * slots + block_slot) * SLOT_FIELDS
-        mode = block_mode[block_star, block_slot].astype(F64)
-        entry = jnp.stack(
-            [
-                att[row, block_slot] + 1.0,
-                eff_cons[row, block_slot],
-                spectra[row, block_slot],
-                mode,
-                ordinal,
-                eff_floor[row, block_slot],
-            ]
-        )
-        new = new.at[state_ix + jnp.arange(SLOT_FIELDS)].set(
-            jnp.where(is_block, entry, slot_state[row, block_slot])
-        )
-        slot_ix = row * stride + 3 + block_slot
-        first = is_block & (att[row, block_slot] < 0.5)
-        new = new.at[slot_ix].set(jnp.where(first, ordinal, pstate[slot_ix]))
         base = n * stride
         spent = jnp.where(observing & (cost[channel] <= remaining), cost[channel], 0.0)
         new = new.at[base].add(spent)
@@ -765,27 +561,6 @@ class BracketPolicy(AbstractPolicy):
             jnp.maximum(pstate[base + 2], (observing & attempt_last).astype(F64))
         )
         return eff, new, jnp.asarray(0.0, F64)
-
-    def _reserve(self, belief, model, cost, n_detect, open_track, heuristic_d):
-        """Telescope days the open tracks still need, at `heuristic_d` plus overhead.
-
-        A track is a slot of the candidate class with a detection whose characterization
-        is still open (`open_track`: not revealed against, retired or out of attempts).
-        A block awaiting its refit still owes its spectrum.
-        """
-        exposure_d = jnp.asarray(model.exposures_s[0], F64) / 86_400.0
-        char_d = jnp.asarray(model.block_days[0], F64)
-        over_det = cost[0] - exposure_d
-        over_char = cost[n_detect] - char_d
-        track = (belief.n_det >= 1) & (belief.p_class >= self.candidate_class)
-        track &= open_track
-        det_left = jnp.clip(
-            CANDIDATE_DETECTIONS - belief.n_det, 0, CANDIDATE_DETECTIONS
-        )
-        char_left = jnp.clip(self.n_char - belief.n_spectra, 0, self.n_char)
-        need = det_left * (heuristic_d + over_det)
-        need += char_left * (heuristic_d + over_char)
-        return jnp.sum(jnp.where(track, need, 0.0))
 
 
 def project_detections(belief):
@@ -803,9 +578,6 @@ _SLOT_LEAVES = tuple(
         "n_obs",
         "p_new",
         "status",
-        "revealed",
-        "n_spectra",
-        "n_blocks",
     )
 )
 
@@ -879,19 +651,11 @@ class SummaryObserver(AbstractObserver):
             new, old = getattr(fitted, name)[subject], getattr(belief, name)[subject]
             if name == "p_new":
                 keep = dark_failed
-            elif name in ("revealed", "n_spectra"):
-                return new
             elif name in _SLOT_LEAVES:
                 keep = kept.reshape(kept.shape + (1,) * (new.ndim - 1))
             else:
                 return new
-            out = jnp.where(keep, old, new)
-            if name == "p_class":
-                # a revealed slot is decided: 1 for class 1, 0 for any other class
-                code = fitted.revealed[subject]
-                decided = (code == CLASS_ONE + REVEAL_OFFSET).astype(out.dtype)
-                out = jnp.where(code > 0, decided, out)
-            return out
+            return jnp.where(keep, old, new)
 
         return eqx.tree_at(
             lambda b: tuple(getattr(b, n) for n in SUMMARY_LEAVES),
@@ -906,15 +670,14 @@ class SummaryObserver(AbstractObserver):
 
 
 def candidate_slots(belief, lod_arcsec, candidate_class=CANDIDATE_CLASS):
-    """The slots a summary nominates for a block: ``bool[n_stars, n_slots]``.
+    """The imaging candidates a summary nominates: ``bool[n_stars, n_slots]``.
 
     A slot is a candidate when it holds at least `CANDIDATE_DETECTIONS` detections, a
     class probability of at least `candidate_class`, a slot status of `SLOT_OK` (a fit
     above the size floor, never a degraded, unsupported or failed one) and a
     predicted-position scatter under one lambda over D (`lod_arcsec`, in arcsec like
-    the summary's `scatter`). Imaging nominates; only a delivered block decides the
-    class (`confirmed_slots`). The policy reads its own summary through this rule and
-    the outcome table reads the observer's, so the two cannot drift apart.
+    the summary's `scatter`). The policy reads its own summary through this rule
+    and the outcome table reads the observer's.
     """
     return (
         (belief.n_det >= CANDIDATE_DETECTIONS)
@@ -922,18 +685,6 @@ def candidate_slots(belief, lod_arcsec, candidate_class=CANDIDATE_CLASS):
         & (belief.status == SLOT_OK)
         & (belief.scatter < CANDIDATE_SCATTER_LOD * lod_arcsec)
     )
-
-
-def confirmed_slots(belief, n_char=1):
-    """The slots characterized as class 1: ``bool[n_stars, n_slots]``.
-
-    A delivered block reveals the class; the slot is confirmed once `n_char` delivered
-    blocks (spectra) have been read. At `n_char = 1` the reveal alone confirms it.
-    """
-    out = belief.revealed == CLASS_ONE + REVEAL_OFFSET
-    if n_char > 1:
-        out = out & (belief.n_spectra >= n_char)
-    return out
 
 
 @dataclasses.dataclass(frozen=True)
@@ -945,27 +696,15 @@ class OutcomeTable:
     ``[W]``.
 
     Slot leaves: `present`, `klass`, `n_det` (visits that detected it), `detected`,
-    `detected_again`, `candidate` (the observer's final summary meets
-    `candidate_slots` at the table's `candidate_class`), `revealed` (the class a
-    delivered block revealed in the observer's final summary, `-1` for none),
-    `claimed` (the slot is confirmed: revealed class 1 with `n_char` spectra read),
-    `claim_error_lod` (distance of the claimed position from the truth at the same
-    epoch, in lambda over D, NaN when not claimed), `block_attempted`,
-    `block_attempts` (blocks started on the slot), `n_spectra` (blocks that met the
-    signal-to-noise requirement), `block_delivered` (a block on a present class-1 slot
-    that met it), `block_snr` (the largest over the slot's blocks) and `block_days`
-    (telescope days of the slots' blocks, NaN for none).
+    `detected_again` and `candidate` (the observer's final summary meets
+    `candidate_slots` at the table's `candidate_class`).
 
-    Star leaves: `visited`, `n_visits`, `t_search`, `t_followup`, `t_block` (telescope
-    days) and `dropped` (planets the slots could not hold).
+    Star leaves: `visited`, `n_visits`, `n_search`, `n_followup`, `t_search` and
+    `t_followup` (telescope days), and `dropped` (planets the slots could not hold).
 
-    World leaves: `confirmed` (slots revealed class 1 in the observer's summary at the
-    horizon), `false_claims` (claimed slots whose truth is not a present class-1
-    planet; zero by construction, so a nonzero value flags a bug), `wasted_blocks`
-    and `wasted_days` (blocks, and their telescope days, on slots whose truth is not
-    a present class-1 planet, delivered or not), `delivered`, `charged` (telescope
-    days spent), `low_ess` (slots whose last refit was degraded, `SLOT_DEGRADED`) and
-    `no_funds` (admissions refused for lack of budget).
+    World leaves: `charged` (telescope days spent), `low_ess` (slots whose last
+    refit was degraded, `SLOT_DEGRADED`) and `no_funds` (admissions refused for lack
+    of budget).
     """
 
     slot: dict
@@ -1016,7 +755,6 @@ def outcome_table(
     dropped=None,
     check_detection=False,
     candidate_class=CANDIDATE_CLASS,
-    n_char=None,
 ):
     """The `OutcomeTable` of a `run_worlds` result.
 
@@ -1028,17 +766,13 @@ def outcome_table(
             source's `dropped` rows of those worlds); zeros when not given.
         candidate_class: The class probability a slot needs to be a candidate; the
             policy's own value for a study run with another one.
-        n_char: Spectra a slot needs to count as confirmed; the policy's own when
-            `None`.
         check_detection: Also fill the slot leaves `det_expected` and `det_variance`:
             the sum over the slot's visits of the channel's detection probability
             at the true elements, and of its Bernoulli variance. It makes one
             channel call per visit, so it is off by default.
 
     A detection-mode visit is a follow-up when an earlier visit of its star (in
-    completion order) detected a slot, a search otherwise; a block is the telescope
-    time of a block mode. Block `k` of a star belongs to the slot the policy's state
-    logged for it.
+    completion order) detected a slot, a search otherwise.
     """
     carry, trace = result.carry, result.trace
     present = np.asarray(truths.present)
@@ -1056,35 +790,18 @@ def outcome_table(
             "channel_index",
         )
     }
-    vis, blk = visit_columns(n_slots), block_columns(n_slots)
+    vis = visit_columns(n_slots)
     det_cols = [column_index(vis, f"detected_{k}") for k in range(n_slots)]
     time_col = column_index(vis, "time_d")
-    snr_cols = [column_index(blk, f"block_snr_{k}") for k in range(n_slots)]
     n_det = np.zeros((n_w, n, n_slots), np.int64)
-    last_det_jd = np.full((n_w, n, n_slots), np.nan)
-    names = ("n_visits", "n_search", "n_followup", "n_block")
+    names = ("n_visits", "n_search", "n_followup")
     star = {k: np.zeros((n_w, n)) for k in names}
-    for k in ("t_search", "t_followup", "t_block"):
+    for k in ("t_search", "t_followup"):
         star[k] = np.zeros((n_w, n))
     expected = np.zeros((n_w, n, n_slots))
     variance = np.zeros((n_w, n, n_slots))
     channel = study.channel_model
-    block_snr = np.full((n_w, n, n_slots), np.nan)
-    block_days = np.full((n_w, n, n_slots), np.nan)
-    attempts = np.zeros((n_w, n, n_slots), np.int64)
-    spectra = np.zeros((n_w, n, n_slots), np.int64)
-    policy = study.agenda.policies[0]
-    if n_char is None:
-        n_char = getattr(policy, "n_char", 1)
-    retire = getattr(policy, "retire_after", None)
-    if retire is None:
-        retire = default_retire_after(bool(channel.survey))
-    pstate = np.asarray(carry.pstate)
     per_day = round(SECONDS_PER_DAY / float(study.clock.tick_length_s))
-    mid = n * (3 + n_slots) + 3 + n * n_slots * SLOT_FIELDS
-    length = block_log_len(n_slots, getattr(policy, "n_char", 1), retire)
-    block_log = pstate[:, mid + n : mid + n + n * length].reshape(n_w, n, length)
-    reveal = list(channel.reveal_columns())
     for w in range(n_w):
         seen = np.zeros(n, bool)
         if check_detection:
@@ -1107,46 +824,17 @@ def outcome_table(
                 expected[w, s] += p * present[w, s]
                 variance[w, s] += p * (1 - p) * present[w, s]
             n_det[w, s] += hit
-            last_det_jd[w, s, hit] = log["payload"][w, r, time_col]
             seen[s] |= bool(hit.any())
-        count = np.zeros(n, np.int64)
-        for r in _rows_of(log, w, KIND_BLOCK):
-            s = int(log["subject"][w, r])
-            count[s] += 1
-            star["n_block"][w, s] += 1
-            days = (log["end_tick"][w, r] - log["start_tick"][w, r]) / per_day
-            star["t_block"][w, s] += days
-            k = int(block_log[w, s, count[s] - 1]) - 1
-            if k < 0:
-                continue
-            attempts[w, s, k] += 1
-            spectra[w, s, k] += log["payload"][w, r, reveal[k]] > 0.5
-            block_snr[w, s, k] = np.fmax(
-                block_snr[w, s, k], log["payload"][w, r, snr_cols[k]]
-            )
-            block_days[w, s, k] = np.nan_to_num(block_days[w, s, k]) + days
     belief = carry.belief
     lod = float(study.channel_model.assets().report.lod_arcsec)
     candidate = np.asarray(candidate_slots(belief, lod, candidate_class))
-    claimed = np.asarray(confirmed_slots(belief, n_char))
-    code = np.asarray(belief.revealed)
-    real = present & (klass == CLASS_ONE)
-    attempted = attempts > 0
-    delivered = attempted & (block_snr >= float(channel.block_snr_required)) & real
-    error = _claim_error(study, truths, belief, claimed, last_det_jd)
     star["visited"] = (star["n_visits"] > 0).astype(np.float64)
     star["dropped"] = (
         np.zeros((n_w, n)) if dropped is None else np.asarray(dropped, np.float64)
     )
     budget = float(np.asarray(study.budget)[-1, SHARED_RESOURCE])
     balance = np.asarray(carry.ledger.balance)[:, -1, SHARED_RESOURCE]
-    wasted = attempted & ~real
     world = {
-        "confirmed": claimed.sum(axis=(1, 2)),
-        "false_claims": (claimed & ~real).sum(axis=(1, 2)),
-        "wasted_blocks": wasted.sum(axis=(1, 2)),
-        "wasted_days": np.where(wasted, block_days, 0.0).sum(axis=(1, 2)),
-        "delivered": delivered.sum(axis=(1, 2)),
         "charged": budget - balance,
         "low_ess": (np.asarray(belief.status) == SLOT_DEGRADED).sum(axis=(1, 2)),
         "no_funds": (
@@ -1160,15 +848,6 @@ def outcome_table(
         "detected": n_det > 0,
         "detected_again": n_det > 1,
         "candidate": candidate,
-        "revealed": np.where(code > 0, code - REVEAL_OFFSET, -1),
-        "claimed": claimed,
-        "claim_error_lod": error,
-        "block_attempted": attempted,
-        "block_attempts": attempts,
-        "n_spectra": spectra,
-        "block_delivered": delivered,
-        "block_snr": block_snr,
-        "block_days": block_days,
     }
     if check_detection:
         slot["det_expected"] = expected
@@ -1178,24 +857,6 @@ def outcome_table(
         star=star,
         world={k: np.asarray(v, np.float64) for k, v in world.items()},
     )
-
-
-def _claim_error(study, truths, belief, claimed, last_det_jd):
-    """Claimed position against the truth at the predicted epoch, in lambda over D."""
-    channel = study.channel_model
-    lod = float(channel.assets().report.lod_arcsec)
-    out = np.full(claimed.shape, np.nan)
-    pos = np.asarray(belief.pos_mean)
-    for w, s, k in zip(*np.nonzero(claimed), strict=True):
-        truth = jax.tree_util.tree_map(lambda x, w=w: x[w], truths)
-        elements = channel.truth_elements(truth)[s, k][None]
-        epoch = float(channel.epoch_jd)
-        if np.isnan(last_det_jd[w, s, k]):
-            continue
-        day = last_det_jd[w, s, k] - epoch + POSITION_LAG_D
-        true_xy = np.asarray(channel.sky_position(int(s), day, elements))[0]
-        out[w, s, k] = float(np.hypot(*(pos[w, s, k] - true_xy))) / lod
-    return out
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1259,7 +920,6 @@ def run_arms(
     dropped=None,
     check_detection=False,
     candidate_class=CANDIDATE_CLASS,
-    n_char=None,
 ):
     """Run every arm on the same truths and roots; return their `ArmsResult`.
 
@@ -1273,7 +933,6 @@ def run_arms(
         dropped: Passed to `outcome_table`.
         check_detection: Passed to `outcome_table`.
         candidate_class: Passed to `outcome_table`.
-        n_char: Passed to `outcome_table`.
     """
     tables = {}
     for name, (study, boundary) in arms.items():
@@ -1286,6 +945,5 @@ def run_arms(
             dropped=dropped,
             check_detection=check_detection,
             candidate_class=candidate_class,
-            n_char=n_char,
         )
     return ArmsResult(table=tables)
