@@ -240,6 +240,34 @@ def test_construction_refuses_a_registry_that_hides_a_catalog_group():
         ReportRefit().refit_batch(study, make_request(study, 1))
 
 
+@pytest.mark.parametrize(
+    ("standard_groups", "alternate_groups", "hidden"),
+    [
+        (None, CATALOG_GROUPS, False),
+        (CATALOG_GROUPS, ("existence", "class"), True),
+        ((), CATALOG_GROUPS, False),
+    ],
+)
+def test_construction_checks_the_configured_catalog(
+    standard_groups, alternate_groups, hidden
+):
+    """Fails if validation uses a different catalog's presence or permissions.
+
+    A renamed catalog works alone and keeps its own audience checks when the
+    standard catalog is also registered with different permissions.
+    """
+    alternate = catalog_kind(1, N_BANDS, alternate_groups)
+    kinds = [RecordKind("alternate_catalog", alternate.columns), report_kind(1)]
+    if standard_groups is not None:
+        kinds.insert(0, catalog_kind(1, N_BANDS, standard_groups))
+    caps = KindRegistry(kinds).lower()
+    if hidden:
+        with pytest.raises(ValueError, match=r"ephemeris.*hidden"):
+            ReportRefit(catalog_kind="alternate_catalog", caps=caps)
+    else:
+        ReportRefit(catalog_kind="alternate_catalog", caps=caps)
+
+
 def test_an_install_changes_only_its_star():
     """A refit installs one star; the prior everywhere else is bitwise unchanged."""
     study = make_study()

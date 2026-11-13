@@ -396,8 +396,9 @@ def photomancy_bindings():
 # slot's weighted orbit cloud into its leaves, and `ReportRefit` fills them.
 #
 # A channel the summary reads (`study.channel_model`) answers three questions, each
-# for a cloud `elements (n, 8)` in the physical order `ELEMENTS` and for one subject
-# at `time_d`, days from the study epoch:
+# for a `PlanetParameters` cloud whose named leaves have a leading draw axis `n`
+# (albedo also has a trailing band axis `B`), and for one subject at `time_d`,
+# days from the study epoch:
 #
 # - `detect_probability(subject, mode, time_d, elements) -> (n,)`
 # - `sky_position(subject, time_d, elements) -> (n, 2)`: east and north, arcsec
@@ -579,7 +580,8 @@ def summarize(
 ):
     """One slot's summary leaves from a weighted orbit cloud.
 
-    `elements (n, 8)` are in the order `ELEMENTS` and `log_w (n,)` are log weights.
+    `elements` is a `PlanetParameters` cloud: each named leaf has a leading draw
+    axis `n`, with albedo shaped `(n, B)`. `log_w (n,)` are log weights.
     Detection probabilities come from the channel's own methods, so the realization,
     the likelihood and the summary share one sensitivity model.
     `last_det_d` is the last detection time in days (the refit time when absent) and
@@ -1762,7 +1764,7 @@ class ReportRefit(AbstractRefitBoundary):
                 f"the registry holds {list(names)}; the refit reads "
                 f"{self.catalog_kind!r} and {self.report_kind!r}"
             )
-        index = names.index(CATALOG_KIND_NAME)
+        index = names.index(self.catalog_kind)
         row = caps.payload_audience[index]
         paths = caps.payload_paths[index]
         need = int(Audience.OBSERVER) | int(Audience.POLICY)
