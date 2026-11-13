@@ -188,3 +188,13 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   remain. Net: twelve functions and seventeen collected cases added; no shared
   scenario matrix expands. Cache renewal pins the albedos bitwise and permits at
   most four ULP in recomputed positions across the two compiled summary programs.
+
+## Configured catalog permission validation
+
+- `ReportRefit.check` reads column paths and audience permissions from the
+  configured `catalog_kind`. A renamed catalog works without the standard kind;
+  when both are registered, only the selected catalog's permissions determine
+  whether construction is allowed. Padding from wider kinds remains excluded.
+- One regression function adds three cases: a renamed catalog alone, a hidden
+  selected catalog beside an open standard catalog, and an open selected catalog
+  beside a hidden standard catalog. No tests retire or shared matrices expand.
