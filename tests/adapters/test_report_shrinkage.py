@@ -18,8 +18,9 @@ from spaceodyssey.adapters import photomancy as ph
 from spaceodyssey.core.enums import RefitStatus
 from spaceodyssey.studies import bracket as br
 from tests.adapters.posterior_helpers import realize_visits, visit_request
-from tests.adapters.test_report_posterior_refit import _thin
+from tests.adapters.test_report_posterior_refit import COLUMNS, _thin
 from tests.studies.bracket_helpers import (
+    N_SLOTS,
     N_STEPS,
     N_WORLDS,
     build,
@@ -96,10 +97,10 @@ def _request(world, visits, **kw):
 def test_an_entry_does_not_depend_on_its_lane_neighbors(world):
     """Property: an entry's slices are bitwise equal alone, in any batch and any order.
 
-    Entry A (star 1: slots with one, three, four and five detections and two dark
-    slots) is refit at a fixed lane count in three requests: first, after another
-    entry, and beside a different neighbor. Fails if a lane reads another lane's data
-    or a padding lane is not isolated. The statuses follow the shared slot codes.
+    Entry A (star 1: detected and dark slots) is refit at a fixed lane count in three
+    requests: first, after another entry, and beside a different neighbor. Fails if a
+    lane reads another lane's data or a padding lane is not isolated. The statuses
+    follow the shared slot codes.
     """
     study, channel, truth, rich = world
     other = realize_visits(channel, truth, 0, 3, [20.0 * i for i in range(1, 5)])
@@ -123,9 +124,11 @@ def test_the_detected_slots_are_the_summary_of_the_shrinkage_cloud(world):
     The cloud is `shrinkage_cloud` around the catalog elements at the width of the
     slot's detection count (one detection 0.20, three or more 0.025), with the
     entry's key folded with the slot, then the same `summarize` as every kernel.
+    The least-detected slot of star 1 keeps only its first detection, so the entry
+    holds a slot detected once beside one detected three or more times.
     """
     study, channel, truth, rich = world
-    request = _request(world, {1: rich[1]})
+    request = _request(world, {1: _first_only(rich[1], _least_detected(rich[1]))})
     result = _boundary(study, 1).refit_batch(study, request)
     got = _slices(study, result, 0, 1)
     elements = np.asarray(channel.truth_elements(truth))[1]
@@ -164,6 +167,29 @@ def test_the_detected_slots_are_the_summary_of_the_shrinkage_cloud(world):
     wide = got["scatter"][np.argmax(got["n_det"] == 1)]
     tight = got["scatter"][np.argmax(got["n_det"] >= 3)]
     assert wide > tight > 0
+
+
+def _least_detected(visits):
+    """The detected slot of `visits` with the fewest detections."""
+    flags = [COLUMNS.index(f"detected_{s}") for s in range(N_SLOTS)]
+    n_det = np.array([sum(row[f] > 0.5 for row, _ in visits) for f in flags])
+    return int(np.argmin(np.where(n_det > 0, n_det, np.iinfo(np.int64).max)))
+
+
+def _first_only(visits, slot):
+    """`visits` with only the first detection of `slot` kept; later ones read null."""
+    flag = COLUMNS.index(f"detected_{slot}")
+    count = COLUMNS.index(f"counts_{slot}")
+    kept = False
+    out = []
+    for row, end in visits:
+        row = row.copy()
+        if row[flag] > 0.5 and kept:
+            row[flag] = 0.0
+            row[count] = 0.0
+        kept |= row[flag] > 0.5
+        out.append((row, end))
+    return out
 
 
 def _flags(request, slot):

@@ -16,7 +16,9 @@ from spaceodyssey.studies import bracket as br
 
 from .bracket_helpers import N_STEPS, N_WORLDS, build
 
-BUDGET_D = 8.0
+# Enough telescope days for a second visit to one star in each world, and few
+# enough that each world runs out of budget.
+BUDGET_D = 9.0
 pytestmark = pytest.mark.slow(reason="compiles the chunked refresh driver once")
 
 
