@@ -259,10 +259,8 @@ def test_an_unsupported_planet_is_detected_and_fits_finitely():
     summary, rows = refit_one_planet(period_d=20.0, a_quadrature=True)
     assert rows.detected.any()
     assert int(summary.status[0, 0]) in {
-        ph.SLOT_NEVER_FIT,
         ph.SLOT_OK,
         ph.SLOT_NO_SUPPORT,
         ph.SLOT_DEGRADED,
-        ph.SLOT_FAILED,
     }
     assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree.leaves(summary))
