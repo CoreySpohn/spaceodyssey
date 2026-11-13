@@ -140,10 +140,13 @@ from yippy.datasets import CATALOG, DATA_RELEASE_TAG
 from yippy.performance import PROFILE_STEP_PIX
 from zodi import MAG_1ZODI_V_ARCSEC2, MV_SUN, exozodi_flux_ratio_band
 
-from spaceodyssey.adapters.photomancy import (
-    CATALOG_FIELDS,
-    ELEMENTS,
-    catalog_kind,
+from spaceodyssey.adapters.parameters import (
+    PlanetParameters,
+    TruthCatalogRow,
+    catalog_template,
+    scale_au2,
+    semimajor_axis_au,
+    truth_parameters,
 )
 from spaceodyssey.adapters.physical_context import (
     Certificate,
@@ -159,10 +162,10 @@ from spaceodyssey.adapters.physical_profile import (
     load_profile,
     payload_column_names,
 )
-from spaceodyssey.adapters.skyscapes import Band
+from spaceodyssey.adapters.skyscapes import Band, _declared
 from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience
 from spaceodyssey.core.kinds import AbstractChannelModel
-from spaceodyssey.core.records import PayloadColumn, RecordKind
+from spaceodyssey.core.records import PayloadColumn, RecordKind, layout_size, pack
 
 # The public response package, release and digest the summary path is pinned to.
 YIP_NAME = "eac1_aavc_2d"
@@ -1722,11 +1725,6 @@ def block_columns(n_slots):
     return _flat(BLOCK_HEADER, BLOCK_SLOT, n_slots)
 
 
-def catalog_columns(n_slots):
-    """Column names of a `truth_catalog` row (the layout of `CATALOG_FIELDS`)."""
-    return tuple(f"{f}_{s}" for s in range(n_slots) for f, _ in CATALOG_FIELDS)
-
-
 def column_index(columns, name):
     """Position of the column `name` in a layout from `visit_columns` and kin."""
     return columns.index(name)
@@ -1746,11 +1744,6 @@ def block_outcome_kind(n_slots):
         BLOCK_KIND_NAME,
         tuple(PayloadColumn(n, Audience.SCORER) for n in block_columns(n_slots)),
     )
-
-
-def truth_catalog_kind(n_slots, open_groups=(), audience=EVERYONE):
-    """The `truth_catalog` kind: `open_groups` are readable, the rest scorer-only."""
-    return catalog_kind(n_slots, dict.fromkeys(open_groups, audience))
 
 
 class ReportData(eqx.Module):
@@ -1989,6 +1982,7 @@ class ObservingModeChannel(AbstractChannelModel):
     diameter_m: float = eqx.field(static=True)
     epoch_jd: float = eqx.field(static=True)
     n_slots: int = eqx.field(static=True)
+    bands: tuple[Band, ...] = eqx.field(static=True)
     exposures_s: tuple = eqx.field(static=True)
     block_days: tuple = eqx.field(static=True)
     block_rate_divisor: float = eqx.field(static=True)
@@ -1999,6 +1993,7 @@ class ObservingModeChannel(AbstractChannelModel):
 
     def __check_init__(self):
         """Refuse malformed declarations."""
+        _declared(self.bands)
         DetectorSpec(*self.detector)
         ReportingLaw(*self.law)
         if type(self.n_slots) is not int or self.n_slots < 1:
@@ -2014,6 +2009,7 @@ class ObservingModeChannel(AbstractChannelModel):
         stars,
         *,
         n_slots,
+        bands: tuple[Band, ...],
         epoch_jd,
         diameter_m=None,
         catalog_mass_kg=None,
@@ -2147,6 +2143,7 @@ class ObservingModeChannel(AbstractChannelModel):
             diameter_m=float(diameter_m),
             epoch_jd=float(epoch_jd),
             n_slots=n_slots,
+            bands=_declared(bands),
             exposures_s=tuple(float(x) for x in exposures_s),
             block_days=tuple(float(x) for x in block_days),
             block_rate_divisor=float(block_rate_divisor),
@@ -2195,7 +2192,7 @@ class ObservingModeChannel(AbstractChannelModel):
         return (
             len(visit_columns(n)),
             len(block_columns(n)),
-            len(catalog_columns(n)),
+            layout_size(catalog_template(n, self.n_bands)),
         )
 
     def assets(self):
@@ -2387,54 +2384,24 @@ class ObservingModeChannel(AbstractChannelModel):
         return jnp.concatenate([head, body.reshape(-1)])
 
     def _catalog_row(self, truth, subject, index, key, context):
-        """The catalog mode's row: every slot in the layout of `CATALOG_FIELDS`.
-
-        Slots are exchangeable to a reader: they are sorted by descending peak flux
-        ratio, so the slot index carries the existence ordering of the truth and a
-        belief must not read meaning into it.
-
-        Elements are the log-parameter set the summary reads: `tau` is days from the
-        epoch, `ln_mass` the central mass (star plus planet) in solar masses and
-        `ln_lam` the log of albedo (in the detection band) times radius squared in
-        Earth radii.
-        """
-        mass = self.scenes.star_mass_kg[subject]
-        band = truth.band_index(self.detection_band.center_nm)
-        planets = self._slot_planets(truth, subject, band)
-        present = truth.present[subject]
-        radius = truth.Rp_AU[subject] / Rearth2AU
-        columns = {
-            "present": present.astype(F64),
-            "ln_period": jnp.log(truth.period_d[subject]),
-            "ecc": planets["e"],
-            "cos_i": planets["cos_i"],
-            "node": planets["W"],
-            "argp": jnp.arctan2(planets["sin_w"], planets["cos_w"]),
-            "tau": planets["tp"],
-            "ln_mass": jnp.log((mass + planets["Mp"]) / Msun2kg),
-            "class1": truth.klass[subject].astype(F64),
-            "ln_lam": jnp.log(
-                jnp.maximum(truth.albedo[subject, :, band] * radius**2, 1e-300)
-            ),
-        }
-        names = [f for f, _ in CATALOG_FIELDS]
-        stacked = jnp.stack([jnp.asarray(columns[c], F64) for c in names], -1)
-        stacked = jnp.where(present[:, None], stacked, 0.0)
-        return stacked.reshape(-1)
-
-    def truth_elements(self, truth):
-        """The true elements of every slot of one world: ``(n_stars, n_slots, 8)``.
-
-        The columns follow `ELEMENTS`, the set `sky_position` and `detect_probability`
-        read; an absent slot is all zeros.
-        """
-        names = [f for f, _ in CATALOG_FIELDS]
-        n_stars = int(self.catalog_mass_kg.shape[0])
-        rows = jax.vmap(lambda s: self._catalog_row(truth, s, 0, None, None))(
-            jnp.arange(n_stars)
+        """Pack the presence and named parameters of every slot of one host."""
+        params = self.truth_parameters(truth)
+        return pack(
+            TruthCatalogRow(
+                truth.present[subject], jax.tree.map(lambda x: x[subject], params)
+            )
         )
-        cells = rows.reshape(n_stars, self.n_slots, len(names))
-        return cells[..., jnp.asarray([names.index(c) for c in ELEMENTS])]
+
+    def truth_parameters(self, truth):
+        """Named physical parameters [n_stars, S] of a population world."""
+        return truth_parameters(
+            truth, self.scenes.star_mass_kg / Msun2kg, self.epoch_jd
+        )
+
+    @property
+    def n_bands(self):
+        """Number of declared observing bands."""
+        return len(self.bands)
 
     # -- Block accumulation ----------------------------------------------------
 
@@ -2473,33 +2440,25 @@ class ObservingModeChannel(AbstractChannelModel):
 
     # -- The belief's views of the channel ---------------------------------------
 
-    def _belief_planet(self, elements):
-        """`(planet dict, central mass override or None)` from one planet's elements.
-
-        `elements` is either a photomancy dict (`PLANET_KEYS`, `tp` in days from
-        `epoch_jd`, optional `Mp` and `Ms` in kg) or a row of the log-parameter set
-        of `ELEMENTS` (`ln_period` in days, `ln_mass` the central mass in solar
-        masses, `tau` days from the epoch, `ln_lam` the log of albedo times radius
-        squared in Earth radii). The row has no separate planet mass: the central
-        mass is the total, as in the truth catalog.
-        """
-        if isinstance(elements, dict):
-            planet = {k: jnp.asarray(v, F64) for k, v in elements.items() if k != "Ms"}
-            return planet, elements.get("Ms")
-        el = jnp.asarray(elements, F64)
-        mass = jnp.exp(el[6]) * Msun2kg
+    def _belief_planet(self, p: PlanetParameters):
+        """Report planet and stellar mass override from one named parameter draw."""
+        band = next(
+            i
+            for i, b in enumerate(self.bands)
+            if math.isclose(b.center_nm, self.detection_band.center_nm, rel_tol=1e-9)
+        )
         planet = {
-            "a": period_to_sma(jnp.exp(el[0]), mass),
-            "e": el[1],
-            "cos_i": el[2],
-            "W": el[3],
-            "cos_w": jnp.cos(el[4]),
-            "sin_w": jnp.sin(el[4]),
-            "tp": el[5],
-            "Lambda": jnp.exp(el[7]) * Rearth2AU**2,
-            "Mp": jnp.zeros((), F64),
+            "a": semimajor_axis_au(p),
+            "e": p.ecc,
+            "cos_i": p.cos_i,
+            "W": p.node_rad,
+            "cos_w": jnp.cos(p.argp_rad),
+            "sin_w": jnp.sin(p.argp_rad),
+            "tp": p.tau_d,
+            "Lambda": scale_au2(p, band),
+            "Mp": p.planet_mass_mearth * Mearth2kg,
         }
-        return planet, mass
+        return planet, p.star_mass_msun * Msun2kg
 
     @property
     def tick_days(self):
@@ -2515,8 +2474,8 @@ class ObservingModeChannel(AbstractChannelModel):
         """Stellar luminosity of `subject` in solar luminosities."""
         return jnp.asarray(self.scenes.luminosity_lsun, F64)[subject]
 
-    def sky_position(self, subject, time_d, elements):
-        """East and north offsets in arcsec of each draw of `elements` ``(n, 8)``.
+    def sky_position(self, subject, time_d, elements: PlanetParameters):
+        """East and north offsets in arcsec of each named parameter draw.
 
         `time_d` is days from the epoch (tick zero).
         """
@@ -2529,10 +2488,10 @@ class ObservingModeChannel(AbstractChannelModel):
             r = report.rates(prepared, planet, time_jd)
             return jnp.stack([r.ra_arcsec[0], r.dec_arcsec[0]])
 
-        return jax.vmap(one)(jnp.asarray(elements, F64))
+        return jax.vmap(one)(elements)
 
-    def detect_probability(self, subject, mode, time_d, elements):
-        """Probability that a visit of `mode` detects each draw of `elements` (n, 8).
+    def detect_probability(self, subject, mode, time_d, elements: PlanetParameters):
+        """Probability that a visit of `mode` detects each named parameter draw.
 
         `time_d` is the science-interval midpoint in days from the epoch (tick zero).
         The threshold is evaluated at the geometry given, against the catalog scene,
@@ -2553,7 +2512,7 @@ class ObservingModeChannel(AbstractChannelModel):
                 (expected.planet - built.law.threshold * limit) / _noise(expected)
             )
 
-        return jax.vmap(one)(jnp.asarray(elements, F64))
+        return jax.vmap(one)(elements)
 
     @property
     def overhead_d(self):
@@ -2762,7 +2721,7 @@ class ObservingModeChannel(AbstractChannelModel):
         order = jnp.argsort(~jnp.isfinite(dmag0), stable=True)
         return sep_arcsec[order], dmag0[order], limit[order]
 
-    def predict_budget(self, subject, elements, interval):
+    def predict_budget(self, subject, elements: PlanetParameters, interval):
         """The belief's `CountBudget` of the planet `elements` over `interval`."""
         planet, mass = self._belief_planet(elements)
         prepared = self._prepared(subject, nominal=True, mass_kg=mass)

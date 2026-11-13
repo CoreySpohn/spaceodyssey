@@ -53,7 +53,11 @@ def fixture_source(n_worlds=N_WORLDS):
 def fixture_channel(source, **kw):
     """The observing-mode channel of the fixture stars."""
     return ObservingModeChannel.from_stars(
-        source.stars, n_slots=N_SLOTS, epoch_jd=source.epoch_jd, **kw
+        source.stars,
+        n_slots=N_SLOTS,
+        bands=source.population.bands,
+        epoch_jd=source.epoch_jd,
+        **kw,
     )
 
 

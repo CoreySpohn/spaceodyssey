@@ -15,14 +15,21 @@ pytest.importorskip("photomancy.orbit.refit", reason="needs the report refit")
 from hwoutils.constants import G, Msun2kg, Rearth2AU
 from photomancy.orbit import refit
 from photomancy.orbit.forward import predict_photometry
+from photomancy.orbit.updater import UpdaterStatus
 
 from spaceodyssey.adapters import jaxedith as jx
+from spaceodyssey.adapters.parameters import from_photomancy
 from spaceodyssey.adapters.photomancy import (
-    channel_elements,
-    photomancy_elements,
+    SLOT_DEGRADED,
+    SLOT_FAILED,
+    SLOT_NEVER_FIT,
+    SLOT_NO_SUPPORT,
+    SLOT_OK,
     photomancy_report,
     posterior_occupancy,
+    slot_status,
 )
+from spaceodyssey.core.enums import RefitStatus
 from tests.studies.bracket_helpers import fixture_channel, fixture_source
 
 STAR, MODE, PROBE_NODE = 0, 4, 80
@@ -111,7 +118,11 @@ def test_report_likelihood_equals_the_channel_law_at_truth(channel):
     el_channel = jnp.asarray(
         [np.log(period), 0.0, 1.0, 0.0, 0.0, 0.0, np.log(mass / Msun2kg), np.log(0.3)]
     )
-    el_phot = photomancy_elements(el_channel)
+    el_phot = el_channel.at[7].add(2 * jnp.log(Rearth2AU))
+    params = jax.tree.map(
+        lambda x: x[0],
+        from_photomancy(el_phot[None], jnp.full((1, channel.n_bands), 0.3), 0),
+    )
     alpha, d_mag = predict_photometry(
         data.epochs,
         a_au,
@@ -131,7 +142,7 @@ def test_report_likelihood_equals_the_channel_law_at_truth(channel):
     total = 0.0
     for i, interval in enumerate(intervals):
         row = jax.tree_util.tree_map(lambda x, i=i: x[i, 0], payload.row)
-        predicted = channel.predict_budget(STAR, el_channel, interval)
+        predicted = channel.predict_budget(STAR, params, interval)
         seen = bool(row.detected > 0.5)
         total += float(jx.loglike_report(law, row, predicted))
         if seen:
@@ -158,11 +169,14 @@ def _agreement(channel, el_phot, mode, days, detected):
     `el_phot` are photomancy elements. The rows are those the channel would report
     for the planet: a detection carries the expected counts and position, a null the
     planet-free noise level. The channel side converts the elements with
-    `channel_elements` and evaluates its own budget over each exposure; the
+    `from_photomancy` and evaluates its own budget over each exposure; the
     photomancy side places the planet from the photomancy convention directly (the
     periastron time is the phase times the period) and reads the converted report.
     """
-    el_channel = channel_elements(el_phot)
+    el_channel = jax.tree.map(
+        lambda x: x[0],
+        from_photomancy(el_phot[None], jnp.full((1, channel.n_bands), 0.3), 0),
+    )
     planet, mass = channel._belief_planet(el_channel)
     prepared = channel._prepared(STAR, nominal=True, mass_kg=mass)
     built = channel.assets()
@@ -251,8 +265,8 @@ def test_a_general_orbit_agrees_with_the_channel_within_the_declared_terms(chann
     """An eccentric, inclined, phased orbit given in photomancy's convention: the
     report likelihood equals the channel's at the truth to 0.163 nats over three rows.
 
-    The elements pass through `channel_elements` for the channel (the periastron phase
-    becomes days, the scale loses the Earth-radius unit) and are placed directly in
+    The elements pass through `from_photomancy` for the channel (the periastron phase
+    becomes days and the scale supplies the physical radius) and are placed directly in
     photomancy's convention for the belief, so a wrong time axis or phase conversion
     moves the planet and the likelihood by many nats. The bound is three rows at the
     declared terms: planet motion over a 320,000 s exposure (5.3e-2 nats per row at
@@ -288,18 +302,6 @@ def test_the_posterior_occupancy_matches_its_closed_form():
 
 def test_slot_codes_are_one_set_whatever_the_kernel():
     """Photomancy's statuses map onto `RefitStatus`; a non-finite cloud is FAILED."""
-    from photomancy.orbit.updater import UpdaterStatus
-
-    from spaceodyssey.adapters.photomancy import (
-        SLOT_DEGRADED,
-        SLOT_FAILED,
-        SLOT_NEVER_FIT,
-        SLOT_NO_SUPPORT,
-        SLOT_OK,
-        slot_status,
-    )
-    from spaceodyssey.core.enums import RefitStatus
-
     assert slot_status(UpdaterStatus.OK, True) == SLOT_OK
     assert slot_status(UpdaterStatus.LOW_ESS, True) == SLOT_DEGRADED
     assert slot_status(UpdaterStatus.NO_SUPPORT, True) == SLOT_NO_SUPPORT

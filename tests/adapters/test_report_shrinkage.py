@@ -4,6 +4,7 @@ Each test names the property or number it protects. The first tier runs at a sma
 draw count: the tests check structure (independence, sharing, codes), not accuracy.
 """
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -123,7 +124,7 @@ def test_the_detected_slots_are_the_summary_of_the_shrinkage_cloud(world):
     request = _request(world, {1: _first_only(rich[1], _least_detected(rich[1]))})
     result = _boundary(study, 1).refit_batch(study, request)
     got = _slices(study, result, 0, 1)
-    elements = np.asarray(channel.truth_elements(truth))[1]
+    elements = jax.tree.map(lambda x: x[1], channel.truth_parameters(truth))
     key = jnp.asarray(request.keys[0, 0, 1], jnp.uint32)
     seen = {int(n) for n in got["n_det"] if n}
     assert 1 in seen and max(seen) >= 3
@@ -132,7 +133,21 @@ def test_the_detected_slots_are_the_summary_of_the_shrinkage_cloud(world):
             continue
         width = ph.shrinkage_width(jnp.asarray(n_det))
         folded = jax.random.fold_in(jax.random.fold_in(key, slot), 1)
-        cloud = ph.shrinkage_cloud(elements[slot], folded, ph.SHRINK_DRAWS, width)
+        center = jax.tree.map(
+            lambda x, slot=slot: jnp.broadcast_to(
+                x[slot], (ph.SHRINK_DRAWS, *x[slot].shape)
+            ),
+            elements,
+        )
+        albedo = study.decision_view().belief_population.albedo_prior(
+            jax.random.fold_in(folded, ph._ALBEDO_TAG), ph.SHRINK_DRAWS, channel.bands
+        )
+        center = eqx.tree_at(lambda p: p.albedo, center, albedo)
+        cloud = jax.vmap(
+            lambda p, k, width=width: jax.tree.map(
+                lambda x: x[0], ph.shrinkage_cloud(p, k, 1, width)
+            )
+        )(center, jax.random.split(folded, ph.SHRINK_DRAWS))
         ends = np.asarray(request.rows.end_tick)[0, 0, 1]
         leaves = ph.summarize(
             cloud,

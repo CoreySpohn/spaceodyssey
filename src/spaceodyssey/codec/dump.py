@@ -28,7 +28,7 @@ from spaceodyssey.codec.kinds import (
     is_optional_field,
     is_version_field,
 )
-from spaceodyssey.core.capacities import require_x64
+from spaceodyssey.core.capacities import Capacities, require_x64
 from spaceodyssey.core.study import Agenda, Study
 
 # Element types the document stores; complex and object arrays are refused.
@@ -57,8 +57,10 @@ def dump_study(study, kinds=None, *, files=None, max_inline=DEFAULT_MAX_INLINE):
     `kinds` is a `KindResolver`, or a mapping of `(group, id, version)` to each
     class the study holds beyond the core's own types (`CORE_KINDS`). Every field
     of every module is written, static and dynamic alike, with exact Python types
-    and array dtypes, so `load_study` rebuilds an equal pytree. A value of a type
-    the document has no form for (a function, a set, a complex array) raises
+    and array dtypes, so `load_study` rebuilds an equal pytree. Derived capacity
+    payload paths are omitted; `load_run` rebuilds them from its stored registry.
+    A value of a type the document has no form for (a function, a set, a complex
+    array) raises
     `DocumentError` naming its pointer, and a callable (an activation function, a
     hook) raises `CallableRefused`.
 
@@ -139,6 +141,9 @@ def _encode_kind(value, path, table):
     out = {"$kind": list(ref)}
     for field in dataclasses.fields(value):
         if is_version_field(cls, field.name):
+            continue
+        if cls is Capacities and field.name == "payload_paths":
+            # Derived from the run document's registry, its single stored source.
             continue
         item = getattr(value, field.name)
         if is_optional_field(field) and at_default(field, item, cls):

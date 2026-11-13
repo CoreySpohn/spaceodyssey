@@ -83,6 +83,7 @@ def built():
     assert int(source.population.klass.sum()) > 0, "no exoEarth candidate in a slot"
     channel = ObservingModeChannel.from_stars(
         hosts,
+        bands=source.population.bands,
         n_slots=N_SLOTS,
         epoch_jd=epoch_jd,
         profile=JATIS_EAC1_V1,

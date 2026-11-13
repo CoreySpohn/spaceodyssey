@@ -102,7 +102,12 @@ def stars():
 @pytest.fixture(scope="module")
 def channel(stars):
     return jx.ObservingModeChannel.from_stars(
-        stars, n_slots=2, epoch_jd=EPOCH_JD, profile=JATIS_EAC1_V1, n_grid=4
+        stars,
+        bands=BANDS,
+        n_slots=2,
+        epoch_jd=EPOCH_JD,
+        profile=JATIS_EAC1_V1,
+        n_grid=4,
     )
 
 
@@ -123,7 +128,7 @@ def test_band_flux_is_the_mean_over_the_band(stars):
 def test_from_yip_defaults_to_the_header_wavelength(channel):
     """With no wavelength the report reads the header's, as before the argument."""
     default = jx.ObservingModeChannel.from_stars(
-        [_spec()], n_slots=1, epoch_jd=EPOCH_JD
+        [_spec()], bands=(Band(1000.0, 100.0),), n_slots=1, epoch_jd=EPOCH_JD
     )
     assert default.assets().report.wavelength_nm == pytest.approx(1000.0)
     assert default.assets().char_report is None
@@ -350,7 +355,12 @@ def test_a_survey_channel_needs_the_band_fluxes():
     """A star without the survey bands is refused, not read at the wrong wavelength."""
     with pytest.raises(ValueError, match="no flux at 500"):
         jx.ObservingModeChannel.from_stars(
-            [_spec()], n_slots=1, epoch_jd=EPOCH_JD, profile=JATIS_EAC1_V1, n_grid=2
+            [_spec()],
+            bands=BANDS,
+            n_slots=1,
+            epoch_jd=EPOCH_JD,
+            profile=JATIS_EAC1_V1,
+            n_grid=2,
         )
 
 
@@ -363,7 +373,9 @@ def test_a_first_summary_channel_needs_the_report_band_first():
     """
     star = StarSpec("blue", 1.0, 10.0, 0.0, 0.0, 1.0, 0.0, 7.0, ((500.0, 7.0),))
     with pytest.raises(ValueError, match="declares the 500 nm band first"):
-        jx.ObservingModeChannel.from_stars([star], n_slots=1, epoch_jd=EPOCH_JD)
+        jx.ObservingModeChannel.from_stars(
+            [star], bands=BANDS, n_slots=1, epoch_jd=EPOCH_JD
+        )
 
 
 @medium
@@ -456,7 +468,7 @@ def test_the_baseline_exozodi_takes_the_host_color():
         )
     )
     base = jx.ObservingModeChannel.from_stars(
-        hosts, n_slots=1, epoch_jd=EPOCH_JD, n_grid=4
+        hosts, bands=(Band(1000.0, 100.0),), n_slots=1, epoch_jd=EPOCH_JD, n_grid=4
     )
     report = base.assets().report
     assert report.stellar_exozodi

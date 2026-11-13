@@ -1,8 +1,8 @@
 """The shrinkage rule's cloud and its registry check, with no channel.
 
-The rule: after a detection the slot's cloud is 500 orbits around the catalog orbit,
-`a` and `Ag` log-normal at a fractional width of 0.20, 0.10 and 0.025 after one, two
-and three or more detections, every other element at the catalog value.
+After a detection the slot has 500 draws. Log period has 1.5 times the width
+of log albedo: 0.20, 0.10 and 0.025 after one, two and three or more detections.
+The radius and all other physical parameters stay at their catalog values.
 """
 
 import jax
@@ -12,24 +12,38 @@ import pytest
 
 pytest.importorskip("photomancy")
 
+from hwoutils.constants import Rearth2AU
+
 from spaceodyssey.adapters import photomancy as ph
+from spaceodyssey.adapters.parameters import (
+    catalog_group_of,
+    from_photomancy,
+    semimajor_axis_au,
+)
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import Audience
 from spaceodyssey.studies import bracket as br
 from tests.adapters.test_report_refit import make_study
 
-TRUTH = np.array([6.0, 0.2, 0.3, 1.0, 2.0, 40.0, 0.0, -2.0])
+TRUTH = jax.tree.map(
+    lambda x: x[0],
+    from_photomancy(
+        jnp.array([[6.0, 0.2, 0.3, 1.0, 2.0, 0.1, 0.0, np.log(0.3 * Rearth2AU**2)]]),
+        jnp.array([[0.3, 0.4]]),
+        0,
+    ),
+)
 N_KEYS = 400
 
 
 def _spread(width):
     """`(a, ln a, Ag)` of `N_KEYS` independent shrinkage clouds, one row per cloud."""
-    keys = jax.random.split(jax.random.PRNGKey(3), N_KEYS)
+    keys = jax.random.split(jax.random.PRNGKey(0), N_KEYS)
     clouds = jax.jit(
         jax.vmap(lambda k: ph.shrinkage_cloud(TRUTH, k, ph.SHRINK_DRAWS, width))
     )(keys)
-    a = np.asarray(ph.semimajor_axis_au(clouds))
-    ag = np.exp(np.asarray(clouds[..., 7]) - TRUTH[7])
+    a = np.asarray(semimajor_axis_au(clouds))
+    ag = np.asarray(clouds.albedo[..., 0] / TRUTH.albedo[0])
     return clouds, a, ag
 
 
@@ -59,23 +73,41 @@ def test_the_width_follows_the_detection_count(n_det, width):
 
 
 def test_the_other_elements_stay_at_the_catalog_values():
-    """Only `a` (through the period at fixed mass) and `Ag` (in `ln_lam`) move."""
+    """Fails if a shrinkage draw moves a field other than period and albedo."""
     clouds, _, _ = _spread(0.2)
-    clouds = np.asarray(clouds)
-    for i in (1, 2, 3, 4, 5, 6):
-        assert (clouds[..., i] == TRUTH[i]).all(), i
-    assert clouds[..., 0].std() > 0 and clouds[..., 7].std() > 0
-    # the draws of `a` and `Ag` are independent
-    corr = np.corrcoef(clouds[0, :, 0], clouds[0, :, 7])[0, 1]
+    for field in (
+        "ecc",
+        "cos_i",
+        "node_rad",
+        "argp_rad",
+        "tau_d",
+        "star_mass_msun",
+        "planet_mass_mearth",
+        "radius_rearth",
+    ):
+        assert (np.asarray(getattr(clouds, field)) == getattr(TRUTH, field)).all(), (
+            field
+        )
+    assert clouds.ln_period_d.std() > 0 and clouds.albedo.std() > 0
+    corr = np.corrcoef(clouds.ln_period_d[0], jnp.log(clouds.albedo[0, :, 0]))[0, 1]
     assert abs(corr) < 0.2
 
 
 def test_the_cloud_is_a_function_of_its_key():
     """The same key gives the same cloud; another key gives another."""
-    k1, k2 = jax.random.PRNGKey(1), jax.random.PRNGKey(2)
+    k1, k2 = jax.random.split(jax.random.PRNGKey(0))
     a = ph.shrinkage_cloud(TRUTH, k1, 50, 0.1)
-    assert np.array_equal(a, ph.shrinkage_cloud(TRUTH, k1, 50, 0.1))
-    assert not np.array_equal(a, ph.shrinkage_cloud(TRUTH, k2, 50, 0.1))
+    assert all(
+        np.array_equal(x, y)
+        for x, y in zip(
+            jax.tree.leaves(a),
+            jax.tree.leaves(ph.shrinkage_cloud(TRUTH, k1, 50, 0.1)),
+            strict=True,
+        )
+    )
+    assert not np.array_equal(
+        a.ln_period_d, ph.shrinkage_cloud(TRUTH, k2, 50, 0.1).ln_period_d
+    )
 
 
 def _boundary(caps):
@@ -119,7 +151,7 @@ def test_the_shrinkage_arm_opens_what_the_kernel_reads():
     arm = br.ARMS["shrinkage"]
     assert arm.kernel == "shrinkage"
     assert set(arm.groups) == set(ph.SHRINK_GROUPS)
-    registry = br.bracket_registry("shrinkage", n_slots=2)
+    registry = br.bracket_registry("shrinkage", n_slots=2, n_bands=2)
     prior = ph.DecisionSummary.zeros(4, 2, 16, 2, n_an=4)
     observer = br.SummaryObserver(prior=prior)
     caps = registry.lower(
@@ -128,6 +160,9 @@ def test_the_shrinkage_arm_opens_what_the_kernel_reads():
     _boundary(caps)
     row = caps.payload_audience[caps.kind_names.index("truth_catalog")]
     need = int(Audience.OBSERVER) | int(Audience.POLICY)
-    for col, (field, group) in enumerate(ph.CATALOG_FIELDS):
+    for col, field in enumerate(
+        caps.payload_paths[caps.kind_names.index("truth_catalog")]
+    ):
+        group = catalog_group_of(field)
         open_ = (int(row[col]) & need) == need
         assert open_ == (group in ph.SHRINK_GROUPS), field

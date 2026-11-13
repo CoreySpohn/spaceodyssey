@@ -238,6 +238,7 @@ def test_every_constructor_needs_declared_bands(build):
 def survey_channel():
     return ObservingModeChannel.from_stars(
         SURVEY_STARS,
+        bands=SURVEY_BANDS,
         n_slots=2,
         epoch_jd=2451545.0,
         profile=JATIS_EAC1_V1,

@@ -7,6 +7,8 @@ import pytest
 
 from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience
 from spaceodyssey.core.records import (
+    KindRegistry,
+    PayloadColumn,
     RecordKind,
     column_names,
     layout_size,
@@ -104,3 +106,12 @@ def test_unpack_refuses_a_payload_narrower_than_the_template():
     """Fails if a short payload is read with silent zero padding."""
     with pytest.raises(ValueError, match="columns"):
         unpack(_template(2, 2), jnp.zeros(3))
+
+
+def test_lowering_preserves_each_kinds_column_paths_without_padding():
+    """Fails if lowering loses nested paths or adds another kind's padding paths."""
+    t = _Outer(jax.ShapeDtypeStruct((2,), F64), _template(1, 2))
+    nested = RecordKind.from_template("nested", t, lambda _: EVERYONE)
+    plain = RecordKind("plain", (PayloadColumn("value", EVERYONE),))
+    caps = KindRegistry((nested, plain)).lower()
+    assert caps.payload_paths == (column_names(t), ("value",))

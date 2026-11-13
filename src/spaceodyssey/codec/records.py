@@ -1,7 +1,7 @@
 """The record-kind registry in a run document.
 
 `Study` keeps only the tables a registry lowers into `Capacities` (kind names,
-payload audiences, derived kinds), and `KindRegistry.lower` drops the column names.
+payload audiences, derived kinds). Payload paths are derived from column names.
 A run document therefore carries the registry itself, passed to the codec explicitly,
 as a list in registry order: `{"name", "derived", "columns": [[name, audience]]}`,
 with each audience an integer made of `Audience` flags. The loader rebuilds the

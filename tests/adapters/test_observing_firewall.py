@@ -29,7 +29,7 @@ pytestmark = pytest.mark.medium(reason="loads the fixture and compiles one visit
 
 
 def test_absent_slot_row_equals_a_present_undetected_slot_row():
-    """Every report column of an absent slot matches a present, undetected slot."""
+    """Fails if a null report exposes existence in any declared report column."""
     source = ExoVistaWorldSource.from_files(
         [fixture_files()],
         n_slots=WIDE_SLOTS,
@@ -49,6 +49,7 @@ def test_absent_slot_row_equals_a_present_undetected_slot_row():
             )
         )(keys)
     )
+    rows = rows[:, : channel.widths()[0]]
     detected = rows[:, :N_SLOTS] > 0.5
     n_rest = len(VISIT_REST)
     cells = rows[:, -N_SLOTS * n_rest :].reshape(len(keys), N_SLOTS, n_rest)

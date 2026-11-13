@@ -41,13 +41,12 @@ import numpy as np
 from spaceodyssey.adapters.jaxedith import (
     block_outcome_kind,
     column_index,
-    truth_catalog_kind,
     visit_columns,
     visit_report_kind,
 )
+from spaceodyssey.adapters.parameters import CATALOG_KIND_NAME, catalog_kind
 from spaceodyssey.adapters.photomancy import (
     BLOCK_KIND_NAME,
-    CATALOG_KIND_NAME,
     GRID_SPACING_D,
     N_GRID,
     REPORT_KIND_NAME,
@@ -145,7 +144,7 @@ def _arm(arm):
     return ARMS[arm]
 
 
-def bracket_registry(arm, n_slots=4):
+def bracket_registry(arm, n_slots=4, *, n_bands):
     """The kind registry of `arm`: none, refresh product, visit, block, catalog."""
     arm = _arm(arm)
     return KindRegistry(
@@ -154,7 +153,7 @@ def bracket_registry(arm, n_slots=4):
             REFRESH_PRODUCT_KIND,
             visit_report_kind(n_slots, arm.report_audience),
             block_outcome_kind(n_slots),
-            truth_catalog_kind(n_slots, arm.groups),
+            catalog_kind(n_slots, n_bands, arm.groups),
         )
     )
 
@@ -315,6 +314,8 @@ def bracket_study(
             `channel`.
     """
     arm = _arm(arm)
+    if channel.bands != source.population.bands:
+        raise ValueError("the channel and source disagree on the declared bands")
     if observer is None or policy is None:
         raise ValueError("bracket_study needs an observer and a policy")
     built = channel.assets()
@@ -343,7 +344,9 @@ def bracket_study(
             raise ValueError(
                 f"caps.n_pstate is {caps.n_pstate}; the policy needs {need}"
             )
-    caps = bracket_registry(arm, channel.n_slots).lower(caps, observer)
+    caps = bracket_registry(arm, channel.n_slots, n_bands=channel.n_bands).lower(
+        caps, observer
+    )
     per_day = int(built.context.clock.ticks_per_day)
     horizon = round(horizon_d * per_day)
     budget = jnp.full((caps.n_balance_rows, caps.n_resources), UNBOUNDED, F64)
@@ -806,7 +809,7 @@ def outcome_table(
         seen = np.zeros(n, bool)
         if check_detection:
             truth = jax.tree_util.tree_map(lambda x, w=w: x[w], truths)
-            true_elements = channel.truth_elements(truth)
+            true_elements = channel.truth_parameters(truth)
         for r in _rows_of(log, w, KIND_VISIT):
             s = int(log["subject"][w, r])
             days = (log["end_tick"][w, r] - log["start_tick"][w, r]) / per_day
@@ -819,7 +822,9 @@ def outcome_table(
                 mode = int(log["channel_index"][w, r])
                 when = log["payload"][w, r, time_col] - float(channel.epoch_jd)
                 p = np.asarray(
-                    channel.detect_probability(s, mode, when, true_elements[s])
+                    channel.detect_probability(
+                        s, mode, when, jax.tree.map(lambda x, s=s: x[s], true_elements)
+                    )
                 )
                 expected[w, s] += p * present[w, s]
                 variance[w, s] += p * (1 - p) * present[w, s]

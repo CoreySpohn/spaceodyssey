@@ -34,16 +34,25 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.constants import Msun2kg, Rearth2AU
+from hwoutils.constants import Mearth2kg, Msun2kg, Rearth2AU
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.ofti import PARAM_NAMES, ofti
 from photomancy.orbit.priors import ecc_distribution
 from photomancy.orbit.updater import UpdaterStatus
 
+from spaceodyssey.adapters.parameters import (
+    CATALOG_GROUPS,
+    CATALOG_KIND_NAME,
+    PlanetParameters,
+    catalog_group_of,
+    catalog_template,
+    from_photomancy,
+    semimajor_axis_au,
+)
 from spaceodyssey.codec.bindings import BindingKind, Bindings
 from spaceodyssey.core.capacities import require_x64
 from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience, RefitStatus
-from spaceodyssey.core.records import PayloadColumn, RecordKind
+from spaceodyssey.core.records import PayloadColumn, RecordKind, unpack
 from spaceodyssey.core.refresh import (
     AbstractRefitBoundary,
     HostLoopRefit,
@@ -396,12 +405,12 @@ def photomancy_bindings():
 #
 # and carries `n_modes` and `tick_days` (days per clock tick).
 
-ELEMENTS = ("ln_period", "ecc", "cos_i", "node", "argp", "tau", "ln_mass", "ln_lam")
-
 N_GRID = 16
 GRID_SPACING_D = 15.0
 POSITION_LAG_D = 60.0
-ALBEDO = 0.3
+# The first tier's class-1 prior is interim.
+_FIRST_TIER_ALBEDO = 0.3
+_ALBEDO_TAG = 0xA1BED0
 
 # The class-1 rule of the ExoVista catalog filter, in scaled semimajor axis (AU per
 # square root of solar luminosity) and radius (Earth radii).
@@ -410,42 +419,8 @@ CLASS1_R_LOWER = 0.8
 CLASS1_R_UPPER = 1.4
 DAYS_PER_YEAR = 365.25
 
-# The truth catalog row: per slot, these columns in order, each in one group. Column
-# `i` of slot `s` is `s * len(CATALOG_FIELDS) + i`.
-CATALOG_FIELDS = (
-    ("present", "existence"),
-    ("ln_period", "ephemeris"),
-    ("ecc", "ephemeris"),
-    ("cos_i", "ephemeris"),
-    ("node", "ephemeris"),
-    ("argp", "ephemeris"),
-    ("tau", "ephemeris"),
-    ("ln_mass", "ephemeris"),
-    ("class1", "class"),
-    ("ln_lam", "class"),
-)
-CATALOG_GROUPS = ("existence", "ephemeris", "class")
-CATALOG_KIND_NAME = "truth_catalog"
 REPORT_KIND_NAME = "visit_report"
 BLOCK_KIND_NAME = "block_outcome"
-
-
-def catalog_kind(n_slots, audiences=None, *, name=CATALOG_KIND_NAME):
-    """The truth-catalog record kind: per slot presence, orbit and class columns.
-
-    `audiences` maps a group name (`CATALOG_GROUPS`) to the audience flags that read
-    it; a group left out is readable by the scorer alone.
-    """
-    audiences = {} if audiences is None else dict(audiences)
-    unknown = set(audiences) - set(CATALOG_GROUPS)
-    if unknown:
-        raise ValueError(f"unknown catalog groups {sorted(unknown)}")
-    columns = tuple(
-        PayloadColumn(f"{field}_{slot}", int(audiences.get(group, Audience.SCORER)))
-        for slot in range(n_slots)
-        for field, group in CATALOG_FIELDS
-    )
-    return RecordKind(name, columns)
 
 
 def report_kind(n_slots, audience=EVERYONE, *, name=REPORT_KIND_NAME):
@@ -548,26 +523,28 @@ def weighted_quantiles(x, log_w, probs=(0.16, 0.5, 0.84)):
     return x[order][jnp.clip(cut, 0, x.shape[0] - 1)]
 
 
-def semimajor_axis_au(elements):
-    """Semimajor axis in AU from `ln_period` (days) and `ln_mass` (solar masses)."""
-    period_yr = jnp.exp(elements[..., 0]) / DAYS_PER_YEAR
-    return (jnp.exp(elements[..., 6]) * period_yr**2) ** (1.0 / 3.0)
+def class1_indicator(params, luminosity):
+    """Whether named physical parameters lie inside the interim class-1 box."""
+    scaled = semimajor_axis_au(params) / jnp.sqrt(luminosity)
+    return _class1_box(params.radius_rearth, scaled)
 
 
-def class1_indicator(elements, luminosity, albedo=ALBEDO):
-    """Whether each draw is a class-1 planet by the skyscapes catalog rule.
+def _first_tier_class1(params, luminosity_lsun):
+    """Keep the interim prior's solar-mass, Julian-year semimajor-axis convention."""
+    mass_msun = params.star_mass_msun + params.planet_mass_mearth * Mearth2kg / Msun2kg
+    axis_au = (mass_msun * (jnp.exp(params.ln_period_d) / DAYS_PER_YEAR) ** 2) ** (
+        1.0 / 3.0
+    )
+    return _class1_box(params.radius_rearth, axis_au / jnp.sqrt(luminosity_lsun))
 
-    The radius in Earth radii is `sqrt(exp(ln_lam) / albedo)`, `ln_lam` being
-    `ln(albedo * radius**2)`; the albedo is the declared one.
-    """
-    scaled = semimajor_axis_au(elements) / jnp.sqrt(luminosity)
-    radius = jnp.sqrt(jnp.exp(elements[..., 7]) / albedo)
+
+def _class1_box(radius_rearth, scaled_a_au):
     lo, hi = CLASS1_A_SCALED
     return (
-        (scaled >= lo)
-        & (scaled < hi)
-        & (radius >= CLASS1_R_LOWER / jnp.sqrt(scaled))
-        & (radius < CLASS1_R_UPPER)
+        (scaled_a_au >= lo)
+        & (scaled_a_au < hi)
+        & (radius_rearth >= CLASS1_R_LOWER / jnp.sqrt(scaled_a_au))
+        & (radius_rearth < CLASS1_R_UPPER)
     )
 
 
@@ -598,7 +575,6 @@ def summarize(
     tick_days=None,
     n_grid=N_GRID,
     spacing_d=GRID_SPACING_D,
-    albedo=ALBEDO,
     position_lag_d=POSITION_LAG_D,
 ):
     """One slot's summary leaves from a weighted orbit cloud.
@@ -620,13 +596,13 @@ def summarize(
     mean = w @ xy
     scatter = jnp.sqrt(w @ jnp.sum((xy - mean) ** 2, axis=-1))
     if class1 is None:
-        class1 = class1_indicator(elements, channel.luminosity(subject), albedo)
+        class1 = class1_indicator(elements, channel.luminosity(subject))
     return SlotLeaves(
         p_det=p_det,
         scatter=scatter,
         pos_mean=mean,
         p_class=w @ class1.astype(F64),
-        ln_period_q=weighted_quantiles(elements[:, 0], log_w),
+        ln_period_q=weighted_quantiles(elements.ln_period_d, log_w),
         ess=kish_size(log_w),
     )
 
@@ -640,10 +616,10 @@ def summarize_search(
     channel,
     ref_tick,
     *,
+    class1=None,
     tick_days=None,
     n_grid=N_GRID,
     spacing_d=GRID_SPACING_D,
-    albedo=ALBEDO,
 ):
     """`p_new [G, M]` of a belief: a visit first-detects a class-1 planet.
 
@@ -659,7 +635,11 @@ def summarize_search(
     tick_days = channel.tick_days if tick_days is None else tick_days
     w = _normalized(log_w)
     times = _grid_times(channel, ref_tick, tick_days, n_grid, spacing_d)
-    cls = class1_indicator(elements, channel.luminosity(subject), albedo)
+    cls = (
+        class1_indicator(elements, channel.luminosity(subject))
+        if class1 is None
+        else class1
+    )
     draws = _detect_draws(elements, subject, channel, times)
     p1 = jnp.einsum("gmn,n->gm", draws * cls.astype(F64), w)
     q = occupancy / jnp.maximum(n_undetected, 1)
@@ -679,24 +659,6 @@ def search_probability_truth(p_det, live):
 # -- The report refit ----------------------------------------------------------------
 
 
-def _catalog_elements(row, n_slots):
-    """`[n_slots, 8]` elements (`ELEMENTS` order) of a catalog row, on the host."""
-    width = len(CATALOG_FIELDS)
-    cells = np.asarray(row)[: n_slots * width].reshape(n_slots, width)
-    names = [f for f, _ in CATALOG_FIELDS]
-    return np.stack([cells[:, names.index(e)] for e in ELEMENTS], axis=-1)
-
-
-def _catalog_slots(row, n_slots):
-    """`(present, class1, elements)` of every slot from a catalog payload row."""
-    width = len(CATALOG_FIELDS)
-    cells = row[: n_slots * width].reshape(n_slots, width)
-    names = [f for f, _ in CATALOG_FIELDS]
-    col = {name: cells[:, names.index(name)] for name in names}
-    elements = jnp.stack([col[e] for e in ELEMENTS], axis=-1)
-    return col["present"] > 0.5, col["class1"] > 0.5, elements
-
-
 def _truth_entry(channel, entry, settings):
     """One entry's slices under the truth kernel, as a dict of leaves.
 
@@ -707,9 +669,9 @@ def _truth_entry(channel, entry, settings):
     is_cat = entry.valid & (entry.kind == cat)
     is_rep = entry.valid & (entry.kind == rep)
     row = entry.payload[jnp.argmax(is_cat)]
-    present, class1, elements = _catalog_slots(row, n_slots)
-    # an absent slot is evaluated on a harmless orbit and masked afterwards
-    safe = jnp.where(present[:, None], elements, jnp.zeros(8, F64).at[0].set(5.0))
+    catalog = unpack(catalog_template(n_slots, channel.n_bands), row)
+    present, safe = catalog.present, catalog.params
+    class1 = class1_indicator(safe, channel.luminosity(entry.subject))
     seen = (
         entry.payload[:, : settings.report_cols[-1] + 1][:, list(settings.report_cols)]
         > 0.5
@@ -724,7 +686,7 @@ def _truth_entry(channel, entry, settings):
 
     def slot(el, is1, last):
         return summarize(
-            el[None],
+            jax.tree.map(lambda x: x[None], el),
             one,
             entry.subject,
             channel,
@@ -733,7 +695,6 @@ def _truth_entry(channel, entry, settings):
             class1=is1[None],
             n_grid=settings.n_grid,
             spacing_d=settings.spacing_d,
-            albedo=settings.albedo,
             position_lag_d=settings.position_lag_d,
         )
 
@@ -778,7 +739,6 @@ class _Settings:
     report_cols: tuple
     n_grid: int
     spacing_d: float
-    albedo: float
     position_lag_d: float
 
 
@@ -871,27 +831,6 @@ def _photomancy_refit():
     return refit
 
 
-def channel_elements(elements):
-    """Physical elements `(..., 8)` of a photomancy cloud in the channel's convention.
-
-    Photomancy holds the periastron phase `tau` (periods) and `ln_lam` as the log of
-    albedo times radius squared in AU squared; the channel holds `tau` in days from
-    the epoch and `ln_lam` with the radius in Earth radii.
-    """
-    el = jnp.asarray(elements)
-    period = jnp.exp(el[..., 0])
-    el = el.at[..., 5].set(el[..., 5] * period)
-    return el.at[..., 7].set(el[..., 7] - 2.0 * jnp.log(Rearth2AU))
-
-
-def photomancy_elements(elements):
-    """The inverse of `channel_elements`: the periastron phase lies in [0, 1)."""
-    el = jnp.asarray(elements)
-    period = jnp.exp(el[..., 0])
-    el = el.at[..., 5].set(jnp.mod(el[..., 5] / period, 1.0))
-    return el.at[..., 7].set(el[..., 7] + 2.0 * jnp.log(Rearth2AU))
-
-
 def posterior_occupancy(prior, log_evidence):
     """Probability a slot holds a planet after reports: `q L / (1 - q + q L)`.
 
@@ -924,7 +863,7 @@ def slot_status(photomancy_status, finite):
     return SLOT_OK
 
 
-def class1_window(luminosity, mass_msun, half_width, albedo=ALBEDO):
+def class1_window(luminosity, mass_msun, half_width, albedo):
     """The class-1 window of a star: `(ln_period_lo, hi, ln_lam_lo, hi)`.
 
     The period bounds follow from the scaled semimajor axis window at the largest and
@@ -950,7 +889,6 @@ class _PostSettings:
     n_slots: int
     n_grid: int
     spacing_d: float
-    albedo: float
     position_lag_d: float
     n_particles: int
     n_round: int
@@ -1037,7 +975,7 @@ class _FitLane(eqx.Module):
 class _ShrinkLane(_FitLane):
     """One detected slot of one entry, with the catalog orbit the rule centers on."""
 
-    truth: jax.Array  # [8] catalog elements of the slot, in the channel's convention
+    truth: PlanetParameters  # catalog parameters of the slot
 
 
 def _grid_entry(channel, lane, grid_points):
@@ -1166,13 +1104,27 @@ def _report_of(refit, channel, lane, detected):
     )
 
 
+def _detection_band_index(channel):
+    return next(
+        i
+        for i, b in enumerate(channel.bands)
+        if math.isclose(b.center_nm, channel.detection_band.center_nm, rel_tol=1e-9)
+    )
+
+
+def _parameters_finite(params):
+    return jnp.all(
+        jnp.stack([jnp.all(jnp.isfinite(x)) for x in jax.tree.leaves(params)])
+    )
+
+
 def _slot_key(lane, scale):
     """The entry's key folded with the slot, and with the retry factor."""
     key = jax.random.fold_in(jnp.asarray(lane.key, jnp.uint32), lane.slot)
     return jax.random.fold_in(key, scale)
 
 
-def _fit_lane(channel, lane, st, engine, scale):
+def _fit_lane(channel, population, lane, st, engine, scale):
     """One slot with detections: refit, then its summary leaves and the status."""
     refit = _photomancy_refit()
     _, target = _star_target(refit, channel, lane.subject, st)
@@ -1215,10 +1167,13 @@ def _fit_lane(channel, lane, st, engine, scale):
             report=report,
             max_rounds=st.max_rounds,
         )
-    elements = channel_elements(cloud.elements)
+    albedo = population.albedo_prior(
+        jax.random.fold_in(key, _ALBEDO_TAG), st.n_particles, channel.bands
+    )
+    elements = from_photomancy(cloud.elements, albedo, _detection_band_index(channel))
     last = jnp.max(jnp.where(lane.detected & lane.valid, lane.end_tick, -1))
     leaves = _slot_leaves(channel, lane.subject, lane.tick, last, elements, st)
-    finite = jnp.all(jnp.isfinite(elements))
+    finite = _parameters_finite(elements)
     return (
         leaves.p_det,
         leaves.scatter,
@@ -1242,14 +1197,13 @@ def _slot_leaves(channel, subject, tick, last, elements, st):
     last_d = jnp.where(last >= 0, last.astype(F64) * channel.tick_days, 0.0)
     return summarize(
         elements,
-        jnp.zeros(elements.shape[0], F64),
+        jnp.zeros(elements.ln_period_d.shape[0], F64),
         subject,
         channel,
         tick,
         last_det_d=jnp.where(last >= 0, last_d, tick * channel.tick_days),
         n_grid=st.n_grid,
         spacing_d=st.spacing_d,
-        albedo=st.albedo,
         position_lag_d=st.position_lag_d,
     )
 
@@ -1260,7 +1214,7 @@ class _SummaryLane(eqx.Module):
     subject: jax.Array
     tick: jax.Array
     last: jax.Array  # end tick of the last counting detection, negative for none
-    elements: jax.Array  # [n_particles, 8], the cloud in the channel's convention
+    elements: PlanetParameters  # [n_particles], including each draw's albedo
     ess: jax.Array
     raw: jax.Array  # the fit's photomancy status
     live: jax.Array
@@ -1279,7 +1233,7 @@ def _resummary_lane(channel, lane, st):
         leaves.ln_period_q,
         lane.ess,
         lane.raw,
-        jnp.all(jnp.isfinite(lane.elements)),
+        _parameters_finite(lane.elements),
         lane.elements,
     )
 
@@ -1295,7 +1249,7 @@ def _resummary_lanes(channel, lanes, st):
 
 
 def _first_tier_cloud(channel, lane, st, scale):
-    """The first-tier cloud of an entry: `(cloud, luminosity)`.
+    """The first-tier cloud and its named parameters, with the fixed interim albedo.
 
     The cloud is the fixed class-1 prior draws of the star reweighted by the entry's
     null reports; `cloud.log_evidence` is the log of `L`, the likelihood of the
@@ -1305,7 +1259,7 @@ def _first_tier_cloud(channel, lane, st, scale):
     mass, _ = _star_target(refit, channel, lane.subject, st)
     luminosity = channel.luminosity(lane.subject)
     lnp_lo, lnp_hi, lam_lo, lam_hi = class1_window(
-        luminosity, mass, st.mass_window, st.albedo
+        luminosity, mass, st.mass_window, _FIRST_TIER_ALBEDO
     )
     base = refit.physical_prior_target(
         mass, channel.scenes.dist_pc[lane.subject], st.mass_window
@@ -1315,7 +1269,15 @@ def _first_tier_cloud(channel, lane, st, scale):
     n = st.n_first * scale
     cloud_key = jax.random.fold_in(jax.random.PRNGKey(CLOUD_SEED), lane.subject)
     pool = refit.prior_cloud(target, cloud_key, 2 * n)
-    inside = class1_indicator(channel_elements(pool), luminosity, st.albedo)
+
+    def parameters(rows):
+        return from_photomancy(
+            rows,
+            jnp.full((rows.shape[0], channel.n_bands), _FIRST_TIER_ALBEDO),
+            _detection_band_index(channel),
+        )
+
+    inside = _first_tier_class1(parameters(pool), luminosity)
     draws = pool[jnp.argsort(~inside, stable=True)[:n]]
     report = _report_of(refit, channel, lane, jnp.zeros_like(lane.detected))
     cloud = refit.first_tier(
@@ -1326,7 +1288,7 @@ def _first_tier_cloud(channel, lane, st, scale):
         n_particles=st.n_particles,
         ess_floor=st.ess_floor,
     )
-    return cloud, luminosity
+    return cloud, parameters(cloud.elements)
 
 
 def _first_tier_lane(channel, lane, st, scale):
@@ -1337,8 +1299,7 @@ def _first_tier_lane(channel, lane, st, scale):
     with `q L / (1 - q + q L)` after them, `L` the null evidence of the first tier:
     every null lowers the chance that a planet is still there to find.
     """
-    cloud, _ = _first_tier_cloud(channel, lane, st, scale)
-    elements = channel_elements(cloud.elements)
+    cloud, elements = _first_tier_cloud(channel, lane, st, scale)
     leaves = _first_leaves(
         channel,
         lane.subject,
@@ -1352,7 +1313,7 @@ def _first_tier_lane(channel, lane, st, scale):
         *leaves,
         cloud.ess,
         cloud.status.astype(I64),
-        jnp.all(jnp.isfinite(elements)),
+        _parameters_finite(elements),
         elements,
         cloud.log_evidence,
     )
@@ -1363,10 +1324,11 @@ def _first_leaves(channel, subject, tick, n_undetected, elements, log_evidence, 
 
     The tick moves only `p_new`, through the forecast grid.
     """
-    zeros = jnp.zeros(elements.shape[0], F64)
+    zeros = jnp.zeros(elements.ln_period_d.shape[0], F64)
     n_dark = jnp.maximum(n_undetected, 1)
     prior = st.occupancy / n_dark
     occupancy = n_dark * posterior_occupancy(prior, log_evidence)
+    class1 = _first_tier_class1(elements, channel.luminosity(subject))
     p_new = summarize_search(
         elements,
         zeros,
@@ -1375,13 +1337,12 @@ def _first_leaves(channel, subject, tick, n_undetected, elements, log_evidence, 
         subject,
         channel,
         tick,
+        class1=class1,
         n_grid=st.n_grid,
         spacing_d=st.spacing_d,
-        albedo=st.albedo,
     )
-    luminosity = channel.luminosity(subject)
-    p_class = jnp.mean(class1_indicator(elements, luminosity, st.albedo).astype(F64))
-    return p_new, p_class, weighted_quantiles(elements[:, 0], zeros)
+    p_class = jnp.mean(class1.astype(F64))
+    return p_new, p_class, weighted_quantiles(elements.ln_period_d, zeros)
 
 
 class _FirstSummaryLane(eqx.Module):
@@ -1390,7 +1351,7 @@ class _FirstSummaryLane(eqx.Module):
     subject: jax.Array
     tick: jax.Array
     n_undetected: jax.Array
-    elements: jax.Array  # [n_first, 8]
+    elements: PlanetParameters  # [n_first]
     log_evidence: jax.Array
     ess: jax.Array
     raw: jax.Array
@@ -1412,7 +1373,7 @@ def _first_resummary_lane(channel, lane, st):
         *leaves,
         lane.ess,
         lane.raw,
-        jnp.all(jnp.isfinite(lane.elements)),
+        _parameters_finite(lane.elements),
         lane.elements,
         lane.log_evidence,
     )
@@ -1433,22 +1394,25 @@ def shrinkage_width(n_det, widths=SHRINK_WIDTHS):
     return jnp.asarray(widths, F64)[jnp.clip(n_det, 1, len(widths)) - 1]
 
 
-def shrinkage_cloud(truth, key, n, width):
-    """`n` orbits around the catalog orbit `truth (8,)`, elements in `ELEMENTS` order.
+def shrinkage_cloud(truth: PlanetParameters, key, n, width) -> PlanetParameters:
+    """Draw period and albedo log-normally around truth, holding the radius fixed.
 
-    The semimajor axis `a` and the geometric albedo `Ag` are log-normal about their
-    catalog values with log standard deviation `width` (a fractional width, to second
-    order), drawn independently. The stellar mass, the planet radius and every other
-    element are held at the catalog values, so the period follows `a` at fixed mass
-    (`ln P` moves by 1.5 `ln a`) and `ln_lam = ln(Ag Rp^2)` moves by `ln Ag`.
+    The log period width is 1.5 times `width`; the log albedo width is `width`.
+    All declared bands share the albedo multiplier of a draw.
     """
     z = jax.random.normal(key, (n, 2), F64)
-    cloud = jnp.broadcast_to(jnp.asarray(truth, F64), (n, 8))
-    cloud = cloud.at[:, 0].add(1.5 * width * z[:, 0])
-    return cloud.at[:, 7].add(width * z[:, 1])
+    cloud = jax.tree.map(lambda x: jnp.broadcast_to(x, (n, *x.shape)), truth)
+    return eqx.tree_at(
+        lambda p: (p.ln_period_d, p.albedo),
+        cloud,
+        (
+            cloud.ln_period_d + 1.5 * width * z[:, 0],
+            cloud.albedo * jnp.exp(width * z[:, 1, None]),
+        ),
+    )
 
 
-def _shrink_lane(channel, lane, st, engine, scale):
+def _shrink_lane(channel, population, lane, st, engine, scale):
     """One detected slot under the shrinkage rule: the cloud's summary leaves.
 
     Returns the tuple of `_fit_lane`; the cloud is never weighted, so its size is
@@ -1456,7 +1420,17 @@ def _shrink_lane(channel, lane, st, engine, scale):
     """
     n_det = (lane.detected & lane.valid).sum()
     width = shrinkage_width(n_det, st.shrink_widths)
-    elements = shrinkage_cloud(lane.truth, _slot_key(lane, scale), st.n_shrink, width)
+    key = _slot_key(lane, scale)
+    albedo = population.albedo_prior(
+        jax.random.fold_in(key, _ALBEDO_TAG), st.n_shrink, channel.bands
+    )
+    center = jax.tree.map(
+        lambda x: jnp.broadcast_to(x, (st.n_shrink, *x.shape)), lane.truth
+    )
+    center = eqx.tree_at(lambda p: p.albedo, center, albedo)
+    elements = jax.vmap(
+        lambda p, k: jax.tree.map(lambda x: x[0], shrinkage_cloud(p, k, 1, width))
+    )(center, jax.random.split(key, st.n_shrink))
     zeros = jnp.zeros(st.n_shrink, F64)
     last = jnp.max(jnp.where(lane.detected & lane.valid, lane.end_tick, -1))
     last_d = jnp.where(last >= 0, last.astype(F64) * channel.tick_days, 0.0)
@@ -1469,7 +1443,6 @@ def _shrink_lane(channel, lane, st, engine, scale):
         last_det_d=jnp.where(last >= 0, last_d, lane.tick * channel.tick_days),
         n_grid=st.n_grid,
         spacing_d=st.spacing_d,
-        albedo=st.albedo,
         position_lag_d=st.position_lag_d,
     )
     return (
@@ -1480,17 +1453,17 @@ def _shrink_lane(channel, lane, st, engine, scale):
         leaves.ln_period_q,
         leaves.ess,
         jnp.asarray(int(UpdaterStatus.OK), I64),
-        jnp.all(jnp.isfinite(elements)),
+        _parameters_finite(elements),
         elements,
     )
 
 
 @eqx.filter_jit
-def _fit_lanes(channel, lanes, st, engine, scale):
+def _fit_lanes(channel, population, lanes, st, engine, scale):
     """A batch of slot fits, one output tuple per leaf."""
     fit = _shrink_lane if engine == "shrink" else _fit_lane
     return _over_lanes(
-        _if_live(lambda lane: fit(channel, lane, st, engine, scale)),
+        _if_live(lambda lane: fit(channel, population, lane, st, engine, scale)),
         lanes,
         st.lane_batch,
     )
@@ -1528,11 +1501,19 @@ _FIT_INPUTS = (
 )
 
 
-def _fit_digest(item, st):
-    """Digest of one slot fit's reports and declared population bounds."""
+def _fit_digest(item, st, population=None, bands=()):
+    """Digest of reports, prior bounds and the population supplying each albedo."""
     h = hashlib.blake2b(digest_size=16)
     bounds = np.asarray((*st.ln_lam_range, *st.period_support_d), np.float64)
     h.update(bounds.tobytes())
+    h.update(repr(bands).encode())
+    if population is not None:
+        leaves, structure = jax.tree.flatten(population)
+        h.update(repr(structure).encode())
+        for leaf in leaves:
+            value = np.ascontiguousarray(leaf)
+            h.update(f"{value.dtype.str}{value.shape}".encode())
+            h.update(value.tobytes())
     for name in _FIT_INPUTS:
         a = np.ascontiguousarray(item[name])
         h.update(f"{name}{a.dtype.str}{a.shape}".encode())
@@ -1585,14 +1566,15 @@ class ReportRefit(AbstractRefitBoundary):
     `kernel="shrinkage"` is the shrinkage rule of a published study, taken as an
     external reference. A slot with no detection takes the posterior kernel's first
     tier. After a detection the slot's cloud is `SHRINK_DRAWS` orbits around its
-    catalog orbit, with the semimajor axis `a` and the geometric albedo `Ag` log-normal
-    at a fractional width of 0.20, 0.10 and 0.025 after one, two and three or more
-    detections (`SHRINK_WIDTHS`); the planet radius, the stellar mass and every other
-    element stay at the catalog values (see `shrinkage_cloud`). The cloud goes through
+    catalog orbit. Albedos come from the belief population at the declared bands.
+    Log albedo has width 0.20, 0.10 and 0.025 after one, two and three or more
+    detections (`SHRINK_WIDTHS`); log period has 1.5 times that width. The radius,
+    masses and other parameters stay at their catalog values (see `shrinkage_cloud`).
+    The cloud goes through
     `summarize` unweighted, so the leaves and the claim rule are those of every other
     kernel, and its key is the entry's key folded with the slot. The kernel reads the
-    catalog groups of `SHRINK_GROUPS`: the orbit and the photometric scale `ln_lam`
-    that `Ag` is centered on. It needs `occupancy` and the belief population like
+    catalog groups of `SHRINK_GROUPS`: the physical orbit and radius. It needs
+    `occupancy` and the belief population like
     the posterior kernel, for the first tier. A detected slot of an entry with no
     catalog row is `SLOT_NO_SUPPORT` and installs nothing.
 
@@ -1640,7 +1622,6 @@ class ReportRefit(AbstractRefitBoundary):
         block_kind=BLOCK_KIND_NAME,
         n_grid=N_GRID,
         spacing_d=GRID_SPACING_D,
-        albedo=ALBEDO,
         position_lag_d=POSITION_LAG_D,
         occupancy=None,
         mass_window=MASS_WINDOW,
@@ -1702,7 +1683,6 @@ class ReportRefit(AbstractRefitBoundary):
         self.block_kind = str(block_kind)
         self.n_grid = int(n_grid)
         self.spacing_d = float(spacing_d)
-        self.albedo = float(albedo)
         self.position_lag_d = float(position_lag_d)
         self.occupancy = None if occupancy is None else float(occupancy)
         self.mass_window = float(mass_window)
@@ -1740,7 +1720,6 @@ class ReportRefit(AbstractRefitBoundary):
             "block_kind": self.block_kind,
             "n_grid": self.n_grid,
             "spacing_d": self.spacing_d,
-            "albedo": self.albedo,
             "position_lag_d": self.position_lag_d,
         }
         if self.kernel != "truth":
@@ -1783,19 +1762,17 @@ class ReportRefit(AbstractRefitBoundary):
                 f"the registry holds {list(names)}; the refit reads "
                 f"{self.catalog_kind!r} and {self.report_kind!r}"
             )
-        row = caps.payload_audience[names.index(self.catalog_kind)]
-        width = len(CATALOG_FIELDS)
+        index = names.index(CATALOG_KIND_NAME)
+        row = caps.payload_audience[index]
+        paths = caps.payload_paths[index]
         need = int(Audience.OBSERVER) | int(Audience.POLICY)
-        # A declared column always has a nonempty audience; the padding to the widest
-        # registered kind has none, so the slot count is the declared width.
-        n_slots = sum(1 for a in row if a) // width
-        for col, audience in enumerate(row[: n_slots * width]):
-            field, group = CATALOG_FIELDS[col % width]
+        for path, audience in zip(paths, row, strict=False):
+            group = catalog_group_of(path)
             if group in self.truth_groups and (int(audience) & need) != need:
                 raise ValueError(
-                    f"catalog column {field!r} of slot {col // width} (group "
-                    f"{group!r}) is hidden from an audience; the {self.kernel} "
-                    "kernel needs it open to the observer and the policy"
+                    f"catalog column {path!r} (group {group!r}) is hidden from an "
+                    f"audience; the {self.kernel} kernel needs it open to the "
+                    "observer and the policy"
                 )
 
     def _settings(self, study):
@@ -1810,7 +1787,6 @@ class ReportRefit(AbstractRefitBoundary):
             report_cols=tuple(range(n_slots)),
             n_grid=self.n_grid,
             spacing_d=self.spacing_d,
-            albedo=self.albedo,
             position_lag_d=self.position_lag_d,
         ), len(report_row)
 
@@ -1902,11 +1878,11 @@ class ReportRefit(AbstractRefitBoundary):
                 "`belief_population` or use a world source that declares one)"
             )
         channel = view.channel_model
+        belief.check_bands(channel.bands)
         return _PostSettings(
             n_slots=channel.n_slots,
             n_grid=self.n_grid,
             spacing_d=self.spacing_d,
-            albedo=self.albedo,
             position_lag_d=self.position_lag_d,
             n_particles=self.n_particles,
             n_round=self.n_round,
@@ -1940,13 +1916,17 @@ class ReportRefit(AbstractRefitBoundary):
             padded = part + [part[0]] * (self.lanes - len(part))
             lanes = lane_cls(
                 **{
-                    f: jnp.asarray(np.stack([it[f] for it in padded]))
+                    f: jax.tree.map(
+                        lambda *xs: jnp.asarray(np.stack(xs)), *[it[f] for it in padded]
+                    )
                     for f in lane_cls_fields
                 },
                 live=jnp.arange(self.lanes) < len(part),
             )
-            result = [np.asarray(x) for x in run(lanes)]
-            out.extend(tuple(x[i] for x in result) for i in range(len(part)))
+            result = jax.tree.map(np.asarray, run(lanes))
+            out.extend(
+                jax.tree.map(lambda x, i=i: x[i], result) for i in range(len(part))
+            )
         return out
 
     def _answer_from_store(self, channel, st, indexed_fits, digests):
@@ -2000,7 +1980,9 @@ class ReportRefit(AbstractRefitBoundary):
 
     def _keep(self, digest, value):
         """Put a cloud in the store (copies: a view would keep a lane batch alive)."""
-        copied = tuple(np.array(x) if not isinstance(x, bool) else x for x in value)
+        copied = jax.tree.map(
+            lambda x: np.array(x) if not isinstance(x, bool) else x, value
+        )
         self._clouds[digest] = copied
         self._clouds.move_to_end(digest)
         while len(self._clouds) > self.resummary_capacity:
@@ -2091,13 +2073,15 @@ class ReportRefit(AbstractRefitBoundary):
             end = np.zeros(rows, np.int64)
             end[: len(idx)] = req.rows.end_tick[w, a, s][idx]
             used = np.arange(rows) < len(idx)
-            truth, has_cat = np.zeros((n_slots, 8)), False
+            truth, has_cat = None, False
             if shrink:
                 is_cat = req.rows.valid[w, a, s] & (req.rows.kind[w, a, s] == cat_index)
                 has_cat = bool(is_cat.any())
                 if has_cat:
                     row = req.rows.payload[w, a, s][int(np.argmax(is_cat))]
-                    truth = _catalog_elements(row, n_slots)
+                    truth = unpack(
+                        catalog_template(n_slots, channel.n_bands), row
+                    ).params
             entries.append(
                 {
                     "at": (w, a, s),
@@ -2164,7 +2148,9 @@ class ReportRefit(AbstractRefitBoundary):
                 item = dict(base)
                 item["slot"] = np.asarray(slot)
                 if shrink:
-                    item["truth"] = e["truth"][slot]
+                    item["truth"] = jax.tree.map(
+                        lambda x, slot=slot: x[slot], e["truth"]
+                    )
                 for f in (
                     "detected",
                     "valid",
@@ -2207,7 +2193,12 @@ class ReportRefit(AbstractRefitBoundary):
                     part = [(k, it) for k, it in group if it["epochs"].shape[0] == rows]
                     out = self._run_groups(
                         lambda lanes, engine=engine: _fit_lanes(
-                            channel, lanes, st, engine, scale
+                            channel,
+                            study.decision_view().belief_population,
+                            lanes,
+                            st,
+                            engine,
+                            scale,
                         ),
                         [it for _, it in part],
                         fit_fields,
@@ -2238,7 +2229,12 @@ class ReportRefit(AbstractRefitBoundary):
         fit_out, stored_retries = {}, set()
         digests = {}
         if self.resummary:
-            digests = {k: _fit_digest(it, st) for k, (_, _, eng, it) in indexed_fits}
+            digests = {
+                k: _fit_digest(
+                    it, st, study.decision_view().belief_population, channel.bands
+                )
+                for k, (_, _, eng, it) in indexed_fits
+            }
             fit_out, stored_retries = self._answer_from_store(
                 channel, st, indexed_fits, digests
             )
@@ -2254,7 +2250,10 @@ class ReportRefit(AbstractRefitBoundary):
         indexed_firsts = list(enumerate(firsts))
         first_out, stored_first_retries, first_digests = {}, set(), {}
         if self.resummary:
-            first_digests = {k: _fit_digest(it, st) for k, (_, it) in indexed_firsts}
+            first_digests = {
+                k: _fit_digest(it, st, bands=channel.bands)
+                for k, (_, it) in indexed_firsts
+            }
             first_out, stored_first_retries = self._answer_firsts_from_store(
                 channel, st, indexed_firsts, first_digests
             )
@@ -2341,13 +2340,9 @@ class ReportRefit(AbstractRefitBoundary):
 
 
 __all__ = [
-    "ALBEDO",
     "BLOCK_KIND_NAME",
-    "CATALOG_FIELDS",
-    "CATALOG_GROUPS",
     "CLASS_ONE",
     "COLUMN_NAMES",
-    "ELEMENTS",
     "SHRINK_DRAWS",
     "SHRINK_GROUPS",
     "SHRINK_WIDTHS",
@@ -2363,15 +2358,12 @@ __all__ = [
     "OftiRefit",
     "ReportRefit",
     "SlotLeaves",
-    "catalog_kind",
-    "channel_elements",
     "class1_indicator",
     "class1_window",
     "kish_size",
     "ofti_binding",
     "ofti_model",
     "photomancy_bindings",
-    "photomancy_elements",
     "photomancy_report",
     "posterior_occupancy",
     "report_kind",

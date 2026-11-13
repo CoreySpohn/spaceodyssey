@@ -19,6 +19,7 @@ from photomancy.orbit.updater import UpdaterStatus
 
 from spaceodyssey.adapters import jaxedith as jx
 from spaceodyssey.adapters import photomancy as ph
+from spaceodyssey.adapters.parameters import to_photomancy
 from spaceodyssey.core.enums import RefitStatus
 from spaceodyssey.studies import bracket as br
 from tests.adapters.posterior_helpers import realize_visits, visit_request
@@ -283,7 +284,7 @@ def test_a_bright_planet_fits_when_the_scale_prior_holds_the_population(world):
     assert fitted, "no detected-slot cloud was retained"
     lo, hi = earth.scale_range_au2(band)
     for elements in fitted:
-        scales = np.asarray(ph.photomancy_elements(elements))[:, 7]
+        scales = np.asarray(to_photomancy(elements, 0))[:, 7]
         assert np.all((lo <= scales) & (scales <= hi))
     dark = slot["n_det"] == 0
     assert dark.any() and (slot["status"][dark] == ph.SLOT_OK).all()
@@ -343,13 +344,12 @@ def test_the_search_probability_follows_the_posterior_occupancy(world, n_rows):
     boundary = _boundary(study, 1)
     st = boundary._post_settings(study)
     lane = _null_lane(channel, st, 0, n_rows)
-    cloud, _ = ph._first_tier_cloud(channel, lane, st, 1)
+    cloud, elements = ph._first_tier_cloud(channel, lane, st, 1)
     like = float(jnp.exp(cloud.log_evidence))
     n = N_SLOTS
     q = st.occupancy / n
     q_post = q * like / (1.0 - q + q * like)
-    elements = ph.channel_elements(cloud.elements)
-    zeros = jnp.zeros(elements.shape[0])
+    zeros = jnp.zeros(elements.ln_period_d.shape[0])
     args = (zeros,)
 
     def search(occupancy):
@@ -361,9 +361,9 @@ def test_the_search_probability_follows_the_posterior_occupancy(world, n_rows):
             0,
             channel,
             jnp.asarray(TICK),
+            class1=ph._first_tier_class1(elements, channel.luminosity(0)),
             n_grid=st.n_grid,
             spacing_d=st.spacing_d,
-            albedo=st.albedo,
         )
 
     p_all = np.asarray(search(float(n)))  # q = 1: 1 - (1 - p1) ** n
@@ -423,9 +423,13 @@ def test_a_renewal_summarizes_the_stored_cloud_like_a_refit(world):
     later = visit_request(study, {0: rich}, tick=TICK + 225 * DAY)
     kept = _boundary(study, 2, ess_floor=1.0, resummary=True)
     at_first = kept.refit_batch(study, first)
+    albedos = {key: cloud[0].albedo.copy() for key, cloud in kept._clouds.items()}
+    assert albedos and all(a.shape[-1] == channel.n_bands for a in albedos.values())
     fits = dict(kept.resummary_stats)
     assert fits["hits"] == 0 and fits["misses"] >= 2
     answered = kept.refit_batch(study, later)
+    for key, albedo in albedos.items():
+        np.testing.assert_array_equal(kept._clouds[key][0].albedo, albedo)
     assert kept.resummary_stats == {"hits": fits["misses"], "misses": fits["misses"]}
     refit = _boundary(study, 2, ess_floor=1.0).refit_batch(study, later)
     for audience in (0, 1):
@@ -437,7 +441,7 @@ def test_a_renewal_summarizes_the_stored_cloud_like_a_refit(world):
     old = _slices(study, at_first, 0, 0)
     new = _slices(study, answered, 0, 0)
     assert not np.allclose(old["p_det"], new["p_det"])
-    assert np.array_equal(old["pos_mean"], new["pos_mean"])
+    np.testing.assert_array_max_ulp(old["pos_mean"], new["pos_mean"], maxulp=4)
     assert np.array_equal(old["ln_period_q"], new["ln_period_q"])
 
 

@@ -51,6 +51,10 @@ class Capacities:
     # `kind_names` is read only while a study is built or checked, never under trace, so
     # it stays out of the equality and hash that key a compiled program.
     kind_names: tuple[str, ...] = dataclasses.field(default=(), compare=False)
+    # Column paths are derived from the registry and omitted from documents.
+    payload_paths: tuple[tuple[str, ...], ...] = dataclasses.field(
+        default=(), compare=False
+    )
     derived_kinds: tuple[int, ...] = ()
     refit_kinds: tuple[int, ...] = ()
     refit_statuses: tuple[int, ...] = ()

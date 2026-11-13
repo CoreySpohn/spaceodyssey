@@ -151,3 +151,40 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   small and survey bounds, sensitivity to spectrum limits and the required
   horizon, and clock refusal with recovery on a longer tick. Net: one test
   function and three collected cases added. No shared parameter matrix expands.
+
+
+## Named physical planet parameters and catalog rows (breaking)
+
+- `PlanetParameters` replaces unnamed orbit matrices above the photomancy boundary.
+  Periastron time is days from the study epoch; stellar and planet masses, physical
+  radius, and all declared-band albedos travel together through a cloud. The
+  photomancy conversion preserves its AU-squared scale and caps the inverse mass
+  relation at 131.6 Earth masses.
+- `TruthCatalogRow` is packed from named fields. The catalog kind and audience
+  groups come from its template; lowering preserves each kind's own column paths.
+  Refit validation uses those paths, excluding padding from wider kinds. Run
+  documents omit these derived paths and rebuild them from the stored registry;
+  pinned documents and goldens do not change.
+- `ObservingModeChannel.from_stars` requires `bands=` and exposes `n_bands`.
+  Study construction refuses channel/source band disagreement. Detected-slot fit
+  and shrinkage clouds draw albedo spectra with a fixed folded slot key from the
+  decision view's belief population, retaining the association during cached
+  resummary. Cache identity includes the population and band declarations.
+- The albedo mixture weights positive-rate occurrence cells, draws log-uniform
+  mass and scaled semimajor axis within each cell, then normalizes eligible type
+  weights including the configured candidate probability. It rejects locations
+  without selectable types. This is the occurrence prior before stability and
+  host/support/observation conditioning; one type supplies every band of a draw.
+  Source and refit host validation reject nonpositive or non-finite albedos of
+  selectable types in any declared band and require an explicit population repair.
+- The first tier retains its interim class-1 prior, scale window, fixed albedo,
+  semimajor-axis convention, pool, filter, evidence and search-occupancy law.
+  Shrinkage holds radius and masses fixed, with log-period width 1.5 times the
+  declared log-albedo width.
+- Fourteen test functions are added, including seventeen cases in the parameter
+  file, one lowering guard and one codec round-trip guard. Two observing-mode
+  functions retire into the parameter tests: catalog layout and stored positions.
+  The independent raw-file/exact-solver and tabulated-solver position guards
+  remain. Net: twelve functions and seventeen collected cases added; no shared
+  scenario matrix expands. Cache renewal pins the albedos bitwise and permits at
+  most four ULP in recomputed positions across the two compiled summary programs.

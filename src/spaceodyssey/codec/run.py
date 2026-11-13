@@ -219,6 +219,7 @@ def load_run(
     )
     registry = decode_records(document.records)
     check_lowering(registry, study)
+    study = dataclasses.replace(study, caps=registry.lower(study.caps, study.observer))
     boundaries = {}
     for side in _SIDES:
         if side in run.get("refit", {}):

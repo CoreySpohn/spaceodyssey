@@ -216,7 +216,12 @@ def _decode_kind(node, path, table):
             pointer((*path, "$kind")),
         )
     fields = dataclasses.fields(cls)
-    stored = [f.name for f in fields if not is_version_field(cls, f.name)]
+    stored = [
+        f.name
+        for f in fields
+        if not is_version_field(cls, f.name)
+        and not (cls is Capacities and f.name == "payload_paths")
+    ]
     version = table.current_version(ref[0], ref[1])
     migrated = None
     if ref[2] == version:
@@ -242,7 +247,9 @@ def _build(cls, node, path, table, version, migrated, fields):
     values = {}
     for field in fields:
         where = (*path, field.name)
-        if is_version_field(cls, field.name):
+        if cls is Capacities and field.name == "payload_paths":
+            value = ()
+        elif is_version_field(cls, field.name):
             value = version
         elif migrated is None and field.name not in node:
             # an optional field the encoder omitted at its default

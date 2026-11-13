@@ -52,6 +52,7 @@ policy, observer or refit.
 
 import dataclasses
 import functools
+import itertools
 import math
 
 import equinox as eqx
@@ -611,6 +612,157 @@ class PopulationModel(eqx.Module):
         low, high = self.support.period_d
         return float(low), float(high)
 
+    def albedo_prior(self, key, n, bands):
+        """Draw [n, B] spectra from the occurrence prior conditioned on selectability.
+
+        Cells have probability proportional to their nonnegative occurrence rates
+        (only binned cells). Scaled semimajor axis and mass are log-uniform within
+        a cell. At that location the eligible types' weights, including the configured
+        candidate probability, are normalized. Locations without a selectable type
+        are rejected. This is the pre-stability occurrence mixture; it is not
+        conditioned on a host, the belief's orbital support, or observed reports.
+        One type supplies all bands of a draw.
+        """
+        t, o = self.types, self.occurrence
+        log_a, log_m = jnp.log(o.a_edges_au), jnp.log(o.mass_edges_mearth)
+        rates = jnp.where(o.bin_id >= 0, o.rate, 0.0).ravel()
+        cumulative = jnp.cumsum(rates)
+
+        def draw(carry):
+            key, indices, done = carry
+            key, kc, ka, km, kt = jr.split(key, 5)
+            cell = jnp.searchsorted(
+                cumulative, jr.uniform(kc, (n,)) * cumulative[-1], side="right"
+            )
+            ia, im = cell // o.rate.shape[1], cell % o.rate.shape[1]
+            a = jnp.exp(log_a[ia] + jr.uniform(ka, (n,)) * (log_a[ia + 1] - log_a[ia]))
+            mass = jnp.exp(
+                log_m[im] + jr.uniform(km, (n,)) * (log_m[im + 1] - log_m[im])
+            )
+            radius = mass_to_radius(mass)
+            lower = jnp.where(
+                t.earth_candidate,
+                t.radius_min_rearth / jnp.sqrt(a[:, None]),
+                t.radius_min_rearth,
+            )
+            fits = (
+                (a[:, None] > t.a_min_au)
+                & (a[:, None] < t.a_max_au)
+                & (radius[:, None] > lower)
+                & (radius[:, None] < t.radius_max_rearth)
+            )
+            candidate = jnp.any(fits & t.earth_candidate, axis=-1, keepdims=True)
+            p = self.config.earth_candidate_probability
+            factor = jnp.where(t.earth_candidate, p, 1.0 - p)
+            weights = fits * t.weight * jnp.where(candidate, factor, 1.0)
+            cum = jnp.cumsum(weights, axis=-1)
+            selected = jnp.sum(cum <= jr.uniform(kt, (n, 1)) * cum[:, -1:], axis=-1)
+            valid = cum[:, -1] > 0.0
+            return key, jnp.where(~done & valid, selected, indices), done | valid
+
+        _, indices, _ = jax.lax.while_loop(
+            lambda c: ~jnp.all(c[2]),
+            draw,
+            (key, jnp.zeros(n, jnp.int64), jnp.zeros(n, bool)),
+        )
+        return jnp.stack(
+            [t.geometric_albedo(indices, b.center_nm) for b in bands], axis=-1
+        )
+
+    def _selectable_types(self):
+        """Host-side reachability through positive-rate cells and type eligibility."""
+        o, t = self.occurrence, self.types
+        ia, im = np.nonzero((np.asarray(o.rate) > 0) & (np.asarray(o.bin_id) >= 0))
+        a_edges = np.asarray(o.a_edges_au)
+        m_edges = np.asarray(o.mass_edges_mearth)
+        m_lo, m_hi = m_edges[im], m_edges[im + 1]
+        r0, r1 = mass_to_radius(m_lo), mass_to_radius(m_hi)
+        r_lo, r_hi = np.minimum(r0, r1), np.maximum(r0, r1)
+        r_hi = np.where((m_lo < 131.6) & (m_hi > 131.6), mass_to_radius(131.6), r_hi)
+        candidates = np.asarray(t.earth_candidate)
+        p = float(self.config.earth_candidate_probability)
+        selected = np.zeros(len(t.names), bool)
+        for k in range(len(t.names)):
+            if float(t.weight[k]) <= 0 or (candidates[k] and p == 0):
+                continue
+            low = np.maximum(a_edges[ia], float(t.a_min_au[k]))
+            high = np.minimum(a_edges[ia + 1], float(t.a_max_au[k]))
+            lower = float(t.radius_min_rearth[k])
+            radius_low = np.maximum(
+                r_lo, lower / np.sqrt(high) if candidates[k] else lower
+            )
+            radius_high = np.minimum(r_hi, float(t.radius_max_rearth[k]))
+            eligible = (low < high) & (radius_low < radius_high)
+            if p < 1 or candidates[k]:
+                selected[k] = np.any(eligible)
+                continue
+            # At p=1 ordinary types are selectable only outside candidate coverage.
+            for cell in np.flatnonzero(eligible):
+                cuts = np.unique(
+                    np.clip(
+                        np.concatenate(
+                            (
+                                [low[cell], high[cell]],
+                                np.asarray(t.a_min_au)[candidates],
+                                np.asarray(t.a_max_au)[candidates],
+                            )
+                        ),
+                        low[cell],
+                        high[cell],
+                    )
+                )
+                for left, right in itertools.pairwise(cuts):
+                    mid = np.sqrt(left * right)
+                    active = (
+                        candidates
+                        & (np.asarray(t.a_min_au) < mid)
+                        & (np.asarray(t.a_max_au) > mid)
+                    )
+                    intervals = sorted(
+                        zip(
+                            np.asarray(t.radius_min_rearth)[active] / np.sqrt(left),
+                            np.asarray(t.radius_max_rearth)[active],
+                            strict=True,
+                        )
+                    )
+                    edge = radius_low[cell]
+                    for lo, hi in intervals:
+                        if lo > edge:
+                            break
+                        edge = max(edge, hi)
+                    if edge < radius_high[cell]:
+                        selected[k] = True
+                        break
+                if selected[k]:
+                    break
+        return selected
+
+    def check_bands(self, bands):
+        """Refuse a declared band with a nonpositive or non-finite selectable albedo."""
+        bands = _declared(bands)
+        selectable = self._selectable_types()
+        if not selectable.any():
+            raise ValueError(
+                "the population has no selectable types in positive-rate cells"
+            )
+        for band in bands:
+            albedo = np.asarray(
+                self.types.geometric_albedo(
+                    np.arange(len(self.types.names)), band.center_nm
+                )
+            )
+            bad = selectable & (~np.isfinite(albedo) | (albedo <= 0))
+            if bad.any():
+                names = [
+                    name
+                    for name, invalid in zip(self.types.names, bad, strict=True)
+                    if invalid
+                ]
+                raise ValueError(
+                    f"nonpositive or non-finite albedo at {band.center_nm:g} nm "
+                    f"for selectable types {names}; repair the population explicitly"
+                )
+
     def radius_range_rearth(self):
         """`(low, high)` of the planet radius the population can draw, Earth radii.
 
@@ -644,10 +796,12 @@ class PopulationModel(eqx.Module):
         albedo with the largest radius. It is a refit's scale prior: every planet the
         population can draw in `band` lies inside it.
         """
+        self.check_bands((band,))
         types = self.types
+        selectable = self._selectable_types()
         albedo = np.asarray(
             types.geometric_albedo(np.arange(len(types.names)), band.center_nm)
-        )
+        )[selectable]
         r_lo, r_hi = (r * Rearth2AU for r in self.radius_range_rearth())
         low = math.log(float(albedo.min()) * r_lo**2) - pad
         high = math.log(float(albedo.max()) * r_hi**2) + pad
@@ -1023,6 +1177,7 @@ class ExoVistaWorldSource(AbstractWorldSource):
         `PopulationModel` the files were drawn from.
         """
         bands = _declared(bands)
+        generator.check_bands(bands)
         n_worlds, n_stars = len(files), len(files[0])
         if any(len(row) != n_stars for row in files):
             raise ValueError("every universe needs one file per star")
@@ -1113,6 +1268,7 @@ class ExoVistaWorldSource(AbstractWorldSource):
         the planet type's (of `generator`) at the band center.
         """
         bands = _declared(bands)
+        generator.check_bands(bands)
         types = generator.types
         n_stars = len(stars)
         if population.present.shape[1] != n_stars:

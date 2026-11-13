@@ -216,6 +216,7 @@ class KindRegistry:
             payload_width=width,
             payload_audience=table,
             kind_names=names,
+            payload_paths=tuple(tuple(c.name for c in k.columns) for k in self._kinds),
             derived_kinds=derived,
             refit_kinds=kinds,
             refit_statuses=statuses,

@@ -74,6 +74,19 @@ def _reloaded(doc, executor, **kw):
     return run.execute(truths, roots, N_STEPS, executor=executor)
 
 
+def test_a_loaded_runs_capacities_preserve_registry_payload_paths():
+    """Fails if derived column paths enter documents or disappear on run loading."""
+    study, registry, _ = refresh_run()
+    document = _document(boundary())
+    assert "payload_paths" not in document.study["caps"]
+    loaded = load_run(document.to_json(), bindings(), KINDS)
+    assert loaded.study.caps.payload_paths == study.caps.payload_paths
+    assert loaded.study.caps.payload_paths == tuple(
+        tuple(column.name for column in registry[i].columns)
+        for i in range(len(registry))
+    )
+
+
 @pytest.mark.parametrize("executor", ["host", "compiled"])
 def test_a_reloaded_run_reproduces_the_history_on_each_executor(executor):
     doc = _document(boundary())
@@ -115,7 +128,7 @@ def test_the_comparison_sees_a_different_boundary():
 
 
 def _registry_of(caps):
-    """A registry that lowers to `caps` (column names are made up: caps keep none)."""
+    """A registry with synthetic column names that lowers to the same access tables."""
     kinds = []
     for i, name in enumerate(caps.kind_names):
         flags = [a for a in caps.payload_audience[i] if a]

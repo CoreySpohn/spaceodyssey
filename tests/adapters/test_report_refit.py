@@ -15,12 +15,15 @@ import pytest
 pytest.importorskip("photomancy")
 
 from spaceodyssey.adapters.jaxedith import block_outcome_kind
-from spaceodyssey.adapters.photomancy import (
-    CATALOG_FIELDS,
+from spaceodyssey.adapters.parameters import (
     CATALOG_GROUPS,
+    PlanetParameters,
+    TruthCatalogRow,
+    catalog_kind,
+)
+from spaceodyssey.adapters.photomancy import (
     DecisionSummary,
     ReportRefit,
-    catalog_kind,
     report_kind,
     search_probability_truth,
 )
@@ -30,6 +33,7 @@ from spaceodyssey.core.records import (
     KindRegistry,
     PayloadColumn,
     RecordKind,
+    pack,
     record_none,
 )
 from spaceodyssey.core.refresh import RefitRequest
@@ -37,28 +41,33 @@ from spaceodyssey.studies.bracket import SummaryObserver
 
 SLOTS, GRID, MODES = 2, 16, 2
 N_SUBJECTS, ROWS = 4, 6
-WIDTH = len(CATALOG_FIELDS)
+N_BANDS = 2
 
 
 class StubChannel(eqx.Module):
     """A smooth sensitivity model with the three methods the summary reads."""
 
+    n_bands: int = eqx.field(static=True, default=N_BANDS)
     n_modes: int = eqx.field(static=True, default=MODES)
     tick_days: float = eqx.field(static=True, default=1.0)
 
     @staticmethod
     def _phase(time_d, el):
-        return 2.0 * jnp.pi * (time_d / jnp.exp(el[:, 0]) + el[:, 5])
+        return (
+            2.0
+            * jnp.pi
+            * (time_d / jnp.exp(el.ln_period_d) + el.tau_d / jnp.exp(el.ln_period_d))
+        )
 
     def detect_probability(self, subject, mode, time_d, elements):
         c = jnp.cos(self._phase(time_d, elements))
         shape = jnp.exp(-0.5 * ((c - 0.2 * mode) / 0.5) ** 2)
-        return 0.9 * shape * (1.0 - 0.1 * subject) * (1.0 - 0.3 * elements[:, 1])
+        return 0.9 * shape * (1.0 - 0.1 * subject) * (1.0 - 0.3 * elements.ecc)
 
     def sky_position(self, subject, time_d, elements):
         ph = self._phase(time_d, elements)
-        a = 0.01 * jnp.exp(elements[:, 0] / 1.5)
-        return jnp.stack([a * jnp.cos(ph), a * jnp.sin(ph) * elements[:, 2]], axis=-1)
+        a = 0.01 * jnp.exp(elements.ln_period_d / 1.5)
+        return jnp.stack([a * jnp.cos(ph), a * jnp.sin(ph) * elements.cos_i], axis=-1)
 
     def luminosity(self, subject):
         return 1.0
@@ -68,7 +77,7 @@ def make_study(open_groups=("existence", "ephemeris", "class")):
     audiences = {g: Audience.OBSERVER | Audience.POLICY for g in open_groups}
     registry = KindRegistry(
         [
-            catalog_kind(SLOTS, audiences),
+            catalog_kind(SLOTS, N_BANDS, audiences),
             report_kind(SLOTS, EVERYONE),
             block_outcome_kind(SLOTS),
         ]
@@ -86,14 +95,20 @@ def make_study(open_groups=("existence", "ephemeris", "class")):
 
 def catalog_payload(rng, present, class1):
     """A catalog payload row: random orbits for the slots, as the layout orders them."""
-    row = np.zeros(WIDTH * SLOTS)
-    for s in range(SLOTS):
-        el = [rng.uniform(4.5, 6.0), rng.uniform(0, 0.5), rng.uniform(-0.8, 0.8)]
-        el += [rng.uniform(0, 6.28), rng.uniform(0, 6.28), rng.uniform(0, 1)]
-        el += [0.0, np.log(0.01)]
-        cells = [present[s], *el[:6], el[6], float(class1[s]), el[7]]
-        row[s * WIDTH : (s + 1) * WIDTH] = cells
-    return row
+    period = np.full(SLOTS, 365.25)
+    params = PlanetParameters(
+        jnp.log(period),
+        jnp.asarray(rng.uniform(0, 0.5, SLOTS)),
+        jnp.asarray(rng.uniform(-0.8, 0.8, SLOTS)),
+        jnp.asarray(rng.uniform(0, 6.28, SLOTS)),
+        jnp.asarray(rng.uniform(0, 6.28, SLOTS)),
+        jnp.asarray(rng.uniform(0, 1, SLOTS) * period),
+        jnp.ones(SLOTS),
+        jnp.ones(SLOTS),
+        jnp.where(jnp.asarray(class1), 1.0, 3.0),
+        jnp.full((SLOTS, N_BANDS), 0.3),
+    )
+    return np.asarray(pack(TruthCatalogRow(jnp.asarray(present, bool), params)))
 
 
 def make_request(study, n_worlds, seed=0, source_shared=False):
@@ -257,7 +272,12 @@ def test_a_wider_registered_kind_does_not_add_phantom_slots():
         "wide", tuple(PayloadColumn(f"w{i}", int(EVERYONE)) for i in range(40))
     )
     registry = KindRegistry(
-        [catalog_kind(1, audiences), report_kind(1), block_outcome_kind(1), wide]
+        [
+            catalog_kind(1, N_BANDS, audiences),
+            report_kind(1),
+            block_outcome_kind(1),
+            wide,
+        ]
     )
     prior = DecisionSummary.zeros(N_SUBJECTS, 1, GRID, MODES, n_an=4)
     caps = registry.lower(
