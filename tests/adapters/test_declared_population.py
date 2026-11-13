@@ -64,15 +64,15 @@ def type_radius_edges(types):
     the square root of its largest scaled semimajor axis) cut to the forecaster
     radii of `GEN`'s occurrence grid, read on a grid twice as fine as the model's.
     """
-    edges = np.asarray(GEN.occurrence.mass_edges_mearth)
+    edges = np.asarray(GEN.occurrence.mass_edges_Mearth)
     masses = np.geomspace(edges.min(), edges.max(), 2 * RADIUS_GRID_POINTS)
     drawn = np.asarray(mass_to_radius(masses))
     for t in range(len(types.names)):
-        lo = float(types.radius_min_rearth[t])
+        lo = float(types.radius_min_Rearth[t])
         if bool(types.earth_candidate[t]):
-            lo /= float(np.sqrt(types.a_max_au[t]))
+            lo /= float(np.sqrt(types.a_max_AU[t]))
         lo = max(lo, float(drawn.min()))
-        hi = min(float(types.radius_max_rearth[t]), float(drawn.max()))
+        hi = min(float(types.radius_max_Rearth[t]), float(drawn.max()))
         if lo <= hi:
             yield t, (lo, hi)
 
@@ -138,7 +138,7 @@ def test_planets_past_capacity_are_dropped_brightest_first():
     pop = hand_population(
         n_planets=3,
         radii_rearth=[1.0, 4.0, 2.0],
-        a_au=[1.0] * 3,
+        a_AU=[1.0] * 3,
         e=[0.0] * 3,
         type_index=[0] * 3,
     )
@@ -216,7 +216,7 @@ def refit_one_planet(period_d, a_quadrature=True):
         periods_d=[period_d],
         radii_rearth=[11.0],
         stars=NEAR_STARS,
-        mass_mearth=[300.0],
+        mass_Mearth=[300.0],
         inc_deg=0.0 if a_quadrature else 90.0,
         type_index=[8],
     )

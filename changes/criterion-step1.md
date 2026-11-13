@@ -243,3 +243,12 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   resampling, evidence and ESS. No tests retire or shared matrices expand; net one
   function added. Photomancy's scale marginalization and conditional scale draws
   retain their existing semantics.
+
+## Skyscapes public-name migration
+
+- Follow the upstream capitalized unit suffixes for population fields and
+  `Star.luminosity_Lsun`; observation times already pass positionally through the
+  renamed `time_jd` APIs. Read stellar coverage through `Star.wavelength_range_nm`.
+  Spaceodyssey parameter names and nonpositive selectable-albedo validation stay
+  unchanged; the formerly negative 1842 nm spectrum is now clipped to zero upstream
+  and still rejected. No golden or pinned values change.

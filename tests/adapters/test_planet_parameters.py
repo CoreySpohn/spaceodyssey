@@ -202,10 +202,10 @@ def mixture_population():
     )
     types = PlanetTypes(
         names=("a", "b", "c"),
-        radius_min_rearth=jnp.zeros(3),
-        radius_max_rearth=jnp.full(3, 10.0),
-        a_min_au=jnp.array([1.0, 2.0, 2.0]),
-        a_max_au=jnp.array([2.0, 4.0, 4.0]),
+        radius_min_Rearth=jnp.zeros(3),
+        radius_max_Rearth=jnp.full(3, 10.0),
+        a_min_AU=jnp.array([1.0, 2.0, 2.0]),
+        a_max_AU=jnp.array([2.0, 4.0, 4.0]),
         weight=jnp.array([100.0, 1.0, 3.0]),
         earth_candidate=jnp.zeros(3, bool),
         wavelength_nm=jnp.array([500.0, 1000.0]),
@@ -291,7 +291,7 @@ def test_channel_and_source_bands_must_agree_at_study_construction(source, chann
 def test_actual_invalid_spectrum_is_rejected_at_source_and_refit_construction(
     source, channel
 ):
-    """Fails if the known negative 1842 nm spectrum reaches a radius inverse."""
+    """Fails if the clipped-zero 1842 nm spectrum reaches a radius inverse."""
     population = source.generator
     bad_bands = (Band(1842.0, 1.0),)
     with pytest.raises(ValueError, match="Warm_Neptune_1AU_Clouds"):
@@ -313,8 +313,8 @@ def test_albedo_validation_and_draws_follow_candidate_probability(
     population = mixture_population()
     population = eqx.tree_at(
         lambda p: (
-            p.types.a_min_au,
-            p.types.a_max_au,
+            p.types.a_min_AU,
+            p.types.a_max_AU,
             p.types.earth_candidate,
         ),
         population,

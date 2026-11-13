@@ -701,7 +701,7 @@ def test_variance_agrees_with_jaxedith_and_the_system_wrapper(yip_report, observ
         ra_deg=164.867,
         dec_deg=40.430,
         diameter_arcsec=0.79e-3,
-        luminosity_lsun=1.54,
+        luminosity_Lsun=1.54,
         wavelengths_nm=jnp.array([900.0, WAVELENGTH_NM, 1100.0]),
         times_jd=jnp.array([start - 10.0, start + 10.0]),
         flux_density_jy=jnp.full((3, 2), 42.0),

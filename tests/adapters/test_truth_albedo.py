@@ -75,13 +75,13 @@ def hand_population(
     planet at 2 AU, both circular, with the types `TYPE_INDEX`, so the slot order
     (descending peak flux ratio) is the drawn order. `overrides` replace a field with
     one value per planet (the same for both stars) or one row per star; a default
-    cycles to `n_planets`. `radii_rearth` sets `radius_rearth`, and `periods_d` sets
-    `a_au` from the period about the star of `stars` with the planet's mass.
+    cycles to `n_planets`. `radii_rearth` sets `radius_Rearth`, and `periods_d` sets
+    `a_AU` from the period about the star of `stars` with the planet's mass.
     """
     fields = {
-        "mass_mearth": [300.0, 1.0],
-        "radius_rearth": [11.0, 1.0],
-        "a_au": [1.0, 2.0],
+        "mass_Mearth": [300.0, 1.0],
+        "radius_Rearth": [11.0, 1.0],
+        "a_AU": [1.0, 2.0],
         "e": 0.0,
         "inc_deg": 30.0,
         "node_deg": 10.0,
@@ -91,16 +91,16 @@ def hand_population(
     }
     fields.update(overrides)
     if radii_rearth is not None:
-        fields["radius_rearth"] = radii_rearth
+        fields["radius_Rearth"] = radii_rearth
     shape = (1, len(stars), n_planets)
     out = {
         k: np.broadcast_to(_per_planet(v, n_planets), shape) for k, v in fields.items()
     }
     if periods_d is not None:
         star_kg = np.asarray([s.mass_msun for s in stars])[None, :, None] * Msun2kg
-        mu = G * (star_kg + out["mass_mearth"] * Mearth2kg)
+        mu = G * (star_kg + out["mass_Mearth"] * Mearth2kg)
         period = np.broadcast_to(_per_planet(periods_d, n_planets), shape)
-        out["a_au"] = np.cbrt(mu * (period / two_pi) ** 2)
+        out["a_AU"] = np.cbrt(mu * (period / two_pi) ** 2)
     floats = {k: jnp.asarray(v, jnp.float64) for k, v in out.items()}
     floats["type_index"] = jnp.asarray(out["type_index"], jnp.int32)
     return PlanetPopulation(

@@ -235,7 +235,7 @@ def build_star(spec):
         ra_deg=spec.ra_deg,
         dec_deg=spec.dec_deg,
         diameter_arcsec=spec.angular_diameter_mas * mas2arcsec,
-        luminosity_lsun=spec.luminosity_lsun,
+        luminosity_Lsun=spec.luminosity_lsun,
         metadata={"name": spec.name},
         interpolation_method="linear",
     )
@@ -678,8 +678,8 @@ class PopulationModel(eqx.Module):
             argp_rad=take(sky.w_rad),
             tau_d=-take(sky.M0_rad) * period_d / (2 * jnp.pi),
             star_mass_msun=jnp.full(n, star.mass_msun),
-            planet_mass_mearth=take(population.mass_mearth),
-            radius_rearth=take(population.radius_rearth),
+            planet_mass_mearth=take(population.mass_Mearth),
+            radius_rearth=take(population.radius_Rearth),
             albedo=albedo,
         )
         # Positive filler scale keeps the physical-prior likelihood finite.
@@ -710,7 +710,7 @@ class PopulationModel(eqx.Module):
         One type supplies all bands of a draw.
         """
         t, o = self.types, self.occurrence
-        log_a, log_m = jnp.log(o.a_edges_au), jnp.log(o.mass_edges_mearth)
+        log_a, log_m = jnp.log(o.a_edges_AU), jnp.log(o.mass_edges_Mearth)
         rates = jnp.where(o.bin_id >= 0, o.rate, 0.0).ravel()
         cumulative = jnp.cumsum(rates)
 
@@ -728,14 +728,14 @@ class PopulationModel(eqx.Module):
             radius = mass_to_radius(mass)
             lower = jnp.where(
                 t.earth_candidate,
-                t.radius_min_rearth / jnp.sqrt(a[:, None]),
-                t.radius_min_rearth,
+                t.radius_min_Rearth / jnp.sqrt(a[:, None]),
+                t.radius_min_Rearth,
             )
             fits = (
-                (a[:, None] > t.a_min_au)
-                & (a[:, None] < t.a_max_au)
+                (a[:, None] > t.a_min_AU)
+                & (a[:, None] < t.a_max_AU)
                 & (radius[:, None] > lower)
-                & (radius[:, None] < t.radius_max_rearth)
+                & (radius[:, None] < t.radius_max_Rearth)
             )
             candidate = jnp.any(fits & t.earth_candidate, axis=-1, keepdims=True)
             p = self.config.earth_candidate_probability
@@ -759,8 +759,8 @@ class PopulationModel(eqx.Module):
         """Host-side reachability through positive-rate cells and type eligibility."""
         o, t = self.occurrence, self.types
         ia, im = np.nonzero((np.asarray(o.rate) > 0) & (np.asarray(o.bin_id) >= 0))
-        a_edges = np.asarray(o.a_edges_au)
-        m_edges = np.asarray(o.mass_edges_mearth)
+        a_edges = np.asarray(o.a_edges_AU)
+        m_edges = np.asarray(o.mass_edges_Mearth)
         m_lo, m_hi = m_edges[im], m_edges[im + 1]
         r0, r1 = mass_to_radius(m_lo), mass_to_radius(m_hi)
         r_lo, r_hi = np.minimum(r0, r1), np.maximum(r0, r1)
@@ -771,13 +771,13 @@ class PopulationModel(eqx.Module):
         for k in range(len(t.names)):
             if float(t.weight[k]) <= 0 or (candidates[k] and p == 0):
                 continue
-            low = np.maximum(a_edges[ia], float(t.a_min_au[k]))
-            high = np.minimum(a_edges[ia + 1], float(t.a_max_au[k]))
-            lower = float(t.radius_min_rearth[k])
+            low = np.maximum(a_edges[ia], float(t.a_min_AU[k]))
+            high = np.minimum(a_edges[ia + 1], float(t.a_max_AU[k]))
+            lower = float(t.radius_min_Rearth[k])
             radius_low = np.maximum(
                 r_lo, lower / np.sqrt(high) if candidates[k] else lower
             )
-            radius_high = np.minimum(r_hi, float(t.radius_max_rearth[k]))
+            radius_high = np.minimum(r_hi, float(t.radius_max_Rearth[k]))
             eligible = (low < high) & (radius_low < radius_high)
             if p < 1 or candidates[k]:
                 selected[k] = np.any(eligible)
@@ -789,8 +789,8 @@ class PopulationModel(eqx.Module):
                         np.concatenate(
                             (
                                 [low[cell], high[cell]],
-                                np.asarray(t.a_min_au)[candidates],
-                                np.asarray(t.a_max_au)[candidates],
+                                np.asarray(t.a_min_AU)[candidates],
+                                np.asarray(t.a_max_AU)[candidates],
                             )
                         ),
                         low[cell],
@@ -801,13 +801,13 @@ class PopulationModel(eqx.Module):
                     mid = np.sqrt(left * right)
                     active = (
                         candidates
-                        & (np.asarray(t.a_min_au) < mid)
-                        & (np.asarray(t.a_max_au) > mid)
+                        & (np.asarray(t.a_min_AU) < mid)
+                        & (np.asarray(t.a_max_AU) > mid)
                     )
                     intervals = sorted(
                         zip(
-                            np.asarray(t.radius_min_rearth)[active] / np.sqrt(left),
-                            np.asarray(t.radius_max_rearth)[active],
+                            np.asarray(t.radius_min_Rearth)[active] / np.sqrt(left),
+                            np.asarray(t.radius_max_Rearth)[active],
                             strict=True,
                         )
                     )
@@ -857,9 +857,9 @@ class PopulationModel(eqx.Module):
         A drawn radius is the forecaster radius of a mass inside the occurrence grid
         (read at `RADIUS_GRID_POINTS` log-spaced masses and the grid edges), and lies
         inside some type's radius range; an exoEarth-candidate type's lower edge is
-        divided by ``sqrt(a_max_au)``, its smallest value over the type's range.
+        divided by ``sqrt(a_max_AU)``, its smallest value over the type's range.
         """
-        edges = np.asarray(self.occurrence.mass_edges_mearth, np.float64)
+        edges = np.asarray(self.occurrence.mass_edges_Mearth, np.float64)
         masses = np.concatenate(
             [edges, np.geomspace(edges.min(), edges.max(), RADIUS_GRID_POINTS)]
         )
@@ -867,11 +867,11 @@ class PopulationModel(eqx.Module):
         t = self.types
         lower = np.where(
             np.asarray(t.earth_candidate),
-            np.asarray(t.radius_min_rearth) / np.sqrt(np.asarray(t.a_max_au)),
-            np.asarray(t.radius_min_rearth),
+            np.asarray(t.radius_min_Rearth) / np.sqrt(np.asarray(t.a_max_AU)),
+            np.asarray(t.radius_min_Rearth),
         )
         low = max(float(lower.min()), float(drawn.min()))
-        high = min(float(np.asarray(t.radius_max_rearth).max()), float(drawn.max()))
+        high = min(float(np.asarray(t.radius_max_Rearth).max()), float(drawn.max()))
         return low, high
 
     def scale_range_au2(self, band, pad=LN_LAM_PAD):
@@ -1074,7 +1074,7 @@ def _covered_nm(system):
 
     The intersection of the star's flux table and each planet's contrast table.
     """
-    tables = [np.asarray(system.star._wavelengths_nm)]
+    tables = [np.asarray(system.star.wavelength_range_nm)]
     tables += [np.asarray(p.physical_model.wavelengths_nm) for p in system.planets]
     return max(float(t.min()) for t in tables), min(float(t.max()) for t in tables)
 
@@ -1163,7 +1163,7 @@ def _spec_of_star(star, hip_name, bands, epoch_jd, luminosity_lsun=None):
         ra_deg=float(star.ra_deg),
         dec_deg=float(star.dec_deg),
         luminosity_lsun=float(
-            star.luminosity_lsun if luminosity_lsun is None else luminosity_lsun
+            star.luminosity_Lsun if luminosity_lsun is None else luminosity_lsun
         ),
         diameter_mas=float(star.diameter_arcsec) / mas2arcsec,
         flux_density_jy=band_fluxes[0][1],
@@ -1360,14 +1360,14 @@ class ExoVistaWorldSource(AbstractWorldSource):
         mass_msun = jnp.asarray([s.mass_msun for s in stars], F64)
         sky = jax.vmap(lambda p: sky_elements(p, mass_msun))(population)
         present = np.asarray(population.present)
-        a_au = np.where(present, np.asarray(sky.a_au, np.float64), 1.0)
+        a_au = np.where(present, np.asarray(sky.a_AU, np.float64), 1.0)
         e = np.where(present, np.asarray(sky.e, np.float64), 0.0)
-        mass_kg = np.asarray(population.mass_mearth, np.float64) * Mearth2kg
+        mass_kg = np.asarray(population.mass_Mearth, np.float64) * Mearth2kg
         star_kg = (np.asarray(mass_msun) * Msun2kg)[None, :, None]
         mu = G * (star_kg + mass_kg)
         period_d = np.asarray(period_a(a_au, mu), np.float64)
         n = np.asarray(mean_motion(a_au, mu), np.float64)
-        rp_au = np.asarray(population.radius_rearth, np.float64) * Rearth2AU
+        rp_au = np.asarray(population.radius_Rearth, np.float64) * Rearth2AU
         albedo = np.stack(
             [
                 np.asarray(

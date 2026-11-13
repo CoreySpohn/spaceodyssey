@@ -229,8 +229,8 @@ def _earth_sized(population):
     Its scale prior then holds only planets near one Earth radius, at any type's
     albedo: a planet 11 times larger lies outside it.
     """
-    edges = jnp.geomspace(0.5, 2.0, population.occurrence.mass_edges_mearth.shape[0])
-    return eqx.tree_at(lambda p: p.occurrence.mass_edges_mearth, population, edges)
+    edges = jnp.geomspace(0.5, 2.0, population.occurrence.mass_edges_Mearth.shape[0])
+    return eqx.tree_at(lambda p: p.occurrence.mass_edges_Mearth, population, edges)
 
 
 def test_a_bright_planet_fits_when_the_scale_prior_holds_the_population(world):

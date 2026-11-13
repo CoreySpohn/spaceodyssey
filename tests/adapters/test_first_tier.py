@@ -37,7 +37,7 @@ def population_scaled(population, rate_factor):
     return dataclasses.replace(
         population,
         occurrence=occurrence_table_from_grid(
-            rate_factor * occ.rate, occ.a_edges_au, occ.mass_edges_mearth, occ.bin_id
+            rate_factor * occ.rate, occ.a_edges_AU, occ.mass_edges_Mearth, occ.bin_id
         ),
     )
 
