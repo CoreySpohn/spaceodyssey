@@ -11,7 +11,8 @@ from spaceodyssey import core
 from spaceodyssey.core import EffectKind
 from spaceodyssey.studies import builder
 from spaceodyssey.studies.toy import ThresholdStopPolicy, ToyPhotometry
-from tests.core.helpers import one_world
+from tests.core import refresh_helpers
+from tests.core.helpers import one_world, worlds
 
 KEY = jax.random.PRNGKey(0)
 PSTATE = jnp.zeros(1)
@@ -71,3 +72,52 @@ def test_a_policy_reads_the_planning_noise_not_the_generating_noise():
 
     assert stop(a.decision_view()) and stop(b.decision_view())
     assert stop(a) != stop(b)
+
+
+def test_the_view_of_a_view_is_the_view():
+    """Fails if a second `decision_view` call raises or builds a different study."""
+    view = builder.survey_1().decision_view()
+    assert view.decision_view() is view
+
+
+def _require_withheld(study):
+    if not isinstance(study.world_source, core.WithheldWorldSource):
+        raise AssertionError("a decision received the full study")
+
+
+class ProbePolicy(refresh_helpers.LeastSeenPolicy):
+    """The least-seen policy, refusing any study that still holds the world source."""
+
+    def decide(self, pstate, view, study, key):
+        _require_withheld(study)
+        return super().decide(pstate, view, study, key)
+
+
+class ProbeRefit(core.AbstractRefitBoundary):
+    """The masked refit, refusing any study that still holds the world source."""
+
+    def __init__(self):
+        self.inner = refresh_helpers.masked()
+        self.calls = 0
+
+    def refit_batch(self, study, requests):
+        _require_withheld(study)
+        self.calls += 1
+        return self.inner.refit_batch(study, requests)
+
+
+@pytest.mark.medium(reason="Runs a refreshed toy study on both executors")
+@pytest.mark.parametrize("executor", ["compiled", "host_array", "host_python"])
+def test_every_decision_and_refit_call_site_passes_the_view(executor):
+    """Fails if an executor hands a policy or a refit the full study."""
+    study = refresh_helpers.refresh_study(40, policies=(ProbePolicy(),))
+    truths, roots = worlds(1)
+    refit = ProbeRefit()
+    if executor == "compiled":
+        run = core.CompiledExecutor().run
+        run(study, truths, roots, 24, refit=refit, chunk=5)
+    else:
+        form = "array" if executor == "host_array" else "python"
+        truth, root = one_world()
+        core.HostExecutor().run(study, truth, root, 24, refit=refit, policy_form=form)
+    assert refit.calls > 0

@@ -133,8 +133,11 @@ class Study(eqx.Module):
         The world source is withheld, the channel model is the planning model (the
         generating one when none is declared), and the belief population is the
         declared one (the world source's own when none is declared). The observer is
-        kept. Built with `tree_at`, so validation does not run again.
+        kept. Built with `tree_at`, so validation does not run again. A view returns
+        itself.
         """
+        if self.world_source.withheld:
+            return self
         belief = self.belief_population
         if belief is None:
             belief = self.world_source.declared_population()

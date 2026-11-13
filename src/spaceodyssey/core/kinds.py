@@ -229,6 +229,7 @@ class AbstractWorldSource(eqx.Module):
     """Source of a world's latent state."""
 
     version: int = eqx.field(default=1, kw_only=True)
+    withheld = False
 
     def draw(self, key, capacities):
         """Draw one world's state."""
@@ -241,6 +242,8 @@ class AbstractWorldSource(eqx.Module):
 
 class WithheldWorldSource(AbstractWorldSource):
     """Stands where a decision's study would otherwise carry the world source."""
+
+    withheld = True
 
     def draw(self, key, capacities):
         """Refuse: decisions never see the worlds."""
