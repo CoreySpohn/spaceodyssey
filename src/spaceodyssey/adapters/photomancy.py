@@ -28,6 +28,7 @@ import collections
 import dataclasses
 import hashlib
 import json
+import math
 
 import equinox as eqx
 import jax
@@ -868,9 +869,6 @@ RETRY_FACTOR = 4
 # of the report likelihood falls about 16 times from 256 to 1024 nodes, and the node
 # count does not change the cost of a fit.
 GRID_POINTS = 1024
-# Half width added on each side of the population's range of ln(albedo radius^2), so
-# a planet at the edge of the population sits inside the scale prior.
-LN_LAM_PAD = 0.5
 # Fractional half width of the stellar mass window around the catalog mass.
 MASS_WINDOW = 0.10
 # Row counts a report batch is padded to (the last is the capacity of the study).
@@ -918,26 +916,6 @@ def photomancy_elements(elements):
     period = jnp.exp(el[..., 0])
     el = el.at[..., 5].set(jnp.mod(el[..., 5] / period, 1.0))
     return el.at[..., 7].set(el[..., 7] + 2.0 * jnp.log(Rearth2AU))
-
-
-def population_ln_lam_range(population, band, pad=LN_LAM_PAD):
-    """`(low, high)` of `ln(albedo * radius^2)` (AU^2) over a population, padded.
-
-    `population` holds per-band `albedo` and `Rp_AU` leaves and a `present` mask, as
-    the world sources' populations do; `band` is the position of the declared band
-    the reports are taken in. The range is the scale prior of the report refit: it
-    must hold every planet a world can draw, or the refit refuses a bright planet
-    (the default Earth-twin window excludes planets under 0.6 or over 1.7 Earth radii
-    at albedo 0.3).
-    """
-    present = np.asarray(population.present)
-    albedo = np.asarray(population.albedo)[..., band]
-    scale = albedo * np.asarray(population.Rp_AU) ** 2
-    scale = scale[present & (scale > 0.0)]
-    if scale.size == 0:
-        raise ValueError("the population holds no planet to derive a scale range from")
-    log = np.log(scale)
-    return float(log.min() - pad), float(log.max() + pad)
 
 
 def posterior_occupancy(prior, log_evidence):
@@ -1009,7 +987,8 @@ class _PostSettings:
     ess_floor: float
     max_rounds: int
     mass_window: float
-    ln_lam_range: object
+    ln_lam_range: tuple
+    period_support_d: tuple
     n_first: int
     occupancy: float
     grid_points: int
@@ -1186,11 +1165,18 @@ def photomancy_report(channel, subject, rows, slot, grid_points=GRID_POINTS):
 
 
 def _star_target(refit, channel, subject, st):
-    """The photomancy target of a star: its distance, catalog mass and window."""
+    """The photomancy target of a star: its distance, catalog mass and window.
+
+    The scale prior and the period range are the belief population's
+    (`st.ln_lam_range`, `st.period_support_d`).
+    """
     mass = channel.catalog_mass_kg[subject] / Msun2kg
-    return mass, refit.physical_prior_target(
+    base = refit.physical_prior_target(
         mass, channel.scenes.dist_pc[subject], st.mass_window, st.ln_lam_range
     )
+    low, high = st.period_support_d
+    model = dataclasses.replace(base.model, lnP_lo=math.log(low), lnP_hi=math.log(high))
+    return mass, type(base)(model, base.dist_pc, st.ln_lam_range)
 
 
 def _report_of(refit, channel, lane, detected):
@@ -1571,9 +1557,11 @@ _FIT_INPUTS = (
 )
 
 
-def _fit_digest(item):
-    """Digest of the inputs of one slot fit (a `_FitLane` field dict)."""
+def _fit_digest(item, st):
+    """Digest of one slot fit's reports and declared population bounds."""
     h = hashlib.blake2b(digest_size=16)
+    bounds = np.asarray((*st.ln_lam_range, *st.period_support_d), np.float64)
+    h.update(bounds.tobytes())
     for name in _FIT_INPUTS:
         a = np.ascontiguousarray(item[name])
         h.update(f"{name}{a.dtype.str}{a.shape}".encode())
@@ -1598,11 +1586,16 @@ class ReportRefit(AbstractRefitBoundary):
     expected number of class-1 planets per star it assumes), scale-and-rotate for one
     detection and the collapsed rounds for two or more. The target of a star takes
     its distance and catalog mass from the channel and a mass window of
-    `mass_window` and a scale prior of `ln_lam_range` (the range of `ln(albedo
-    radius^2)` in AU^2 the population can hold, required: see
-    `population_ln_lam_range`). An audience that cannot read every measurement
-    column of the report kind is answered `NO_SUPPORT` and installs nothing, so its
-    summary stays what it was.
+    `mass_window`. Its scale prior and period range come from the study's belief
+    population at refit time (`study.belief_population` of the decision view): the
+    range of `ln(albedo radius^2)` in AU^2 it can draw in the channel's detection
+    band (`PopulationModel.scale_range_au2`) and its period support
+    (`period_support_d`); a study whose view declares none is refused. A planet
+    outside that support is fit against it like any other: `SLOT_NO_SUPPORT` when
+    no prior orbit has a finite weight, `SLOT_DEGRADED` when the cloud stays under
+    the size floor. An audience that cannot read every measurement column of the
+    report kind is answered `NO_SUPPORT` and installs nothing, so its summary stays
+    what it was.
 
     A slot whose refit is under the size floor runs once more with `RETRY_FACTOR`
     times the proposals (a second compiled program per engine and row bucket, since
@@ -1628,9 +1621,9 @@ class ReportRefit(AbstractRefitBoundary):
     `summarize` unweighted, so the leaves and the claim rule are those of every other
     kernel, and its key is the entry's key folded with the slot. The kernel reads the
     catalog groups of `SHRINK_GROUPS`: the orbit and the photometric scale `ln_lam`
-    that `Ag` is centered on. It needs `occupancy` and `ln_lam_range` like the
-    posterior kernel, for the first tier. A detected slot of an entry with no catalog
-    row is `SLOT_NO_SUPPORT` and installs nothing.
+    that `Ag` is centered on. It needs `occupancy` and the belief population like
+    the posterior kernel, for the first tier. A detected slot of an entry with no
+    catalog row is `SLOT_NO_SUPPORT` and installs nothing.
 
     The first tier's `p_new` weighs each undetected slot by its posterior occupancy
     after the entry's nulls (`posterior_occupancy`), so repeated nulls on a star lower
@@ -1680,7 +1673,6 @@ class ReportRefit(AbstractRefitBoundary):
         position_lag_d=POSITION_LAG_D,
         occupancy=None,
         mass_window=MASS_WINDOW,
-        ln_lam_range=None,
         n_round=2**16,
         n_rounds=3,
         n_centers=256,
@@ -1720,13 +1712,6 @@ class ReportRefit(AbstractRefitBoundary):
                     f"the {kernel} kernel needs `occupancy`, the class-1 planets "
                     "per star its first tier assumes"
                 )
-            if ln_lam_range is None:
-                raise ValueError(
-                    f"the {kernel} kernel needs `ln_lam_range`, the range of "
-                    "ln(albedo radius^2) of the population (see "
-                    "`population_ln_lam_range`); a default window would refuse a "
-                    "planet outside it"
-                )
             if kernel == "posterior":
                 groups = ()
         if lanes < 1:
@@ -1750,9 +1735,6 @@ class ReportRefit(AbstractRefitBoundary):
         self.position_lag_d = float(position_lag_d)
         self.occupancy = None if occupancy is None else float(occupancy)
         self.mass_window = float(mass_window)
-        self.ln_lam_range = (
-            None if ln_lam_range is None else tuple(float(x) for x in ln_lam_range)
-        )
         self.n_round = int(n_round)
         self.n_rounds = int(n_rounds)
         self.n_centers = int(n_centers)
@@ -1795,7 +1777,6 @@ class ReportRefit(AbstractRefitBoundary):
                 "n_particles": self.n_particles,
                 "occupancy": self.occupancy,
                 "mass_window": self.mass_window,
-                "ln_lam_range": self.ln_lam_range,
                 "n_round": self.n_round,
                 "n_rounds": self.n_rounds,
                 "n_centers": self.n_centers,
@@ -1980,7 +1961,21 @@ class ReportRefit(AbstractRefitBoundary):
         flags = (int(Audience.OBSERVER), int(Audience.POLICY))
         return tuple(all(int(x) & flag for x in row[:width]) for flag in flags)
 
-    def _post_settings(self, channel):
+    def _post_settings(self, study):
+        """The posterior program's settings for `study`, read on its decision view.
+
+        The scale prior and the period range are the belief population's, in the
+        detection band of the view's channel model.
+        """
+        view = study.decision_view()
+        belief = view.belief_population
+        if belief is None:
+            raise ValueError(
+                f"the {self.kernel} kernel reads its prior bounds from the study's "
+                "belief population, and the study declares none (set "
+                "`belief_population` or use a world source that declares one)"
+            )
+        channel = view.channel_model
         return _PostSettings(
             n_slots=channel.n_slots,
             n_grid=self.n_grid,
@@ -1996,7 +1991,8 @@ class ReportRefit(AbstractRefitBoundary):
             ess_floor=self.ess_floor,
             max_rounds=self.max_rounds,
             mass_window=self.mass_window,
-            ln_lam_range=self.ln_lam_range,
+            ln_lam_range=belief.scale_range_au2(channel.detection_band),
+            period_support_d=belief.period_support_d,
             n_first=self.n_first,
             occupancy=self.occupancy,
             grid_points=self.grid_points,
@@ -2137,7 +2133,7 @@ class ReportRefit(AbstractRefitBoundary):
         spec = slice_spec(study)
         names = tuple(name for name, _, _ in spec)
         channel = study.channel_model
-        st = self._post_settings(channel)
+        st = self._post_settings(study)
         n_slots = st.n_slots
         readable = np.asarray(self._readable(study, channel))
         flat = np.arange(2 * count).reshape(2, count)
@@ -2316,7 +2312,7 @@ class ReportRefit(AbstractRefitBoundary):
         fit_out, stored_retries = {}, set()
         digests = {}
         if self.resummary:
-            digests = {k: _fit_digest(it) for k, (_, _, eng, it) in indexed_fits}
+            digests = {k: _fit_digest(it, st) for k, (_, _, eng, it) in indexed_fits}
             fit_out, stored_retries = self._answer_from_store(
                 channel, st, indexed_fits, digests
             )
@@ -2332,7 +2328,7 @@ class ReportRefit(AbstractRefitBoundary):
         indexed_firsts = list(enumerate(firsts))
         first_out, stored_first_retries, first_digests = {}, set(), {}
         if self.resummary:
-            first_digests = {k: _fit_digest(it) for k, (_, it) in indexed_firsts}
+            first_digests = {k: _fit_digest(it, st) for k, (_, it) in indexed_firsts}
             first_out, stored_first_retries = self._answer_firsts_from_store(
                 channel, st, indexed_firsts, first_digests
             )
@@ -2453,7 +2449,6 @@ __all__ = [
     "photomancy_bindings",
     "photomancy_elements",
     "photomancy_report",
-    "population_ln_lam_range",
     "posterior_occupancy",
     "report_kind",
     "search_probability_truth",

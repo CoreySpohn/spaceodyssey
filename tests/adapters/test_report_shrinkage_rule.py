@@ -83,7 +83,6 @@ def _boundary(caps):
         kernel="shrinkage",
         truth_groups=ph.SHRINK_GROUPS,
         occupancy=0.5,
-        ln_lam_range=(-30.0, -20.0),
         caps=caps,
     )
 
@@ -106,13 +105,11 @@ def test_construction_raises_if_the_registry_hides_the_photometric_scale():
 
 
 def test_the_kernel_declares_the_groups_it_reads_and_the_first_tier_settings():
-    """The orbit and class groups, the occupancy and the scale range are required."""
+    """The orbit and class groups and the occupancy are required."""
     with pytest.raises(ValueError, match="exactly"):
         ph.ReportRefit(kernel="shrinkage", truth_groups=("ephemeris",), occupancy=0.5)
     with pytest.raises(ValueError, match="occupancy"):
         ph.ReportRefit(kernel="shrinkage", truth_groups=ph.SHRINK_GROUPS)
-    with pytest.raises(ValueError, match="ln_lam_range"):
-        ph.ReportRefit(kernel="shrinkage", truth_groups=ph.SHRINK_GROUPS, occupancy=0.5)
     config = _boundary(None).configuration()
     assert config["n_shrink"] == 500 and config["shrink_widths"] == [0.2, 0.1, 0.025]
 

@@ -11,7 +11,7 @@ pytestmark = pytest.mark.slow(reason="compiles the chunked refresh driver once")
 
 # Enough telescope days that the fixture's first claimed planet gets a block.
 BUDGET_D = 30.0
-# With the exozodi in the host's own colour, the second world's candidate is served
+# With the exozodi in the host's own color, the second world's candidate is served
 # only by the 45-day block at the default requirement, which the budget cannot
 # cover; at a requirement of 5 (a lower resolving power) the 5-day block serves it.
 # That world's next visits fall after the default 120-day horizon.
@@ -36,9 +36,20 @@ def test_a_star_that_got_a_block_is_visited_again():
 
 
 def test_an_arm_whose_policy_is_never_refit_still_spends_budget():
-    """The policy of `prior_planned` never waits for a refit that cannot come."""
+    """Fails if the never-refit policy waits for a refit instead of spending."""
     _, study, _, truths, _, run = build(
-        arm="prior_planned", budget_d=BUDGET_D, p_new=0.3, occupancy=0.2
+        arm="prior_planned",
+        budget_d=BUDGET_D,
+        p_new=0.3,
+        occupancy=0.2,
+        n_round=2**9,
+        n_rounds=1,
+        n_centers=16,
+        n_constants=1,
+        max_rounds=2,
+        n_first=64,
+        n_particles=128,
+        ess_floor=1.0,
     )
     assert study.agenda.policies[0].refits_reach_policy is False
     table = br.outcome_table(run, truths, study)

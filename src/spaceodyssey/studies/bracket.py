@@ -61,7 +61,6 @@ from spaceodyssey.adapters.photomancy import (
     SUMMARY_LEAVES,
     DecisionSummary,
     ReportRefit,
-    population_ln_lam_range,
 )
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration
@@ -336,6 +335,8 @@ def bracket_study(
     caps=None,
     observer=None,
     policy=None,
+    belief_population=None,
+    planning_model=None,
 ):
     """The `Study` of `arm`: the stars of `source` on one telescope and one budget.
 
@@ -350,6 +351,10 @@ def bracket_study(
         observer: The summary observer. It must be non-incremental and refit the
             visit and catalog kinds.
         policy: The decision policy.
+        belief_population: The population decisions and refits start from; `None`
+            is the world source's declared one (`Study.decision_view`).
+        planning_model: The channel model decisions and refits plan with; `None` is
+            `channel`.
     """
     arm = _arm(arm)
     if observer is None or policy is None:
@@ -407,7 +412,11 @@ def bracket_study(
         phase_until=(horizon,),
     )
     return dataclasses.replace(
-        study, clock=built.context.clock.clock, world_source=source
+        study,
+        clock=built.context.clock.clock,
+        world_source=source,
+        belief_population=belief_population,
+        planning_model=planning_model,
     )
 
 
@@ -416,15 +425,10 @@ def bracket_boundary(study, arm, **settings):
 
     Construction refuses a registry that hides a catalog group the kernel needs.
     `settings` are the kernel's own (the posterior and shrinkage kernels need
-    `occupancy`; their scale prior `ln_lam_range` is derived from the world source's
-    population when not given).
+    `occupancy`). The world source is not read: those kernels take their prior
+    bounds from the study's belief population at refit time.
     """
     arm = _arm(arm)
-    if arm.kernel != "truth" and "ln_lam_range" not in settings:
-        population = getattr(study.world_source, "population", None)
-        if population is not None:
-            band = population.band_index(study.channel_model.detection_band.center_nm)
-            settings["ln_lam_range"] = population_ln_lam_range(population, band)
     return ReportRefit(
         kernel=arm.kernel, truth_groups=arm.groups, caps=study.caps, **settings
     )

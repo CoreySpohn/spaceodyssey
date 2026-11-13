@@ -13,15 +13,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.constants import G, Mearth2kg, Msun2kg, two_pi
 from orbix.kepler import markley_solve_trig
 from skyscapes.io import from_exovista
-from skyscapes.population import PlanetPopulation, load_planet_types
+from skyscapes.population import PlanetPopulation
 
 from spaceodyssey.adapters.jaxedith import ObservingModeChannel
 from spaceodyssey.adapters.physical_profile import JATIS_EAC1_V1
 from spaceodyssey.adapters.skyscapes import (
     Band,
     ExoVistaWorldSource,
+    PopulationModel,
     StarSpec,
     geometry,
     star_spec_from_model,
@@ -51,37 +53,62 @@ SURVEY_STARS = tuple(
     for k in range(2)
 )
 KEYS = jax.random.split(jax.random.PRNGKey(0), 2)
+GEN = PopulationModel.exovista()
 # Two planet types whose albedo spectra differ between the bands.
 TYPE_INDEX = ((0, 5), (3, 8))
 
 
-def hand_population():
-    """`(population, stars, types)`: one world of 2 stars with 2 planets each.
+def _per_planet(value, n_planets):
+    """`value` with its last axis cycled to `n_planets` entries."""
+    value = np.asarray(value)
+    if value.ndim == 0:
+        return np.full(n_planets, value)
+    return np.take(value, np.arange(n_planets) % value.shape[-1], axis=-1)
 
-    Planet 0 of each star is a giant at 1 AU and planet 1 an Earth-sized planet at
-    2 AU, so the slot order (descending peak flux ratio) is the drawn order. Both are
-    on circular orbits inside the default support.
+
+def hand_population(
+    n_planets=2, periods_d=None, radii_rearth=None, stars=STARS, **overrides
+):
+    """One world with `n_planets` per host in `stars`, a `PlanetPopulation`.
+
+    By default planet 0 of each star is a giant at 1 AU and planet 1 an Earth-sized
+    planet at 2 AU, both circular, with the types `TYPE_INDEX`, so the slot order
+    (descending peak flux ratio) is the drawn order. `overrides` replace a field with
+    one value per planet (the same for both stars) or one row per star; a default
+    cycles to `n_planets`. `radii_rearth` sets `radius_rearth`, and `periods_d` sets
+    `a_au` from the period about the star of `stars` with the planet's mass.
     """
-    shape = (1, 2, 2)
-
-    def full(values):
-        return jnp.broadcast_to(jnp.asarray(values, jnp.float64), shape)
-
-    population = PlanetPopulation(
+    fields = {
+        "mass_mearth": [300.0, 1.0],
+        "radius_rearth": [11.0, 1.0],
+        "a_au": [1.0, 2.0],
+        "e": 0.0,
+        "inc_deg": 30.0,
+        "node_deg": 10.0,
+        "argperi_deg": 40.0,
+        "mean_anomaly_deg": 70.0,
+        "type_index": TYPE_INDEX,
+    }
+    fields.update(overrides)
+    if radii_rearth is not None:
+        fields["radius_rearth"] = radii_rearth
+    shape = (1, len(stars), n_planets)
+    out = {
+        k: np.broadcast_to(_per_planet(v, n_planets), shape) for k, v in fields.items()
+    }
+    if periods_d is not None:
+        star_kg = np.asarray([s.mass_msun for s in stars])[None, :, None] * Msun2kg
+        mu = G * (star_kg + out["mass_mearth"] * Mearth2kg)
+        period = np.broadcast_to(_per_planet(periods_d, n_planets), shape)
+        out["a_au"] = np.cbrt(mu * (period / two_pi) ** 2)
+    floats = {k: jnp.asarray(v, jnp.float64) for k, v in out.items()}
+    floats["type_index"] = jnp.asarray(out["type_index"], jnp.int32)
+    return PlanetPopulation(
         present=jnp.ones(shape, bool),
-        mass_mearth=full([300.0, 1.0]),
-        radius_rearth=full([11.0, 1.0]),
-        a_au=full([1.0, 2.0]),
-        e=full(0.0),
-        inc_deg=full(30.0),
-        node_deg=full(10.0),
-        argperi_deg=full(40.0),
-        mean_anomaly_deg=full(70.0),
-        type_index=jnp.asarray([TYPE_INDEX]),
-        midplane_inc_deg=jnp.zeros((1, 2)),
-        midplane_pa_deg=jnp.zeros((1, 2)),
+        midplane_inc_deg=jnp.zeros(shape[:2]),
+        midplane_pa_deg=jnp.zeros(shape[:2]),
+        **floats,
     )
-    return population, STARS, load_planet_types()
 
 
 def _lambert_phase(alpha):
@@ -139,14 +166,14 @@ def test_a_band_refuses_a_nonpositive_or_nonfinite_value():
 
 def test_drawn_truth_albedo_is_the_type_spectrum_at_each_band():
     """Fails if a band reads another band's albedo or one gray value."""
-    population, stars, types = hand_population()
+    population = hand_population()
     truth = ExoVistaWorldSource.from_population(
-        population, stars, n_slots=2, bands=BANDS
+        population, STARS, n_slots=2, bands=BANDS, generator=GEN
     ).population
     assert truth.albedo.shape == (1, 2, 2, len(BANDS))
     assert truth.bands == BANDS
     for b, band in enumerate(BANDS):
-        want = types.geometric_albedo(population.type_index, band.center_nm)
+        want = GEN.types.geometric_albedo(population.type_index, band.center_nm)
         np.testing.assert_allclose(
             truth.albedo[..., b], np.where(truth.present, want, 0.0), rtol=1e-12
         )
@@ -161,7 +188,7 @@ def test_stored_albedo_reproduces_the_file_contrast_in_each_band():
     up to 30 percent, so a reused band misses the file's contrast.
     """
     source = ExoVistaWorldSource.from_files(
-        [fixture_files()], n_slots=6, bands=FILE_BANDS
+        [fixture_files()], n_slots=6, bands=FILE_BANDS, generator=GEN
     )
     contrast, phase, distance = file_contrast(source, FILE_BANDS)
     lit = np.asarray(source.population.present[0]) & (phase > 0.05)
@@ -174,16 +201,23 @@ def test_a_band_the_files_do_not_cover_is_refused():
     """Fails if an uncovered band is read through a fallback instead of refused."""
     with pytest.raises(ValueError, match=r"HIP_27913.*covers 900 to 1093.96 nm.*500"):
         ExoVistaWorldSource.from_files(
-            [fixture_files()], n_slots=6, bands=(Band(910.0, 6.5), Band(500.0, 100.0))
+            [fixture_files()],
+            n_slots=6,
+            bands=(Band(910.0, 6.5), Band(500.0, 100.0)),
+            generator=GEN,
         )
 
 
 @pytest.mark.parametrize(
     "build",
     [
-        lambda: ExoVistaWorldSource.from_files([fixture_files()], n_slots=6),
-        lambda: ExoVistaWorldSource.from_draws(KEYS, STARS, n_slots=6),
-        lambda: ExoVistaWorldSource.from_population(*hand_population()[:2], n_slots=2),
+        lambda: ExoVistaWorldSource.from_files(
+            [fixture_files()], n_slots=6, generator=GEN
+        ),
+        lambda: ExoVistaWorldSource.from_draws(KEYS, STARS, n_slots=6, generator=GEN),
+        lambda: ExoVistaWorldSource.from_population(
+            hand_population(), STARS, n_slots=2, generator=GEN
+        ),
         lambda: star_spec_from_model(
             "x",
             mass_msun=1.0,
@@ -213,9 +247,8 @@ def survey_channel():
 
 @pytest.fixture(scope="module")
 def truth():
-    population, _, _ = hand_population()
     source = ExoVistaWorldSource.from_population(
-        population, SURVEY_STARS, n_slots=2, bands=SURVEY_BANDS
+        hand_population(), SURVEY_STARS, n_slots=2, bands=SURVEY_BANDS, generator=GEN
     )
     return source.take(0)
 

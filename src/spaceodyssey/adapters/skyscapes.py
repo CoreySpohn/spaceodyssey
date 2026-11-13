@@ -6,7 +6,7 @@ diameter) and one planet (period, eccentricity, the radial-velocity argument of
 periastron, periastron epoch, inclination, node, mass, radius, geometric albedo).
 `build_scene` turns it into a skyscapes `System`: a tabulated `Star` whose
 single-epoch flux table is a skyscapes `BlackbodyStar` spectrum over the band, and
-one `Planet` with an orbix `KeplerianOrbit` and a grey `LambertianPhysicalModel`.
+one `Planet` with an orbix `KeplerianOrbit` and a gray `LambertianPhysicalModel`.
 
 Conventions are the libraries' own: positions in the right-handed (east, north,
 away) frame, the east offset already multiplied by cos(declination), the node
@@ -26,9 +26,11 @@ relative to its time origin, which the source places at `epoch_jd`.
 `ExoVistaWorldSource` reads stored ExoVista universes (one file per star per
 universe) into `PopulationTruth`: each star has `n_slots` planet slots with a
 `present` mask, so the truth of one world is a fixed-shape array tree whatever
-the number of planets a generator drew. Slots hold the planets inside a declared
-`SupportRange`, ranked by peak flux ratio; `klass` is 1 for the planets
-`skyscapes.io.get_earth_like_planet_indices` selects. Every wavelength is a declared
+the number of planets a generator drew. Slots hold every planet up to the capacity
+`n_slots`, ranked by peak flux ratio, whether or not a belief can represent its orbit;
+`klass` is 1 for the planets `skyscapes.io.get_earth_like_planet_indices` selects.
+Every source declares the `PopulationModel` its worlds come from (`generator`), which
+a decision view hands to beliefs in place of the worlds. Every wavelength is a declared
 `Band`, and the truth carries one geometric albedo per declared band
 (`PopulationTruth.albedo`). The albedo of a stored planet in a band is the geometric
 albedo whose Lambert phase curve reproduces the file's contrast at the band center at
@@ -83,10 +85,14 @@ from photomancy.orbit.model import build_model
 from skyscapes.io import from_exovista, from_phoenix, get_earth_like_planet_indices
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.population import (
+    OccurrenceTable,
+    PlanetTypes,
+    PopulationConfig,
     draw_population,
     earth_like,
     load_occurrence_table,
     load_planet_types,
+    mass_to_radius,
     sky_elements,
 )
 from skyscapes.scene import BlackbodyStar, Planet, Star, System
@@ -527,7 +533,8 @@ _MIN_PHASE_FUNCTION = 0.05
 class SupportRange:
     """The orbits a belief can represent: a period range and an eccentricity ceiling.
 
-    Planets outside it are dropped from the stored truth and counted.
+    It belongs to a `PopulationModel` and bounds a refit's prior. The truth keeps the
+    planets outside it, and a refit fits such a planet against the support.
     """
 
     period_d: tuple[float, float] = (50.0, 5000.0)
@@ -556,6 +563,95 @@ class Band:
             value = getattr(self, name)
             if not (math.isfinite(value) and value > 0.0):
                 raise ValueError(f"a band needs a finite positive {name}, got {value}")
+
+
+# Half width added on each side of a population's range of ln(albedo radius^2), so a
+# planet at the edge of the population sits inside a refit's scale prior.
+LN_LAM_PAD = 0.5
+# Log-spaced masses at which the forecaster radius is read to find the radii an
+# occurrence grid can draw (the radius is not monotonic in mass above the Jovian
+# break, so the edges alone do not bound it).
+RADIUS_GRID_POINTS = 4097
+
+
+class PopulationModel(eqx.Module):
+    """A declared planet population: the generator's tables and a belief's support.
+
+    `occurrence`, `types` and `config` are the inputs of
+    `skyscapes.population.draw_population`: a world source draws its worlds from them
+    and a belief starts from them. `support` is the range of orbits a belief can
+    represent, which bounds a refit's period prior; the truth keeps the planets
+    outside it.
+
+    Attributes:
+        occurrence: The occurrence grid planets are drawn from.
+        types: The planet types and their albedo spectra.
+        config: The settings of the draw.
+        support: The orbits a belief can represent.
+    """
+
+    occurrence: OccurrenceTable
+    types: PlanetTypes
+    config: PopulationConfig = eqx.field(static=True)
+    support: SupportRange = eqx.field(static=True)
+
+    @classmethod
+    def exovista(cls):
+        """The ExoVista generator: its occurrence grid and types, `SupportRange()`."""
+        return cls(
+            occurrence=load_occurrence_table(),
+            types=load_planet_types(),
+            config=PopulationConfig(),
+            support=SupportRange(),
+        )
+
+    @property
+    def period_support_d(self):
+        """`(low, high)` of the period a belief can represent, days."""
+        low, high = self.support.period_d
+        return float(low), float(high)
+
+    def radius_range_rearth(self):
+        """`(low, high)` of the planet radius the population can draw, Earth radii.
+
+        A drawn radius is the forecaster radius of a mass inside the occurrence grid
+        (read at `RADIUS_GRID_POINTS` log-spaced masses and the grid edges), and lies
+        inside some type's radius range; an exoEarth-candidate type's lower edge is
+        divided by ``sqrt(a_max_au)``, its smallest value over the type's range.
+        """
+        edges = np.asarray(self.occurrence.mass_edges_mearth, np.float64)
+        masses = np.concatenate(
+            [edges, np.geomspace(edges.min(), edges.max(), RADIUS_GRID_POINTS)]
+        )
+        drawn = np.asarray(mass_to_radius(masses))
+        t = self.types
+        lower = np.where(
+            np.asarray(t.earth_candidate),
+            np.asarray(t.radius_min_rearth) / np.sqrt(np.asarray(t.a_max_au)),
+            np.asarray(t.radius_min_rearth),
+        )
+        low = max(float(lower.min()), float(drawn.min()))
+        high = min(float(np.asarray(t.radius_max_rearth).max()), float(drawn.max()))
+        return low, high
+
+    def scale_range_au2(self, band, pad=LN_LAM_PAD):
+        """`(low, high)` of ``ln(albedo * radius^2)``, radius in AU, padded by `pad`.
+
+        Radius bounds intersect the type bounds with radii reached by the forecaster
+        mass-radius relation over the occurrence mass grid.
+        The low end is the smallest geometric albedo of any type at the band center
+        with the smallest radius (`radius_range_rearth`), the high end the largest
+        albedo with the largest radius. It is a refit's scale prior: every planet the
+        population can draw in `band` lies inside it.
+        """
+        types = self.types
+        albedo = np.asarray(
+            types.geometric_albedo(np.arange(len(types.names)), band.center_nm)
+        )
+        r_lo, r_hi = (r * Rearth2AU for r in self.radius_range_rearth())
+        low = math.log(float(albedo.min()) * r_lo**2) - pad
+        high = math.log(float(albedo.max()) * r_hi**2) + pad
+        return low, high
 
 
 def _declared(bands):
@@ -878,27 +974,27 @@ class ExoVistaWorldSource(AbstractWorldSource):
     The arrays hold every universe: `population` is a `PopulationTruth` whose leaves
     are ``[n_worlds, n_subjects, n_slots]``. `stars` are the hosts (the same in every
     universe, checked at construction). `dropped` counts, per universe and star, the
-    planets that did not reach a slot (outside the support, or more than `n_slots`
-    inside it); `dropped_class1` counts the class-1 ones among them; `occupancy`
-    counts the class-1 planets that did.
+    planets past the capacity `n_slots`, the faintest by peak flux ratio. `generator`
+    is the population the worlds come from; `declared_population` returns it, so a
+    belief starts from the population and never from the stored worlds.
 
     Attributes:
         population: The stored `PopulationTruth`, world axis first.
-        dropped: ``int[n_worlds, n_subjects]``.
-        dropped_class1: ``int[n_worlds, n_subjects]``.
-        occupancy: ``int[n_worlds, n_subjects]`` class-1 planets in slots.
+        dropped: ``int[n_worlds, n_subjects]`` planets past the capacity.
+        generator: The `PopulationModel` the worlds are drawn from.
         stars: One `StarSpec` per subject.
         epoch_jd: Julian Date of the files' first epoch (the orbit epoch).
-        support: The `SupportRange` the slots were filled under.
     """
 
     population: PopulationTruth
     dropped: jax.Array
-    dropped_class1: jax.Array
-    occupancy: jax.Array
+    generator: PopulationModel
     stars: tuple[StarSpec, ...] = eqx.field(static=True)
     epoch_jd: float = eqx.field(static=True)
-    support: SupportRange = eqx.field(static=True)
+
+    def declared_population(self):
+        """The `PopulationModel` the worlds come from (`generator`)."""
+        return self.generator
 
     @property
     def n_worlds(self):
@@ -911,22 +1007,22 @@ class ExoVistaWorldSource(AbstractWorldSource):
         return int(self.population.period_d.shape[2])
 
     @classmethod
-    def from_files(cls, files, *, n_slots, bands, support=None, epoch_jd=None):
+    def from_files(cls, files, *, n_slots, bands, generator, epoch_jd=None):
         """Read `files[w][s]`, star `s` of universe `w`, into a world source.
 
         Each file is read with `skyscapes.io.from_exovista(path, load_disk=False)`,
-        which loads one system. Slots hold the planets inside `support`, the first
-        `n_slots` by descending peak flux ratio (full phase at periastron, first
-        declared band). The slot index therefore carries the existence ordering, so
-        slots are exchangeable to a belief, which must not read meaning into the
-        index. The stars must agree across universes.
+        which loads one system. Slots hold the first `n_slots` planets by descending
+        peak flux ratio (full phase at periastron, first declared band); the rest are
+        `dropped`. The slot index therefore carries the existence ordering, so slots
+        are exchangeable to a belief, which must not read meaning into the index. The
+        stars must agree across universes.
 
         `bands` are the declared `Band`s: each planet's albedo and each star's flux
         are read in every one. A band the file's tables do not cover from edge to
-        edge is refused, naming the file and its covered range.
+        edge is refused, naming the file and its covered range. `generator` is the
+        `PopulationModel` the files were drawn from.
         """
         bands = _declared(bands)
-        support = SupportRange() if support is None else support
         n_worlds, n_stars = len(files), len(files[0])
         if any(len(row) != n_stars for row in files):
             raise ValueError("every universe needs one file per star")
@@ -936,8 +1032,6 @@ class ExoVistaWorldSource(AbstractWorldSource):
         present = np.zeros(shape, bool)
         klass = np.zeros(shape, np.int64)
         dropped = np.zeros((n_worlds, n_stars), np.int64)
-        dropped1 = np.zeros((n_worlds, n_stars), np.int64)
-        occupancy = np.zeros((n_worlds, n_stars), np.int64)
         stars = [None] * n_stars
         epoch = epoch_jd
         for w in range(n_worlds):
@@ -953,14 +1047,9 @@ class ExoVistaWorldSource(AbstractWorldSource):
                 elif stars[s] != spec:
                     raise ValueError(f"star {s} differs between universes")
                 planets = _stored_planets(path, system, bands)
-                inside = [p for p in planets if support.contains(p["period_d"], p["e"])]
-                inside.sort(key=lambda p: -p["peak"])
-                kept = inside[:n_slots]
+                planets.sort(key=lambda p: -p["peak"])
+                kept = planets[:n_slots]
                 dropped[w, s] = len(planets) - len(kept)
-                dropped1[w, s] = sum(p["klass"] for p in planets) - sum(
-                    p["klass"] for p in kept
-                )
-                occupancy[w, s] = sum(p["klass"] for p in kept)
                 for k, p in enumerate(kept):
                     present[w, s, k] = True
                     klass[w, s, k] = p["klass"]
@@ -977,33 +1066,23 @@ class ExoVistaWorldSource(AbstractWorldSource):
         return cls(
             population=population,
             dropped=jnp.asarray(dropped),
-            dropped_class1=jnp.asarray(dropped1),
-            occupancy=jnp.asarray(occupancy),
+            generator=generator,
             stars=tuple(stars),
             epoch_jd=float(epoch),
-            support=support,
         )
 
     @classmethod
-    def from_draws(
-        cls,
-        keys,
-        stars,
-        *,
-        n_slots,
-        bands,
-        support=None,
-        epoch_jd=J2000_JD,
-        config=None,
-    ):
+    def from_draws(cls, keys, stars, *, n_slots, bands, generator, epoch_jd=J2000_JD):
         """Draw one world per key from the occurrence-rate generator.
 
         `keys` is ``[n_worlds]`` PRNG keys (world `w` depends on `keys[w]` alone) and
         `stars` the `StarSpec` of each host; the draw is
-        `skyscapes.population.draw_population` over the stars' masses and
-        luminosities. See `from_population` for the slot rules and `bands`.
+        `skyscapes.population.draw_population` of `generator` (its occurrence grid,
+        types and config) over the stars' masses and luminosities. See
+        `from_population` for the slot rules and `bands`.
         """
-        occurrence, types = load_occurrence_table(), load_planet_types()
+        occurrence, types = generator.occurrence, generator.types
+        config = generator.config
         mass = jnp.asarray([s.mass_msun for s in stars], F64)
         lum = jnp.asarray([s.luminosity_lsun for s in stars], F64)
         population = eqx.filter_jit(
@@ -1016,41 +1095,28 @@ class ExoVistaWorldSource(AbstractWorldSource):
             stars,
             n_slots=n_slots,
             bands=bands,
-            support=support,
+            generator=generator,
             epoch_jd=epoch_jd,
-            types=types,
         )
 
     @classmethod
     def from_population(
-        cls,
-        population,
-        stars,
-        *,
-        n_slots,
-        bands,
-        support=None,
-        epoch_jd=J2000_JD,
-        types=None,
+        cls, population, stars, *, n_slots, bands, generator, epoch_jd=J2000_JD
     ):
         """Build a world source from drawn `PlanetPopulation` leaves ``[W, S, P]``.
 
-        The slot, class and drop rules are those of `from_files`: slots hold the
-        planets inside `support`, the first `n_slots` by descending peak flux ratio
-        (first declared band); `klass` is 1 inside the exoEarth-candidate box
-        (counted over all planets, `dropped_class1` among those that did not reach a
-        slot). Orbits are at `epoch_jd` (the epoch of the ExoVista files is J2000).
-        The geometric albedo in each declared `Band` is the planet type's at the
-        band center.
+        The slot and drop rules are those of `from_files`: slots hold the first
+        `n_slots` planets by descending peak flux ratio (first declared band), the
+        rest are `dropped`, and slots past the drawn planets hold the filler; `klass`
+        is 1 inside the exoEarth-candidate box. Orbits are at `epoch_jd` (the epoch of
+        the ExoVista files is J2000). The geometric albedo in each declared `Band` is
+        the planet type's (of `generator`) at the band center.
         """
         bands = _declared(bands)
-        support = SupportRange() if support is None else support
-        types = load_planet_types() if types is None else types
+        types = generator.types
         n_stars = len(stars)
         if population.present.shape[1] != n_stars:
             raise ValueError("the population needs one star axis entry per star")
-        if n_slots > population.present.shape[2]:
-            raise ValueError("n_slots exceeds the drawn planets per star")
         mass_msun = jnp.asarray([s.mass_msun for s in stars], F64)
         lum = np.asarray([s.luminosity_lsun for s in stars], np.float64)[None, :, None]
         sky = jax.vmap(lambda p: sky_elements(p, mass_msun))(population)
@@ -1088,12 +1154,17 @@ class ExoVistaWorldSource(AbstractWorldSource):
         klass = present & np.asarray(
             earth_like(a_au, np.asarray(population.radius_rearth, np.float64), lum)
         )
-        low, high = support.period_d
-        inside = present & (period_d >= low) & (period_d <= high) & (e < support.e_max)
         peak = albedo[..., 0] * (rp_au / (a_au * (1.0 - e))) ** 2
-        order = np.argsort(np.where(inside, -peak, np.inf), axis=-1, kind="stable")
+        # Absent planets past the drawn ones, so a capacity above the draw fills.
+        extra = max(n_slots - present.shape[-1], 0)
+        if extra:
+            pad = [(0, 0)] * (present.ndim - 1) + [(0, extra)]
+            present, klass, peak = (np.pad(x, pad) for x in (present, klass, peak))
+            planets = {k: np.pad(v, pad) for k, v in planets.items()}
+            albedo = np.pad(albedo, [*pad, (0, 0)])
+        order = np.argsort(np.where(present, -peak, np.inf), axis=-1, kind="stable")
         order = order[..., :n_slots]
-        kept = np.take_along_axis(inside, order, axis=-1)
+        kept = np.take_along_axis(present, order, axis=-1)
         kept_class = np.take_along_axis(klass, order, axis=-1) & kept
         leaves = {}
         for name in _ORBIT_FIELDS:
@@ -1110,11 +1181,9 @@ class ExoVistaWorldSource(AbstractWorldSource):
         return cls(
             population=population_truth,
             dropped=jnp.asarray(present.sum(-1) - kept.sum(-1)),
-            dropped_class1=jnp.asarray(klass.sum(-1) - kept_class.sum(-1)),
-            occupancy=jnp.asarray(kept_class.sum(-1)),
+            generator=generator,
             stars=tuple(stars),
             epoch_jd=float(epoch_jd),
-            support=support,
         )
 
     def take(self, indices):

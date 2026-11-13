@@ -302,7 +302,9 @@ def test_the_block_log_maps_every_block_row_to_its_slot():
     spectra.
     """
     _, study, _, truths, _, run = build(
-        budget_d=30.0, policy_kw={"n_char": 2, "retire_after": 3}
+        budget_d=30.0,
+        block_snr_required=5.0,
+        policy_kw={"n_char": 2, "retire_after": 3},
     )
     carry = run.carry
     assert not bool(np.any(np.asarray(carry.overflow)))

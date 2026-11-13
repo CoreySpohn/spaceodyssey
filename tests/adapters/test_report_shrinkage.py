@@ -4,8 +4,6 @@ Each test names the property or number it protects. The first tier runs at a sma
 draw count: the tests check structure (independence, sharing, codes), not accuracy.
 """
 
-import functools
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -24,7 +22,6 @@ from tests.studies.bracket_helpers import (
     N_STEPS,
     N_WORLDS,
     build,
-    fixture_source,
 )
 
 pytestmark = [
@@ -37,13 +34,8 @@ TICK = 250 * 86_400_000
 CODES = {ph.SLOT_OK, ph.SLOT_NO_SUPPORT, ph.SLOT_DEGRADED, ph.SLOT_FAILED}
 
 
-@functools.cache
-def _ln_lam():
-    return ph.population_ln_lam_range(fixture_source().population, 0)
-
-
 def _boundary(study, lanes, kernel="shrinkage", **override):
-    settings = {"ln_lam_range": _ln_lam(), **SMALL, **override}
+    settings = {**SMALL, **override}
     groups = ph.SHRINK_GROUPS if kernel == "shrinkage" else ()
     return ph.ReportRefit(
         kernel=kernel,

@@ -12,7 +12,11 @@ import pytest
 
 from spaceodyssey.adapters.jaxedith import ObservingModeChannel
 from spaceodyssey.adapters.physical_profile import JATIS_EAC1_V1
-from spaceodyssey.adapters.skyscapes import ExoVistaWorldSource, star_spec_from_model
+from spaceodyssey.adapters.skyscapes import (
+    ExoVistaWorldSource,
+    PopulationModel,
+    star_spec_from_model,
+)
 from spaceodyssey.studies import bracket as br
 
 from .bracket_helpers import (
@@ -62,6 +66,7 @@ def _survey_source(hosts, epoch_jd):
         hosts,
         n_slots=N_SLOTS,
         bands=SURVEY_BANDS,
+        generator=PopulationModel.exovista(),
         epoch_jd=epoch_jd,
     )
     scale = jnp.asarray([PERIOD_SCALE**w for w in range(N_WORLDS)])[:, None, None]
@@ -75,7 +80,7 @@ def built():
     hosts = _hosts()
     epoch_jd = fixture_source(1).epoch_jd
     source = _survey_source(hosts, epoch_jd)
-    assert int(source.occupancy.sum()) > 0, "the world holds no exoEarth candidate"
+    assert int(source.population.klass.sum()) > 0, "no exoEarth candidate in a slot"
     channel = ObservingModeChannel.from_stars(
         hosts,
         n_slots=N_SLOTS,

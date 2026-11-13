@@ -1,4 +1,4 @@
-"""Draw-based world source: the slot, class and drop rules of the file-based one.
+"""Draw-based world source: the slot and class rules of the file-based one.
 
 Worlds come from `skyscapes.population.draw_population` on two hand-written G dwarfs
 (no model-atmosphere download). The layout test also loads the stored fixture source
@@ -12,8 +12,8 @@ import pytest
 
 from spaceodyssey.adapters.skyscapes import (
     ExoVistaWorldSource,
+    PopulationModel,
     StarSpec,
-    SupportRange,
 )
 from tests.studies.bracket_helpers import FIXTURE_BANDS, fixture_source
 
@@ -23,12 +23,13 @@ STARS = tuple(
     for k in range(2)
 )
 KEYS = jax.random.split(jax.random.PRNGKey(0), 6)
+GEN = PopulationModel.exovista()
 
 
 @pytest.fixture(scope="module")
 def source():
     return ExoVistaWorldSource.from_draws(
-        KEYS, STARS, n_slots=N_SLOTS, bands=FIXTURE_BANDS
+        KEYS, STARS, n_slots=N_SLOTS, bands=FIXTURE_BANDS, generator=GEN
     )
 
 
@@ -55,54 +56,20 @@ def test_arrays_follow_the_stored_source_layout(source):
     assert jax.tree.map(lambda x: x.dtype, stored.population) == jax.tree.map(
         lambda x: x.dtype, pop
     )
-    assert stored.occupancy.dtype == source.occupancy.dtype
     assert stored.dropped.dtype == source.dropped.dtype
 
 
-def test_counts_account_for_every_drawn_class_one_planet(source):
-    """Fails if a class-1 planet is lost between the draw and the slots.
+@pytest.mark.medium(reason="draws and fills three worlds of the fixture stars")
+def test_worlds_are_keyed(source):
+    """Fails if a world depends on another world's key.
 
-    Class-1 planets in slots plus `dropped_class1` must equal the drawn class-1
-    planets, and `occupancy` must equal the class flags of the slots.
+    World `w` must not change when later keys are removed.
     """
-    occurrence = source.population.klass.sum(-1)
-    np.testing.assert_array_equal(source.occupancy, occurrence)
-    drawn = ExoVistaWorldSource.from_draws(
-        KEYS,
-        STARS,
-        n_slots=30,
-        bands=FIXTURE_BANDS,
-        support=SupportRange((0.0, 1e9), 1.1),
-    )
-    total_class1 = np.asarray(drawn.occupancy)
-    np.testing.assert_array_equal(
-        np.asarray(source.occupancy + source.dropped_class1), total_class1
-    )
-    total = np.asarray(drawn.population.present.sum(-1))
-    np.testing.assert_array_equal(
-        np.asarray(source.population.present.sum(-1) + source.dropped), total
-    )
-
-
-@pytest.mark.medium(reason="draws and fills two worlds of the fixture stars")
-def test_support_range_drops_planets_and_worlds_are_keyed(source):
-    """Fails if `support` is ignored or a world depends on another world's key.
-
-    A narrow period range must leave only planets inside it, count the rest as
-    dropped, and world `w` must not change when later keys are removed.
-    """
-    narrow = SupportRange((100.0, 400.0), 0.9)
-    tight = ExoVistaWorldSource.from_draws(
-        KEYS[:3], STARS, n_slots=N_SLOTS, bands=FIXTURE_BANDS, support=narrow
-    )
-    period = np.asarray(tight.population.period_d)
-    present = np.asarray(tight.population.present)
-    assert ((period[present] >= 100.0) & (period[present] <= 400.0)).all()
-    assert (np.asarray(tight.dropped) >= np.asarray(source.dropped)[:3]).all()
-    wide = ExoVistaWorldSource.from_draws(
-        KEYS[:3], STARS, n_slots=N_SLOTS, bands=FIXTURE_BANDS, support=source.support
+    first = ExoVistaWorldSource.from_draws(
+        KEYS[:3], STARS, n_slots=N_SLOTS, bands=FIXTURE_BANDS, generator=GEN
     )
     np.testing.assert_array_equal(
-        np.asarray(wide.population.period_d), np.asarray(source.population.period_d)[:3]
+        np.asarray(first.population.period_d),
+        np.asarray(source.population.period_d)[:3],
     )
     assert jnp.isfinite(source.population.tp_jd).all()

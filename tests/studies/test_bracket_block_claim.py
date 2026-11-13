@@ -38,7 +38,11 @@ def test_a_blocks_class_column_is_the_only_one_an_observer_may_read():
 
 @functools.cache
 def _oracle(block_snr_required=None):
-    return build(budget_d=BUDGET_D, block_snr_required=block_snr_required)
+    return build(
+        budget_d=2 * BUDGET_D,
+        horizon_d=180.0,
+        block_snr_required=block_snr_required,
+    )
 
 
 def _block_rows(run, truths, study):

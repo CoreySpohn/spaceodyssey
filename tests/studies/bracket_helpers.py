@@ -15,7 +15,7 @@ import jax.numpy as jnp
 
 from spaceodyssey.adapters.jaxedith import ObservingModeChannel
 from spaceodyssey.adapters.photomancy import GRID_SPACING_D, N_GRID, DecisionSummary
-from spaceodyssey.adapters.skyscapes import Band, ExoVistaWorldSource
+from spaceodyssey.adapters.skyscapes import Band, ExoVistaWorldSource, PopulationModel
 from spaceodyssey.studies import bracket as br
 
 FIXTURE = pathlib.Path(__file__).parents[1] / "fixtures" / "exovista"
@@ -37,7 +37,10 @@ def fixture_source(n_worlds=N_WORLDS):
     """The fixture as a world source in `FIXTURE_BANDS`; later worlds scale periods."""
     files = fixture_files()
     source = ExoVistaWorldSource.from_files(
-        [files] * n_worlds, n_slots=N_SLOTS, bands=FIXTURE_BANDS
+        [files] * n_worlds,
+        n_slots=N_SLOTS,
+        bands=FIXTURE_BANDS,
+        generator=PopulationModel.exovista(),
     )
     scale = jnp.asarray([PERIOD_SCALE**w for w in range(n_worlds)])[:, None, None]
     return eqx.tree_at(

@@ -135,8 +135,9 @@ def test_stored_positions_survive_the_slot_conversion(source):
 
 
 def test_absent_slot_never_detects(source, channel):
-    """A visit never reports a detection in a slot that holds no planet."""
+    """Fails if a visit reports a detection in a slot that holds no planet."""
     truth = _truth(source, 0)
+    truth = eqx.tree_at(lambda t: t.present, truth, truth.present.at[0, -1].set(False))
     context = _context(channel, 100.0, 160000.0)
     keys = jax.random.split(jax.random.key(3), 24)
     rows = jax.vmap(

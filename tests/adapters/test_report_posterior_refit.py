@@ -4,14 +4,13 @@ Each test names the property or number it protects. The fits use small proposal
 counts: they check structure (independence, masks, statuses), not accuracy.
 """
 
-import functools
+import dataclasses
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import Rearth2AU
 
 pytest.importorskip("photomancy")
 pytest.importorskip("photomancy.orbit.refit", reason="needs the report refit")
@@ -76,14 +75,8 @@ def world():
     return study, channel, star0, star1
 
 
-@functools.cache
-def _ln_lam():
-    """The scale prior of the fixture's population."""
-    return ph.population_ln_lam_range(fixture_source().population, 0)
-
-
 def _boundary(study, lanes, **override):
-    settings = {"ln_lam_range": _ln_lam(), **SMALL, **override}
+    settings = {**SMALL, **override}
     return ph.ReportRefit(
         kernel="posterior",
         occupancy=0.5,
@@ -215,43 +208,83 @@ def test_a_blind_policy_keeps_its_prior_summary_to_the_horizon():
         assert np.array_equal(held, np.broadcast_to(expected, held.shape)), name
 
 
+# The slot of star 1 that holds its 318-day, 1.05 Earth-radius planet.
+GIANT_SLOT = 2
+
+
 def _giant_visits(world, factor=11.0):
-    """Visits of star 1 when its slot 1 is `factor` times larger than the fixture's."""
+    """Visits of star 1 when its `GIANT_SLOT` planet is `factor` times larger."""
     _, channel, _, _ = world
     truth = jax.tree_util.tree_map(lambda x: x[0], fixture_source().population)
-    big = eqx.tree_at(lambda t: t.Rp_AU, truth, truth.Rp_AU.at[1, 1].multiply(factor))
+    big = eqx.tree_at(
+        lambda t: t.Rp_AU, truth, truth.Rp_AU.at[1, GIANT_SLOT].multiply(factor)
+    )
     days = [30.0 * i for i in range(1, 7)]
     return {1: realize_visits(channel, big, 1, 4, days)}
 
 
+def _earth_sized(population):
+    """`population` with its occurrence grid cut to 0.5 to 2 Earth masses.
+
+    Its scale prior then holds only planets near one Earth radius, at any type's
+    albedo: a planet 11 times larger lies outside it.
+    """
+    edges = jnp.geomspace(0.5, 2.0, population.occurrence.mass_edges_mearth.shape[0])
+    return eqx.tree_at(lambda p: p.occurrence.mass_edges_mearth, population, edges)
+
+
 def test_a_bright_planet_fits_when_the_scale_prior_holds_the_population(world):
-    """A planet 11 times larger than the fixture's, in a population that holds it:
-    the slot fits (status OK, detections kept); under the default Earth-twin window
-    (0.6 to 1.7 Earth radii at albedo 0.3) it does not fit, the entry is
-    DEGRADED, not FAILED, the other slots still install, and the failed slot carries
-    its code.
+    """Fails if a bright planet cannot fit inside its declared population, or a
+    narrower belief reuses a cloud or fits scales outside its own bounds.
+
+    A planet 11 times larger than the fixture's fits when the population holds it.
+    An Earth-sized belief must keep its fitted scales inside its own range, even
+    when supported orbits have finite likelihood for the giant's reports.
     """
     study, _, _, _ = world
     seen = _giant_visits(world)
-    population = fixture_source().population
-    population = eqx.tree_at(
-        lambda t: t.Rp_AU, population, population.Rp_AU.at[:, 1, 1].multiply(11.0)
+    population = study.world_source.generator
+    band = study.channel_model.detection_band
+    truth = jax.tree_util.tree_map(lambda x: x[0], fixture_source().population)
+    giant = float(
+        np.log(
+            truth.albedo[1, GIANT_SLOT, 0] * (11.0 * truth.Rp_AU[1, GIANT_SLOT]) ** 2
+        )
     )
-    wide = ph.population_ln_lam_range(population, 0)
+    lo, hi = population.scale_range_au2(band)
+    assert lo < giant < hi
     request = visit_request(study, seen, tick=TICK)
-    got = _boundary(study, 1, ess_floor=1.0, ln_lam_range=wide).refit_batch(
-        study, request
-    )
+    wide = dataclasses.replace(study, belief_population=population)
+    boundary = _boundary(study, 1, ess_floor=1.0, resummary=True)
+    got = boundary.refit_batch(wide, request)
+    wide_keys = set(boundary._clouds)
     slot = _slices(study, got, 0, 1)
     assert int(got.status[0, 0, 1]) == int(RefitStatus.OK)
-    assert slot["n_det"][1] >= 2 and slot["status"][1] == ph.SLOT_OK
-    assert slot["ess"][1] > 1.0
-    ref = float(np.log(0.3 * Rearth2AU**2))
-    narrow = _boundary(study, 1, ess_floor=1.0, ln_lam_range=(ref - 1.0, ref + 1.0))
-    got = narrow.refit_batch(study, request)
+    assert slot["n_det"][GIANT_SLOT] >= 2 and slot["status"][GIANT_SLOT] == ph.SLOT_OK
+    assert slot["ess"][GIANT_SLOT] > 1.0
+    earth = _earth_sized(population)
+    assert earth.scale_range_au2(band)[1] < giant
+    narrow = dataclasses.replace(study, belief_population=earth)
+    got = boundary.refit_batch(narrow, request)
     slot = _slices(study, got, 0, 1)
-    assert slot["status"][1] in ph.SLOT_KEPT
-    assert int(got.status[0, 0, 1]) == int(RefitStatus.DEGRADED)
+    assert slot["status"][GIANT_SLOT] in {
+        ph.SLOT_OK,
+        ph.SLOT_NO_SUPPORT,
+        ph.SLOT_DEGRADED,
+        ph.SLOT_FAILED,
+    }
+    assert all(np.isfinite(leaf).all() for leaf in slot.values())
+    # Five-item entries are first-tier clouds with their separate class-1 window.
+    fitted = [
+        value[0]
+        for key, value in boundary._clouds.items()
+        if key not in wide_keys and len(value) == 4
+    ]
+    assert fitted, "no detected-slot cloud was retained"
+    lo, hi = earth.scale_range_au2(band)
+    for elements in fitted:
+        scales = np.asarray(ph.photomancy_elements(elements))[:, 7]
+        assert np.all((lo <= scales) & (scales <= hi))
     dark = slot["n_det"] == 0
     assert dark.any() and (slot["status"][dark] == ph.SLOT_OK).all()
     assert np.any(slot["p_new"]) and np.all(np.isfinite(slot["p_new"]))
@@ -308,7 +341,7 @@ def test_the_search_probability_follows_the_posterior_occupancy(world, n_rows):
     """
     study, channel, _, _ = world
     boundary = _boundary(study, 1)
-    st = boundary._post_settings(channel)
+    st = boundary._post_settings(study)
     lane = _null_lane(channel, st, 0, n_rows)
     cloud, _ = ph._first_tier_cloud(channel, lane, st, 1)
     like = float(jnp.exp(cloud.log_evidence))
