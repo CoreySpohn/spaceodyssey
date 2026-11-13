@@ -26,6 +26,7 @@ from spaceodyssey.adapters.skyscapes import (
     geometry,
     star_spec_from_model,
 )
+from spaceodyssey.core.kinds import RealizeContext
 from tests.studies.bracket_helpers import SURVEY_BANDS, fixture_files
 
 BANDS = (Band(500.0, 100.0), Band(940.0, 6.7))
@@ -219,9 +220,24 @@ def truth():
     return source.take(0)
 
 
-@pytest.mark.medium(reason="builds the survey channel's two reports")
+def _one_day(channel):
+    """The context of a record that holds one science day after the settling."""
+    built = channel.assets().context
+    start = 10 * int(built.clock.ticks_per_day)
+    end = start + int(built.settle_ticks) + int(built.clock.ticks_per_day)
+    zero = jnp.asarray(0)
+    return RealizeContext(
+        jnp.asarray(start), jnp.asarray(end), zero, jnp.asarray(1.0), zero, zero
+    )
+
+
+@pytest.mark.medium(reason="builds the survey channel's two reports and two rows")
 def test_the_channel_reads_the_albedo_of_each_report_band(survey_channel, truth):
-    """Fails if detection and characterization share one albedo."""
+    """Fails if detection and characterization share one albedo.
+
+    The detection rows read the 500 nm albedo and the block rows the 910 nm one:
+    changing only the 910 nm albedo changes the block row and leaves the visit row.
+    """
     assert truth.bands == SURVEY_BANDS
     twice = eqx.tree_at(
         lambda t: t.albedo, truth, truth.albedo.at[..., 1].set(2 * truth.albedo[..., 0])
@@ -230,5 +246,22 @@ def test_the_channel_reads_the_albedo_of_each_report_band(survey_channel, truth)
     char = survey_channel._slot_planets(twice, 0, twice.band_index(910.0))["Lambda"]
     np.testing.assert_allclose(char, 2.0 * det, rtol=1e-12)
     assert survey_channel.detection_band == SURVEY_BANDS[0]
+    block = survey_channel._block_band
+    assert block.center_nm == SURVEY_BANDS[1].center_nm
+    assert block.width_nm == pytest.approx(SURVEY_BANDS[1].width_nm, rel=1e-12)
+    context = _one_day(survey_channel)
+    key = jax.random.key(0)
+
+    @eqx.filter_jit
+    def rows(t):
+        return (
+            survey_channel._visit_row(t, 0, 0, key, context),
+            survey_channel._block_row(t, 0, 0, key, context),
+        )
+
+    visit, block_row = (np.asarray(x) for x in rows(truth))
+    visit_twice, block_twice = (np.asarray(x) for x in rows(twice))
+    np.testing.assert_array_equal(visit, visit_twice)
+    assert not np.array_equal(block_row, block_twice), "the block ignored 910 nm"
     with pytest.raises(ValueError, match="no declared band at 1000"):
         truth.band_index(1000.0)
