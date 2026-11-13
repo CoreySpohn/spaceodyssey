@@ -224,6 +224,7 @@ require_tier_reason = true
 "tests/core/test_core.py" = 306
 "tests/core/test_corpus.py" = 389
 "tests/core/test_corpus_invariants.py" = 2703
+"tests/core/test_decision_view.py" = 186
 "tests/core/test_declarations_match_run.py" = 84
 "tests/core/test_derived_corrections.py" = 252
 "tests/core/test_draws.py" = 254

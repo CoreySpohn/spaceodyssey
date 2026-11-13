@@ -44,7 +44,7 @@ CAP_FIELDS = (
     "max_config_switches",
     "n_ops",
 )
-STUDY_FIELDS = ("key_version",)
+STUDY_FIELDS = ("key_version", "planning_model", "belief_population")
 CHANNEL_FIELDS = ("pricing", "surcharge", "failure_kind", "refund_deadline_ticks")
 RECORD_FIELDS = (
     "nonrefundable",

@@ -550,7 +550,7 @@ def answer_refresh(carry, root, study, boundary, *, can_finish=True, keep=False)
         return carry if keep else drop_hold(carry)
     request = _gather(carry, root, study)
     batch = jax.tree_util.tree_map(lambda x: x[None], request)
-    result = boundary.refit_batch(study, batch)
+    result = boundary.refit_batch(study.decision_view(), batch)
     one = jax.tree_util.tree_map(lambda x: x[0], result)
     return _commit(carry, request, one, study)
 
@@ -579,7 +579,7 @@ def answer_refreshes(carries, roots, study, boundary, left=None, keep=False):
         return carries
     requests = _gather_worlds(carries, roots, study)
     batch = jax.tree_util.tree_map(lambda x: x[frozen], requests)
-    result = boundary.refit_batch(study, batch)
+    result = boundary.refit_batch(study.decision_view(), batch)
     n_worlds = roots.shape[0]
     padded = jax.tree_util.tree_map(
         lambda x: jnp.zeros((n_worlds, *x.shape[1:]), x.dtype).at[frozen].set(x),

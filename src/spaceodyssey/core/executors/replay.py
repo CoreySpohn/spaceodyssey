@@ -498,7 +498,7 @@ def _hold(study, carry, roots, boundary, at, state):
     )
     request = _request(view, roots, study)
     batch = jax.tree_util.tree_map(lambda x: x[None], request)
-    result = boundary.refit_batch(study, batch)
+    result = boundary.refit_batch(study.decision_view(), batch)
     one = jax.tree_util.tree_map(lambda x: x[0], result)
     new = refresh._commit(view, request, one, study)
     return {"ordinal": ordinal, "n_log": n_log, "new": new}

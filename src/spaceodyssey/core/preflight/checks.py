@@ -825,6 +825,8 @@ STUDY_SLOTS = frozenset(
         "fork",
         "refresh",
         "key_version",
+        "planning_model",
+        "belief_population",
     }
 )
 

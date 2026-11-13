@@ -99,6 +99,7 @@ from spaceodyssey.core.kinds import AbstractPolicy as AbstractPolicy
 from spaceodyssey.core.kinds import AbstractProcess as AbstractProcess
 from spaceodyssey.core.kinds import AbstractWorldSource as AbstractWorldSource
 from spaceodyssey.core.kinds import ObserverCapabilities as ObserverCapabilities
+from spaceodyssey.core.kinds import WithheldWorldSource as WithheldWorldSource
 from spaceodyssey.core.ledger import AssetTable as AssetTable
 from spaceodyssey.core.ledger import ChannelTable as ChannelTable
 from spaceodyssey.core.ledger import Ledger as Ledger

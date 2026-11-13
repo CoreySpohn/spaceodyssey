@@ -62,7 +62,10 @@ uniform draw it used. The draw exists so a policy that randomizes can have its r
 number recorded in the trace: use the `key` argument for any randomness and return the
 uniform you drew, or 0.0 when you drew nothing, as here. The policy keeps its own state
 in `pstate`, a small float array it may read and update. It reads the world only
-through `view`, a snapshot of what has been released to it. [Truth and
+through `view`, a snapshot of what has been released to it. The `study` argument is the
+study's decision view (`Study.decision_view()`): the world source is withheld, and the
+channel model is the study's planning model, which is the generating model unless the
+study declares another. [Truth and
 view](../concepts/truth-and-view.md) lists what the snapshot holds.
 
 The policy below reads the counts of measurements per star from `view.belief.n` and

@@ -234,6 +234,22 @@ class AbstractWorldSource(eqx.Module):
         """Draw one world's state."""
         raise NotImplementedError
 
+    def declared_population(self):
+        """The population a belief may start from, or None when none is declared."""
+        return None
+
+
+class WithheldWorldSource(AbstractWorldSource):
+    """Stands where a decision's study would otherwise carry the world source."""
+
+    def draw(self, key, capacities):
+        """Refuse: decisions never see the worlds."""
+        raise RuntimeError("the world source is withheld from decisions")
+
+    def declared_population(self):
+        """Refuse: decisions never see the worlds."""
+        raise RuntimeError("the world source is withheld from decisions")
+
 
 class AbstractDesign(eqx.Module):
     """Continuous study design leaves."""

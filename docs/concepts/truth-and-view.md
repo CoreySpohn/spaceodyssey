@@ -126,6 +126,12 @@ policy undo the noise and recover the truth from a measured value. The mask prot
 variate because the channel declared it scorer-only. A column declared readable would
 reach the policy unchanged.
 
+A third mechanism covers the study itself. The policy and the refit receive
+`study.decision_view()`, not the study: the world source is replaced by one that raises
+on any draw, and the channel model is the study's `planning_model`, the generating model
+when none is declared. A policy therefore cannot reach the true worlds through its
+`study` argument.
+
 ## A view grows only when a result is released
 
 A policy is woken when a record is released to it, and the view it receives holds the

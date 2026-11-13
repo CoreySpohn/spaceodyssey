@@ -146,7 +146,7 @@ class HostExecutor(AbstractExecutor):
                     )
                     key = decision_key(carry, roots, study)
                     eff, pstate, u = study.agenda.policies[ph].decide_py(
-                        ps, view_np, study, key
+                        ps, view_np, study.decision_view(), key
                     )
             else:
                 eff, pstate, u = effects_none(caps), carry.pstate, jnp.asarray(0.0)

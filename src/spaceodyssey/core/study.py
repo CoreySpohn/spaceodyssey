@@ -16,6 +16,7 @@ from spaceodyssey.core.kinds import (
     AbstractPolicy,
     AbstractProcess,
     AbstractWorldSource,
+    WithheldWorldSource,
 )
 from spaceodyssey.core.ledger import AssetTable, ChannelTable, charge_parts
 from spaceodyssey.core.records import lower_refit
@@ -95,6 +96,13 @@ class Study(eqx.Module):
     # far uses; version 2 keys a measurement draw by the asset of its channel
     # (`keys.asset_coordinate`). An optional document field (`OPTIONAL`).
     key_version: int = eqx.field(default=1, static=True, metadata=OPTIONAL)
+    # What decisions and refits plan with, when it differs from the generating model
+    # and the true population. `None` grants the truth (`decision_view`). Optional
+    # document fields (`OPTIONAL`).
+    planning_model: AbstractChannelModel | None = eqx.field(
+        default=None, metadata=OPTIONAL
+    )
+    belief_population: eqx.Module | None = eqx.field(default=None, metadata=OPTIONAL)
 
     def __check_init__(self):
         """Validate precision, kinds, the observer's layout, refit and refresh.
@@ -118,6 +126,27 @@ class Study(eqx.Module):
         _check_refit(self.observer, self.caps, self.refresh)
         _check_refresh(self.observer, self.caps, self.refresh)
         _check_balance_range(self)
+
+    def decision_view(self):
+        """The study as a policy or a refit sees it.
+
+        The world source is withheld, the channel model is the planning model (the
+        generating one when none is declared), and the belief population is the
+        declared one (the world source's own when none is declared). The observer is
+        kept. Built with `tree_at`, so validation does not run again.
+        """
+        belief = self.belief_population
+        if belief is None:
+            belief = self.world_source.declared_population()
+        model = self.planning_model
+        if model is None:
+            model = self.channel_model
+        return eqx.tree_at(
+            lambda s: (s.channel_model, s.belief_population, s.world_source),
+            self,
+            (model, belief, WithheldWorldSource()),
+            is_leaf=lambda x: x is None,
+        )
 
 
 _EXACT_QUANTA = 2.0**53

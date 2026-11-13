@@ -194,9 +194,10 @@ def decide(carry, root, study, view=None):
     ph = phase_at(carry, study)
     pstate = jnp.where(ph != carry.phase, jnp.zeros_like(carry.pstate), carry.pstate)
     key = decision_key(carry, root, study)
+    seen = study.decision_view()
 
     def run_policy(ps, v, k, p):
-        out = p.decide(ps, v, study, k)
+        out = p.decide(ps, v, seen, k)
         # checked per policy, before the switch asks its branches to agree
         _check_rows(out[0], study.caps, f" (policy: {p})")
         return out
