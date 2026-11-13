@@ -160,6 +160,7 @@ from spaceodyssey.adapters.physical_profile import (
     load_profile,
     payload_column_names,
 )
+from spaceodyssey.adapters.skyscapes import Band
 from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience
 from spaceodyssey.core.kinds import AbstractChannelModel
 from spaceodyssey.core.records import PayloadColumn, RecordKind
@@ -2075,6 +2076,10 @@ class ObservingModeChannel(AbstractChannelModel):
         requirement are the modes' required signal-to-noise ratios, `diameter_m`
         defaults to the circumscribed aperture of the profile's inscribed diameter,
         and every star needs the fluxes of both bands (`StarSpec.band_fluxes_jy`).
+
+        Without a survey table the host flux is `StarSpec.flux_density_jy`, the flux
+        in a star's first declared band, so a star that declares bands must declare
+        the report's band first; another first band is refused.
         """
         stars = tuple(stars)
         survey = survey_table(profile)
@@ -2129,6 +2134,8 @@ class ObservingModeChannel(AbstractChannelModel):
             law,
         )
         built = _build_mode_assets(*args)
+        if survey is None:
+            _require_report_band(stars, built.report.wavelength_nm)
 
         def stacked(wavelength_nm):
             return SummaryScene(
@@ -2278,8 +2285,24 @@ class ObservingModeChannel(AbstractChannelModel):
             )
         return prepared
 
-    def _slot_planets(self, truth, subject):
-        """The true planets of one star as photomancy dicts, leaves ``[n_slots]``."""
+    @property
+    def detection_band(self):
+        """The `Band` of the detection report: its wavelength and bin width."""
+        report = self.assets().report
+        return Band(report.wavelength_nm, report.bin_width_nm)
+
+    @property
+    def _block_band(self):
+        """The `Band` a block reads: the characterization report's on a survey."""
+        report = self.assets().char_report if self.survey else self.assets().report
+        return Band(report.wavelength_nm, report.bin_width_nm)
+
+    def _slot_planets(self, truth, subject, band):
+        """The true planets of one star as photomancy dicts, leaves ``[n_slots]``.
+
+        `band` is the position of the declared band (`PopulationTruth.band_index`)
+        whose albedo sets the planets' scale.
+        """
         mass = self.scenes.star_mass_kg[subject]
         mp = truth.Mp_kg[subject]
         return {
@@ -2290,7 +2313,7 @@ class ObservingModeChannel(AbstractChannelModel):
             "cos_w": truth.cos_w[subject],
             "sin_w": truth.sin_w[subject],
             "tp": truth.tp_jd[subject] - self.epoch_jd,
-            "Lambda": truth.Ag[subject] * truth.Rp_AU[subject] ** 2,
+            "Lambda": truth.albedo[subject, :, band] * truth.Rp_AU[subject] ** 2,
             "Mp": mp,
         }
 
@@ -2344,7 +2367,8 @@ class ObservingModeChannel(AbstractChannelModel):
         interval, valid, occupied = self._interval(context, settle=True)
         true_prep = self._prepared(subject, nominal=False)
         nominal_prep = self._prepared(subject, nominal=True)
-        planets = self._slot_planets(truth, subject)
+        band = truth.band_index(self.detection_band.center_nm)
+        planets = self._slot_planets(truth, subject, band)
         present = truth.present[subject]
         keys = jax.vmap(lambda s: jax.random.fold_in(key, s))(jnp.arange(self.n_slots))
 
@@ -2397,7 +2421,8 @@ class ObservingModeChannel(AbstractChannelModel):
         """A block mode's row: true accumulated signal-to-noise per slot."""
         interval, valid, _ = self._interval(context, settle=self.survey)
         prepared = self._prepared(subject, nominal=False, char=True)
-        planets = self._slot_planets(truth, subject)
+        band = truth.band_index(self._block_band.center_nm)
+        planets = self._slot_planets(truth, subject, band)
         present = truth.present[subject]
         interval = ScienceInterval(
             interval.midpoint_jd, jnp.where(valid, interval.duration_s, 0.0)
@@ -2423,10 +2448,12 @@ class ObservingModeChannel(AbstractChannelModel):
 
         Elements are the log-parameter set the summary reads: `tau` is days from the
         epoch, `ln_mass` the central mass (star plus planet) in solar masses and
-        `ln_lam` the log of albedo times radius squared in Earth radii.
+        `ln_lam` the log of albedo (in the detection band) times radius squared in
+        Earth radii.
         """
         mass = self.scenes.star_mass_kg[subject]
-        planets = self._slot_planets(truth, subject)
+        band = truth.band_index(self.detection_band.center_nm)
+        planets = self._slot_planets(truth, subject, band)
         present = truth.present[subject]
         radius = truth.Rp_AU[subject] / Rearth2AU
         columns = {
@@ -2439,7 +2466,9 @@ class ObservingModeChannel(AbstractChannelModel):
             "tau": planets["tp"],
             "ln_mass": jnp.log((mass + planets["Mp"]) / Msun2kg),
             "class1": truth.klass[subject].astype(F64),
-            "ln_lam": jnp.log(jnp.maximum(truth.Ag[subject] * radius**2, 1e-300)),
+            "ln_lam": jnp.log(
+                jnp.maximum(truth.albedo[subject, :, band] * radius**2, 1e-300)
+            ),
         }
         names = [f for f, _ in CATALOG_FIELDS]
         stacked = jnp.stack([jnp.asarray(columns[c], F64) for c in names], -1)
@@ -2825,6 +2854,20 @@ class ObservingModeChannel(AbstractChannelModel):
         planet, mass = self._belief_planet(elements)
         prepared = self._prepared(subject, nominal=True, mass_kg=mass)
         return self.assets().report.budget(prepared, planet, interval)
+
+
+def _require_report_band(stars, report_nm):
+    """Refuse a host whose first declared band is not the report band `report_nm`."""
+    for star in stars:
+        if not star.band_fluxes_jy:
+            continue
+        first_nm = star.band_fluxes_jy[0][0]
+        if not math.isclose(first_nm, report_nm, rel_tol=1e-9):
+            raise ValueError(
+                f"star {star.name!r} declares the {first_nm:g} nm band first; this "
+                f"channel reads the flux of a star's first declared band, which must "
+                f"be the report band at {report_nm:g} nm"
+            )
 
 
 def _star_scene(star, n_exozodi, wavelength_nm=None):

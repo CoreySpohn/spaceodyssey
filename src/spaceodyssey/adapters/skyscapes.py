@@ -28,14 +28,17 @@ universe) into `PopulationTruth`: each star has `n_slots` planet slots with a
 `present` mask, so the truth of one world is a fixed-shape array tree whatever
 the number of planets a generator drew. Slots hold the planets inside a declared
 `SupportRange`, ranked by peak flux ratio; `klass` is 1 for the planets
-`skyscapes.io.get_earth_like_planet_indices` selects. The albedo of a stored planet
-is the geometric albedo whose Lambert phase curve reproduces the file's contrast at
-the band center at the first epoch (the file's own spectra are not carried).
+`skyscapes.io.get_earth_like_planet_indices` selects. Every wavelength is a declared
+`Band`, and the truth carries one geometric albedo per declared band
+(`PopulationTruth.albedo`). The albedo of a stored planet in a band is the geometric
+albedo whose Lambert phase curve reproduces the file's contrast at the band center at
+the first epoch (the file's own spectra are not carried); a band the file does not
+cover is refused.
 
 `ExoVistaWorldSource.from_draws` builds the same arrays without files: it draws each
 world's planets with `skyscapes.population.draw_population` (the occurrence-rate
 generator, pure JAX) and fills slots by the same rules. The albedo there is the
-planet type's geometric albedo at the band center, and the star's flux comes from a
+planet type's geometric albedo at each band center, and the star's flux comes from a
 PHOENIX model atmosphere (`star_spec_from_model`), not from a scene file.
 
 `diagnose(truth, record, ...)` recomputes truth-side geometry for a record from
@@ -537,13 +540,42 @@ class SupportRange:
 
 
 @dataclasses.dataclass(frozen=True)
+class Band:
+    """A declared observing band: its center and full width, nm.
+
+    Every wavelength the truth or a host star is read at is a declared band; none
+    is a default. Construction refuses a non-finite or nonpositive center or width.
+    """
+
+    center_nm: float
+    width_nm: float
+
+    def __post_init__(self):
+        """Refuse a non-finite or nonpositive center or width."""
+        for name in ("center_nm", "width_nm"):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value > 0.0):
+                raise ValueError(f"a band needs a finite positive {name}, got {value}")
+
+
+def _declared(bands):
+    """`bands` as a tuple of distinct `Band`s, at least one; refuse anything else."""
+    bands = tuple(bands)
+    if not bands or not all(isinstance(b, Band) for b in bands):
+        raise ValueError("bands must be one or more `Band`s")
+    centers = [b.center_nm for b in bands]
+    if len(set(centers)) != len(centers):
+        raise ValueError(f"declared bands share a center: {centers}")
+    return bands
+
+
+@dataclasses.dataclass(frozen=True)
 class StarSpec:
     """A host star as the study uses it: plain numbers, one per subject.
 
-    `flux_density_jy` is the stellar flux density at the band center, read from the
-    star the universe files hold. `band_fluxes_jy` holds more bands as
-    ``(wavelength_nm, flux_density_jy)`` pairs, one per observing mode of a survey
-    that observes in several bands (`flux_at` reads them).
+    `band_fluxes_jy` holds the mean flux density of every declared band as
+    ``(center_nm, flux_density_jy)`` pairs, in the declared order (`flux_at` reads
+    them). `flux_density_jy` is the flux in the first declared band.
     """
 
     name: str
@@ -557,10 +589,11 @@ class StarSpec:
     band_fluxes_jy: tuple = ()
 
     def flux_at(self, wavelength_nm=None):
-        """Flux density [Jy] in the band centred on `wavelength_nm`.
+        """Flux density [Jy] in the band centered on `wavelength_nm`.
 
-        `None` is the star's own band-center flux, `flux_density_jy`. A wavelength
-        must be one the spec was built with (`band_fluxes_jy`).
+        `None` is `flux_density_jy`, the flux in the first declared band. A
+        wavelength must be the center of a band the spec was built with
+        (`band_fluxes_jy`).
         """
         if wavelength_nm is None:
             return self.flux_density_jy
@@ -574,22 +607,62 @@ class StarSpec:
         )
 
 
-class PopulationTruth(PhysicalTruth):
+class PopulationTruth(eqx.Module):
     """One world's planets: `n_slots` per star, with a present mask and a class.
 
-    Every `PhysicalTruth` leaf has shape ``[n_subjects, n_slots]`` (a batch of worlds
-    adds a leading axis). An absent slot (`present` false) holds an inert filler
-    planet: a circular one-year orbit with zero radius, so every kernel stays finite
-    and the mask alone says whether it exists.
+    Every leaf but `albedo` has shape ``[n_subjects, n_slots]``; `albedo` adds a last
+    axis, one entry per declared band (a batch of worlds adds a leading axis to all).
+    An absent slot (`present` false) holds an inert filler planet: a circular
+    one-year orbit with zero radius and zero albedo, so every kernel stays finite and
+    the mask alone says whether it exists.
 
     Attributes:
+        period_d: Orbital period, days.
+        e: Eccentricity.
+        cos_i: Cosine of the inclination.
+        W_rad: Longitude of the ascending node, radians.
+        cos_w: Cosine of the planet's argument of periastron.
+        sin_w: Sine of the planet's argument of periastron.
+        tp_jd: Periastron epoch, TDB Julian Date.
+        Mp_kg: Planet mass, kg.
+        Rp_AU: Planet radius, AU.
         present: Whether the slot holds a planet.
         klass: 1 for a planet `skyscapes.io.get_earth_like_planet_indices` selects,
             0 for any other planet and for an absent slot.
+        albedo: Geometric albedo in each declared band, ``[..., n_bands]``.
+        bands: The declared bands, in the order of the last axis of `albedo`.
     """
 
+    period_d: jax.Array
+    e: jax.Array
+    cos_i: jax.Array
+    W_rad: jax.Array
+    cos_w: jax.Array
+    sin_w: jax.Array
+    tp_jd: jax.Array
+    Mp_kg: jax.Array
+    Rp_AU: jax.Array
     present: jax.Array
     klass: jax.Array
+    albedo: jax.Array
+    bands: tuple[Band, ...] = eqx.field(static=True)
+
+    def __check_init__(self):
+        """Require declared bands and one albedo entry per band."""
+        _declared(self.bands)
+        if self.albedo.shape[-1:] != (len(self.bands),):
+            raise ValueError(
+                f"albedo has last axis {self.albedo.shape[-1:]}; "
+                f"{len(self.bands)} bands are declared"
+            )
+
+    def band_index(self, center_nm):
+        """Position of the declared band centered on `center_nm`; refuse any other."""
+        for b, band in enumerate(self.bands):
+            if math.isclose(band.center_nm, float(center_nm), rel_tol=1e-9):
+                return b
+        have = [b.center_nm for b in self.bands]
+        raise ValueError(f"no declared band at {center_nm} nm; declared: {have}")
 
 
 _FILLER = {
@@ -601,9 +674,18 @@ _FILLER = {
     "sin_w": 0.0,
     "Mp_kg": 0.0,
     "Rp_AU": 0.0,
-    "Ag": 0.0,
 }
-_TRUTH_FIELDS = tuple(f.name for f in dataclasses.fields(PhysicalTruth))
+_ORBIT_FIELDS = (
+    "period_d",
+    "e",
+    "cos_i",
+    "W_rad",
+    "cos_w",
+    "sin_w",
+    "tp_jd",
+    "Mp_kg",
+    "Rp_AU",
+)
 PHOENIX_LOGG_MAX = 5.0  # the model grid ends here; compact dwarfs are read at its edge
 G_CGS = 6.6743e-8  # cm^3 g^-1 s^-2, for the surface gravity handed to PHOENIX
 
@@ -612,7 +694,10 @@ def _lambert_albedo(system, planet, wavelength_nm):
     """Geometric albedo that gives the file's contrast at `wavelength_nm`, first epoch.
 
     Photomancy's Lambert phase curve with the planet's own radius, read at the
-    planet's first epoch; `FALLBACK_ALBEDO` where the phase function is too small.
+    planet's first epoch. The wavelength must lie inside the file's tables
+    (`from_files` checks). `FALLBACK_ALBEDO` stands in only for degenerate geometry:
+    a Lambert phase too small to divide by, or an albedo that comes out non-finite
+    or under 1e-3.
     """
     one = eqx.tree_at(lambda s: s.planets, system, (planet,))
     t0 = jnp.atleast_1d(planet.orbit.t0_d[:1])
@@ -645,8 +730,34 @@ def _lambert_albedo(system, planet, wavelength_nm):
     return albedo if albedo > 1e-3 and math.isfinite(albedo) else FALLBACK_ALBEDO
 
 
-def _stored_planets(path, system, wavelength_nm):
-    """Each planet of one file: the ten truth leaves, `klass` and a ranking `peak`."""
+def _covered_nm(system):
+    """``(low, high)`` [nm] that every table of a loaded file covers.
+
+    The intersection of the star's flux table and each planet's contrast table.
+    """
+    tables = [np.asarray(system.star._wavelengths_nm)]
+    tables += [np.asarray(p.physical_model.wavelengths_nm) for p in system.planets]
+    return max(float(t.min()) for t in tables), min(float(t.max()) for t in tables)
+
+
+def _require_covered(path, system, bands):
+    """Refuse a declared band that the file's tables do not cover from edge to edge."""
+    low, high = _covered_nm(system)
+    for band in bands:
+        lo = band.center_nm - band.width_nm / 2
+        hi = band.center_nm + band.width_nm / 2
+        if lo < low or hi > high:
+            raise ValueError(
+                f"{path} covers {low:g} to {high:g} nm; the declared band at "
+                f"{band.center_nm:g} nm (width {band.width_nm:g} nm) is outside it"
+            )
+
+
+def _stored_planets(path, system, bands):
+    """Each planet of one file: the orbit leaves, `albedo` per band, `klass`, `peak`.
+
+    `peak`, the ranking key, uses the first declared band.
+    """
     earth = set(get_earth_like_planet_indices(path))
     star_kg = float(system.star.Ms_kg)
     out = []
@@ -657,7 +768,7 @@ def _stored_planets(path, system, wavelength_nm):
         mu = G * (star_kg + mass_kg)
         n = float(mean_motion(a_au, mu))
         rp_au = float(planet.Rp_Rearth[0]) * Rearth2AU
-        albedo = _lambert_albedo(system, planet, wavelength_nm)
+        albedo = [_lambert_albedo(system, planet, b.center_nm) for b in bands]
         w = float(orbit.w_rad[0])
         out.append(
             {
@@ -670,20 +781,13 @@ def _stored_planets(path, system, wavelength_nm):
                 "tp_jd": float(orbit.t0_d[0]) - float(orbit.M0_rad[0]) / n,
                 "Mp_kg": mass_kg,
                 "Rp_AU": rp_au,
-                "Ag": albedo,
+                "albedo": albedo,
                 "klass": CLASS_ONE if k in earth else 0,
                 # flux ratio at full phase and periastron: an upper bound, for ranking
-                "peak": albedo * (rp_au / (a_au * (1.0 - e))) ** 2,
+                "peak": albedo[0] * (rp_au / (a_au * (1.0 - e))) ** 2,
             }
         )
     return out
-
-
-def _star_spec(system, hip_name, wavelength_nm, epoch_jd, bands_nm=()):
-    """The `StarSpec` of a loaded system's star."""
-    return _spec_of_star(
-        system.star, hip_name, wavelength_nm, epoch_jd, bands_nm=bands_nm
-    )
 
 
 BAND_POINTS = 9  # wavelengths averaged across a band
@@ -693,13 +797,11 @@ def _band_flux_jy(star, epoch_jd, center_nm, width_nm):
     """Flux density [Jy] of `star` in a band: its mean photon flux, read at the center.
 
     The photon flux density per nm is averaged over `BAND_POINTS` wavelengths across
-    the band (a single point for a zero width), then expressed in Jy at `center_nm`.
+    the band, then expressed in Jy at `center_nm`.
     """
     points = jnp.linspace(
         center_nm - width_nm / 2, center_nm + width_nm / 2, BAND_POINTS
     )
-    if not width_nm > 0:
-        points = jnp.asarray([center_nm], F64)
     photons = jnp.ravel(star.spec_flux_density(points, epoch_jd))
     n = points.shape[0]
     photons = photons.reshape(n, -1)[:, 0]
@@ -711,20 +813,12 @@ def _band_flux_jy(star, epoch_jd, center_nm, width_nm):
     return float(photons_per_nm_per_m2_to_jy(jnp.mean(photons), center_nm))
 
 
-def _spec_of_star(
-    star, hip_name, wavelength_nm, epoch_jd, luminosity_lsun=None, bands_nm=()
-):
-    """The `StarSpec` of a skyscapes `Star`, reading its flux at `wavelength_nm`.
-
-    `bands_nm` are ``(center_nm, width_nm)`` bands whose mean flux density the spec
-    also carries (`StarSpec.band_fluxes_jy`).
-    """
+def _spec_of_star(star, hip_name, bands, epoch_jd, luminosity_lsun=None):
+    """The `StarSpec` of a skyscapes `Star` with its mean flux in each of `bands`."""
     band_fluxes = tuple(
-        (float(c), _band_flux_jy(star, epoch_jd, float(c), float(w)))
-        for c, w in bands_nm
+        (b.center_nm, _band_flux_jy(star, epoch_jd, b.center_nm, b.width_nm))
+        for b in bands
     )
-    photons = star.spec_flux_density(jnp.asarray(wavelength_nm, F64), epoch_jd)
-    flux_jy = photons_per_nm_per_m2_to_jy(jnp.ravel(photons)[0], wavelength_nm)
     return StarSpec(
         name=hip_name,
         mass_msun=float(star.Ms_kg) / Msun2kg,
@@ -735,7 +829,7 @@ def _spec_of_star(
             star.luminosity_lsun if luminosity_lsun is None else luminosity_lsun
         ),
         diameter_mas=float(star.diameter_arcsec) / mas2arcsec,
-        flux_density_jy=float(flux_jy),
+        flux_density_jy=band_fluxes[0][1],
         band_fluxes_jy=band_fluxes,
     )
 
@@ -748,23 +842,21 @@ def star_spec_from_model(
     luminosity_lsun,
     teff_k,
     radius_rsun,
+    bands,
     ra_deg=0.0,
     dec_deg=0.0,
-    wavelength_nm=1000.0,
     epoch_jd=J2000_JD,
-    bands_nm=(),
 ):
     """A `StarSpec` whose flux is a PHOENIX model atmosphere, not a scene file.
 
     The model is `skyscapes.io.from_phoenix` at `teff_k` and the surface gravity of
     `mass_msun` and `radius_rsun` (solar metallicity, gravity capped at the grid edge
-    of log g = 5), scaled to `dist_pc`; the flux
-    density is read at `wavelength_nm`. `luminosity_lsun` is the catalog value, which
-    is what the exoEarth-candidate box uses, and is kept as given. `bands_nm` are
-    ``(center_nm, width_nm)`` bands whose mean flux density the spec also carries,
-    one per observing mode of a survey (the JATIS baseline reads ``(500, 100)`` and
-    ``(910, 6.5)``).
+    of log g = 5), scaled to `dist_pc`. The spec carries the mean flux density in
+    each of `bands` (`Band`s, at least one; `flux_density_jy` is the first one's).
+    `luminosity_lsun` is the catalog value, which is what the exoEarth-candidate box
+    uses, and is kept as given.
     """
+    bands = _declared(bands)
     radius_m = radius_rsun * Rsun2m
     logg = math.log10(G_CGS * mass_msun * Msun2kg * 1e3 / (radius_m * 1e2) ** 2)
     logg = min(logg, PHOENIX_LOGG_MAX)
@@ -777,9 +869,7 @@ def star_spec_from_model(
         ra_deg=ra_deg,
         dec_deg=dec_deg,
     )
-    return _spec_of_star(
-        star, name, wavelength_nm, epoch_jd, luminosity_lsun, bands_nm=bands_nm
-    )
+    return _spec_of_star(star, name, bands, epoch_jd, luminosity_lsun)
 
 
 class ExoVistaWorldSource(AbstractWorldSource):
@@ -821,35 +911,30 @@ class ExoVistaWorldSource(AbstractWorldSource):
         return int(self.population.period_d.shape[2])
 
     @classmethod
-    def from_files(
-        cls,
-        files,
-        *,
-        n_slots,
-        support=None,
-        wavelength_nm=1000.0,
-        epoch_jd=None,
-        bands_nm=(),
-    ):
+    def from_files(cls, files, *, n_slots, bands, support=None, epoch_jd=None):
         """Read `files[w][s]`, star `s` of universe `w`, into a world source.
 
         Each file is read with `skyscapes.io.from_exovista(path, load_disk=False)`,
         which loads one system. Slots hold the planets inside `support`, the first
-        `n_slots` by descending peak flux ratio (full phase at periastron). The slot
-        index therefore carries the existence ordering, so slots are exchangeable to
-        a belief, which must not read meaning into the index. The stars must agree
-        across universes.
+        `n_slots` by descending peak flux ratio (full phase at periastron, first
+        declared band). The slot index therefore carries the existence ordering, so
+        slots are exchangeable to a belief, which must not read meaning into the
+        index. The stars must agree across universes.
+
+        `bands` are the declared `Band`s: each planet's albedo and each star's flux
+        are read in every one. A band the file's tables do not cover from edge to
+        edge is refused, naming the file and its covered range.
         """
+        bands = _declared(bands)
         support = SupportRange() if support is None else support
         n_worlds, n_stars = len(files), len(files[0])
         if any(len(row) != n_stars for row in files):
             raise ValueError("every universe needs one file per star")
-        leaves = {n: np.zeros((n_worlds, n_stars, n_slots)) for n in _TRUTH_FIELDS}
-        for name, value in _FILLER.items():
-            leaves[name][...] = value
-        leaves["tp_jd"][...] = 0.0
-        present = np.zeros((n_worlds, n_stars, n_slots), bool)
-        klass = np.zeros((n_worlds, n_stars, n_slots), np.int64)
+        shape = (n_worlds, n_stars, n_slots)
+        leaves = {n: np.full(shape, _FILLER.get(n, 0.0)) for n in _ORBIT_FIELDS}
+        albedo = np.zeros((*shape, len(bands)))
+        present = np.zeros(shape, bool)
+        klass = np.zeros(shape, np.int64)
         dropped = np.zeros((n_worlds, n_stars), np.int64)
         dropped1 = np.zeros((n_worlds, n_stars), np.int64)
         occupancy = np.zeros((n_worlds, n_stars), np.int64)
@@ -859,16 +944,15 @@ class ExoVistaWorldSource(AbstractWorldSource):
             for s in range(n_stars):
                 path = str(files[w][s])
                 system = from_exovista(path, load_disk=False)
+                _require_covered(path, system, bands)
                 t0 = float(system.planets[0].orbit.t0_d[0]) if system.planets else 0.0
                 epoch = t0 if epoch is None else epoch
-                spec = _star_spec(
-                    system, _hip_name(path), wavelength_nm, epoch, bands_nm
-                )
+                spec = _spec_of_star(system.star, _hip_name(path), bands, epoch)
                 if stars[s] is None:
                     stars[s] = spec
                 elif stars[s] != spec:
                     raise ValueError(f"star {s} differs between universes")
-                planets = _stored_planets(path, system, wavelength_nm)
+                planets = _stored_planets(path, system, bands)
                 inside = [p for p in planets if support.contains(p["period_d"], p["e"])]
                 inside.sort(key=lambda p: -p["peak"])
                 kept = inside[:n_slots]
@@ -880,12 +964,15 @@ class ExoVistaWorldSource(AbstractWorldSource):
                 for k, p in enumerate(kept):
                     present[w, s, k] = True
                     klass[w, s, k] = p["klass"]
-                    for name in _TRUTH_FIELDS:
+                    albedo[w, s, k] = p["albedo"]
+                    for name in _ORBIT_FIELDS:
                         leaves[name][w, s, k] = p[name]
         population = PopulationTruth(
             **{n: jnp.asarray(v, F64) for n, v in leaves.items()},
             present=jnp.asarray(present),
             klass=jnp.asarray(klass),
+            albedo=jnp.asarray(albedo, F64),
+            bands=bands,
         )
         return cls(
             population=population,
@@ -904,8 +991,8 @@ class ExoVistaWorldSource(AbstractWorldSource):
         stars,
         *,
         n_slots,
+        bands,
         support=None,
-        wavelength_nm=1000.0,
         epoch_jd=J2000_JD,
         config=None,
     ):
@@ -914,7 +1001,7 @@ class ExoVistaWorldSource(AbstractWorldSource):
         `keys` is ``[n_worlds]`` PRNG keys (world `w` depends on `keys[w]` alone) and
         `stars` the `StarSpec` of each host; the draw is
         `skyscapes.population.draw_population` over the stars' masses and
-        luminosities. See `from_population` for the slot rules.
+        luminosities. See `from_population` for the slot rules and `bands`.
         """
         occurrence, types = load_occurrence_table(), load_planet_types()
         mass = jnp.asarray([s.mass_msun for s in stars], F64)
@@ -928,8 +1015,8 @@ class ExoVistaWorldSource(AbstractWorldSource):
             population,
             stars,
             n_slots=n_slots,
+            bands=bands,
             support=support,
-            wavelength_nm=wavelength_nm,
             epoch_jd=epoch_jd,
             types=types,
         )
@@ -941,20 +1028,22 @@ class ExoVistaWorldSource(AbstractWorldSource):
         stars,
         *,
         n_slots,
+        bands,
         support=None,
-        wavelength_nm=1000.0,
         epoch_jd=J2000_JD,
         types=None,
     ):
         """Build a world source from drawn `PlanetPopulation` leaves ``[W, S, P]``.
 
         The slot, class and drop rules are those of `from_files`: slots hold the
-        planets inside `support`, the first `n_slots` by descending peak flux ratio;
-        `klass` is 1 inside the exoEarth-candidate box (counted over all planets,
-        `dropped_class1` among those that did not reach a slot). Orbits are at
-        `epoch_jd` (the epoch of the ExoVista files is J2000). The geometric albedo is
-        the planet type's at `wavelength_nm`.
+        planets inside `support`, the first `n_slots` by descending peak flux ratio
+        (first declared band); `klass` is 1 inside the exoEarth-candidate box
+        (counted over all planets, `dropped_class1` among those that did not reach a
+        slot). Orbits are at `epoch_jd` (the epoch of the ExoVista files is J2000).
+        The geometric albedo in each declared `Band` is the planet type's at the
+        band center.
         """
+        bands = _declared(bands)
         support = SupportRange() if support is None else support
         types = load_planet_types() if types is None else types
         n_stars = len(stars)
@@ -974,8 +1063,15 @@ class ExoVistaWorldSource(AbstractWorldSource):
         period_d = np.asarray(period_a(a_au, mu), np.float64)
         n = np.asarray(mean_motion(a_au, mu), np.float64)
         rp_au = np.asarray(population.radius_rearth, np.float64) * Rearth2AU
-        albedo = np.asarray(
-            types.geometric_albedo(population.type_index, wavelength_nm), np.float64
+        albedo = np.stack(
+            [
+                np.asarray(
+                    types.geometric_albedo(population.type_index, b.center_nm),
+                    np.float64,
+                )
+                for b in bands
+            ],
+            axis=-1,
         )
         w_rad = np.asarray(sky.w_rad, np.float64)
         planets = {
@@ -988,26 +1084,28 @@ class ExoVistaWorldSource(AbstractWorldSource):
             "tp_jd": epoch_jd - np.asarray(sky.M0_rad, np.float64) / n,
             "Mp_kg": mass_kg,
             "Rp_AU": rp_au,
-            "Ag": albedo,
         }
         klass = present & np.asarray(
             earth_like(a_au, np.asarray(population.radius_rearth, np.float64), lum)
         )
         low, high = support.period_d
         inside = present & (period_d >= low) & (period_d <= high) & (e < support.e_max)
-        peak = albedo * (rp_au / (a_au * (1.0 - e))) ** 2
+        peak = albedo[..., 0] * (rp_au / (a_au * (1.0 - e))) ** 2
         order = np.argsort(np.where(inside, -peak, np.inf), axis=-1, kind="stable")
         order = order[..., :n_slots]
         kept = np.take_along_axis(inside, order, axis=-1)
         kept_class = np.take_along_axis(klass, order, axis=-1) & kept
         leaves = {}
-        for name in _TRUTH_FIELDS:
+        for name in _ORBIT_FIELDS:
             taken = np.take_along_axis(planets[name], order, axis=-1)
             leaves[name] = np.where(kept, taken, _FILLER.get(name, 0.0))
+        taken = np.take_along_axis(albedo, order[..., None], axis=-2)
         population_truth = PopulationTruth(
             **{k: jnp.asarray(v, F64) for k, v in leaves.items()},
             present=jnp.asarray(kept),
             klass=jnp.asarray(kept_class.astype(np.int64)),
+            albedo=jnp.asarray(np.where(kept[..., None], taken, 0.0), F64),
+            bands=bands,
         )
         return cls(
             population=population_truth,

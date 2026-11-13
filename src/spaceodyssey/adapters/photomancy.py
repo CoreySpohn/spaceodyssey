@@ -920,17 +920,19 @@ def photomancy_elements(elements):
     return el.at[..., 7].set(el[..., 7] + 2.0 * jnp.log(Rearth2AU))
 
 
-def population_ln_lam_range(population, pad=LN_LAM_PAD):
+def population_ln_lam_range(population, band, pad=LN_LAM_PAD):
     """`(low, high)` of `ln(albedo * radius^2)` (AU^2) over a population, padded.
 
-    `population` holds `Ag` and `Rp_AU` leaves and a `present` mask, as the world
-    sources' populations do. The range is the scale prior of the report refit: it
+    `population` holds per-band `albedo` and `Rp_AU` leaves and a `present` mask, as
+    the world sources' populations do; `band` is the position of the declared band
+    the reports are taken in. The range is the scale prior of the report refit: it
     must hold every planet a world can draw, or the refit refuses a bright planet
     (the default Earth-twin window excludes planets under 0.6 or over 1.7 Earth radii
     at albedo 0.3).
     """
     present = np.asarray(population.present)
-    scale = np.asarray(population.Ag) * np.asarray(population.Rp_AU) ** 2
+    albedo = np.asarray(population.albedo)[..., band]
+    scale = albedo * np.asarray(population.Rp_AU) ** 2
     scale = scale[present & (scale > 0.0)]
     if scale.size == 0:
         raise ValueError("the population holds no planet to derive a scale range from")

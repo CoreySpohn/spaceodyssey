@@ -423,7 +423,8 @@ def bracket_boundary(study, arm, **settings):
     if arm.kernel != "truth" and "ln_lam_range" not in settings:
         population = getattr(study.world_source, "population", None)
         if population is not None:
-            settings["ln_lam_range"] = population_ln_lam_range(population)
+            band = population.band_index(study.channel_model.detection_band.center_nm)
+            settings["ln_lam_range"] = population_ln_lam_range(population, band)
     return ReportRefit(
         kernel=arm.kernel, truth_groups=arm.groups, caps=study.caps, **settings
     )

@@ -2,7 +2,9 @@
 
 The fixture is one ExoVista universe of two stars (`tests/fixtures/exovista`); the
 second world is the first with every period scaled, so the two worlds differ in
-what the records show.
+what the records show. The files tabulate 900 to 1094 nm, so the fixture declares
+the first-summary report band (1000 nm) first and a 940 nm band second; the survey
+bands (`SURVEY_BANDS`, 500 and 910 nm) need a drawn or hand-built world.
 """
 
 import pathlib
@@ -13,7 +15,7 @@ import jax.numpy as jnp
 
 from spaceodyssey.adapters.jaxedith import ObservingModeChannel
 from spaceodyssey.adapters.photomancy import GRID_SPACING_D, N_GRID, DecisionSummary
-from spaceodyssey.adapters.skyscapes import ExoVistaWorldSource
+from spaceodyssey.adapters.skyscapes import Band, ExoVistaWorldSource
 from spaceodyssey.studies import bracket as br
 
 FIXTURE = pathlib.Path(__file__).parents[1] / "fixtures" / "exovista"
@@ -21,6 +23,9 @@ N_SLOTS, N_WORLDS = 6, 2
 HORIZON_D, BUDGET_D = 120.0, 2.0
 N_STEPS = 3000
 PERIOD_SCALE = 1.07
+# The first-summary report band first: that channel reads the flux of the first band.
+FIXTURE_BANDS = (Band(1000.0, 100.0), Band(940.0, 6.7))
+SURVEY_BANDS = (Band(500.0, 100.0), Band(910.0, 6.5))  # detection, characterization
 
 
 def fixture_files():
@@ -29,9 +34,11 @@ def fixture_files():
 
 
 def fixture_source(n_worlds=N_WORLDS):
-    """The fixture as a world source; later worlds scale every period."""
+    """The fixture as a world source in `FIXTURE_BANDS`; later worlds scale periods."""
     files = fixture_files()
-    source = ExoVistaWorldSource.from_files([files] * n_worlds, n_slots=N_SLOTS)
+    source = ExoVistaWorldSource.from_files(
+        [files] * n_worlds, n_slots=N_SLOTS, bands=FIXTURE_BANDS
+    )
     scale = jnp.asarray([PERIOD_SCALE**w for w in range(n_worlds)])[:, None, None]
     return eqx.tree_at(
         lambda s: s.population.period_d,
@@ -64,6 +71,7 @@ def build(
     block_snr_required=None,
     channel=None,
     policy_kw=None,
+    source=None,
     **settings,
 ):
     """`(source, study, executor, truths, roots, run)` of `arm` (the oracle by default).
@@ -72,9 +80,10 @@ def build(
     to the arm's boundary (a posterior arm needs `occupancy`). `block_snr_required`
     sets the channel's block requirement (its default when `None`); `channel` replaces
     the fixture's own channel (it must observe the fixture's stars); `policy_kw` are
-    extra `BracketPolicy` arguments.
+    extra `BracketPolicy` arguments; `source` replaces the fixture's world source (it
+    must hold `N_WORLDS` worlds of the same stars).
     """
-    source = fixture_source()
+    source = fixture_source() if source is None else source
     knob = (
         {} if block_snr_required is None else {"block_snr_required": block_snr_required}
     )

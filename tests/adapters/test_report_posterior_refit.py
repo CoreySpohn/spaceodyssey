@@ -79,7 +79,7 @@ def world():
 @functools.cache
 def _ln_lam():
     """The scale prior of the fixture's population."""
-    return ph.population_ln_lam_range(fixture_source().population)
+    return ph.population_ln_lam_range(fixture_source().population, 0)
 
 
 def _boundary(study, lanes, **override):
@@ -237,7 +237,7 @@ def test_a_bright_planet_fits_when_the_scale_prior_holds_the_population(world):
     population = eqx.tree_at(
         lambda t: t.Rp_AU, population, population.Rp_AU.at[:, 1, 1].multiply(11.0)
     )
-    wide = ph.population_ln_lam_range(population)
+    wide = ph.population_ln_lam_range(population, 0)
     request = visit_request(study, seen, tick=TICK)
     got = _boundary(study, 1, ess_floor=1.0, ln_lam_range=wide).refit_batch(
         study, request

@@ -38,7 +38,7 @@ CODES = {ph.SLOT_OK, ph.SLOT_NO_SUPPORT, ph.SLOT_DEGRADED, ph.SLOT_FAILED}
 
 @functools.cache
 def _ln_lam():
-    return ph.population_ln_lam_range(fixture_source().population)
+    return ph.population_ln_lam_range(fixture_source().population, 0)
 
 
 def _boundary(study, lanes, kernel="shrinkage", **override):

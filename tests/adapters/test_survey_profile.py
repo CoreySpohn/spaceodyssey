@@ -23,10 +23,10 @@ from spaceodyssey.adapters.physical_profile import (
     check_profile,
     load_profile,
 )
-from spaceodyssey.adapters.skyscapes import StarSpec, star_spec_from_model
+from spaceodyssey.adapters.skyscapes import Band, StarSpec, star_spec_from_model
 from spaceodyssey.studies import bracket as br
 
-BANDS = ((500.0, 100.0), (910.0, 6.5), (551.0, 88.0))  # detection, IFS, V
+BANDS = (Band(500.0, 100.0), Band(910.0, 6.5), Band(551.0, 88.0))  # detection, IFS, V
 EPOCH_JD = 2462502.5
 
 
@@ -90,8 +90,7 @@ def stars():
             radius_rsun=radius,
             ra_deg=270.0,
             dec_deg=66.56,
-            wavelength_nm=500.0,
-            bands_nm=BANDS,
+            bands=BANDS,
         )
         for name, mass, dist, lum, teff, radius in (
             ("G dwarf", 1.0, 10.0, 1.0, 5772.0, 1.0),
@@ -117,7 +116,7 @@ def test_band_flux_is_the_mean_over_the_band(stars):
         assert [c for c, _ in star.band_fluxes_jy] == [500.0, 910.0, 551.0]
         assert star.flux_at(500.0) > 0 and star.flux_at(910.0) > 0
         assert star.flux_at(500.0) != star.flux_at(910.0)
-        assert star.flux_density_jy == pytest.approx(star.flux_at(500.0), rel=0.2)
+        assert star.flux_density_jy == star.flux_at(500.0)
 
 
 @medium
@@ -376,6 +375,18 @@ def test_a_survey_channel_needs_the_band_fluxes():
 
 
 @medium
+def test_a_first_summary_channel_needs_the_report_band_first():
+    """Fails if the default channel reads a host's flux from a band it does not observe.
+
+    The first-summary report is at 1000 nm and reads the flux of a star's first
+    declared band; a star that declares 500 nm first is refused.
+    """
+    star = StarSpec("blue", 1.0, 10.0, 0.0, 0.0, 1.0, 0.0, 7.0, ((500.0, 7.0),))
+    with pytest.raises(ValueError, match="declares the 500 nm band first"):
+        jx.ObservingModeChannel.from_stars([star], n_slots=1, epoch_jd=EPOCH_JD)
+
+
+@medium
 def test_the_photometric_aperture_is_that_of_the_inscribed_diameter(channel):
     """Both survey reports use a core of 0.7 lambda/D of the inscribed diameter."""
     ratio = 1.0 / (1.0 - 0.17481001240599225)
@@ -460,7 +471,7 @@ def test_the_baseline_exozodi_takes_the_host_color():
             radius_rsun=radius,
             ra_deg=270.0,
             dec_deg=66.56,
-            bands_nm=((551.0, 88.0),),
+            bands=(Band(1000.0, 100.0), Band(551.0, 88.0)),
         )
         for name, mass, dist, lum, teff, radius in (
             ("G dwarf", 1.0, 10.0, 1.0, 5772.0, 1.0),

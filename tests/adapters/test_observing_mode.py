@@ -90,7 +90,7 @@ def population_system(source, truth, subject):
             truth.tp_jd[subject, k],
             truth.Mp_kg[subject, k],
             truth.Rp_AU[subject, k],
-            truth.Ag[subject, k],
+            truth.albedo[subject, k, 0],
         )
         for k in range(truth.period_d.shape[1])
     )
