@@ -111,7 +111,7 @@ def build_study(worlds, belief_population=None, *, channel):
 
 def boundary_bounds(study):
     """`(scale range, period support)` a posterior `ReportRefit` reads from `study`."""
-    boundary = ph.ReportRefit(kernel="posterior", truth_groups=(), occupancy=0.5)
+    boundary = ph.ReportRefit(kernel="posterior", truth_groups=())
     st = boundary._post_settings(study)
     return st.ln_lam_range, st.period_support_d
 
@@ -224,14 +224,13 @@ def refit_one_planet(period_d, a_quadrature=True):
     source = ExoVistaWorldSource.from_population(
         pop, NEAR_STARS, n_slots=N_SLOTS, bands=FIXTURE_BANDS, generator=GEN
     )
-    _, study, *_ = build(run=False, arm="replan", source=source, occupancy=0.5)
+    _, study, *_ = build(run=False, arm="replan", source=source)
     channel = study.channel_model
     truth = source.take(0)
     visits = realize_visits(channel, truth, 0, 4, [30.0])
     boundary = ph.ReportRefit(
         kernel="posterior",
         truth_groups=(),
-        occupancy=0.5,
         lanes=1,
         caps=study.caps,
         ess_floor=1.0,

@@ -82,7 +82,6 @@ def test_the_table_reads_the_observer_summary_not_the_policy_summary(built):
     held = dataclasses.replace(
         zeros,
         n_det=zeros.n_det.at[:, 0, 0].set(3),
-        p_class=zeros.p_class.at[:, 0, 0].set(1.0),
     )
     observer_only = eqx.tree_at(
         lambda c: (c.belief, c.pbelief), run.carry, (held, zeros)

@@ -198,3 +198,37 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
 - One regression function adds three cases: a renamed catalog alone, a hidden
   selected catalog beside an open standard catalog, and an open selected catalog
   beside a hidden standard catalog. No tests retire or shared matrices expand.
+
+## Population first tiers and physical claims (breaking)
+
+- `AbstractClaim` and `EarthCandidateClaim` evaluate named physical parameters.
+  Weighted claim means become `DecisionSummary.p_claim [n, S, C]`; an empty
+  claim tuple has an empty last axis and values any planet. The scorer evaluates
+  claims on truth with `claims_on_truth`, masking absent slots. Population truth
+  carries no stored class code; outcome tables expose the evaluated `real` flag.
+- `PopulationModel.draw_planets` draws a bounded pool of 256 identical hosts by
+  default (`n_pool_systems`), keeps supported present planets in system order,
+  and returns parameters plus an original-entry validity mask. Exhaustion cycles
+  available supported draws; an empty pool uses finite inert parameters and zero
+  existence. Support includes both period and eccentricity. The expected supported
+  count uses a separate keyed pool of 256 systems (`n_estimate_systems`).
+- `ReportRefit` reads the decision view's population and the observer's claims.
+  The first tier passes population draws to Photomancy with its slot key, retains
+  each resampled draw's albedo, and stores the expected count for resummary. Its
+  cache identity includes the population. `occupancy`, the fixed cloud seed, the
+  interim class window, `p_class` and `p_new` are removed. Dark slots carry
+  conditional detection probabilities and period quantiles, and per-slot
+  `p_exist` from a clipped expected-count prior updated by null evidence. Detected
+  slots have existence one. Failed dark slots retain their prior summary leaves.
+- Imaging candidacy requires detections, supported status and position precision.
+  The policy reads claim probabilities separately and uses existence in both
+  search and follow-up probabilities, so an impossible slot cannot be followed
+  merely because the criterion has no claims.
+- Six regression functions are added for declared-population first tiers, empty
+  and all-false claims, scorer/catalog agreement, weighted claim probabilities,
+  bounded exhaustion and full support, and zero-existence policy decisions. The
+  exhaustion check also covers zero dark slots and saturated priors. The previous
+  interim semimajor-axis test becomes a physical claim boundary test. No tests
+  retire and no shared parameter matrix expands; net six functions added.
+- Program budgets include measured compiles and cache loads with the standard
+  headroom; existing larger allowances are retained for unmeasured slow cases.

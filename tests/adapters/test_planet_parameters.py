@@ -8,7 +8,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import Msun2kg, Rearth2AU
+from hwoutils.constants import G, Msun2kg, Rearth2AU
+from orbix.equations.orbit import period_a
 from orbix.kepler import markley_solve_trig
 from skyscapes.io import from_exovista
 from skyscapes.population import (
@@ -35,6 +36,7 @@ from spaceodyssey.adapters.skyscapes import (
     geometry,
 )
 from spaceodyssey.core.records import layout_size, pack, unpack
+from spaceodyssey.criteria.claims import EarthCandidateClaim
 from spaceodyssey.studies import bracket as br
 from tests.studies.bracket_helpers import (
     N_SLOTS,
@@ -265,17 +267,17 @@ def test_cached_cloud_identity_distinguishes_albedo_mixtures():
     )
 
 
-def test_first_tier_keeps_its_previous_semimajor_axis_convention():
-    """Fails if physical orbital constants move the interim first-tier class box."""
+def test_earth_candidate_uses_the_physical_semimajor_axis_convention():
+    """Fails if the claim uses a Julian-year approximation at either box edge."""
     el = photomancy_cloud(4).at[:, 6].set(0.0)
     axes = jnp.array(
         [0.95 * (1 - 1e-7), 0.95 * (1 + 1e-7), 1.67 * (1 - 1e-7), 1.67 * (1 + 1e-7)]
     )
-    el = el.at[:, 0].set(jnp.log(365.25 * axes**1.5))
+    el = el.at[:, 0].set(jnp.log(period_a(axes, G * Msun2kg)))
     el = el.at[:, 7].set(jnp.log(0.3 * Rearth2AU**2))
     params = from_photomancy(el, jnp.full((4, 2), 0.3), 0)
     np.testing.assert_array_equal(
-        ph._first_tier_class1(params, 1.0), [False, True, True, False]
+        EarthCandidateClaim().evaluate(params, 1.0), [False, True, True, False]
     )
 
 
@@ -296,13 +298,11 @@ def test_actual_invalid_spectrum_is_rejected_at_source_and_refit_construction(
         ExoVistaWorldSource.from_files(
             [fixture_files()], n_slots=N_SLOTS, bands=bad_bands, generator=population
         )
-    _, study, *_ = build(
-        run=False, source=source, channel=channel, arm="replan", occupancy=0.5
-    )
+    _, study, *_ = build(run=False, source=source, channel=channel, arm="replan")
     bad_channel = dataclasses.replace(channel, bands=(*channel.bands, *bad_bands))
     study = dataclasses.replace(study, planning_model=bad_channel)
     with pytest.raises(ValueError, match="Warm_Neptune_1AU_Clouds"):
-        ph.ReportRefit(kernel="posterior", occupancy=0.5)._post_settings(study)
+        ph.ReportRefit(kernel="posterior")._post_settings(study)
 
 
 @pytest.mark.parametrize("candidate_probability", [0.0, 1.0])

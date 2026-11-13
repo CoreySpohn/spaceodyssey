@@ -1,0 +1,268 @@
+"""Population first tiers and claims at the decision/scoring boundary."""
+
+import dataclasses
+from types import SimpleNamespace
+
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+from hwoutils.constants import Rearth2AU
+from skyscapes.population import (
+    PopulationConfig,
+    earth_like,
+    occurrence_table_from_grid,
+)
+
+from spaceodyssey.adapters import photomancy as ph
+from spaceodyssey.adapters.parameters import (
+    PlanetParameters,
+    semimajor_axis_au,
+    truth_parameters,
+)
+from spaceodyssey.adapters.skyscapes import ExoVistaWorldSource, PopulationModel
+from spaceodyssey.core.enums import EffectKind
+from spaceodyssey.criteria.claims import EarthCandidateClaim, claims_on_truth
+from spaceodyssey.studies import bracket as br
+from tests.adapters.test_report_posterior_refit import _null_lane
+from tests.studies.bracket_helpers import build, fixture_source
+
+KEY = jax.random.PRNGKey(0)
+
+
+def population_scaled(population, rate_factor):
+    """Scale the declared occurrence table, preserving its cell boundaries."""
+    occ = population.occurrence
+    return dataclasses.replace(
+        population,
+        occurrence=occurrence_table_from_grid(
+            rate_factor * occ.rate, occ.a_edges_au, occ.mass_edges_mearth, occ.bin_id
+        ),
+    )
+
+
+@pytest.fixture(scope="module")
+def boundary_inputs():
+    """A small exact population: one cell, no stability removal, no misses."""
+    source = fixture_source(1)
+    population = dataclasses.replace(
+        PopulationModel.exovista(),
+        occurrence=occurrence_table_from_grid(
+            jnp.asarray([[0.25]]),
+            jnp.asarray([1.0, 1.1]),
+            jnp.asarray([1.0, 1.1]),
+            jnp.asarray([[0]]),
+        ),
+        config=PopulationConfig(max_planets=2, max_iterations=1, mutual_hill_min=0.0),
+        n_pool_systems=8,
+    )
+    _, study, *_ = build(run=False, source=source, arm="replan")
+    boundary = ph.ReportRefit(
+        kernel="posterior",
+        n_first=8,
+        n_particles=8,
+        n_estimate_systems=8,
+        grid_points=16,
+        n_grid=2,
+        ess_floor=1.0,
+        lanes=1,
+    )
+    return study, boundary, population
+
+
+def first_tier(boundary_inputs, population, claims=()):
+    """Fit one star's dark slots with the declared population and no reports."""
+    study, boundary, _ = boundary_inputs
+    study = dataclasses.replace(study, belief_population=population)
+    study = dataclasses.replace(
+        study, observer=dataclasses.replace(study.observer, claims=claims)
+    )
+    st = boundary._post_settings(study)
+    lane = _null_lane(study.channel_model, st, 0, 1, key=KEY)
+    lane = eqx.tree_at(lambda x: x.valid, lane, jnp.zeros_like(lane.valid))
+    ph._photomancy_refit()
+    return ph._first_tier_lane(study.channel_model, population, lane, st, 1), lane, st
+
+
+@pytest.mark.slow(reason="two cold population first tiers, 15 s focused on this host")
+def test_the_first_tier_draws_the_belief_population(boundary_inputs):
+    """Fails if first-tier existence or orbits come from truth or a class window."""
+    population = boundary_inputs[2]
+    for p, expected in ((population, 0.25), (population_scaled(population, 2.0), 0.5)):
+        out, lane, st = first_tier(boundary_inputs, p)
+        assert float(out[0]) == pytest.approx(expected / int(lane.n_undetected))
+        elements = out[-3]
+        draws, _ = p.draw_planets(
+            ph._slot_key(lane, 1),
+            boundary_inputs[0].world_source.stars[0],
+            st.n_first,
+            boundary_inputs[0].channel_model.bands,
+        )
+        assert np.isin(
+            np.asarray(elements.ln_period_d), np.asarray(draws.ln_period_d)
+        ).all()
+        got = p.expected_planets(
+            boundary_inputs[0].world_source.stars[0], KEY, st.n_estimate_systems
+        )
+        assert float(got) == expected
+
+
+def hand_cloud():
+    """Four draws with two inside the claim and unequal weights."""
+    zeros = jnp.zeros(4)
+    p = PlanetParameters(
+        ln_period_d=jnp.log(jnp.full(4, 365.25)),
+        ecc=zeros,
+        cos_i=zeros,
+        node_rad=zeros,
+        argp_rad=zeros,
+        tau_d=zeros,
+        star_mass_msun=jnp.ones(4),
+        planet_mass_mearth=jnp.ones(4),
+        radius_rearth=jnp.asarray([1.0, 3.0, 1.0, 3.0]),
+        albedo=jnp.full((4, 2), 0.3),
+    )
+    return p, jnp.log(jnp.asarray([0.1, 0.2, 0.3, 0.4])), jnp.asarray([1, 0, 1, 0])
+
+
+def test_without_claims_a_dark_slot_values_any_planet():
+    """Fails if no claims or an all-false claim produces zero search value or NaN."""
+    params, log_w, _ = hand_cloud()
+    none = ph.summarize_claims(params, log_w, (), 1.0)
+    earth = ph.summarize_claims(params, log_w, (EarthCandidateClaim(),), 1.0)
+    false = ph.summarize_claims(
+        dataclasses.replace(params, radius_rearth=jnp.full(4, 3.0)),
+        log_w,
+        (EarthCandidateClaim(),),
+        1.0,
+    )
+    p_exist = 0.25
+    v_none = p_exist * none.p_claim.prod(-1)
+    v_earth = p_exist * earth.p_claim[..., 0]
+    assert bool(jnp.isfinite(v_none)) and float(v_none) >= float(v_earth)
+    assert float(v_none) > 0 and float(false.p_claim[0]) == 0
+
+
+@pytest.fixture(scope="module")
+def drawn_source(boundary_inputs):
+    """A source drawn from the same tiny population."""
+    study, _, population = boundary_inputs
+    return ExoVistaWorldSource.from_draws(
+        jax.random.split(KEY, 1),
+        study.world_source.stars,
+        n_slots=2,
+        bands=study.channel_model.bands,
+        generator=population_scaled(population, 4.0),
+    )
+
+
+def a_au_of(source):
+    """True semimajor axes, including inert slots."""
+    return jax.vmap(
+        lambda t: semimajor_axis_au(
+            truth_parameters(
+                t, jnp.asarray([s.mass_msun for s in source.stars]), source.epoch_jd
+            )
+        )
+    )(source.population)
+
+
+def radius_of(source):
+    """True radii in Earth radii."""
+    return source.population.Rp_AU / Rearth2AU
+
+
+@pytest.mark.medium(reason="one real two-host population draw and scorer evaluation")
+def test_a_claim_on_truth_is_the_catalog_rule(drawn_source):
+    """Fails if scorer claims differ from the population's Earth-candidate rule."""
+    mass = jnp.asarray([s.mass_msun for s in drawn_source.stars])
+    lum = jnp.asarray([s.luminosity_lsun for s in drawn_source.stars])
+    got = claims_on_truth(
+        drawn_source.population,
+        (EarthCandidateClaim(),),
+        mass,
+        lum,
+        drawn_source.epoch_jd,
+    )[..., 0]
+    want = earth_like(a_au_of(drawn_source), radius_of(drawn_source), lum[:, None])
+    assert bool(got.any()) and bool((~drawn_source.population.present).any())
+    np.testing.assert_array_equal(got, want & drawn_source.population.present)
+    empty = claims_on_truth(
+        drawn_source.population, (), mass, lum, drawn_source.epoch_jd
+    )
+    np.testing.assert_array_equal(empty.prod(-1), np.ones(got.shape))
+
+
+def test_p_claim_is_the_weighted_claim_mean_of_the_draws():
+    """Fails if a claim leaf is summarized with uniform weights or the wrong axis."""
+    params, log_w, inside = hand_cloud()
+    leaves = ph.summarize_claims(params, log_w, (EarthCandidateClaim(),), 1.0)
+    assert float(leaves.p_claim[0]) == pytest.approx(
+        float(jax.nn.softmax(log_w) @ inside)
+    )
+
+
+@pytest.mark.slow(reason="cold bounded population fits for three empty-support cases")
+def test_empty_support_and_exhaustion_are_bounded(boundary_inputs):
+    """Fails if empty support retries forever or padding invents supported planets."""
+    study, _, p = boundary_inputs
+    star, bands = study.world_source.stars[0], study.channel_model.bands
+    draws, valid = p.draw_planets(KEY, star, 8, bands)
+    assert int(valid.sum()) == 2
+    again, _ = p.draw_planets(KEY, star, 8, bands)
+    changed, _ = p.draw_planets(jax.random.fold_in(KEY, 1), star, 8, bands)
+    np.testing.assert_array_equal(draws.ln_period_d, again.ln_period_d)
+    assert not np.array_equal(draws.ln_period_d, changed.ln_period_d)
+    assert np.all(np.asarray(draws.planet_mass_mearth)[np.asarray(valid)] < 1.1)
+    for empty in (
+        population_scaled(p, 0.0),
+        dataclasses.replace(p, support=dataclasses.replace(p.support, e_max=0.0)),
+        dataclasses.replace(
+            p, support=dataclasses.replace(p.support, period_d=(1.0, 2.0))
+        ),
+    ):
+        _, valid = empty.draw_planets(KEY, star, 8, bands)
+        assert not bool(valid.any())
+        assert float(empty.expected_planets(star, KEY, 8)) == 0.0
+        out, _, _ = first_tier(boundary_inputs, empty)
+        assert float(out[0]) == 0.0
+    params, _, _ = hand_cloud()
+    st = boundary_inputs[1]._post_settings(study)
+    for n_dark, expected, want in ((2, 100.0, 1.0), (0, 100.0, 0.0), (2, 0.0, 0.0)):
+        got = ph._first_leaves(
+            study.channel_model, 0, 0, n_dark, params, 0.0, expected, st
+        )[0]
+        assert float(got) == want
+
+
+@pytest.mark.medium(reason="one policy decision using the prepared two-star channel")
+def test_a_dark_slot_with_zero_existence_does_not_schedule_followup(boundary_inputs):
+    """Fails if an empty claim tuple makes an impossible dark slot look known."""
+    study, _, _ = boundary_inputs
+    n = study.caps.n_subjects
+    channel = study.channel_model
+    summary = ph.DecisionSummary.zeros(n, channel.n_slots, ph.N_GRID, channel.n_modes)
+    summary = dataclasses.replace(summary, p_det=jnp.ones_like(summary.p_det))
+    state = jnp.zeros(n * 3 + 3).at[n * 3 + 1].set(n)
+    state = state.at[jnp.arange(n) * 3].set(-30 * br.TICKS_PER_DAY)
+    view = SimpleNamespace(belief=summary, tick=jnp.asarray(0), n_dec=jnp.asarray(0))
+    policy = study.agenda.policies[0]
+    for probability, n_claims, expected_kind, searched in (
+        (0.0, 0, EffectKind.WAIT, False),
+        (0.1, 0, EffectKind.OBSERVE, True),
+        (1.0, 1, EffectKind.WAIT, False),
+    ):
+        held = dataclasses.replace(
+            summary,
+            p_exist=jnp.full_like(summary.p_exist, probability),
+            p_claim=jnp.zeros((*summary.p_exist.shape, n_claims)),
+        )
+        eff, updated, _ = policy.decide(
+            state,
+            SimpleNamespace(belief=held, tick=view.tick, n_dec=view.n_dec),
+            study.decision_view(),
+            KEY,
+        )
+        assert int(eff.kind[0]) == int(expected_kind)
+        assert bool(updated[jnp.arange(n) * 3 + 2].sum() > 0) == searched

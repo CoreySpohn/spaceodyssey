@@ -33,6 +33,7 @@ def source():
     )
 
 
+@pytest.mark.medium(reason="six drawn worlds plus a stored fixture for layout parity")
 def test_arrays_follow_the_stored_source_layout(source):
     """Fails if a leaf loses the [world, star, slot] layout or a slot count drifts.
 
@@ -42,14 +43,13 @@ def test_arrays_follow_the_stored_source_layout(source):
     """
     shape = (len(KEYS), len(STARS), N_SLOTS)
     pop = source.population
-    assert pop.period_d.shape == pop.present.shape == pop.klass.shape == shape
+    assert pop.period_d.shape == pop.present.shape == shape
     assert pop.albedo.shape == (*shape, len(FIXTURE_BANDS))
     assert (np.asarray(pop.albedo)[~np.asarray(pop.present)] == 0.0).all()
     present = np.asarray(pop.present)
     assert (np.diff(present.astype(int), axis=-1) <= 0).all()
     assert (np.asarray(pop.Rp_AU)[~present] == 0.0).all()
     assert (np.asarray(pop.period_d)[~present] == 365.25).all()
-    assert (np.asarray(pop.klass)[~present] == 0).all()
     assert source.epoch_jd == 2451545.0
     stored = fixture_source(1)
     assert jax.tree.structure(stored.population) == jax.tree.structure(pop)

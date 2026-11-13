@@ -37,6 +37,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.constants import Msun2kg
 
 from spaceodyssey.adapters.jaxedith import (
     block_outcome_kind,
@@ -81,12 +82,11 @@ from spaceodyssey.core.ledger import ChannelTable
 from spaceodyssey.core.records import KindRegistry, RecordKind
 from spaceodyssey.core.refresh import REFRESH_PRODUCT_KIND, RefreshSchedule
 from spaceodyssey.core.snapshot import BeliefLayout
+from spaceodyssey.criteria.claims import AbstractClaim, claims_on_truth
 from spaceodyssey.studies import builder, effect_rows
 
-# A candidate: three detections, a class probability of at least `CANDIDATE_CLASS`
-# (a study parameter), a refit that completed, and a predicted-position scatter under
-# one lambda over D.
-CANDIDATE_DETECTIONS, CANDIDATE_CLASS, CANDIDATE_SCATTER_LOD = 3, 0.2, 1.0
+# Candidates need repeated detections, a supported fit and a tight sky position.
+CANDIDATE_DETECTIONS, CANDIDATE_SCATTER_LOD = 3, 1.0
 # Kind indices of `bracket_registry`.
 KIND_NONE, KIND_PRODUCT, KIND_VISIT, KIND_BLOCK, KIND_CATALOG = range(5)
 # The telescope and the catalog lanes, and the shared budget resource column.
@@ -378,8 +378,8 @@ def bracket_boundary(study, arm, **settings):
     """The refit boundary of `arm` for `study` (`ReportRefit` with the arm's kernel).
 
     Construction refuses a registry that hides a catalog group the kernel needs.
-    `settings` are the kernel's own (the posterior and shrinkage kernels need
-    `occupancy`). The world source is not read: those kernels take their prior
+    `settings` are the kernel's own. The world source is not read: the kernels
+    take their prior
     bounds from the study's belief population at refit time.
     """
     arm = _arm(arm)
@@ -429,7 +429,6 @@ class BracketPolicy(AbstractPolicy):
     max_visits: int = eqx.field(default=24, static=True)
     max_search: int = eqx.field(default=8, static=True)
     refits_reach_policy: bool = eqx.field(default=True, static=True)
-    candidate_class: float = eqx.field(default=CANDIDATE_CLASS, static=True)
     followup_p: float = eqx.field(default=0.5, static=True)
 
     def declare(self):
@@ -473,12 +472,21 @@ class BracketPolicy(AbstractPolicy):
         weight = jnp.maximum(cost[:n_detect], 1e-9)
 
         lod = model.assets().report.lod_arcsec
-        candidate = candidate_slots(belief, lod, self.candidate_class)
-        known = (belief.n_det >= 1) | (belief.p_class >= 0.5)
+        candidate = candidate_slots(belief, lod)
+        p_claim = (
+            belief.p_claim.max(-1)
+            if belief.p_claim.shape[-1]
+            else jnp.ones_like(belief.p_exist)
+        )
+        known = (belief.n_det >= 1) | (p_claim >= 0.5)
         eligible = known & ~candidate
-        eligible &= belief.p_class >= 0.05
+        eligible &= p_claim >= 0.05
         late = node_ticks >= (last_tick + 15 * per_day)[:, None]
-        pd_val = belief.p_det / weight[None, None, None, :]
+        pd_val = (
+            belief.p_exist[:, :, None, None]
+            * belief.p_det
+            / weight[None, None, None, :]
+        )
         pd_val = jnp.where(
             late[:, None, :, None] & eligible[:, :, None, None], pd_val, -1.0
         )
@@ -488,7 +496,10 @@ class BracketPolicy(AbstractPolicy):
         fu_slot = fu_best // (N_NODES * n_detect)
         fu_node = (fu_best // n_detect) % N_NODES
         fu_mode = fu_best % n_detect
-        fu_p = belief.p_det[s_ix, fu_slot, fu_node, fu_mode]
+        fu_p = (
+            belief.p_exist[s_ix, fu_slot]
+            * belief.p_det[s_ix, fu_slot, fu_node, fu_mode]
+        )
         fu_ok = (
             (fu_score > 0)
             & (fu_node == g_cur)
@@ -499,7 +510,10 @@ class BracketPolicy(AbstractPolicy):
         do_follow = fu_ok[fs]
 
         rested = (tick - last_tick) >= 15 * per_day
-        sp = belief.p_new[s_ix, g_cur, :]
+        slot_p = belief.p_exist[:, :, None] * belief.p_det[s_ix, :, g_cur, :]
+        slot_p *= p_claim[:, :, None]
+        slot_p = jnp.where(belief.n_det[:, :, None] == 0, slot_p, 0.0)
+        sp = 1.0 - jnp.prod(1.0 - slot_p, axis=1)
         sp_val = sp / weight[None, :]
         sp_ok = (
             (rested | (n_vis == 0))[:, None]
@@ -579,7 +593,6 @@ _SLOT_LEAVES = tuple(
     not in (
         "ref_tick",
         "n_obs",
-        "p_new",
         "status",
     )
 )
@@ -596,6 +609,7 @@ class SummaryObserver(AbstractObserver):
 
     subject_leaves = SUMMARY_LEAVES
     prior: DecisionSummary
+    claims: tuple[AbstractClaim, ...] = eqx.field(static=True, default=())
     catalog_kind: str = eqx.field(default=CATALOG_KIND_NAME, static=True)
     report_kind: str = eqx.field(default=REPORT_KIND_NAME, static=True)
     block_kind: str = eqx.field(default=BLOCK_KIND_NAME, static=True)
@@ -643,17 +657,16 @@ class SummaryObserver(AbstractObserver):
 
         A slot whose `status` is `SLOT_NO_SUPPORT` or `SLOT_FAILED` in `fitted` keeps
         its previous leaves and takes the code, so it cannot support a claim while
-        the slots that fit are installed. `p_new` is the first tier's: it keeps its
-        previous value when an undetected slot (no detection in `fitted`) failed.
+        the slots that fit are installed. A failed dark slot keeps its previous
+        existence probability along with its other conditional leaves.
         """
         status = fitted.status[subject]
         kept = jnp.isin(status, jnp.asarray(SLOT_KEPT, I64))
-        dark_failed = jnp.any(kept & (fitted.n_det[subject] == 0))
 
         def merged(name):
             new, old = getattr(fitted, name)[subject], getattr(belief, name)[subject]
-            if name == "p_new":
-                keep = dark_failed
+            if name == "p_exist":
+                keep = kept & (fitted.n_det[subject] == 0)
             elif name in _SLOT_LEAVES:
                 keep = kept.reshape(kept.shape + (1,) * (new.ndim - 1))
             else:
@@ -672,11 +685,11 @@ class SummaryObserver(AbstractObserver):
 # -- Outcomes and paired arms ----------------------------------------------------
 
 
-def candidate_slots(belief, lod_arcsec, candidate_class=CANDIDATE_CLASS):
+def candidate_slots(belief, lod_arcsec):
     """The imaging candidates a summary nominates: ``bool[n_stars, n_slots]``.
 
-    A slot is a candidate when it holds at least `CANDIDATE_DETECTIONS` detections, a
-    class probability of at least `candidate_class`, a slot status of `SLOT_OK` (a fit
+    A slot is a candidate when it holds at least `CANDIDATE_DETECTIONS` detections,
+    a slot status of `SLOT_OK` (a fit
     above the size floor, never a degraded, unsupported or failed one) and a
     predicted-position scatter under one lambda over D (`lod_arcsec`, in arcsec like
     the summary's `scatter`). The policy reads its own summary through this rule
@@ -684,7 +697,6 @@ def candidate_slots(belief, lod_arcsec, candidate_class=CANDIDATE_CLASS):
     """
     return (
         (belief.n_det >= CANDIDATE_DETECTIONS)
-        & (belief.p_class >= candidate_class)
         & (belief.status == SLOT_OK)
         & (belief.scatter < CANDIDATE_SCATTER_LOD * lod_arcsec)
     )
@@ -698,9 +710,9 @@ class OutcomeTable:
     ``[W, n_stars, n_slots]``, `star` leaves ``[W, n_stars]`` and `world` leaves
     ``[W]``.
 
-    Slot leaves: `present`, `klass`, `n_det` (visits that detected it), `detected`,
+    Slot leaves: `present`, `real`, `n_det` (visits that detected it), `detected`,
     `detected_again` and `candidate` (the observer's final summary meets
-    `candidate_slots` at the table's `candidate_class`).
+    `candidate_slots`).
 
     Star leaves: `visited`, `n_visits`, `n_search`, `n_followup`, `t_search` and
     `t_followup` (telescope days), and `dropped` (planets the slots could not hold).
@@ -757,7 +769,6 @@ def outcome_table(
     *,
     dropped=None,
     check_detection=False,
-    candidate_class=CANDIDATE_CLASS,
 ):
     """The `OutcomeTable` of a `run_worlds` result.
 
@@ -767,8 +778,6 @@ def outcome_table(
         study: The `Study` that ran.
         dropped: Optional ``[W, n_stars]`` planets the slots could not hold (the
             source's `dropped` rows of those worlds); zeros when not given.
-        candidate_class: The class probability a slot needs to be a candidate; the
-            policy's own value for a study run with another one.
         check_detection: Also fill the slot leaves `det_expected` and `det_variance`:
             the sum over the slot's visits of the channel's detection probability
             at the true elements, and of its Bernoulli variance. It makes one
@@ -779,7 +788,15 @@ def outcome_table(
     """
     carry, trace = result.carry, result.trace
     present = np.asarray(truths.present)
-    klass = np.asarray(truths.klass)
+    channel = study.channel_model
+    claim_values = claims_on_truth(
+        truths,
+        study.observer.claims,
+        channel.scenes.star_mass_kg / Msun2kg,
+        jnp.asarray(channel.scenes.luminosity_lsun),
+        channel.epoch_jd,
+    )
+    real = present & np.asarray(claim_values.all(-1))
     n_w, n, n_slots = present.shape
     log = {
         name: np.asarray(getattr(carry.log, name))
@@ -832,7 +849,7 @@ def outcome_table(
             seen[s] |= bool(hit.any())
     belief = carry.belief
     lod = float(study.channel_model.assets().report.lod_arcsec)
-    candidate = np.asarray(candidate_slots(belief, lod, candidate_class))
+    candidate = np.asarray(candidate_slots(belief, lod))
     star["visited"] = (star["n_visits"] > 0).astype(np.float64)
     star["dropped"] = (
         np.zeros((n_w, n)) if dropped is None else np.asarray(dropped, np.float64)
@@ -848,7 +865,7 @@ def outcome_table(
     }
     slot = {
         "present": present,
-        "klass": klass,
+        "real": real,
         "n_det": n_det,
         "detected": n_det > 0,
         "detected_again": n_det > 1,
@@ -924,7 +941,6 @@ def run_arms(
     executor=None,
     dropped=None,
     check_detection=False,
-    candidate_class=CANDIDATE_CLASS,
 ):
     """Run every arm on the same truths and roots; return their `ArmsResult`.
 
@@ -937,7 +953,6 @@ def run_arms(
             it. Defaults to `BoundExecutor`.
         dropped: Passed to `outcome_table`.
         check_detection: Passed to `outcome_table`.
-        candidate_class: Passed to `outcome_table`.
     """
     tables = {}
     for name, (study, boundary) in arms.items():
@@ -949,6 +964,5 @@ def run_arms(
             study,
             dropped=dropped,
             check_detection=check_detection,
-            candidate_class=candidate_class,
         )
     return ArmsResult(table=tables)

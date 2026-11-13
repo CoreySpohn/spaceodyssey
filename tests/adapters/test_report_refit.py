@@ -37,6 +37,7 @@ from spaceodyssey.core.records import (
     record_none,
 )
 from spaceodyssey.core.refresh import RefitRequest
+from spaceodyssey.criteria.claims import EarthCandidateClaim
 from spaceodyssey.studies.bracket import SummaryObserver
 
 SLOTS, GRID, MODES = 2, 16, 2
@@ -82,8 +83,8 @@ def make_study(open_groups=("existence", "ephemeris", "class")):
             block_outcome_kind(SLOTS),
         ]
     )
-    prior = DecisionSummary.zeros(N_SUBJECTS, SLOTS, GRID, MODES, n_an=4)
-    observer = SummaryObserver(prior=prior)
+    prior = DecisionSummary.zeros(N_SUBJECTS, SLOTS, GRID, MODES, n_an=4, n_claims=1)
+    observer = SummaryObserver(prior=prior, claims=(EarthCandidateClaim(),))
     caps = registry.lower(
         Capacities(n_subjects=N_SUBJECTS, rows_per_subject=ROWS, refit_lanes=2),
         observer,
@@ -165,7 +166,7 @@ def take_world(request, w):
 def test_bytes_per_star_match_the_budget():
     """Number: bytes per star per audience at S = 4, M = 6, G = 16."""
     size = DecisionSummary.zeros(5, 4, 16, 6).bytes_per_star()
-    assert size == 4176
+    assert size == 3408
 
 
 def test_an_entry_does_not_depend_on_its_lane_or_batch():
@@ -214,16 +215,16 @@ def test_the_truth_summary_reads_the_catalog_and_the_reports():
     assert np.array_equal(leaf["n_det"][0, 0], reports.sum(axis=1).astype(int))
     # subject 1 has its second slot absent: nothing of it reaches the summary
     assert leaf["ess"][0, 0, 1, 1] == 0.0
-    assert leaf["p_class"][0, 0, 1, 1] == 0.0
+    assert leaf["p_claim"][0, 0, 1, 1] == 0.0
     assert not np.asarray(leaf["p_det"])[0, 0, 1, 1].any()
     # slot 0 is class 1 for every subject
-    assert (np.asarray(leaf["p_class"])[0, 0, :, 0] == 1.0).all()
+    assert (np.asarray(leaf["p_claim"])[0, 0, :, 0] == 1.0).all()
     assert (np.asarray(leaf["scatter"]) == 0.0).all()
     assert (np.asarray(leaf["status"]) == RefitStatus.OK).all()
 
 
 def test_the_first_detection_probability_is_one_minus_the_miss_product():
-    """`p_new` under truth is `1 - prod(1 - p_det)` over the live slots."""
+    """Fails if the first-detection probability is not one minus the miss product."""
     p = jnp.asarray([[[0.5, 0.1]], [[0.2, 0.3]]])
     live = jnp.asarray([True, True])
     got = search_probability_truth(p, live)
@@ -307,7 +308,7 @@ def test_a_wider_registered_kind_does_not_add_phantom_slots():
             wide,
         ]
     )
-    prior = DecisionSummary.zeros(N_SUBJECTS, 1, GRID, MODES, n_an=4)
+    prior = DecisionSummary.zeros(N_SUBJECTS, 1, GRID, MODES, n_an=4, n_claims=1)
     caps = registry.lower(
         Capacities(n_subjects=N_SUBJECTS, rows_per_subject=ROWS, refit_lanes=2),
         SummaryObserver(prior=prior),

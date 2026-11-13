@@ -17,6 +17,7 @@ from spaceodyssey.adapters.skyscapes import (
     PopulationModel,
     star_spec_from_model,
 )
+from spaceodyssey.criteria.claims import EarthCandidateClaim, claims_on_truth
 from spaceodyssey.studies import bracket as br
 
 from .bracket_helpers import (
@@ -80,7 +81,15 @@ def built():
     hosts = _hosts()
     epoch_jd = fixture_source(1).epoch_jd
     source = _survey_source(hosts, epoch_jd)
-    assert int(source.population.klass.sum()) > 0, "no exoEarth candidate in a slot"
+    assert bool(
+        claims_on_truth(
+            source.population,
+            (EarthCandidateClaim(),),
+            jnp.asarray([s.mass_msun for s in hosts]),
+            jnp.asarray([s.luminosity_lsun for s in hosts]),
+            epoch_jd,
+        ).any()
+    ), "no exoEarth candidate in a slot"
     channel = ObservingModeChannel.from_stars(
         hosts,
         bands=source.population.bands,

@@ -16,6 +16,7 @@ import jax.numpy as jnp
 from spaceodyssey.adapters.jaxedith import ObservingModeChannel
 from spaceodyssey.adapters.photomancy import GRID_SPACING_D, N_GRID, DecisionSummary
 from spaceodyssey.adapters.skyscapes import Band, ExoVistaWorldSource, PopulationModel
+from spaceodyssey.criteria.claims import EarthCandidateClaim
 from spaceodyssey.studies import bracket as br
 
 FIXTURE = pathlib.Path(__file__).parents[1] / "fixtures" / "exovista"
@@ -61,10 +62,16 @@ def fixture_channel(source, **kw):
     )
 
 
-def prior_summary(channel, n_stars, p_new=0.0):
-    """The first-tier summary the observer starts from (`p_new` everywhere)."""
-    summary = DecisionSummary.zeros(n_stars, N_SLOTS, N_GRID, channel.n_modes, n_an=1)
-    return eqx.tree_at(lambda x: x.p_new, summary, summary.p_new + p_new)
+def prior_summary(channel, n_stars, p_exist=0.0):
+    """The first-tier summary the observer starts from (`p_exist` everywhere)."""
+    summary = DecisionSummary.zeros(
+        n_stars, N_SLOTS, N_GRID, channel.n_modes, n_an=1, n_claims=1
+    )
+    return eqx.tree_at(
+        lambda x: (x.p_exist, x.p_det, x.p_claim),
+        summary,
+        (summary.p_exist + p_exist, summary.p_det + 1.0, summary.p_claim + 1.0),
+    )
 
 
 def build(
@@ -72,7 +79,7 @@ def build(
     horizon_d=HORIZON_D,
     budget_d=BUDGET_D,
     arm="oracle",
-    p_new=0.0,
+    p_exist=0.0,
     channel=None,
     policy_kw=None,
     source=None,
@@ -80,8 +87,8 @@ def build(
 ):
     """`(source, study, executor, truths, roots, run)` of `arm` (the oracle by default).
 
-    `p_new` is the prior chance of a new planet per star, node and mode. `settings` go
-    to the arm's boundary (a posterior arm needs `occupancy`). `channel` replaces
+    `p_exist` is the prior slot existence probability. `settings` go to the arm's
+    boundary, which reads the belief population. `channel` replaces
     the fixture's own channel (it must observe the fixture's stars); `policy_kw` are
     extra `BracketPolicy` arguments; `source` replaces the fixture's world source (it
     must hold `N_WORLDS` worlds of the same stars).
@@ -95,7 +102,10 @@ def build(
         arm=arm,
         horizon_d=horizon_d,
         budget_d=budget_d,
-        observer=br.SummaryObserver(prior=prior_summary(channel, n_stars, p_new)),
+        observer=br.SummaryObserver(
+            prior=prior_summary(channel, n_stars, p_exist),
+            claims=(EarthCandidateClaim(),),
+        ),
         policy=br.BracketPolicy(budget_d, N_SLOTS, **(policy_kw or {})),
     )
     executor = br.BoundExecutor(boundary=br.bracket_boundary(study, arm, **settings))

@@ -17,8 +17,7 @@ def test_an_arm_whose_policy_is_never_refit_still_spends_budget():
     _, study, _, truths, _, run = build(
         arm="prior_planned",
         budget_d=BUDGET_D,
-        p_new=0.3,
-        occupancy=0.2,
+        p_exist=0.3,
         n_round=2**9,
         n_rounds=1,
         n_centers=16,
@@ -37,6 +36,6 @@ def test_an_arm_whose_policy_is_never_refit_still_spends_budget():
 def test_an_arm_that_refits_the_policy_waits_for_it():
     """The oracle and posterior arms keep the wait; only the unrefit arm drops it."""
     for name in ("oracle", "replan", "prior_planned"):
-        _, study, _, _, _, _ = build(arm=name, run=False, occupancy=0.2)
+        _, study, _, _, _, _ = build(arm=name, run=False)
         reaches = study.agenda.policies[0].refits_reach_policy
         assert reaches == (name != "prior_planned"), name

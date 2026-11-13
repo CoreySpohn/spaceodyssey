@@ -41,7 +41,6 @@ def _boundary(study, lanes, kernel="shrinkage", **override):
     return ph.ReportRefit(
         kernel=kernel,
         truth_groups=groups,
-        occupancy=0.5,
         lanes=lanes,
         caps=study.caps,
         **settings,
@@ -73,7 +72,7 @@ def _slices(study, result, audience, star, world=0):
 
 @pytest.fixture(scope="module")
 def world():
-    source, study, *_ = build(run=False, arm="shrinkage", occupancy=0.5, **SMALL)
+    source, study, *_ = build(run=False, arm="shrinkage", **SMALL)
     channel = study.channel_model
     truth = jax.tree_util.tree_map(lambda x: x[0], source.population)
     days = [30.0 * i for i in range(1, 7)]
@@ -155,6 +154,7 @@ def test_the_detected_slots_are_the_summary_of_the_shrinkage_cloud(world):
             1,
             channel,
             TICK,
+            claims=study.observer.claims,
             last_det_d=max(
                 e * channel.tick_days
                 for e, flag in zip(ends, _flags(request, slot), strict=True)
@@ -163,7 +163,7 @@ def test_the_detected_slots_are_the_summary_of_the_shrinkage_cloud(world):
         )
         assert got["status"][slot] == ph.SLOT_OK
         assert got["ess"][slot] == ph.SHRINK_DRAWS
-        for name in ("p_det", "scatter", "pos_mean", "p_class"):
+        for name in ("p_det", "scatter", "pos_mean", "p_claim"):
             np.testing.assert_allclose(
                 got[name][slot],
                 np.asarray(getattr(leaves, name)),
@@ -205,7 +205,7 @@ def _flags(request, slot):
 
 
 def test_an_undetected_slot_takes_the_posterior_first_tier(world):
-    """Dark slots and `p_new` are bitwise those of the posterior kernel on one entry."""
+    """Fails if dark slots differ from the posterior first tier on the same entry."""
     study, _, _, rich = world
     request = _request(world, {0: _thin(rich[0])})
     shrink = _slices(study, _boundary(study, 1).refit_batch(study, request), 0, 0)
@@ -214,9 +214,9 @@ def test_an_undetected_slot_takes_the_posterior_first_tier(world):
     )
     dark = shrink["n_det"] == 0
     assert dark.any() and (shrink["n_det"] > 0).any()
-    assert np.any(shrink["p_new"])
-    assert np.array_equal(shrink["p_new"], post["p_new"])
-    for name in ("p_class", "ln_period_q", "ess", "status"):
+    assert np.any(shrink["p_exist"])
+    assert np.array_equal(shrink["p_exist"], post["p_exist"])
+    for name in ("p_claim", "ln_period_q", "ess", "status"):
         assert np.array_equal(shrink[name][dark], post[name][dark]), name
 
 
@@ -238,15 +238,15 @@ def test_a_detected_slot_without_a_catalog_row_installs_nothing(world):
     assert int(result.status[0, 0, 0]) != int(RefitStatus.OK)
     full = _slices(study, boundary.refit_batch(study, _request(world, visits)), 0, 0)
     assert (full["status"][live] == ph.SLOT_OK).all()
-    assert np.array_equal(got["p_new"], full["p_new"])
-    for name in ("p_class", "ln_period_q", "ess", "status"):
+    assert np.array_equal(got["p_exist"], full["p_exist"])
+    for name in ("p_claim", "ln_period_q", "ess", "status"):
         assert np.array_equal(got[name][~live], full[name][~live]), name
 
 
 def test_the_shrinkage_arm_runs_beside_the_oracle_on_the_fixture():
     """Fails if paired arms lose matching imaging columns or telescope-use contrasts."""
     arms, truths, roots = {}, None, None
-    for name, settings in (("oracle", {}), ("shrinkage", {"occupancy": 0.5, **SMALL})):
+    for name, settings in (("oracle", {}), ("shrinkage", SMALL)):
         _, study, executor, truths, roots, _ = build(run=False, arm=name, **settings)
         arms[name] = (study, executor.boundary)
     out = br.run_arms(arms, truths, roots, N_STEPS)

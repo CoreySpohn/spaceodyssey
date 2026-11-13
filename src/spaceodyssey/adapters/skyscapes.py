@@ -28,7 +28,6 @@ universe) into `PopulationTruth`: each star has `n_slots` planet slots with a
 `present` mask, so the truth of one world is a fixed-shape array tree whatever
 the number of planets a generator drew. Slots hold every planet up to the capacity
 `n_slots`, ranked by peak flux ratio, whether or not a belief can represent its orbit;
-`klass` is 1 for the planets `skyscapes.io.get_earth_like_planet_indices` selects.
 Every source declares the `PopulationModel` its worlds come from (`generator`), which
 a decision view hands to beliefs in place of the worlds. Every wavelength is a declared
 `Band`, and the truth carries one geometric albedo per declared band
@@ -83,14 +82,13 @@ from orbix.orbit import KeplerianOrbit
 from photomancy.orbit.data import OrbitData
 from photomancy.orbit.forward import predict_photometry
 from photomancy.orbit.model import build_model
-from skyscapes.io import from_exovista, from_phoenix, get_earth_like_planet_indices
+from skyscapes.io import from_exovista, from_phoenix
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.population import (
     OccurrenceTable,
     PlanetTypes,
     PopulationConfig,
     draw_population,
-    earth_like,
     load_occurrence_table,
     load_planet_types,
     mass_to_radius,
@@ -98,6 +96,7 @@ from skyscapes.population import (
 )
 from skyscapes.scene import BlackbodyStar, Planet, Star, System
 
+from spaceodyssey.adapters.parameters import PlanetParameters
 from spaceodyssey.core.enums import F64
 from spaceodyssey.core.kinds import AbstractWorldSource
 
@@ -522,8 +521,6 @@ def diagnose(truth, record, *, source, context):
 
 # -- Stored populations: planet slots with a present mask ------------------------------
 
-# The class number of the planets `get_earth_like_planet_indices` selects.
-CLASS_ONE = 1
 # Albedo of a stored planet whose Lambert phase is too small to read the file's
 # contrast through (a planet at the crescent limit of its first epoch).
 FALLBACK_ALBEDO = 0.3
@@ -595,6 +592,12 @@ class PopulationModel(eqx.Module):
     types: PlanetTypes
     config: PopulationConfig = eqx.field(static=True)
     support: SupportRange = eqx.field(static=True)
+    n_pool_systems: int = eqx.field(static=True, default=256)
+
+    def __check_init__(self):
+        """Require a nonempty bounded draw pool."""
+        if self.n_pool_systems < 1:
+            raise ValueError("n_pool_systems is at least one")
 
     @classmethod
     def exovista(cls):
@@ -611,6 +614,89 @@ class PopulationModel(eqx.Module):
         """`(low, high)` of the period a belief can represent, days."""
         low, high = self.support.period_d
         return float(low), float(high)
+
+    def _supported_systems(self, key, star, n_systems):
+        """Read host scalars before entering the compiled population draw."""
+        return self._draw_supported_systems(
+            key,
+            jnp.asarray(star.mass_msun),
+            jnp.asarray(star.luminosity_lsun),
+            n_systems,
+        )
+
+    @eqx.filter_jit
+    def _draw_supported_systems(self, key, mass_msun, luminosity_lsun, n_systems):
+        """Draw a fixed pool of identical hosts and mask planets outside support."""
+        mass = jnp.full(n_systems, mass_msun)
+        population = draw_population(
+            key,
+            self.occurrence,
+            self.types,
+            jnp.full(n_systems, luminosity_lsun),
+            mass,
+            self.config,
+        )
+        sky = sky_elements(population, mass)
+        low, high = self.period_support_d
+        valid = (
+            population.present
+            & (sky.period_d >= low)
+            & (sky.period_d <= high)
+            & (sky.e < self.support.e_max)
+        )
+        return population, sky, valid
+
+    def draw_planets(self, key, star: "StarSpec", n, bands):
+        """Return physical draws [n] and a validity mask from a bounded system pool.
+
+        Keep the first n supported present planets in system/slot order. When the
+        pool is exhausted, cycle its supported planets to fill the fixed shape;
+        the mask marks only the original entries. An empty pool returns finite
+        fillers with an all-false mask. The pool size is n_pool_systems.
+        """
+        population, sky, valid = self._supported_systems(key, star, self.n_pool_systems)
+        count = valid.sum()
+        order = jnp.argsort(~valid.ravel(), stable=True)
+        selected = order[jnp.arange(n) % jnp.maximum(count, 1)]
+
+        def take(x):
+            return x.ravel()[selected]
+
+        period_d = take(sky.period_d)
+        albedo = jnp.stack(
+            [
+                take(self.types.geometric_albedo(population.type_index, b.center_nm))
+                for b in bands
+            ],
+            axis=-1,
+        )
+        p = PlanetParameters(
+            ln_period_d=jnp.log(period_d),
+            ecc=take(sky.e),
+            cos_i=jnp.cos(take(sky.i_rad)),
+            node_rad=take(sky.W_rad),
+            argp_rad=take(sky.w_rad),
+            tau_d=-take(sky.M0_rad) * period_d / (2 * jnp.pi),
+            star_mass_msun=jnp.full(n, star.mass_msun),
+            planet_mass_mearth=take(population.mass_mearth),
+            radius_rearth=take(population.radius_rearth),
+            albedo=albedo,
+        )
+        # Positive filler scale keeps the physical-prior likelihood finite.
+        p = eqx.tree_at(
+            lambda x: (x.radius_rearth, x.albedo),
+            p,
+            (
+                jnp.where(count > 0, p.radius_rearth, 1.0),
+                jnp.where(count > 0, p.albedo, 1.0),
+            ),
+        )
+        return p, jnp.arange(n) < count
+
+    def expected_planets(self, star, key, n_systems):
+        """Mean supported present count per host over n_systems drawn systems."""
+        _, _, valid = self._supported_systems(key, star, n_systems)
+        return valid.sum() / jnp.asarray(n_systems, jnp.float64)
 
     def albedo_prior(self, key, n, bands):
         """Draw [n, B] spectra from the occurrence prior conditioned on selectability.
@@ -742,6 +828,8 @@ class PopulationModel(eqx.Module):
         bands = _declared(bands)
         selectable = self._selectable_types()
         if not selectable.any():
+            if not np.any(np.asarray(self.occurrence.rate) > 0):
+                return
             raise ValueError(
                 "the population has no selectable types in positive-rate cells"
             )
@@ -799,6 +887,10 @@ class PopulationModel(eqx.Module):
         self.check_bands((band,))
         types = self.types
         selectable = self._selectable_types()
+        if not selectable.any():
+            # Only the inert first-tier filler is evaluated for a zero-rate prior.
+            center = math.log(Rearth2AU**2)
+            return center - pad, center + pad
         albedo = np.asarray(
             types.geometric_albedo(np.arange(len(types.names)), band.center_nm)
         )[selectable]
@@ -858,7 +950,7 @@ class StarSpec:
 
 
 class PopulationTruth(eqx.Module):
-    """One world's planets: `n_slots` per star, with a present mask and a class.
+    """One world's planets: `n_slots` per star, with a present mask.
 
     Every leaf but `albedo` has shape ``[n_subjects, n_slots]``; `albedo` adds a last
     axis, one entry per declared band (a batch of worlds adds a leading axis to all).
@@ -877,8 +969,6 @@ class PopulationTruth(eqx.Module):
         Mp_kg: Planet mass, kg.
         Rp_AU: Planet radius, AU.
         present: Whether the slot holds a planet.
-        klass: 1 for a planet `skyscapes.io.get_earth_like_planet_indices` selects,
-            0 for any other planet and for an absent slot.
         albedo: Geometric albedo in each declared band, ``[..., n_bands]``.
         bands: The declared bands, in the order of the last axis of `albedo`.
     """
@@ -893,7 +983,6 @@ class PopulationTruth(eqx.Module):
     Mp_kg: jax.Array
     Rp_AU: jax.Array
     present: jax.Array
-    klass: jax.Array
     albedo: jax.Array
     bands: tuple[Band, ...] = eqx.field(static=True)
 
@@ -1004,14 +1093,13 @@ def _require_covered(path, system, bands):
 
 
 def _stored_planets(path, system, bands):
-    """Each planet of one file: the orbit leaves, `albedo` per band, `klass`, `peak`.
+    """Each planet of one file: the orbit leaves, `albedo` per band and `peak`.
 
     `peak`, the ranking key, uses the first declared band.
     """
-    earth = set(get_earth_like_planet_indices(path))
     star_kg = float(system.star.Ms_kg)
     out = []
-    for k, planet in enumerate(system.planets):
+    for planet in system.planets:
         orbit = planet.orbit
         a_au, e = float(orbit.a_AU[0]), float(orbit.e[0])
         mass_kg = float(planet.Mp_Mearth[0]) * Mearth2kg
@@ -1032,7 +1120,6 @@ def _stored_planets(path, system, bands):
                 "Mp_kg": mass_kg,
                 "Rp_AU": rp_au,
                 "albedo": albedo,
-                "klass": CLASS_ONE if k in earth else 0,
                 # flux ratio at full phase and periastron: an upper bound, for ranking
                 "peak": albedo[0] * (rp_au / (a_au * (1.0 - e))) ** 2,
             }
@@ -1185,7 +1272,6 @@ class ExoVistaWorldSource(AbstractWorldSource):
         leaves = {n: np.full(shape, _FILLER.get(n, 0.0)) for n in _ORBIT_FIELDS}
         albedo = np.zeros((*shape, len(bands)))
         present = np.zeros(shape, bool)
-        klass = np.zeros(shape, np.int64)
         dropped = np.zeros((n_worlds, n_stars), np.int64)
         stars = [None] * n_stars
         epoch = epoch_jd
@@ -1207,14 +1293,12 @@ class ExoVistaWorldSource(AbstractWorldSource):
                 dropped[w, s] = len(planets) - len(kept)
                 for k, p in enumerate(kept):
                     present[w, s, k] = True
-                    klass[w, s, k] = p["klass"]
                     albedo[w, s, k] = p["albedo"]
                     for name in _ORBIT_FIELDS:
                         leaves[name][w, s, k] = p[name]
         population = PopulationTruth(
             **{n: jnp.asarray(v, F64) for n, v in leaves.items()},
             present=jnp.asarray(present),
-            klass=jnp.asarray(klass),
             albedo=jnp.asarray(albedo, F64),
             bands=bands,
         )
@@ -1262,8 +1346,8 @@ class ExoVistaWorldSource(AbstractWorldSource):
 
         The slot and drop rules are those of `from_files`: slots hold the first
         `n_slots` planets by descending peak flux ratio (first declared band), the
-        rest are `dropped`, and slots past the drawn planets hold the filler; `klass`
-        is 1 inside the exoEarth-candidate box. Orbits are at `epoch_jd` (the epoch of
+        rest are `dropped`, and slots past the drawn planets hold the filler.
+        Orbits are at `epoch_jd` (the epoch of
         the ExoVista files is J2000). The geometric albedo in each declared `Band` is
         the planet type's (of `generator`) at the band center.
         """
@@ -1274,7 +1358,6 @@ class ExoVistaWorldSource(AbstractWorldSource):
         if population.present.shape[1] != n_stars:
             raise ValueError("the population needs one star axis entry per star")
         mass_msun = jnp.asarray([s.mass_msun for s in stars], F64)
-        lum = np.asarray([s.luminosity_lsun for s in stars], np.float64)[None, :, None]
         sky = jax.vmap(lambda p: sky_elements(p, mass_msun))(population)
         present = np.asarray(population.present)
         a_au = np.where(present, np.asarray(sky.a_au, np.float64), 1.0)
@@ -1307,21 +1390,17 @@ class ExoVistaWorldSource(AbstractWorldSource):
             "Mp_kg": mass_kg,
             "Rp_AU": rp_au,
         }
-        klass = present & np.asarray(
-            earth_like(a_au, np.asarray(population.radius_rearth, np.float64), lum)
-        )
         peak = albedo[..., 0] * (rp_au / (a_au * (1.0 - e))) ** 2
         # Absent planets past the drawn ones, so a capacity above the draw fills.
         extra = max(n_slots - present.shape[-1], 0)
         if extra:
             pad = [(0, 0)] * (present.ndim - 1) + [(0, extra)]
-            present, klass, peak = (np.pad(x, pad) for x in (present, klass, peak))
+            present, peak = (np.pad(x, pad) for x in (present, peak))
             planets = {k: np.pad(v, pad) for k, v in planets.items()}
             albedo = np.pad(albedo, [*pad, (0, 0)])
         order = np.argsort(np.where(present, -peak, np.inf), axis=-1, kind="stable")
         order = order[..., :n_slots]
         kept = np.take_along_axis(present, order, axis=-1)
-        kept_class = np.take_along_axis(klass, order, axis=-1) & kept
         leaves = {}
         for name in _ORBIT_FIELDS:
             taken = np.take_along_axis(planets[name], order, axis=-1)
@@ -1330,7 +1409,6 @@ class ExoVistaWorldSource(AbstractWorldSource):
         population_truth = PopulationTruth(
             **{k: jnp.asarray(v, F64) for k, v in leaves.items()},
             present=jnp.asarray(kept),
-            klass=jnp.asarray(kept_class.astype(np.int64)),
             albedo=jnp.asarray(np.where(kept[..., None], taken, 0.0), F64),
             bands=bands,
         )

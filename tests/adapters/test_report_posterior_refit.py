@@ -67,7 +67,7 @@ def _thin(visits):
 
 @pytest.fixture(scope="module")
 def world():
-    source, study, _, _, _, _ = build(run=False, arm="replan", occupancy=0.5, **SMALL)
+    source, study, _, _, _, _ = build(run=False, arm="replan", **SMALL)
     channel = study.channel_model
     truth = jax.tree_util.tree_map(lambda x: x[0], source.population)
     star0 = _thin(realize_visits(channel, truth, 0, 4, [30.0 * i for i in range(1, 7)]))
@@ -80,7 +80,6 @@ def _boundary(study, lanes, **override):
     settings = {**SMALL, **override}
     return ph.ReportRefit(
         kernel="posterior",
-        occupancy=0.5,
         lanes=lanes,
         caps=study.caps,
         **settings,
@@ -157,7 +156,7 @@ def test_an_entry_does_not_depend_on_its_lane_neighbors(world):
 
 def test_an_audience_that_cannot_read_the_columns_installs_nothing(world):
     """A policy blind to the measurements gets NO_SUPPORT and all-zero slices."""
-    _, study, *_ = build(run=False, arm="prior_planned", occupancy=0.5, **SMALL)
+    _, study, *_ = build(run=False, arm="prior_planned", **SMALL)
     channel, star0 = world[1], world[2]
     boundary = _boundary(study, 2)
     assert list(boundary._readable(study, channel)) == [True, False]
@@ -168,7 +167,7 @@ def test_an_audience_that_cannot_read_the_columns_installs_nothing(world):
         int(RefitStatus.OK),
         int(RefitStatus.DEGRADED),
     )
-    assert np.any(_slices(study, result, 0, 0)["p_new"])
+    assert np.any(_slices(study, result, 0, 0)["p_exist"])
     for name, value in _slices(study, result, 1, 0).items():
         assert not np.any(value), name
 
@@ -199,11 +198,11 @@ def test_a_slot_never_fit_has_a_status_of_its_own():
 
 def test_a_blind_policy_keeps_its_prior_summary_to_the_horizon():
     """Mask, not zeros: the prior_planned policy summary stays the initial one."""
-    _, study, _, _, _, run = build(arm="prior_planned", occupancy=0.5, **SMALL)
+    _, study, _, _, _, run = build(arm="prior_planned", **SMALL)
     channel = study.channel_model
     prior = prior_summary(channel, len(channel.catalog_mass_kg))
     got = jax.tree_util.tree_map(np.asarray, run.carry.pbelief)
-    for name in ("p_new", "p_det", "n_det", "status", "p_class"):
+    for name in ("p_exist", "p_det", "n_det", "status", "p_claim"):
         expected = np.asarray(getattr(prior, name))
         held = np.asarray(getattr(got, name))
         assert np.array_equal(held, np.broadcast_to(expected, held.shape)), name
@@ -275,7 +274,7 @@ def test_a_bright_planet_fits_when_the_scale_prior_holds_the_population(world):
         ph.SLOT_FAILED,
     }
     assert all(np.isfinite(leaf).all() for leaf in slot.values())
-    # Five-item entries are first-tier clouds with their separate class-1 window.
+    # First-tier entries also retain evidence and the expected supported count.
     fitted = [
         value[0]
         for key, value in boundary._clouds.items()
@@ -288,7 +287,7 @@ def test_a_bright_planet_fits_when_the_scale_prior_holds_the_population(world):
         assert np.all((lo <= scales) & (scales <= hi))
     dark = slot["n_det"] == 0
     assert dark.any() and (slot["status"][dark] == ph.SLOT_OK).all()
-    assert np.any(slot["p_new"]) and np.all(np.isfinite(slot["p_new"]))
+    assert np.any(slot["p_exist"]) and np.all(np.isfinite(slot["p_exist"]))
 
 
 def _null_lane(channel, st, star, n_rows, key=(1, 2)):
@@ -333,46 +332,28 @@ def _null_lane(channel, st, star, n_rows, key=(1, 2)):
 
 @pytest.mark.parametrize("n_rows", [1, 6])
 def test_the_search_probability_follows_the_posterior_occupancy(world, n_rows):
-    """`p_new` equals `1 - (1 - q' p1) ** n` with `q' = q L / (1 - q + q L)` per slot.
+    """Fails if a dark slot ignores null evidence when updating existence.
 
-    `L` is the first tier's null evidence, `q` the prior occupancy per undetected
-    slot and `p1` the cloud's chance that an occupied slot is class 1 and detected
-    (found from the same cloud at `q = 1`). More nulls give a smaller `L`, so a
-    smaller `p_new` than the constant prior gives.
+    The prior is the supported expected count per dark slot, clipped to one;
+    the posterior is q L / (1 - q + q L) for the first-tier null evidence L.
     """
     study, channel, _, _ = world
     boundary = _boundary(study, 1)
     st = boundary._post_settings(study)
     lane = _null_lane(channel, st, 0, n_rows)
-    cloud, elements = ph._first_tier_cloud(channel, lane, st, 1)
+    population = study.decision_view().belief_population
+    cloud, _ = ph._first_tier_cloud(channel, population, lane, st, 1)
     like = float(jnp.exp(cloud.log_evidence))
-    n = N_SLOTS
-    q = st.occupancy / n
-    q_post = q * like / (1.0 - q + q * like)
-    zeros = jnp.zeros(elements.ln_period_d.shape[0])
-    args = (zeros,)
-
-    def search(occupancy):
-        return ph.summarize_search(
-            elements,
-            *args,
-            occupancy,
-            n,
-            0,
-            channel,
-            jnp.asarray(TICK),
-            class1=ph._first_tier_class1(elements, channel.luminosity(0)),
-            n_grid=st.n_grid,
-            spacing_d=st.spacing_d,
-        )
-
-    p_all = np.asarray(search(float(n)))  # q = 1: 1 - (1 - p1) ** n
-    p1 = 1.0 - (1.0 - p_all) ** (1.0 / n)
-    expected = 1.0 - (1.0 - q_post * p1) ** n
-    got = np.asarray(ph._first_tier_lane(channel, lane, st, 1)[0])
-    np.testing.assert_allclose(got, expected, rtol=1e-10, atol=1e-14)
-    prior = 1.0 - (1.0 - q * p1) ** n
-    assert np.all(got <= prior + 1e-15) and got.max() < prior.max()
+    expected_count = population.expected_planets(
+        ph._population_star(channel, lane.subject),
+        jax.random.fold_in(lane.key, ph._EXPECTED_TAG),
+        st.n_estimate_systems,
+    )
+    q = min(float(expected_count) / N_SLOTS, 1.0)
+    expected = q * like / (1.0 - q + q * like)
+    got = float(ph._first_tier_lane(channel, population, lane, st, 1)[0])
+    assert got == pytest.approx(expected, rel=1e-10, abs=1e-14)
+    assert got < q
 
 
 def test_degraded_slots_reach_the_outcome_table(world):
@@ -388,7 +369,7 @@ def test_degraded_slots_reach_the_outcome_table(world):
     status = _slices(study, result, 0, 0)["status"]
     n_degraded = int((status == ph.SLOT_DEGRADED).sum())
     assert n_degraded > 0
-    _, built, _, truths, _, run = build(arm="prior_planned", occupancy=0.5, **SMALL)
+    _, built, _, truths, _, run = build(arm="prior_planned", **SMALL)
     belief = run.carry.belief
     belief = eqx.tree_at(
         lambda b: b.status, belief, belief.status.at[0, 0].set(jnp.asarray(status))
