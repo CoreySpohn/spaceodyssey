@@ -134,3 +134,20 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   violations; the focused slow renewal/replay, refit-cache and paired-arm checks
   also pass. Per-file program budgets are regenerated from measured compilations
   and cache loads with the standard headroom. No golden file changes.
+
+## Declared row capacities (breaking)
+
+- `default_capacities` requires `horizon_d` and accepts `max_spectra`, defaulting
+  to `MAX_SPECTRA = 12`. Each star's counting rows include one catalog row, up to
+  `MAX_VISITS = 24` imaging rows and the declared spectrum rows. Imaging rows
+  and forecast renewals each add `REFIT_ROWS` log products; spectra add none.
+  The 1024 log-row, 32 counting-row and 4096 ID values remain floors. Clock
+  horizons that cannot fit still fail at construction.
+- `bracket_study` sizes rows from the policy's imaging and spectrum limits, with
+  the declared limits as fallbacks. The survey channel-table test supplies its
+  horizon explicitly.
+- `test_bracket_capacities.py` replaces `test_bracket_characterization.py`.
+  Three tests (five collected cases) replace the two capacity tests: hand-pinned
+  small and survey bounds, sensitivity to spectrum limits and the required
+  horizon, and clock refusal with recovery on a longer tick. Net: one test
+  function and three collected cases added. No shared parameter matrix expands.

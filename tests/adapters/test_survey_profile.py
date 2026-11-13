@@ -228,9 +228,11 @@ def test_the_channel_holds_the_survey_declarations(channel):
 
 @medium
 def test_channel_table_charges_the_overhead_to_every_observation(channel):
-    """Detection and characterization both occupy settling plus coronagraph overhead."""
+    """Fails if an observation omits settling plus coronagraph overhead."""
     n = int(channel.catalog_mass_kg.shape[0])
-    caps = br.default_capacities(n, channel.n_slots, n_channels=channel.n_channels)
+    caps = br.default_capacities(
+        n, channel.n_slots, n_channels=channel.n_channels, horizon_d=120.0
+    )
     table = br.channel_table(channel, caps)
     per_day = int(channel.assets().context.clock.ticks_per_day)
     settle = int(channel.assets().context.settle_ticks)

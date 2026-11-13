@@ -169,6 +169,7 @@ RENEWAL_D = GRID_SPACING_D * (N_GRID - 1)
 # Refit products one renewal or visit adds to the log.
 REFIT_ROWS = 2
 MAX_VISITS = 24
+MAX_SPECTRA = 12
 
 
 def default_capacities(
@@ -176,42 +177,40 @@ def default_capacities(
     n_slots,
     *,
     n_channels,
-    horizon_d=None,
+    horizon_d,
     max_visits=MAX_VISITS,
+    max_spectra=MAX_SPECTRA,
     ticks_per_day=None,
 ):
     """Capacities of the bracket study of `n_subjects` stars.
 
-    `n_pstate` holds the policy state (`pstate_size`). Without `horizon_d` the log,
-    counting-row and id capacities are the fixed small-study values (`n_log` 1024,
-    `rows_per_subject` 32, `max_sid` 4096). With it they scale with the study:
-
-    These are upper bounds that hold whatever the visit times, not typical counts. A
-    star holds one catalog row and at most `max_visits` visits. Each visit and
-    forecast renewal (one per `RENEWAL_D`) adds `REFIT_ROWS` refit products.
+    `n_pstate` holds the policy state (`pstate_size`). The required `horizon_d`
+    sets upper bounds that hold whatever the observing times, not typical counts.
+    A star holds one catalog row, at most `max_visits` imaging rows and at most
+    `max_spectra` spectrograph rows. Each imaging row and forecast renewal adds
+    `REFIT_ROWS` refit products; spectrograph rows add none. The renewal bound is
+    `ceil(horizon_d / RENEWAL_D) + 1` per star.
 
     - `n_log` holds those rows of every star, with a quarter spare, in steps of 256.
-    - `rows_per_subject` holds the catalog row and the visits of a star,
-      plus three spare.
-    - `max_sid` is the next power of two above two ids per row, one per day for the
+    - `rows_per_subject` holds the catalog, imaging and spectrograph rows of a
+      star, plus three spare.
+    - `max_sid` is the next power of two above two ids per row, two per day for the
       policy's waits and eight per star; it must leave `max_tick` above the horizon,
       so a bound that needs more ids than that allows is refused. The horizon is
       counted in ticks of `ticks_per_day` (the profile's declared tick length;
       `TICKS_PER_DAY` when not given), so a longer tick admits more stars.
 
-    A study never gets less than the fixed values.
+    The floors are `n_log` 1024, `rows_per_subject` 32 and `max_sid` 4096.
     """
     n_pstate = pstate_size(n_subjects)
-    n_log, rows, max_sid = 1024, 32, 4096
-    if horizon_d is not None:
-        renewals = math.ceil(horizon_d / RENEWAL_D) + 1
-        per_star = 1 + max_visits
-        refits = REFIT_ROWS * (renewals + max_visits)
-        need = n_subjects * (per_star + refits)
-        n_log = max(n_log, 256 * math.ceil(1.25 * need / 256))
-        rows = max(rows, per_star + 3)
-        ids = 2 * need + 2 * math.ceil(horizon_d) + 8 * n_subjects
-        max_sid = max(max_sid, 1 << (ids - 1).bit_length())
+    renewals = math.ceil(horizon_d / RENEWAL_D) + 1
+    per_star = 1 + max_visits + max_spectra
+    refits = REFIT_ROWS * (renewals + max_visits)
+    need = n_subjects * (per_star + refits)
+    n_log = max(1024, 256 * math.ceil(1.25 * need / 256))
+    rows = max(32, per_star + 3)
+    ids = 2 * need + 2 * math.ceil(horizon_d) + 8 * n_subjects
+    max_sid = max(4096, 1 << (ids - 1).bit_length())
     caps = Capacities(
         n_subjects=n_subjects,
         n_assets=2,
@@ -227,7 +226,7 @@ def default_capacities(
         max_sid=max_sid,
     )
     per_day = TICKS_PER_DAY if ticks_per_day is None else int(ticks_per_day)
-    if horizon_d is not None and caps.max_tick < horizon_d * per_day:
+    if caps.max_tick < horizon_d * per_day:
         raise ValueError(
             f"{n_subjects} stars over {horizon_d} d need max_sid {max_sid}, which"
             f" leaves max_tick {caps.max_tick} below the horizon of"
@@ -306,7 +305,7 @@ def bracket_study(
         horizon_d: Study length in days.
         budget_d: Telescope days on the shared row.
         caps: Capacities; defaults to `default_capacities` for this horizon, the
-            policy's visit limit.
+            policy's visit and spectrum limits.
         observer: The summary observer. It must be non-incremental and refit the
             visit and catalog kinds.
         policy: The decision policy.
@@ -335,6 +334,7 @@ def bracket_study(
         n_channels=channel.n_channels,
         horizon_d=horizon_d,
         max_visits=getattr(policy, "max_visits", MAX_VISITS),
+        max_spectra=getattr(policy, "max_spectra", MAX_SPECTRA),
         ticks_per_day=built.context.clock.ticks_per_day,
     )
     if isinstance(policy, BracketPolicy):
