@@ -179,7 +179,7 @@ require_tier_reason = true
 # --budget-json runs of both.
 [tool.testbudget.module_compile_budget_by_file]
 "tests/adapters/test_declared_population.py" = 883
-"tests/adapters/test_first_tier.py" = 3728
+"tests/adapters/test_first_tier.py" = 3656
 "tests/adapters/test_jaxedith_summary.py" = 1078
 "tests/adapters/test_observing_firewall.py" = 465
 "tests/adapters/test_observing_mode.py" = 944

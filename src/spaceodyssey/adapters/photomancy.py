@@ -34,8 +34,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.constants import Msun2kg
+from hwoutils.constants import Mearth2kg, Msun2kg
 from photomancy.orbit.data import RelativeAstromData
+from photomancy.orbit.forward import predict_photometry
 from photomancy.orbit.ofti import PARAM_NAMES, ofti
 from photomancy.orbit.priors import ecc_distribution
 from photomancy.orbit.updater import UpdaterStatus
@@ -47,6 +48,8 @@ from spaceodyssey.adapters.parameters import (
     catalog_group_of,
     catalog_template,
     from_photomancy,
+    scale_au2,
+    semimajor_axis_au,
     to_photomancy,
 )
 from spaceodyssey.adapters.skyscapes import StarSpec
@@ -414,6 +417,7 @@ POSITION_LAG_D = 60.0
 _ALBEDO_TAG = 0xA1BED0
 
 _EXPECTED_TAG = 0xC017
+_RESAMPLE_TAG = 0x5A4D
 
 REPORT_KIND_NAME = "visit_report"
 BLOCK_KIND_NAME = "block_outcome"
@@ -1168,62 +1172,68 @@ def _population_star(channel, subject):
     )
 
 
-def _masked_first_tier(refit, target, draws, valid, report, key, st):
-    """Photomancy's scale-marginal first tier over only valid population rows."""
-    log_w = jnp.where(valid, refit.report_log_weights(target, draws, report), -jnp.inf)
-    ess = refit._kish(log_w)
-    k_pick, k_draw = jax.random.split(key)
-    # Reuse the same sampler and key split as first_tier; only prior mass changes.
-    picked = refit._resample_elements(
-        k_pick,
-        log_w,
-        st.n_particles,
-        lambda idx, branch: draws[idx],
-        lambda idx, k: refit.draw_report_scale(target, draws[idx], report, k_draw),
-    )
-    return refit.RefitCloud(
-        elements=picked,
-        log_evidence=jnp.where(
-            ess > 0,
-            jax.scipy.special.logsumexp(log_w) - jnp.log(jnp.maximum(valid.sum(), 1)),
-            -jnp.inf,
-        ),
-        ess=ess,
-        status=refit._status(ess, log_w, st.ess_floor),
-        rounds=jnp.asarray(1),
-        max_weight=refit._max_weight(log_w),
-    )
-
-
 def _first_tier_cloud(channel, population, lane, st, scale):
-    """Reweight supported population draws by null reports, with bounded cost."""
+    """Weight whole population rows at their own scales by null reports.
+
+    Evidence is the mean likelihood over valid rows. Systematic resampling keeps
+    every physical parameter, including mass, radius and all albedo bands.
+    """
     refit = _photomancy_refit()
-    _, target = _star_target(refit, channel, lane.subject, st)
     key = _slot_key(lane, scale)
     params, valid = population.draw_planets(
         key, _population_star(channel, lane.subject), st.n_first * scale, channel.bands
     )
     band = _detection_band_index(channel)
-    draws = to_photomancy(params, band)
     report = _report_of(refit, channel, lane, jnp.zeros_like(lane.detected))
-    cloud = jax.lax.cond(
-        valid.all(),
-        lambda: refit.first_tier(
-            target,
-            draws,
-            report,
-            key,
-            n_particles=st.n_particles,
-            ess_floor=st.ess_floor,
-        ),
-        lambda: _masked_first_tier(refit, target, draws, valid, report, key, st),
+
+    def log_likelihood(p):
+        alpha_arcsec, dmag = predict_photometry(
+            report.epochs,
+            semimajor_axis_au(p),
+            p.ecc,
+            p.cos_i,
+            p.node_rad,
+            jnp.cos(p.argp_rad),
+            jnp.sin(p.argp_rad),
+            p.tau_d,
+            p.star_mass_msun * Msun2kg,
+            scale_au2(p, band),
+            channel.scenes.dist_pc[lane.subject],
+            Mp=p.planet_mass_mearth * Mearth2kg,
+        )
+        return refit.loglike_report(alpha_arcsec, dmag, report)
+
+    log_w = jnp.where(valid, jax.vmap(log_likelihood)(params), -jnp.inf)
+    log_total = jax.scipy.special.logsumexp(log_w)
+    supported = jnp.isfinite(log_total)
+    weights = jnp.exp(log_w - jnp.where(supported, log_total, 0.0))
+    sum_squares = jnp.sum(weights**2)
+    ess = jnp.where(supported, 1.0 / jnp.maximum(sum_squares, 1e-300), 0.0)
+    # A zero-likelihood pool supplies inert rows; its status and evidence reject it.
+    fallback = jnp.where(
+        valid.any(),
+        valid / jnp.maximum(valid.sum(), 1),
+        jnp.ones_like(weights) / valid.size,
     )
-    # Resampling changes the scale, but keeps the period of its source draw.
-    order = jnp.argsort(params.ln_period_d)
-    selected = order[jnp.searchsorted(params.ln_period_d[order], cloud.elements[:, 0])]
-    elements = from_photomancy(cloud.elements, params.albedo[selected], band)
-    cloud = dataclasses.replace(
-        cloud, log_evidence=jnp.where(valid.any(), cloud.log_evidence, -jnp.inf)
+    cdf = jnp.cumsum(jnp.where(supported, weights, fallback))
+    cdf = cdf / cdf[-1]
+    offset = jax.random.uniform(jax.random.fold_in(key, _RESAMPLE_TAG))
+    positions = (offset + jnp.arange(st.n_particles)) / st.n_particles
+    selected = jnp.minimum(
+        jnp.searchsorted(cdf, positions, side="right"), valid.size - 1
+    )
+    elements = jax.tree.map(lambda x: x[selected], params)
+    cloud = refit.RefitCloud(
+        elements=to_photomancy(elements, band),
+        log_evidence=log_total - jnp.log(jnp.maximum(valid.sum(), 1)),
+        ess=ess,
+        status=jnp.where(
+            supported,
+            jnp.where(ess < st.ess_floor, UpdaterStatus.LOW_ESS, UpdaterStatus.OK),
+            UpdaterStatus.NO_SUPPORT,
+        ).astype(jnp.int32),
+        rounds=jnp.asarray(1),
+        max_weight=jnp.max(weights),
     )
     return cloud, elements
 

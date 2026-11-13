@@ -18,6 +18,7 @@ from skyscapes.population import (
 from spaceodyssey.adapters import photomancy as ph
 from spaceodyssey.adapters.parameters import (
     PlanetParameters,
+    scale_au2,
     semimajor_axis_au,
     truth_parameters,
 )
@@ -87,7 +88,7 @@ def first_tier(boundary_inputs, population, claims=()):
 
 @pytest.mark.slow(reason="two cold population first tiers, 15 s focused on this host")
 def test_the_first_tier_draws_the_belief_population(boundary_inputs):
-    """Fails if first-tier existence or orbits come from truth or a class window."""
+    """Fails if first-tier existence or joint draws differ from the population."""
     population = boundary_inputs[2]
     for p, expected in ((population, 0.25), (population_scaled(population, 2.0), 0.5)):
         out, lane, st = first_tier(boundary_inputs, p)
@@ -102,6 +103,12 @@ def test_the_first_tier_draws_the_belief_population(boundary_inputs):
         assert np.isin(
             np.asarray(elements.ln_period_d), np.asarray(draws.ln_period_d)
         ).all()
+        np.testing.assert_array_equal(
+            jnp.sort(elements.radius_rearth), jnp.sort(draws.radius_rearth)
+        )
+        np.testing.assert_array_equal(
+            jnp.sort(scale_au2(elements, 0)), jnp.sort(scale_au2(draws, 0))
+        )
         got = p.expected_planets(
             boundary_inputs[0].world_source.stars[0], KEY, st.n_estimate_systems
         )
@@ -204,37 +211,70 @@ def test_p_claim_is_the_weighted_claim_mean_of_the_draws():
 
 
 @pytest.mark.medium(reason="cold first-tier fits with and without a null report")
-def test_first_tier_padding_has_no_prior_weight(boundary_inputs, monkeypatch):
-    """Fails if three survivors padded to four bias resampling or null evidence."""
+@pytest.mark.parametrize("padded", [False, True])
+def test_first_tier_padding_has_no_prior_weight(boundary_inputs, monkeypatch, padded):
+    """Fails if row scales change, misses favor bright rows, or padding has mass.
+
+    Systematic resampling has a discrepancy of at most one particle per row;
+    without misses, twelve particles exactly preserve the three/four-row prior.
+    Equal periods force row identity to include radius, mass and both albedos.
+    """
     study, boundary, population = boundary_inputs
     st = dataclasses.replace(boundary._post_settings(study), n_first=4, n_particles=12)
     params, _, _ = hand_cloud()
     params = dataclasses.replace(
         params,
-        ln_period_d=jnp.log(jnp.asarray([200.0, 365.25, 700.0, 200.0])),
+        cos_i=jnp.ones(4),
+        radius_rearth=jnp.asarray([0.5, 1.0, 3.0, 4.0]),
+        albedo=jnp.asarray([[0.1, 0.4], [0.2, 0.3], [0.3, 0.2], [0.4, 0.1]]),
     )
-    valid = jnp.asarray([True, True, True, False])
+    valid = jnp.asarray([True, True, True, not padded])
+    n_valid = int(valid.sum())
     monkeypatch.setattr(PopulationModel, "draw_planets", lambda *args: (params, valid))
     channel = study.channel_model
-    refit = ph._photomancy_refit()
-    _, target = ph._star_target(refit, channel, 0, st)
-    draws = ph.to_photomancy(params, ph._detection_band_index(channel))
+    ph._photomancy_refit()
     lane = _null_lane(channel, st, 0, 1, key=KEY)
+    lane = eqx.tree_at(
+        lambda x: (x.sep, x.dmag0, x.limit),
+        lane,
+        (
+            jnp.linspace(0.0, 100.0, st.grid_points)[None],
+            jnp.full_like(lane.dmag0, 23.0),
+            jnp.full_like(lane.limit, 10.0),
+        ),
+    )
+    band = ph._detection_band_index(channel)
+    # Circular face-on rows have a constant Lambert phase of 1 / pi.
+    contrast = scale_au2(params, band) / (jnp.pi * semimajor_axis_au(params) ** 2)
+    counts_pred = float(channel.law[0]) * 10.0 * contrast * 10.0 ** (0.4 * 23.0)
+    null_likelihood = jax.scipy.special.ndtr(
+        (float(channel.law[0]) * 10.0 - counts_pred) / jnp.sqrt(100.0 + counts_pred)
+    )[:n_valid]
     for has_miss in (False, True):
         lane = eqx.tree_at(lambda x: x.valid, lane, jnp.asarray([has_miss]))
-        report = ph._report_of(refit, channel, lane, jnp.zeros_like(lane.detected))
-        likelihood = jnp.exp(refit.report_log_weights(target, draws, report)[:3])
+        likelihood = null_likelihood if has_miss else jnp.ones(n_valid)
         cloud, elements = ph._first_tier_cloud(channel, population, lane, st, 1)
         assert float(jnp.exp(cloud.log_evidence)) == pytest.approx(
             float(likelihood.mean())
         )
         weights = likelihood / likelihood.sum()
         counts = jnp.sum(
-            elements.ln_period_d[:, None] == params.ln_period_d[None, :3], axis=0
+            elements.radius_rearth[:, None] == params.radius_rearth[None, :n_valid],
+            axis=0,
         )
+        selected = jnp.argmax(
+            elements.radius_rearth[:, None] == params.radius_rearth[None, :], axis=1
+        )
+        for got, source in zip(
+            jax.tree.leaves(elements), jax.tree.leaves(params), strict=True
+        ):
+            np.testing.assert_array_equal(got, source[selected])
         np.testing.assert_allclose(counts / st.n_particles, weights, atol=1 / 12)
         if not has_miss:
-            np.testing.assert_array_equal(counts, [4, 4, 4])
+            np.testing.assert_array_equal(counts, np.full(n_valid, 12 // n_valid))
+        else:
+            assert float(weights[0]) > float(weights[2])
+            assert counts[0] > counts[2]
         assert float(cloud.ess) == pytest.approx(float(1 / jnp.sum(weights**2)))
         assert float(cloud.max_weight) == pytest.approx(float(weights.max()))
 

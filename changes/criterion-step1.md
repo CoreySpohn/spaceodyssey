@@ -213,8 +213,8 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   existence. Support includes both period and eccentricity. The expected supported
   count uses a separate keyed pool of 256 systems (`n_estimate_systems`).
 - `ReportRefit` reads the decision view's population and the observer's claims.
-  The first tier passes population draws to Photomancy with its slot key, retains
-  each resampled draw's albedo, and stores the expected count for resummary. Its
+  The first tier weights population draws from its slot key at their own scales,
+  resamples whole physical rows, and stores the expected count for resummary. Its
   cache identity includes the population. `occupancy`, the fixed cloud seed, the
   interim class window, `p_class` and `p_new` are removed. Dark slots carry
   conditional detection probabilities and period quantiles, and per-slot
@@ -241,8 +241,8 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
 - One regression function checks three distinct survivors padded to four, both
   without reports and after a miss. It pins equal prior mass, likelihood-weighted
   resampling, evidence and ESS. No tests retire or shared matrices expand; net one
-  function added. Photomancy's scale marginalization and conditional scale draws
-  retain their existing semantics.
+  function added. First-tier likelihoods use each population row's own physical
+  scale, preserving its radius, masses and albedo spectrum when resampled.
 
 ## Skyscapes public-name migration
 
@@ -252,3 +252,16 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   Spaceodyssey parameter names and nonpositive selectable-albedo validation stay
   unchanged; the formerly negative 1842 nm spectrum is now clipped to zero upstream
   and still rejected. No golden or pinned values change.
+
+## First-tier inference preserves joint population draws
+
+- Evaluate each row's report likelihood with photomancy's public photometric
+  forward model and fixed-scale reporting law. Resample whole physical rows and
+  compute null evidence as the mean likelihood over valid rows. Both full and
+  exhausted pools preserve radius, mass and albedo correlations; padding has zero
+  weight. No replacement scale prior enters the first tier.
+- Strengthen the population test to check same-key radius and scale distributions.
+  Extend the padding regression to a full pool, with equal periods and distinct
+  radii and spectra, checking every physical field and preferential weight on
+  faint rows after a miss against an analytic face-on circular-orbit likelihood.
+  One parameter case is added; no test functions retire or shared matrices expand.
