@@ -46,11 +46,11 @@ def semimajor_axis_au(period_d, central_mass_kg):
 
 
 def relative_position(
-    t_jd, *, period_d, ecc, inc_deg, node_deg, omega_deg, tp_jd, a_au
+    time_jd, *, period_d, ecc, inc_deg, node_deg, omega_deg, tp_jd, a_au
 ):
     """Planet position relative to the star, (east, north, away) in AU."""
     n = 2 * mp.pi / mp.mpf(period_d)
-    M = n * (mp.mpf(t_jd) - mp.mpf(tp_jd))
+    M = n * (mp.mpf(time_jd) - mp.mpf(tp_jd))
     e = mp.mpf(ecc)
     E = kepler_eccentric_anomaly(M, e)
     X = mp.cos(E) - e

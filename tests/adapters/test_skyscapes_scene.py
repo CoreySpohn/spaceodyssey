@@ -51,7 +51,7 @@ def quarter_epochs(spec):
     return spec.tp_jd + spec.period_d * np.array([0.0, 0.25, 0.5, 0.75])
 
 
-def reference_scene(spec, t_jd):
+def reference_scene(spec, time_jd):
     """(east, north, away) in AU from the independent reference, per epoch."""
     central = mp.mpf(spec.mass_msun) * ref.M_SUN_KG + REF_MP_KG
     a_au = ref.semimajor_axis_au(spec.period_d, central)
@@ -66,14 +66,14 @@ def reference_scene(spec, t_jd):
             tp_jd=spec.tp_jd,
             a_au=a_au,
         )
-        for t in t_jd
+        for t in time_jd
     ]
 
 
-def away_au(spec, t_jd):
+def away_au(spec, time_jd):
     system = build_scene(spec)
     r_au, _, _ = system.planets[0].propagate(
-        system.trig_solver, jnp.asarray(t_jd), star=system.star
+        system.trig_solver, jnp.asarray(time_jd), star=system.star
     )
     return np.asarray(r_au[0, 2])
 
