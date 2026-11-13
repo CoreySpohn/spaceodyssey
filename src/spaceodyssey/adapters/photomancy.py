@@ -1168,6 +1168,33 @@ def _population_star(channel, subject):
     )
 
 
+def _masked_first_tier(refit, target, draws, valid, report, key, st):
+    """Photomancy's scale-marginal first tier over only valid population rows."""
+    log_w = jnp.where(valid, refit.report_log_weights(target, draws, report), -jnp.inf)
+    ess = refit._kish(log_w)
+    k_pick, k_draw = jax.random.split(key)
+    # Reuse the same sampler and key split as first_tier; only prior mass changes.
+    picked = refit._resample_elements(
+        k_pick,
+        log_w,
+        st.n_particles,
+        lambda idx, branch: draws[idx],
+        lambda idx, k: refit.draw_report_scale(target, draws[idx], report, k_draw),
+    )
+    return refit.RefitCloud(
+        elements=picked,
+        log_evidence=jnp.where(
+            ess > 0,
+            jax.scipy.special.logsumexp(log_w) - jnp.log(jnp.maximum(valid.sum(), 1)),
+            -jnp.inf,
+        ),
+        ess=ess,
+        status=refit._status(ess, log_w, st.ess_floor),
+        rounds=jnp.asarray(1),
+        max_weight=refit._max_weight(log_w),
+    )
+
+
 def _first_tier_cloud(channel, population, lane, st, scale):
     """Reweight supported population draws by null reports, with bounded cost."""
     refit = _photomancy_refit()
@@ -1179,13 +1206,17 @@ def _first_tier_cloud(channel, population, lane, st, scale):
     band = _detection_band_index(channel)
     draws = to_photomancy(params, band)
     report = _report_of(refit, channel, lane, jnp.zeros_like(lane.detected))
-    cloud = refit.first_tier(
-        target,
-        draws,
-        report,
-        key,
-        n_particles=st.n_particles,
-        ess_floor=st.ess_floor,
+    cloud = jax.lax.cond(
+        valid.all(),
+        lambda: refit.first_tier(
+            target,
+            draws,
+            report,
+            key,
+            n_particles=st.n_particles,
+            ess_floor=st.ess_floor,
+        ),
+        lambda: _masked_first_tier(refit, target, draws, valid, report, key, st),
     )
     # Resampling changes the scale, but keeps the period of its source draw.
     order = jnp.argsort(params.ln_period_d)

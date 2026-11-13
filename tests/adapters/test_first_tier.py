@@ -203,6 +203,42 @@ def test_p_claim_is_the_weighted_claim_mean_of_the_draws():
     )
 
 
+@pytest.mark.medium(reason="cold first-tier fits with and without a null report")
+def test_first_tier_padding_has_no_prior_weight(boundary_inputs, monkeypatch):
+    """Fails if three survivors padded to four bias resampling or null evidence."""
+    study, boundary, population = boundary_inputs
+    st = dataclasses.replace(boundary._post_settings(study), n_first=4, n_particles=12)
+    params, _, _ = hand_cloud()
+    params = dataclasses.replace(
+        params,
+        ln_period_d=jnp.log(jnp.asarray([200.0, 365.25, 700.0, 200.0])),
+    )
+    valid = jnp.asarray([True, True, True, False])
+    monkeypatch.setattr(PopulationModel, "draw_planets", lambda *args: (params, valid))
+    channel = study.channel_model
+    refit = ph._photomancy_refit()
+    _, target = ph._star_target(refit, channel, 0, st)
+    draws = ph.to_photomancy(params, ph._detection_band_index(channel))
+    lane = _null_lane(channel, st, 0, 1, key=KEY)
+    for has_miss in (False, True):
+        lane = eqx.tree_at(lambda x: x.valid, lane, jnp.asarray([has_miss]))
+        report = ph._report_of(refit, channel, lane, jnp.zeros_like(lane.detected))
+        likelihood = jnp.exp(refit.report_log_weights(target, draws, report)[:3])
+        cloud, elements = ph._first_tier_cloud(channel, population, lane, st, 1)
+        assert float(jnp.exp(cloud.log_evidence)) == pytest.approx(
+            float(likelihood.mean())
+        )
+        weights = likelihood / likelihood.sum()
+        counts = jnp.sum(
+            elements.ln_period_d[:, None] == params.ln_period_d[None, :3], axis=0
+        )
+        np.testing.assert_allclose(counts / st.n_particles, weights, atol=1 / 12)
+        if not has_miss:
+            np.testing.assert_array_equal(counts, [4, 4, 4])
+        assert float(cloud.ess) == pytest.approx(float(1 / jnp.sum(weights**2)))
+        assert float(cloud.max_weight) == pytest.approx(float(weights.max()))
+
+
 @pytest.mark.slow(reason="cold bounded population fits for three empty-support cases")
 def test_empty_support_and_exhaustion_are_bounded(boundary_inputs):
     """Fails if empty support retries forever or padding invents supported planets."""

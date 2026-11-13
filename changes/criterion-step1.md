@@ -232,3 +232,14 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   retire and no shared parameter matrix expands; net six functions added.
 - Program budgets include measured compiles and cache loads with the standard
   headroom; existing larger allowances are retained for unmeasured slow cases.
+
+## Population padding has zero prior weight
+
+- Exhausted first-tier pools exclude padded rows before resampling and normalize
+  null evidence over valid draws. ESS, maximum weight and fit status use the same
+  mask. Empty supported pools retain zero existence and finite inert parameters.
+- One regression function checks three distinct survivors padded to four, both
+  without reports and after a miss. It pins equal prior mass, likelihood-weighted
+  resampling, evidence and ESS. No tests retire or shared matrices expand; net one
+  function added. Photomancy's scale marginalization and conditional scale draws
+  retain their existing semantics.
