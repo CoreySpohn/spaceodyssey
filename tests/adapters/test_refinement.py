@@ -91,7 +91,7 @@ def test_b4_time_refinement_of_the_likelihood_quantities(yip_report):
         W_rad=0.4,
         w_rad=0.0,
         tp_d=0.0,
-        Rp_au=0.19 * Rearth2AU,
+        Rp_au=0.16 * Rearth2AU,
         Ag=0.3,
     )
     # From 4.7 to 4.3 lambda/D, near the threshold: N is about 5 s0.
