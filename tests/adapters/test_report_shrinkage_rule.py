@@ -15,13 +15,18 @@ pytest.importorskip("photomancy")
 from hwoutils.constants import Rearth2AU
 
 from spaceodyssey.adapters import photomancy as ph
+from spaceodyssey.adapters.measurement import (
+    MEASUREMENT_KIND_NAME,
+    measurement_template,
+)
 from spaceodyssey.adapters.parameters import (
     catalog_group_of,
     from_photomancy,
     semimajor_axis_au,
 )
 from spaceodyssey.core.capacities import Capacities
-from spaceodyssey.core.enums import Audience
+from spaceodyssey.core.enums import EVERYONE, Audience
+from spaceodyssey.core.records import unpack
 from spaceodyssey.studies import bracket as br
 from tests.adapters.test_report_refit import make_study
 
@@ -148,7 +153,11 @@ def test_the_kernel_declares_the_groups_it_reads_and_the_first_tier_settings():
 
 
 def test_the_shrinkage_arm_opens_what_the_kernel_reads():
-    """The arm's registry shows the orbit and scale columns and hides existence."""
+    """Fails if shrinkage hides measurements or exposes existence or measurement truth.
+
+    The catalog grants orbit and scale; measured leaves are open to all audiences,
+    while identity and generating counts and variance stay scorer-only.
+    """
     arm = br.ARMS["shrinkage"]
     assert arm.kernel == "shrinkage"
     assert set(arm.groups) == set(ph.SHRINK_GROUPS)
@@ -159,6 +168,17 @@ def test_the_shrinkage_arm_opens_what_the_kernel_reads():
         Capacities(n_subjects=4, rows_per_subject=6, refit_lanes=2), observer
     )
     _boundary(caps)
+    measurement = unpack(
+        measurement_template(n_detections=2, n_bands=2),
+        caps.payload_audience[caps.kind_names.index(MEASUREMENT_KIND_NAME)],
+    )
+    for name, grants in vars(measurement).items():
+        expected = (
+            int(Audience.SCORER)
+            if name in ("identity", "true_counts", "true_variance")
+            else int(EVERYONE)
+        )
+        assert (np.asarray(grants) == expected).all(), name
     row = caps.payload_audience[caps.kind_names.index("truth_catalog")]
     need = int(Audience.OBSERVER) | int(Audience.POLICY)
     for col, field in enumerate(

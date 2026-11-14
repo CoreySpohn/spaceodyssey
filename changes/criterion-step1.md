@@ -322,3 +322,7 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   control's proposal pool to retain its ESS guard. Check refusal totals against
   the actual trace and a controlled two-refusal trace rather than assuming that
   an affordable-mode policy must request an unaffordable observation.
+- Extend the shrinkage registry guard to unpack measurement audience grants by
+  named leaf, checking that measured data remain open and generating identities,
+  counts and variances remain scorer-only. Strengthen one existing test; no test
+  functions or shared parameter cases are added or retired.
