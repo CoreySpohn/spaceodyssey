@@ -851,3 +851,9 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
 - Solar-host checks require 4096 distinct first-tier rows and 16384 distinct retry
   rows, with no row reused across the two keys. Empty-support and zero-padding
   guards remain in force.
+
+## Decision-view source guard
+
+- Recognize the library's exact withheld-source sentinel before reusing a decision
+  view. An ordinary user source's public `withheld` attribute cannot expose the
+  world source or bypass substitution of the planning model and belief population.

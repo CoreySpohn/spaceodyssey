@@ -121,3 +121,23 @@ def test_every_decision_and_refit_call_site_passes_the_view(executor):
         truth, root = one_world()
         core.HostExecutor().run(study, truth, root, 24, refit=refit, policy_form=form)
     assert refit.calls > 0
+
+
+class MisleadingWorldSource(core.AbstractWorldSource):
+    """A user source with a similarly named ordinary class attribute."""
+
+    withheld = True
+
+    def draw(self, key, capacities):
+        return jnp.asarray(1.0)
+
+
+def test_a_user_sources_public_attribute_cannot_bypass_the_view():
+    """Fails if a user-defined source's withheld flag exposes the full study."""
+    study = dataclasses.replace(
+        builder.survey_1(), world_source=MisleadingWorldSource()
+    )
+    view = study.decision_view()
+    assert isinstance(view.world_source, core.WithheldWorldSource)
+    with pytest.raises(RuntimeError, match="withheld"):
+        view.world_source.draw(KEY, study.caps)

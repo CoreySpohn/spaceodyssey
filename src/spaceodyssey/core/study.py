@@ -143,7 +143,7 @@ class Study(eqx.Module):
         kept. Built with `tree_at`, so validation does not run again. A view returns
         itself.
         """
-        if self.world_source.withheld:
+        if type(self.world_source) is WithheldWorldSource:
             return self
         belief = self.belief_population
         if belief is None:
