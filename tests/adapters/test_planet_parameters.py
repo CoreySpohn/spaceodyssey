@@ -42,9 +42,7 @@ from tests.criteria import ImagingCriterion
 from tests.studies.bracket_helpers import (
     N_SLOTS,
     build,
-    fixture_channel,
     fixture_files,
-    fixture_source,
     prior_summary,
 )
 
@@ -76,13 +74,13 @@ def assert_trees_close(a, b, **kw):
 
 
 @pytest.fixture(scope="module")
-def source():
-    return fixture_source()
+def source(bracket_source):
+    return bracket_source
 
 
 @pytest.fixture(scope="module")
-def channel(source):
-    return fixture_channel(source)
+def channel(bracket_channel):
+    return bracket_channel
 
 
 @pytest.mark.parametrize("jit", [False, True])

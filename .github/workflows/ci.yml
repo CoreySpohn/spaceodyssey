@@ -93,6 +93,29 @@ jobs:
         continue-on-error: true
         run: ty check src/spaceodyssey
 
+      # loadfile can assign a file to the other worker on the next run. Seed
+      # both directories before pytest starts; concurrent writes stay isolated.
+      - name: Seed both workers from the restored JAX cache
+        run: |
+          python3 - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          root = Path(os.environ["SPACEODYSSEY_JAX_CACHE"])
+          workers = [root / name for name in ("gw0", "gw1")]
+          for worker in workers:
+              worker.mkdir(parents=True, exist_ok=True)
+          for source in (root / "main", *workers):
+              for entry in source.glob("*-cache"):
+                  if not entry.is_file():
+                      continue
+                  for worker in workers:
+                      destination = worker / entry.name
+                      if not destination.exists():
+                          shutil.copyfile(entry, destination)
+          PY
+
       - name: Quick tier
         run: |
           # Two workers, one file each: the quick tier is compile-bound and a

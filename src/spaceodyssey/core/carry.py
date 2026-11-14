@@ -315,12 +315,15 @@ def _tree_set(carry, **paths):
 
 
 def init_carry(study, truth):
-    """Initialize the budget and public kickoff wake at tick 0."""
-    caps = study.caps
-    c = empty_carry(caps, balance=study.budget)
-    c = _tree_set(
-        c, belief=study.observer.init(caps), pbelief=study.observer.init_summary(caps)
-    )
+    """Initialize the budget and public kickoff wake from study declarations."""
+    return _init_carry(study.caps, study.budget, study.observer, study.process)
+
+
+@eqx.filter_jit(inline=True)
+def _init_carry(caps, budget, observer, process):
+    """Compile only the declarations that initialize a carry, without truth keys."""
+    c = empty_carry(caps, balance=budget)
+    c = _tree_set(c, belief=observer.init(caps), pbelief=observer.init_summary(caps))
     c = enqueue(
         c,
         True,
@@ -330,4 +333,4 @@ def init_carry(study, truth):
         audience=PUBLIC,
         caps=caps,
     )
-    return study.process.seed(c, caps)
+    return process.seed(c, caps)

@@ -84,6 +84,7 @@ import functools
 import hashlib
 import json
 import math
+import threading
 from pathlib import Path
 
 import equinox as eqx
@@ -204,6 +205,12 @@ def fetch_pinned_yip():
     Refuses when yippy's catalog or release tag no longer match the pinned digest
     and release, so a changed package cannot be read under the old name.
     """
+    _check_pinned_yip()
+    return fetch_yip(YIP_NAME)
+
+
+def _check_pinned_yip():
+    """Validate the response pin even when its in-memory data is already loaded."""
     entry = CATALOG.get(YIP_NAME)
     if entry is None or entry.get("md5") != YIP_DIGEST:
         found = None if entry is None else entry.get("md5")
@@ -212,7 +219,6 @@ def fetch_pinned_yip():
     if DATA_RELEASE_TAG != YIP_RELEASE:
         msg = f"yippy data release is {DATA_RELEASE_TAG!r}, pinned {YIP_RELEASE!r}"
         raise ValueError(msg)
-    return fetch_yip(YIP_NAME)
 
 
 def _finite(name, value, *, low=None, high=None, low_open=False):
@@ -618,11 +624,10 @@ class SummaryReport(eqx.Module):
         `stellar_exozodi` (default True) gives the exozodi the host's own colour (see
         `prepare`); False keeps the solar-colour one-zodi form.
         """
-        path = fetch_pinned_yip() if yip_path is None else yip_path
         backend = (
-            EqxCoronagraph(path)
-            if aperture_radius_lod is None
-            else EqxCoronagraph(path, aperture_radius_lod=aperture_radius_lod)
+            _pinned_response(aperture_radius_lod)
+            if yip_path is None
+            else _response_from_path(yip_path, aperture_radius_lod)
         )
         header_wavelength_nm, header_diameter_m = backend.stellar_frame
         wavelength_nm = header_wavelength_nm if wavelength_nm is None else wavelength_nm
@@ -1453,6 +1458,48 @@ def _in_thread(builder, declarations, config):
         if precision is not None:
             stack.enter_context(jax.default_matmul_precision(precision))
         return builder(*declarations)
+
+
+_RESPONSE_BUILD_LOCK = threading.Lock()
+
+
+def _response_from_path(path, aperture_radius_lod):
+    """Load the response with the caller's aperture declaration."""
+    if aperture_radius_lod is None:
+        return EqxCoronagraph(path)
+    return EqxCoronagraph(path, aperture_radius_lod=aperture_radius_lod)
+
+
+def _construct_pinned_response(aperture_radius_lod):
+    return _response_from_path(fetch_pinned_yip(), aperture_radius_lod)
+
+
+@functools.lru_cache(maxsize=4)
+def _cached_pinned_response(key):
+    """One immutable response, including its static callable closures, per key."""
+    *_, aperture, config = key
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(
+            _in_thread, _construct_pinned_response, (aperture,), config
+        ).result()
+
+
+def _pinned_response(aperture_radius_lod):
+    """Share the pinned response outside traces, under the caller's JAX settings."""
+    _check_pinned_yip()
+    try:
+        hash(aperture_radius_lod)
+    except TypeError:
+        return _response_from_path(fetch_pinned_yip(), aperture_radius_lod)
+    key = (
+        YIP_NAME,
+        YIP_RELEASE,
+        YIP_DIGEST,
+        aperture_radius_lod,
+        _thread_config(),
+    )
+    with _RESPONSE_BUILD_LOCK:
+        return _cached_pinned_response(key)
 
 
 def _build_assets(*declarations):

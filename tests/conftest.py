@@ -1,21 +1,22 @@
 """Shared optional artifacts for plotting smoke tests, and the suite's compile budget.
 
-The suite is dominated by XLA compilation. Two settings keep it fast and small:
+The suite is dominated by XLA compilation. A persistent cache per xdist worker
+(or ``main`` for serial runs) avoids concurrent readers seeing partial writes;
+``SPACEODYSSEY_JAX_CACHE`` names another cache root, ``off`` disables it.
+Module teardown releases memoized runs and JAX programs, keeping per-file
+program counts independent. Garbage is collected once at each module end.
+Session fixtures retain the canonical source, channel and population prior.
 
-- a persistent compilation cache per xdist worker (or ``main`` for serial runs), so
-  later runs reuse compiled programs without concurrent readers seeing partial writes
-  (``SPACEODYSSEY_JAX_CACHE`` names another cache root, ``off`` disables it);
-- fixed cache watermarks: module teardown clears when RSS exceeds
-  ``SPACEODYSSEY_RSS_LIMIT_MB`` (default 3500 MiB), or live heap allocations exceed
-  half that limit. On macOS, malloc's live bytes exclude freed pages it still keeps
-  resident; elsewhere RSS is the fallback. This retains useful executables without
-  letting the cache budget grow with allocator retention. Cleanup and the next
-  compile both need headroom below the 6 GB process budget. Release freed allocator
-  pages before rechecking either watermark, so retention alone does not evict
-  programs when live heap accounting falls back to RSS.
+Equinox caches are also cleared when RSS exceeds ``SPACEODYSSEY_RSS_LIMIT_MB``
+(default 3500 MiB), or live heap allocations exceed half that limit. macOS malloc
+statistics exclude freed pages retained by the allocator; elsewhere RSS is the
+fallback. Freed allocator pages are released before rechecking the watermark,
+so retention alone does not evict caches. Cleanup and the next compile need
+headroom below the 6 GB process budget.
 """
 
 import ctypes
+import fcntl
 import gc
 import os
 import sys
@@ -177,13 +178,13 @@ def bound_resident_memory(request):
 
 @pytest.fixture(autouse=True, scope="module")
 def drop_shared_runs():
-    """Release memoized runs, then clear compiled programs if memory is high.
+    """Release memoized runs and JAX programs once per module.
 
-    The budget plugin also clears JAX caches after every file (clear_caches in
-    pyproject.toml), so each file's program count is independent of the files
-    before it; this fixture adds the equinox caches and freed-memory release when
-    over the watermark. Files marked clear_caches_between_tests also clear after
-    each test. Session-scoped fixtures survive either clear and recompile on use.
+    Clear JAX programs once at each module's end, after releasing memoized runs.
+    This keeps file program counts independent without repeating the budget
+    plugin's full garbage collection. Above the memory watermark, also clear
+    Equinox caches, collect garbage and release freed allocator pages. Session
+    fixtures retain their immutable results.
     """
     yield
     for name, module in tuple(sys.modules.items()):
@@ -193,12 +194,57 @@ def drop_shared_runs():
             clear = getattr(value, "cache_clear", None)
             if callable(clear):
                 clear()
-    gc.collect()
-    if _over_watermark():
+    over_watermark = _over_watermark()
+    if over_watermark:
         eqx.clear_caches()
-        jax.clear_caches()
-        gc.collect()
+    jax.clear_caches()
+    gc.collect()
+    if over_watermark:
         _release_freed_memory()
+
+
+@pytest.fixture(scope="session")
+def bracket_source():
+    """The canonical stored worlds, retained independently of compiled programs."""
+    # Import after the root conftest has enabled x64, before building any arrays.
+    from tests.studies.bracket_helpers import fixture_source
+
+    return fixture_source()
+
+
+@pytest.fixture(scope="session")
+def bracket_channel(bracket_source):
+    """One set of physical reports and host leakage tables per worker."""
+    from tests.studies.bracket_helpers import fixture_channel
+
+    return fixture_channel(bracket_source)
+
+
+@pytest.fixture(scope="session")
+def bracket_study(bracket_source, bracket_channel, tmp_path_factory):
+    """One exact population prior, shared as a study document by both workers.
+
+    The file lives only in this pytest session's temporary directory. A lock keeps
+    a second worker from loading a partially written document. Scientific inputs
+    and defaults are identical to an independent build.
+    """
+    from spaceodyssey.codec import KindResolver, dump_study, load_study
+    from spaceodyssey.plugins import installed_kinds
+    from spaceodyssey.studies import bracket as br
+    from tests.studies.bracket_helpers import build
+
+    directory = tmp_path_factory.getbasetemp()
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        directory = directory.parent
+    path = directory / "bracket-study.json"
+    resolver = KindResolver({**installed_kinds(), **br.BRACKET_KINDS})
+    with (directory / "bracket-study.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if path.exists():
+            return load_study(path.read_text(), resolver)
+        study = build(run=False, source=bracket_source, channel=bracket_channel).study
+        path.write_text(dump_study(study, resolver).to_json())
+        return study
 
 
 # Files that exercise expensive program variants, with the reason each is slow. Use one
@@ -255,8 +301,8 @@ SLOW_FILES = {
 FROZEN = "frozen feature, no science consumer"
 FROZEN_FILES = {
     "test_survey_10.py": (
-        FROZEN + ": the committee and award window",
-        ("test_both_executors_make_the_same_awards",),
+        FROZEN + ": six full committee flights; award transaction guards stay quick",
+        (),
     ),
     "test_awards.py": (
         FROZEN + ": awards",

@@ -85,8 +85,8 @@ CRITERION = TransitionTable(
 
 
 @pytest.fixture(scope="module")
-def base_study():
-    study = build(run=False).study
+def base_study(bracket_study):
+    study = bracket_study
     return dataclasses.replace(
         study, observer=dataclasses.replace(study.observer, criterion=CRITERION)
     )
@@ -98,6 +98,16 @@ def hand_scored_log(base=None, *, mis_associated=1, duplicate=1, missed=1):
     study = dataclasses.replace(
         study, observer=dataclasses.replace(study.observer, criterion=CRITERION)
     )
+    carry = _hand_scored_carry(
+        study, jnp.asarray(mis_associated), jnp.asarray(duplicate), jnp.asarray(missed)
+    )
+    return SimpleNamespace(
+        carry=jax.tree.map(lambda x: x[None], carry), trace=None
+    ), study
+
+
+@eqx.filter_jit
+def _hand_scored_carry(study, mis_associated, duplicate, missed):
     carry = init_carry(study, None)
     catalog = jax.tree.map(
         lambda x: jnp.ones(x.shape, x.dtype), catalog_template(N_SLOTS, 2)
@@ -119,7 +129,7 @@ def hand_scored_log(base=None, *, mis_associated=1, duplicate=1, missed=1):
         mode=jnp.asarray(1, I64),
         valid_science=jnp.asarray(1.0),
         occupied_s=jnp.asarray(br.SECONDS_PER_DAY),
-        assignment=jnp.asarray([0, 1, 2 if duplicate else -1, 3, -1, -1]),
+        assignment=jnp.asarray([0, 1, jnp.where(duplicate, 2, -1), 3, -1, -1]),
         identity=jnp.asarray([2, 0, 0, 1, -1, -1]),
         counts=row.counts.at[:4, 1].set(6.0),
         variance=row.variance.at[:4, 1].set(1.0),
@@ -127,10 +137,11 @@ def hand_scored_log(base=None, *, mis_associated=1, duplicate=1, missed=1):
         true_variance=row.true_variance.at[:4, 1].set(1.0),
     )
     second = dataclasses.replace(
-        row, identity=row.identity.at[3].set(2 if mis_associated else 1)
+        row, identity=row.identity.at[3].set(jnp.where(mis_associated, 2, 1))
     )
-    if not missed:
-        catalog = dataclasses.replace(catalog, present=catalog.present.at[1].set(False))
+    catalog = dataclasses.replace(
+        catalog, present=catalog.present.at[1].set(missed.astype(bool))
+    )
     entries = [
         (br.KIND_CATALOG, catalog),
         (br.KIND_MEASUREMENT, row),
@@ -154,14 +165,18 @@ def hand_scored_log(base=None, *, mis_associated=1, duplicate=1, missed=1):
                 carry, belief=study.observer.fold(carry.belief, rec, study.caps)
             )
     carry = dataclasses.replace(carry, tick=jnp.asarray(3, I64))
-    return SimpleNamespace(
-        carry=jax.tree.map(lambda x: x[None], carry), trace=None
-    ), study
+    return carry
 
 
 @pytest.fixture(scope="module")
 def scored_case(base_study):
     return hand_scored_log(base_study)
+
+
+@pytest.fixture(scope="module")
+def scored_verdict(scored_case):
+    """The fixed control shared by all detection-order property examples."""
+    return verdict(*scored_case)
 
 
 @pytest.fixture(scope="module")
@@ -278,10 +293,12 @@ def test_a_refold_equals_the_incremental_fold(folded_case, scored_case):
 
 @settings(max_examples=25, deadline=None)
 @given(order=permutations(range(6)))
-def test_the_verdict_survives_a_permuted_detection_order(order, scored_case):
+def test_the_verdict_survives_a_permuted_detection_order(
+    order, scored_case, scored_verdict
+):
     """Fails if detection order changes a verdict joined by assignment and identity."""
     result, study = scored_case
-    a, b = verdict(result, study), verdict(permute_detections(result, order), study)
+    a, b = scored_verdict, verdict(permute_detections(result, order), study)
     np.testing.assert_array_equal(a.scorer_label, b.scorer_label)
     np.testing.assert_array_equal(a.mission_label, b.mission_label)
     assert all(np.array_equal(a.counts[k], b.counts[k]) for k in a.counts)

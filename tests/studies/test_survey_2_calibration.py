@@ -16,8 +16,8 @@ from tests.studies.scenarios.survey_2 import (
     survey_2,
 )
 
-pytestmark = pytest.mark.medium(
-    reason="2000 worlds on one adaptive run shared by every test: 14 s on a laptop"
+campaign = pytest.mark.slow(
+    reason="2000 adaptive flights are needed for the 0.075 PIT margin and controls"
 )
 
 N_WORLDS = 2000
@@ -29,11 +29,15 @@ PRIOR = {"prior_mean": 1.0, "prior_std": 0.3, "noise": 0.5}
 @pytest.fixture(scope="module")
 def sample():
     """Two thousand worlds drawn from the prior, run under the adaptive policy."""
+    return _sample(N_WORLDS)
+
+
+def _sample(n_worlds):
     observer = GaussianMean(**PRIOR)
     study = dataclasses.replace(
         survey_2(observer=observer), world_source=GaussianSignals(1.0, 0.3)
     )
-    truths, roots = make_worlds(study, N_WORLDS)
+    truths, roots = make_worlds(study, n_worlds)
     run = CompiledExecutor().run(study, truths, roots, N_STEPS)
     return observer, truths, run
 
@@ -51,6 +55,7 @@ def per_subject(run, truths, pit):
     return results
 
 
+@campaign
 def test_the_adaptive_design_took_data_dependent_samples(sample):
     """Fails if every world got the same samples, which would make the calibration
     claim a statement about a fixed design only.
@@ -61,6 +66,7 @@ def test_the_adaptive_design_took_data_dependent_samples(sample):
     assert len(np.unique(n, axis=0)) > 3
 
 
+@campaign
 def test_the_posterior_is_calibrated_under_the_adaptive_design(sample):
     """Fails if the posterior CDF at the true signal is not uniform within the kit's
     margin, over every subject that was sampled.
@@ -74,6 +80,7 @@ def test_the_posterior_is_calibrated_under_the_adaptive_design(sample):
         assert subject.detail["n_pits"] == N_WORLDS
 
 
+@campaign
 def test_opposite_subject_errors_cannot_cancel_in_the_calibration_guard(sample):
     """Fails if pooling conceals opposite subject-level PIT errors.
 
@@ -106,6 +113,7 @@ def test_opposite_subject_errors_cannot_cancel_in_the_calibration_guard(sample):
     ],
     ids=["doubled-noise", "halved-noise", "narrow-prior", "wide-prior"],
 )
+@campaign
 def test_a_mistaken_posterior_is_not_calibrated(sample, wrong):
     """Fails if the check accepts a posterior with the wrong spread or centre."""
     _, truths, run = sample
@@ -114,6 +122,7 @@ def test_a_mistaken_posterior_is_not_calibrated(sample, wrong):
     assert not result
 
 
+@campaign
 def test_a_posterior_centre_that_is_shifted_is_not_calibrated(sample):
     """Fails if the check accepts a posterior whose centre is off by half a prior
     standard deviation.
@@ -127,6 +136,7 @@ def test_a_posterior_centre_that_is_shifted_is_not_calibrated(sample):
     assert not check_calibration(run, truths, shifted, margin=MARGIN)
 
 
+@campaign
 def test_a_posterior_that_ignores_the_prior_is_not_calibrated(sample):
     """Fails if the check accepts a near-flat prior spread, which is over-wide."""
     _, truths, run = sample
@@ -136,13 +146,13 @@ def test_a_posterior_that_ignores_the_prior_is_not_calibrated(sample):
 
 
 @pytest.mark.parametrize("margin", [math.nan, math.inf, -0.1, 0.0])
-def test_a_margin_that_is_not_positive_and_finite_is_refused(sample, margin):
-    """Fails if the check runs with a NaN, infinite, negative or zero margin."""
-    observer, truths, run = sample
+def test_a_margin_that_is_not_positive_and_finite_is_refused(margin):
+    """Fails if an invalid margin reaches run inspection or PIT evaluation."""
     with pytest.raises(ValueError, match="margin"):
-        check_calibration(run, truths, gaussian_pit(observer), margin=margin)
+        check_calibration(None, None, None, margin=margin)
 
 
+@campaign
 def test_a_nan_signal_is_not_calibrated(sample):
     """Fails if a NaN true signal passes as calibrated."""
     observer, truths, run = sample

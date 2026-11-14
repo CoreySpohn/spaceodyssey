@@ -15,6 +15,7 @@ pytest.importorskip("photomancy")
 pytest.importorskip("photomancy.orbit.refit", reason="needs the report refit")
 
 from hwoutils.constants import G, Msun2kg, Rearth2AU
+from hwoutils.testbudget.compiles import cache_hit_count, compile_count
 from photomancy.orbit import refit
 from photomancy.orbit.forward import predict_photometry
 from photomancy.orbit.updater import UpdaterStatus
@@ -33,14 +34,13 @@ from spaceodyssey.adapters.photomancy import (
 )
 from spaceodyssey.core.enums import RefitStatus
 from spaceodyssey.core.records import pack
-from tests.studies.bracket_helpers import fixture_channel, fixture_source
 
 STAR, MODE, PROBE_NODE = 0, 1, 80
 
 
 @pytest.fixture(scope="module")
-def channel():
-    return fixture_channel(fixture_source())
+def channel(bracket_channel):
+    return bracket_channel
 
 
 def _probe_rows(channel, sep_arcsec, days=(100.0, 140.0)):
@@ -111,12 +111,17 @@ def test_report_likelihood_equals_the_channel_law_at_truth(channel):
     remaining difference is the linear interpolation between nodes.
 
     Fails if the grid inverts the counts model (a wrong dmag0 sign or zero point), uses
-    the wrong time axis, or reads the limit from the wrong row.
+    the wrong time axis, reads the limit from the wrong row, or rebuilds the grid
+    program for new report values after the same shape has been warmed.
     """
+    before = compile_count() + cache_hit_count()
     data0 = photomancy_report(channel, STAR, np.zeros((2, channel.widths()[0])), 0)
+    assert compile_count() + cache_hit_count() - before <= 10
     sep = float(data0.sep_grid[0, PROBE_NODE])
     rows, intervals, planet, _limits = _probe_rows(channel, sep)
+    before = compile_count() + cache_hit_count()
     data = photomancy_report(channel, STAR, rows, 0)
+    assert compile_count() + cache_hit_count() == before
     prepared = channel._prepared(STAR, channel.imaging_band_index, nominal=True)
     mass = float(prepared.star_mass_kg)
     a_au = float(planet["a"])
@@ -160,6 +165,13 @@ def test_report_likelihood_equals_the_channel_law_at_truth(channel):
             total -= float(law.log_position_density(row, predicted, True))
     assert np.isfinite(ours) and np.isfinite(total)
     np.testing.assert_allclose(ours, total, atol=1e-3, rtol=0)
+    before = compile_count() + cache_hit_count()
+    other = photomancy_report(channel, STAR + 1, rows, 0)
+    assert compile_count() + cache_hit_count() == before
+    assert not np.allclose(other.limit_grid, data.limit_grid, equal_nan=True)
+    for invalid in (0.5, True):
+        with pytest.raises(TypeError, match="subject must be an integer"):
+            photomancy_report(channel, invalid, rows, 0)
 
 
 def _circular(channel, sep_lod, radius_re, albedo):

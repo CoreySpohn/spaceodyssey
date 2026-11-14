@@ -26,8 +26,6 @@ from tests.studies.bracket_helpers import (
     charged_days,
     columns_of,
     decide_once,
-    fixture_channel,
-    fixture_source,
     fold_rows,
     spec_row,
     state_with,
@@ -40,10 +38,10 @@ base_study = test_criterion_contract.fixture_study
 
 
 @pytest.fixture(scope="module")
-def fixture_study(base_study):
+def fixture_study(base_study, bracket_channel):
     return dataclasses.replace(
         base_study,
-        channel_model=fixture_channel(fixture_source()),
+        channel_model=bracket_channel,
         observer=dataclasses.replace(
             base_study.observer, criterion=test_criterion_contract._TwoLeafCriterion()
         ),
@@ -80,7 +78,9 @@ def test_each_preset_opens_exactly_its_columns(name):
 @pytest.mark.medium(
     reason="loads the shared physical channel and round-trips a study document"
 )
-def test_the_printed_line_is_decoded_from_the_document(fixture_study, base_study):
+def test_the_printed_line_is_decoded_from_the_document(
+    fixture_study, base_study, bracket_source
+):
     """Fails if the grants line is a label rather than what the study holds."""
     with_model = dataclasses.replace(
         fixture_study, planning_model=fixture_study.channel_model
@@ -88,7 +88,7 @@ def test_the_printed_line_is_decoded_from_the_document(fixture_study, base_study
     assert grants_in_force(fixture_study)["model"] == "truth"
     assert grants_in_force(with_model)["model"] == "declared"
     with_population = dataclasses.replace(
-        fixture_study, belief_population=fixture_source().generator
+        fixture_study, belief_population=bracket_source.generator
     )
     assert grants_in_force(fixture_study)["population"] == "truth"
     assert grants_in_force(with_population)["population"] == "declared"

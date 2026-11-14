@@ -9,6 +9,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
+from hwoutils.testbudget.compiles import cache_hit_count, compile_count
 
 from spaceodyssey import core
 from spaceodyssey import core as sch
@@ -80,7 +81,14 @@ def test_every_handler_has_uniform_output_structure(kind):
 
 
 def test_init_carry_has_the_public_kickoff_wake():
-    c = carry0()
+    """Fails if kickoff is missing or initialization dispatches primitive programs."""
+    before = compile_count() + cache_hit_count()
+    c = core.init_carry(STUDY, TRUTH)
+    assert compile_count() + cache_hit_count() - before <= 10
+    before = compile_count() + cache_hit_count()
+    without_truth = core.init_carry(STUDY, None)
+    assert compile_count() + cache_hit_count() == before
+    assert eqx.tree_equal(c, without_truth)
     assert int(c.ev.valid.sum()) == 1 and int(c.next_sid) == 1
     row = jax.tree_util.tree_map(lambda a: a[int(jnp.argmax(c.ev.valid))], c.ev)
     assert (int(row.tick), int(row.stage), int(row.kind)) == (

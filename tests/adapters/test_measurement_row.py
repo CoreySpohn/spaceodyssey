@@ -8,31 +8,40 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from spaceodyssey.adapters.jaxedith import planet_free
+from spaceodyssey.adapters.jaxedith import ObservingModeChannel, planet_free
 from spaceodyssey.adapters.measurement import measurement_kind
 from spaceodyssey.core.enums import Audience
 from spaceodyssey.core.records import layout_size, pack, unpack
 from tests.adapters.test_observing_mode import _context, _truth
-from tests.studies.bracket_helpers import N_SLOTS, fixture_channel, fixture_source
+from tests.studies.bracket_helpers import N_SLOTS
 
 KEY = jax.random.key(0)
+_realize = eqx.filter_jit(ObservingModeChannel.realize)
 
 
 @pytest.fixture(scope="module")
-def source():
-    return fixture_source()
+def source(bracket_source):
+    return bracket_source
 
 
 @pytest.fixture(scope="module")
-def channel(source):
-    return fixture_channel(source)
+def channel(bracket_channel):
+    return bracket_channel
 
 
 def realize(channel, source, channel_index, key=KEY):
     """Packed row of the first fixture star, with science starting near day 100."""
     context = _context(channel, 100.0, channel.mode_table.duration_s(channel_index))
-    return channel.realize(
-        _truth(source, 0), 0, channel_index, 1.0, key, None, None, context=context
+    return _realize(
+        channel,
+        _truth(source, 0),
+        jnp.asarray(0),
+        jnp.asarray(channel_index),
+        jnp.asarray(1.0),
+        key,
+        None,
+        None,
+        context=context,
     )
 
 

@@ -10,12 +10,11 @@ import pytest
 from spaceodyssey.core import record_none
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import I64
-from tests.studies.bracket_helpers import build
 
 
 @pytest.fixture(scope="module")
-def study():
-    return build(run=False)[1]
+def study(bracket_study):
+    return bracket_study
 
 
 def record_at(channel_index, *, detected=True):

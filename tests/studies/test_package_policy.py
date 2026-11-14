@@ -40,8 +40,8 @@ pytestmark = pytest.mark.medium(
 
 
 @pytest.fixture(scope="module")
-def fixture():
-    return build(run=False).study
+def fixture(bracket_study):
+    return bracket_study
 
 
 def test_a_package_starts_only_at_its_selected_node(fixture):

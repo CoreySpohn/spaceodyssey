@@ -31,14 +31,14 @@ from spaceodyssey.adapters.skyscapes import (
 )
 from spaceodyssey.core.enums import EffectKind
 from spaceodyssey.criteria.claims import EarthCandidateClaim, claims_on_truth
+from spaceodyssey.studies import bracket as br
 from tests.adapters.test_report_posterior_refit import _null_lane
 from tests.studies.bracket_helpers import (
-    build,
     decide_once,
     effect_kind,
-    fixture_source,
     state_with,
     summary_selecting_node,
+    with_grants,
 )
 
 KEY = jax.random.PRNGKey(0)
@@ -56,9 +56,8 @@ def population_scaled(population, rate_factor):
 
 
 @pytest.fixture(scope="module")
-def boundary_inputs():
+def boundary_inputs(bracket_study):
     """A small exact population: one cell, no stability removal, no misses."""
-    source = fixture_source(1)
     population = dataclasses.replace(
         PopulationModel.exovista(),
         occurrence=occurrence_table_from_grid(
@@ -70,7 +69,7 @@ def boundary_inputs():
         config=PopulationConfig(max_planets=2, max_iterations=1, mutual_hill_min=0.0),
         n_pool_systems=8,
     )
-    _, study, *_ = build(run=False, source=source, arm="replan")
+    study = with_grants(bracket_study, br.GRANT_PRESETS["replan"])
     boundary = ph.ReportRefit(
         kernel="posterior",
         n_first=8,

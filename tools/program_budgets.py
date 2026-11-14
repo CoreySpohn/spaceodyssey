@@ -4,8 +4,9 @@ Usage: python tools/program_budgets.py budget.json [budget.json ...]
        [--scale 1.15] [--pad 10]
 
 Each JSON is written by ``pytest --budget-json PATH`` on a run with
-``clear_caches = true``, where a file's count is the programs it compiles or
-loads from the persistent cache with nothing carried over from earlier files.
+per-module cache clearing in ``tests/conftest.py``, where a file's count is the
+programs it compiles or loads from the persistent cache with nothing carried over
+from earlier files.
 With several runs the largest count of each file is used. The budget is
 ``ceil(count * scale) + pad``: the headroom absorbs a session-scoped fixture
 built by whichever file uses it first, and differences between machines.

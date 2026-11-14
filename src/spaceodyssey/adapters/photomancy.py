@@ -1057,6 +1057,7 @@ class _ShrinkLane(_FitLane):
     truth: PlanetParameters  # catalog parameters of the slot
 
 
+@eqx.filter_jit(inline=True)
 def _grid_entry(channel, lane, grid_points):
     """Photomancy-ready arrays of one entry's reports, every slot.
 
@@ -1141,7 +1142,14 @@ def photomancy_report(channel, subject, rows, slot, grid_points=GRID_POINTS):
     """
     refit = _photomancy_refit()
     rows = jnp.asarray(rows, F64)
-    lane = _RowLane(payload=rows, use=jnp.ones(rows.shape[0], bool), subject=subject)
+    subject = jnp.asarray(subject)
+    if not jnp.issubdtype(subject.dtype, jnp.integer):
+        raise TypeError("subject must be an integer index")
+    lane = _RowLane(
+        payload=rows,
+        use=jnp.ones(rows.shape[0], bool),
+        subject=subject.astype(I64),
+    )
     g = _grid_entry(channel, lane, grid_points)
     return refit.ReportData(
         epochs=g["epochs"],

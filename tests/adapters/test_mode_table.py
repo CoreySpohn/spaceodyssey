@@ -3,6 +3,7 @@
 import dataclasses
 import json
 
+import jax
 import numpy as np
 import pytest
 from hwoutils.constants import d2s
@@ -21,7 +22,6 @@ from spaceodyssey.adapters.modes import (
 )
 from spaceodyssey.adapters.physical_profile import JATIS_EAC1_V1
 from spaceodyssey.adapters.skyscapes import Band, star_spec_from_model
-from tests.studies.bracket_helpers import build, fixture_channel, fixture_source
 
 EPOCH_JD = 2462502.5
 pytestmark = pytest.mark.medium(reason="builds declared reports and host scenes")
@@ -59,13 +59,13 @@ def channel_with(stars, modes):
 
 
 @pytest.fixture(scope="module")
-def channel():
-    return fixture_channel(fixture_source())
+def channel(bracket_channel):
+    return bracket_channel
 
 
 @pytest.fixture(scope="module")
-def study():
-    return build(run=False)[1]
+def study(bracket_study):
+    return bracket_study
 
 
 def test_channels_are_found_by_mode_name(channel):
@@ -83,7 +83,7 @@ def test_channels_are_found_by_mode_name(channel):
 
 
 def test_a_third_mode_needs_no_index_arithmetic(stars):
-    """Fails if adding a spectrograph mode moves another mode's channels or its band."""
+    """Fails if a new mode moves channels or rebuilds the same pinned response."""
     extra = ModeSpec(
         "ifs_760",
         "spectrograph",
@@ -103,6 +103,14 @@ def test_a_third_mode_needs_no_index_arithmetic(stars):
     assert report.wavelength_nm == 760.0
     assert report.resolving_power == 140.0
     assert report.detector_spec.frame_time_s == 300.0
+    backend = two.assets().reports[0].optical_path.coronagraph._backend
+    assert all(
+        r.optical_path.coronagraph._backend is backend
+        for r in (*two.assets().reports, *three.assets().reports)
+    )
+    with jax.default_matmul_precision("highest"):
+        other = channel_with(stars, base).assets()
+    assert other.reports[0].optical_path.coronagraph._backend is not backend
 
 
 def test_the_source_holds_no_characterization_requirement(channel):
@@ -173,6 +181,13 @@ def test_imaging_modes_require_one_reporting_threshold(stars):
     law = ReportingLaw(threshold=9.0, kappa=2.0, corr=0.25)
     explicit = ObservingModeChannel.from_stars(stars, law=law, **kwargs)
     assert explicit.assets().law == law
+    assert all(
+        a.optical_path.coronagraph._backend is b.optical_path.coronagraph._backend
+        for a, b in zip(
+            inferred.assets().reports, explicit.assets().reports, strict=True
+        )
+    )
+    assert inferred.assets().calibration_id != explicit.assets().calibration_id
 
 
 def test_channel_table_charges_occupancy_to_the_named_resource(study):

@@ -41,6 +41,7 @@ from skyscapes.physical_model import GridPhysicalModel
 from skyscapes.scene import Planet, Star, System
 from yippy.datasets import CATALOG
 
+from spaceodyssey.adapters import jaxedith as adapter
 from spaceodyssey.adapters.jaxedith import (
     CADENCE_CODES,
     YIP_DIGEST,
@@ -885,6 +886,20 @@ def test_survey_snr_and_exposure_time_over_one_orbit(yip_report, observatory):
     assert solved >= 6
 
 
-def test_pinned_package_digest_matches_yippy_catalog():
-    """Fails if yippy's catalog digest for the pinned package moves."""
+def test_pinned_package_digest_matches_yippy_catalog(monkeypatch):
+    """Fails if the pin moves or a cached response bypasses pin validation."""
     assert CATALOG["eac1_aavc_2d"]["md5"] == YIP_DIGEST
+    cached = object()
+    monkeypatch.setattr(adapter, "_cached_pinned_response", lambda key: cached)
+    assert adapter._pinned_response(None) is cached
+    with monkeypatch.context() as patch:
+        entry = {**CATALOG[adapter.YIP_NAME], "md5": "changed"}
+        patch.setitem(CATALOG, adapter.YIP_NAME, entry)
+        with pytest.raises(ValueError, match="digest"):
+            adapter._pinned_response(None)
+        with pytest.raises(ValueError, match="digest"):
+            fetch_pinned_yip()
+    with monkeypatch.context() as patch:
+        patch.setattr(adapter, "DATA_RELEASE_TAG", "changed")
+        with pytest.raises(ValueError, match="release"):
+            adapter._pinned_response(None)

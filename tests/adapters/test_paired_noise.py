@@ -2,6 +2,7 @@
 
 import dataclasses
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -12,12 +13,13 @@ from spaceodyssey.core.keys import asset_coordinate, draw_key
 from spaceodyssey.core.kinds import realize_row
 from spaceodyssey.core.records import record_none, unpack
 from tests.adapters.test_observing_mode import _truth
-from tests.studies.bracket_helpers import build
+
+_realize_row = eqx.filter_jit(realize_row)
 
 
 @pytest.fixture(scope="module")
-def study():
-    return build(run=False)[1]
+def study(bracket_study):
+    return bracket_study
 
 
 @pytest.fixture(scope="module")
@@ -52,7 +54,7 @@ def realize_measurement(
     )
     return unpack(
         study.channel_model.measurement_template,
-        realize_row(study, truth, rec, jnp.asarray(1.0), key),
+        _realize_row(study, truth, rec, jnp.asarray(1.0), key),
     )
 
 

@@ -491,6 +491,32 @@ def test_the_build_runs_under_the_callers_jax_settings(monkeypatch):
         ("float64", None),
         ("float64", "highest"),
     ]
+    # Exercise the response cache separately without replacing any physical report.
+    cache = functools.lru_cache(maxsize=4)(jaxedith._cached_pinned_response.__wrapped__)
+    with monkeypatch.context() as patch:
+        patch.setattr(jaxedith, "_construct_pinned_response", stub)
+        patch.setattr(jaxedith, "_cached_pinned_response", cache)
+        start = len(seen)
+        with jax.enable_x64(False):
+            first = jaxedith._pinned_response(None)
+        with jax.enable_x64(True):
+            second = jaxedith._pinned_response(None)
+            again = jaxedith._pinned_response(None)
+            aperture = jaxedith._pinned_response(0.9)
+        with jax.enable_x64(True), jax.default_matmul_precision("highest"):
+            third = jaxedith._pinned_response(None)
+        assert (first, second, aperture, third) == tuple(range(start + 1, start + 5))
+        assert again == second
+        assert seen[start:] == [
+            ("float32", None),
+            ("float64", None),
+            ("float64", None),
+            ("float64", "highest"),
+        ]
+        aperture_array = np.asarray(0.9)
+        patch.setattr(jaxedith, "fetch_pinned_yip", lambda: "response")
+        patch.setattr(jaxedith, "_response_from_path", lambda path, value: value)
+        assert jaxedith._pinned_response(aperture_array) is aperture_array
 
 
 def test_an_edited_profile_is_not_served_a_stale_build(monkeypatch):

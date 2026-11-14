@@ -14,8 +14,6 @@ from spaceodyssey.core.kinds import RealizeContext
 from spaceodyssey.core.records import unpack
 from tests.studies.bracket_helpers import (
     N_SLOTS,
-    fixture_channel,
-    fixture_source,
 )
 
 pytestmark = pytest.mark.medium(reason="loads the fixture and compiles the channel")
@@ -24,13 +22,13 @@ DETECT_DURATION = 1
 
 
 @pytest.fixture(scope="module")
-def source():
-    return fixture_source()
+def source(bracket_source):
+    return bracket_source
 
 
 @pytest.fixture(scope="module")
-def channel(source):
-    return fixture_channel(source)
+def channel(bracket_channel):
+    return bracket_channel
 
 
 def _context(channel, start_d, length_s):

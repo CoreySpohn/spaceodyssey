@@ -19,13 +19,13 @@ from spaceodyssey.studies.scoring import (
     row_log,
     verdict,
 )
-from tests.studies.bracket_helpers import build, needs_mode
+from tests.studies.bracket_helpers import needs_mode
 from tests.studies.test_scoring import CRITERION, MODES, hand_scored_log
 
 
 @pytest.fixture(scope="module")
-def scored_case():
-    return hand_scored_log(build(run=False).study)
+def scored_case(bracket_study):
+    return hand_scored_log(bracket_study)
 
 
 def flight(scored_case, criterion, exposures):
