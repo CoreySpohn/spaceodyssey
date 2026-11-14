@@ -71,6 +71,10 @@ class StubChannel(eqx.Module):
         shape = jnp.exp(-0.5 * ((c - 0.2 * mode) / 0.5) ** 2)
         return 0.9 * shape * (1.0 - 0.1 * subject) * (1.0 - 0.3 * elements.ecc)
 
+    def predicted_counts(self, subject, channel_index, start_d, params):
+        counts = (channel_index + 1) * jnp.exp(params.ln_period_d) + start_d + subject
+        return counts, counts + 1.0
+
     def sky_position(self, subject, time_d, elements):
         ph = self._phase(time_d, elements)
         a = 0.01 * jnp.exp(elements.ln_period_d / 1.5)
@@ -88,7 +92,15 @@ def make_study(open_groups=("existence", "ephemeris", "class")):
             measurement_kind(SLOTS, N_BANDS, EVERYONE),
         ]
     )
-    prior = DecisionSummary.zeros(N_SUBJECTS, SLOTS, GRID, MODES, n_an=4, n_claims=1)
+    prior = DecisionSummary.zeros(
+        N_SUBJECTS,
+        SLOTS,
+        GRID,
+        MODES,
+        n_an=4,
+        n_claims=1,
+        n_variants=StubChannel().mode_table.catalog_channel,
+    )
     observer = SummaryObserver(
         prior=prior,
         criterion=ImagingCriterion(claims=(EarthCandidateClaim(),)),
@@ -340,7 +352,15 @@ def test_a_wider_registered_kind_does_not_add_phantom_slots():
             wide,
         ]
     )
-    prior = DecisionSummary.zeros(N_SUBJECTS, 1, GRID, MODES, n_an=4, n_claims=1)
+    prior = DecisionSummary.zeros(
+        N_SUBJECTS,
+        1,
+        GRID,
+        MODES,
+        n_an=4,
+        n_claims=1,
+        n_variants=StubChannel().mode_table.catalog_channel,
+    )
     caps = registry.lower(
         Capacities(n_subjects=N_SUBJECTS, rows_per_subject=ROWS, refit_lanes=2),
         SummaryObserver(prior=prior, criterion=ImagingCriterion(claims=())),
@@ -349,7 +369,7 @@ def test_a_wider_registered_kind_does_not_add_phantom_slots():
 
 
 def test_an_entry_without_a_catalog_row_installs_nothing():
-    """With no catalog row every leaf is zero and the status is `NO_SUPPORT`."""
+    """Fails if a missing catalog row supplies belief or masks available variants."""
     study = make_study()
     request = make_request(study, 1)
     rows = request.rows
@@ -360,5 +380,7 @@ def test_an_entry_without_a_catalog_row_installs_nothing():
     out = ReportRefit().refit_batch(study, request)
     assert (np.asarray(out.status) == RefitStatus.NO_SUPPORT).all()
     for name, piece in zip(study.observer.subject_leaves, out.slices, strict=True):
-        if name != "status":
+        if name == "available":
+            assert np.asarray(piece).all(), name
+        elif name != "status":
             assert not np.asarray(piece).any(), name

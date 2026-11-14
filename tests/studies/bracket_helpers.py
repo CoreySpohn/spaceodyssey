@@ -84,7 +84,13 @@ def fixture_channel(source, **kw):
 def prior_summary(channel, n_stars, p_exist=0.0):
     """The first-tier summary the observer starts from (`p_exist` everywhere)."""
     summary = DecisionSummary.zeros(
-        n_stars, N_SLOTS, N_GRID, channel.n_modes, n_an=1, n_claims=1
+        n_stars,
+        N_SLOTS,
+        N_GRID,
+        channel.n_modes,
+        n_an=1,
+        n_claims=1,
+        n_variants=channel.mode_table.catalog_channel,
     )
     return eqx.tree_at(
         lambda x: (x.p_exist, x.p_det, x.p_claim),

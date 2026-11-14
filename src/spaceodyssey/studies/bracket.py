@@ -615,6 +615,7 @@ _SLOT_LEAVES = tuple(
     not in (
         "ref_tick",
         "n_obs",
+        "available",
         "status",
     )
 )

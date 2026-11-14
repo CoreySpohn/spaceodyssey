@@ -19,6 +19,8 @@ from tests.studies.bracket_helpers import N_SLOTS, build
 
 CONSTANTS = dict(
     p_det=0.2,
+    fc_counts=0.8,
+    fc_variance=0.9,
     scatter=0.3,
     pos_mean=0.4,
     p_claim=0.5,
@@ -32,6 +34,8 @@ def constant_result(n_slots, updater_status=None):
     """Each summary leaf has a distinct value, so swaps cannot pass unnoticed."""
     shapes = dict(
         p_det=(2, 2),
+        fc_counts=(2, 4, 3),
+        fc_variance=(2, 4, 3),
         scatter=(),
         pos_mean=(2,),
         p_claim=(1,),
@@ -55,12 +59,13 @@ def constant_result(n_slots, updater_status=None):
         else np.asarray(updater_status),
         finite=np.ones(n_slots, bool),
         draws=params,
+        available=np.ones((n_slots, 2, 4), bool),
     )
 
 
 def empty_summary():
     """A writable host summary with world and audience axes like refit slices."""
-    summary = ph.DecisionSummary.zeros(2, N_SLOTS, 2, 2, n_claims=1)
+    summary = ph.DecisionSummary.zeros(2, N_SLOTS, 2, 2, n_claims=1, n_variants=4)
     return jax.tree.map(lambda x: np.broadcast_to(x, (1, 2, *x.shape)).copy(), summary)
 
 
@@ -72,9 +77,22 @@ def test_a_lane_result_scatters_into_the_summary_by_name():
         np.testing.assert_array_equal(getattr(summary, name)[0, 0, 1], value)
         np.testing.assert_array_equal(getattr(summary, name)[0, 1, 1], 0.0)
     np.testing.assert_array_equal(summary.status[0, 0, 1], ph.SLOT_OK)
+    np.testing.assert_array_equal(summary.available, True)
+    unbounded = dataclasses.replace(
+        result, fc_variance=np.full_like(result.fc_variance, np.inf)
+    )
+    accepted = ph.scatter_results(empty_summary(), {(0, 0, 1): unbounded})
+    np.testing.assert_array_equal(accepted.status[0, 0, 1], ph.SLOT_OK)
+    assert np.isposinf(accepted.fc_variance[0, 0, 1]).all()
     for broken, code in (
         (dataclasses.replace(result, finite=np.zeros(N_SLOTS, bool)), ph.SLOT_FAILED),
         (dataclasses.replace(result, scatter=np.full(N_SLOTS, np.nan)), ph.SLOT_FAILED),
+        (
+            dataclasses.replace(
+                result, fc_variance=np.full_like(result.fc_variance, np.nan)
+            ),
+            ph.SLOT_FAILED,
+        ),
         (
             dataclasses.replace(
                 result, updater_status=np.full(N_SLOTS, int(UpdaterStatus.NO_SUPPORT))

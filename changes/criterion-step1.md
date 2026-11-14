@@ -407,3 +407,23 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   layouts and refit preservation, and imports without physical dependencies.
   Existing imaging fixtures supply an explicit empty-state criterion. No tests
   are retired, parameter matrices expanded, or goldens and pinned hashes changed.
+
+## Forecast and availability leaves
+
+- Summaries carry criterion-independent count quantiles and the model variance
+  of each selected draw for every future node and non-catalog channel. The
+  quantiles default to (1/6, 1/2, 5/6) and are configurable in the report refit.
+  Truth, posterior, shrinkage, dark-slot and stored-cloud paths carry these leaves.
+- Forecasts select the channel's band, albedo and science duration against its
+  nominal catalog-mass scene. Node epochs start the science exposure. Availability
+  is a Boolean per-star [G, V] leaf and is all true, including without a fit.
+- At S=6, G=16, V=36, Q=3, C=1, B=3, with three imaging durations and packed
+  state width W=2*S*B, the complete summary uses 169600 bytes per star per
+  audience (165.625 KiB), or 339200 bytes for both audiences (331.25 KiB).
+  The closed form is 8*(2 + S*(10+C+G*M) + 2*S*G*V*Q + W) + G*V bytes,
+  where M=3. The admission test enforces a 256 KiB ceiling per star per audience.
+- Add five tests for weighted forecasts, paired variance, configurable quantiles,
+  dark clouds, memory admission and one-point real-channel integration. Extend the
+  named scatter checks to forecasts and availability; preserve infinite model
+  variance and reject NaNs. No tests are retired or parameter matrices expanded.
+  Goldens and pinned hashes are unchanged.

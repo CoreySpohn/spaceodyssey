@@ -404,13 +404,14 @@ def photomancy_bindings():
 # policy decides from. `DecisionSummary` holds them per star; `summarize` turns one
 # slot's weighted orbit cloud into its leaves, and `ReportRefit` fills them.
 #
-# A channel the summary reads (`study.channel_model`) answers three questions, each
+# A channel the summary reads (`study.channel_model`) answers four questions, each
 # for a `PlanetParameters` cloud whose named leaves have a leading draw axis `n`
 # (albedo also has a trailing band axis `B`), and for one subject at `time_d`,
 # days from the study epoch:
 #
 # - `detect_probability(subject, channel_index, time_d, params) -> (n,)`
 # - `sky_position(subject, time_d, elements) -> (n, 2)`: east and north, arcsec
+# - `predicted_counts(subject, channel_index, start_d, params) -> ((n,), (n,))`
 # - `luminosity(subject) -> float`: solar luminosities
 #
 # and carries `mode_table.imaging_channels` and `tick_days` (days per clock tick).
@@ -428,8 +429,8 @@ class DecisionSummary(eqx.Module):
     """What a policy decides from, per star: leaves `[n_subjects, ...]`.
 
     `S` slots, `G` future epochs spaced `GRID_SPACING_D` days from `ref_tick`, `M`
-    detection modes. `aux` is the observer's per-world slot (not per star) and
-    carries no belief.
+    detection variants, `V` non-catalog channels, `Q` forecast quantiles. `aux` is
+    the observer's per-world slot (not per star) and carries no belief.
     """
 
     ref_tick: jax.Array  # I64 [n], tick of the refit
@@ -437,6 +438,9 @@ class DecisionSummary(eqx.Module):
     p_exist: jax.Array  # [n, S], posterior probability the slot holds a planet
     n_det: jax.Array  # I64 [n, S], detections of the slot
     p_det: jax.Array  # [n, S, G, M], detection probability conditional on existence
+    fc_counts: jax.Array  # F64 [n, S, G, V, Q], predicted counts
+    fc_variance: jax.Array  # F64 [n, S, G, V, Q], paired model variance
+    available: jax.Array  # bool [n, G, V], variant availability
     scatter: jax.Array  # [n, S], predicted-position scatter, arcsec
     pos_mean: jax.Array  # [n, S, 2], predicted position, arcsec
     p_claim: jax.Array  # [n, S, C], probabilities of the declared claims
@@ -448,9 +452,24 @@ class DecisionSummary(eqx.Module):
 
     @classmethod
     def zeros(
-        cls, n_subjects, n_slots, n_grid, n_modes, n_an=0, *, n_claims=0, n_state=0
+        cls,
+        n_subjects,
+        n_slots,
+        n_grid,
+        n_modes,
+        n_an=0,
+        *,
+        n_claims=0,
+        n_state=0,
+        n_variants=0,
+        n_quantiles=3,
     ):
-        """An all-zero summary of the given capacities."""
+        """Zero belief leaves and all-true availability at the given capacities.
+
+        Set `n_variants` to the mode table's non-catalog channel count and
+        `n_quantiles` to the refit's forecast quantile count. The default empty
+        variant axis supports summaries used without a forecast refit.
+        """
         n, s, g, m = n_subjects, n_slots, n_grid, n_modes
         return cls(
             ref_tick=jnp.zeros(n, I64),
@@ -458,6 +477,9 @@ class DecisionSummary(eqx.Module):
             p_exist=jnp.zeros((n, s), F64),
             n_det=jnp.zeros((n, s), I64),
             p_det=jnp.zeros((n, s, g, m), F64),
+            fc_counts=jnp.zeros((n, s, g, n_variants, n_quantiles), F64),
+            fc_variance=jnp.zeros((n, s, g, n_variants, n_quantiles), F64),
+            available=jnp.ones((n, g, n_variants), jnp.bool_),
             scatter=jnp.zeros((n, s), F64),
             pos_mean=jnp.zeros((n, s, 2), F64),
             p_claim=jnp.zeros((n, s, n_claims), F64),
@@ -494,6 +516,9 @@ class SlotLeaves(eqx.Module):
     """One slot's summary leaves."""
 
     p_det: jax.Array  # [G, M]
+    fc_counts: jax.Array  # [G, V, Q]
+    fc_variance: jax.Array  # [G, V, Q]
+    available: jax.Array  # bool [G, V]
     scatter: jax.Array
     pos_mean: jax.Array  # [2]
     p_claim: jax.Array
@@ -512,12 +537,17 @@ def kish_size(log_w):
     return 1.0 / jnp.sum(w * w)
 
 
-def weighted_quantiles(x, log_w, probs=(0.16, 0.5, 0.84)):
-    """Quantiles of `x` under the weights, by the weighted empirical distribution."""
+def _quantile_indices(x, log_w, probs):
+    """Draw indices at quantiles of the weighted empirical distribution of `x`."""
     order = jnp.argsort(x)
     cum = jnp.cumsum(_normalized(log_w)[order])
     cut = jnp.searchsorted(cum, jnp.asarray(probs, cum.dtype))
-    return x[order][jnp.clip(cut, 0, x.shape[0] - 1)]
+    return order[jnp.clip(cut, 0, x.shape[0] - 1)]
+
+
+def weighted_quantiles(x, log_w, probs=(0.16, 0.5, 0.84)):
+    """Quantiles of `x` under the weights, by the weighted empirical distribution."""
+    return x[_quantile_indices(x, log_w, probs)]
 
 
 def _grid_times(channel, ref_tick, tick_days, n_grid, spacing_d):
@@ -535,6 +565,21 @@ def _detect_draws(elements, subject, channel, times):
     return jax.vmap(lambda time: jax.vmap(lambda mode: at(mode, time))(modes))(times)
 
 
+def _forecast_draws(elements, log_w, subject, channel, times, quantiles):
+    """Counts and their paired model variances at weighted quantiles [G, V, Q]."""
+    variants = jnp.arange(channel.mode_table.catalog_channel, dtype=I64)
+
+    def at(time):
+        def variant(index):
+            counts, variance = channel.predicted_counts(subject, index, time, elements)
+            selected = _quantile_indices(counts, log_w, quantiles)
+            return counts[selected], variance[selected]
+
+        return jax.lax.map(variant, variants)
+
+    return jax.vmap(at)(times)
+
+
 def summarize(
     elements,
     log_w,
@@ -546,6 +591,7 @@ def summarize(
     claims=(),
     tick_days=None,
     n_grid=N_GRID,
+    forecast_quantiles=(1 / 6, 1 / 2, 5 / 6),
     spacing_d=GRID_SPACING_D,
     position_lag_d=POSITION_LAG_D,
 ):
@@ -557,7 +603,9 @@ def summarize(
     the likelihood and the summary share one sensitivity model.
     `last_det_d` is the last detection time in days (the refit time when absent) and
     the predicted position is read `position_lag_d` later. Claims are predicates
-    evaluated on the same weighted physical draws.
+    evaluated on the same weighted physical draws. Forecasts use the weighted
+    empirical count quantiles and retain the model variance of each selected draw;
+    the node epochs start the variant's science exposure.
     """
     # A fused fit must summarize the same cloud precision that a later refit reads.
     elements, log_w = jax.lax.optimization_barrier((elements, log_w))
@@ -565,6 +613,9 @@ def summarize(
     w = _normalized(log_w)
     times = _grid_times(channel, ref_tick, tick_days, n_grid, spacing_d)
     p_det = jnp.einsum("gmn,n->gm", _detect_draws(elements, subject, channel, times), w)
+    fc_counts, fc_variance = _forecast_draws(
+        elements, log_w, subject, channel, times, forecast_quantiles
+    )
     base = jnp.asarray(ref_tick, F64) * tick_days
     last = base if last_det_d is None else last_det_d
     xy = channel.sky_position(subject, last + position_lag_d, elements)
@@ -572,6 +623,9 @@ def summarize(
     scatter = jnp.sqrt(w @ jnp.sum((xy - mean) ** 2, axis=-1))
     return SlotLeaves(
         p_det=p_det,
+        fc_counts=fc_counts,
+        fc_variance=fc_variance,
+        available=jnp.ones(fc_counts.shape[:2], jnp.bool_),
         scatter=scatter,
         pos_mean=mean,
         p_claim=summarize_claims(
@@ -629,6 +683,7 @@ def _truth_entry(channel, entry, settings):
             last_det_d=last,
             claims=settings.claims,
             n_grid=settings.n_grid,
+            forecast_quantiles=settings.forecast_quantiles,
             spacing_d=settings.spacing_d,
             position_lag_d=settings.position_lag_d,
         )
@@ -647,6 +702,9 @@ def _truth_entry(channel, entry, settings):
         "p_exist": present.astype(F64),
         "n_det": n_det,
         "p_det": keep(leaves.p_det),
+        "fc_counts": keep(leaves.fc_counts),
+        "fc_variance": keep(leaves.fc_variance),
+        "available": jnp.ones(leaves.available.shape[1:], jnp.bool_),
         "scatter": keep(leaves.scatter),
         "pos_mean": keep(leaves.pos_mean),
         "p_claim": keep(leaves.p_claim),
@@ -656,6 +714,7 @@ def _truth_entry(channel, entry, settings):
     # without a catalog row nothing was read: the leaves are zero, not row 0's values
     out = {k: jnp.where(has_cat, v, jnp.zeros_like(v)) for k, v in leaves_out.items()}
     out["status"] = jnp.full(n_slots, status, I64)
+    out["available"] = leaves_out["available"]
     return out
 
 
@@ -667,6 +726,7 @@ class _Settings:
     catalog: int
     report: int
     n_grid: int
+    forecast_quantiles: tuple
     spacing_d: float
     position_lag_d: float
     claims: tuple
@@ -794,6 +854,7 @@ class _PostSettings:
 
     n_slots: int
     n_grid: int
+    forecast_quantiles: tuple
     spacing_d: float
     position_lag_d: float
     claims: tuple
@@ -887,9 +948,14 @@ class LaneResult(eqx.Module):
 
     `updater_status` holds the raw photomancy code, mapped only at the scatter.
     Draws retain all physical parameters, including the albedo band axis.
+    Forecast leaves are [S, G, V, Q]; availability is a shared star leaf [G, V],
+    repeated along S by batched track programs until the host scatter.
     """
 
     p_det: jax.Array
+    fc_counts: jax.Array
+    fc_variance: jax.Array
+    available: jax.Array
     scatter: jax.Array
     pos_mean: jax.Array
     p_claim: jax.Array
@@ -911,6 +977,8 @@ class _FirstResult(eqx.Module):
 
 _RESULT_LEAVES = (
     "p_det",
+    "fc_counts",
+    "fc_variance",
     "scatter",
     "pos_mean",
     "p_claim",
@@ -926,9 +994,12 @@ def retry_mask(result):
 
 
 def _result_finite(result):
-    """Whether one host track has finite summary leaves and a finite cloud."""
+    """Whether a host track is sound, allowing infinite forecast variance."""
     return bool(result.finite) and all(
-        np.isfinite(getattr(result, name)).all() for name in _RESULT_LEAVES
+        (np.asarray(result.fc_variance) >= 0).all()
+        if name == "fc_variance"
+        else np.isfinite(getattr(result, name)).all()
+        for name in _RESULT_LEAVES
     )
 
 
@@ -939,10 +1010,12 @@ def scatter_results(summary, results):
     the group's slots. Unsupported or failed tracks retain their summary leaves.
     """
     leaves = {
-        name: np.array(getattr(summary, name)) for name in (*_RESULT_LEAVES, "status")
+        name: np.array(getattr(summary, name))
+        for name in (*_RESULT_LEAVES, "available", "status")
     }
     for at, result in results.items():
         slots = range(result.finite.shape[0]) if len(at) == 3 else at[3]
+        leaves["available"][at[:3]] = result.available[0]
         for i, slot in enumerate(slots):
             track = jax.tree.map(lambda x, i=i: x[i], result)
             index = (*at[:3], slot)
@@ -1182,6 +1255,9 @@ def _fit_lane(channel, population, lane, st, engine, scale):
     finite = _parameters_finite(elements)
     return LaneResult(
         p_det=leaves.p_det,
+        fc_counts=leaves.fc_counts,
+        fc_variance=leaves.fc_variance,
+        available=leaves.available,
         scatter=leaves.scatter,
         pos_mean=leaves.pos_mean,
         p_claim=leaves.p_claim,
@@ -1211,6 +1287,7 @@ def _slot_leaves(channel, subject, tick, last, elements, st):
         last_det_d=jnp.where(last >= 0, last_d, tick * channel.tick_days),
         claims=st.claims,
         n_grid=st.n_grid,
+        forecast_quantiles=st.forecast_quantiles,
         spacing_d=st.spacing_d,
         position_lag_d=st.position_lag_d,
     )
@@ -1235,6 +1312,9 @@ def _resummary_lane(channel, lane, st):
     )
     return LaneResult(
         p_det=leaves.p_det,
+        fc_counts=leaves.fc_counts,
+        fc_variance=leaves.fc_variance,
+        available=leaves.available,
         scatter=leaves.scatter,
         pos_mean=leaves.pos_mean,
         p_claim=leaves.p_claim,
@@ -1364,7 +1444,7 @@ def _first_tier_lane(channel, population, lane, st, scale):
 def _first_leaves(
     channel, subject, tick, n_undetected, elements, log_evidence, expected, st
 ):
-    """Existence [scalar], detection [G,M], claims [C] and period quantiles [3]."""
+    """Existence [scalar] and the dark cloud's conditional summary leaves."""
     zeros = jnp.zeros(elements.ln_period_d.shape[0], F64)
     prior = jnp.clip(expected / jnp.maximum(n_undetected, 1), 0.0, 1.0)
     p_exist = jnp.where(n_undetected > 0, posterior_occupancy(prior, log_evidence), 0.0)
@@ -1376,20 +1456,24 @@ def _first_leaves(
         tick,
         claims=st.claims,
         n_grid=st.n_grid,
+        forecast_quantiles=st.forecast_quantiles,
         spacing_d=st.spacing_d,
         position_lag_d=st.position_lag_d,
     )
-    return p_exist, leaves.p_det, leaves.p_claim, leaves.ln_period_q
+    return p_exist, leaves
 
 
 def _dark_result(leaves, ess, updater_status, elements):
     """Name the dark-slot leaves, with inert position leaves as before."""
-    p_exist, p_det, p_claim, ln_period_q = leaves
+    p_exist, leaves = leaves
     return LaneResult(
         p_exist=p_exist,
-        p_det=p_det,
-        p_claim=p_claim,
-        ln_period_q=ln_period_q,
+        p_det=leaves.p_det,
+        fc_counts=leaves.fc_counts,
+        fc_variance=leaves.fc_variance,
+        available=leaves.available,
+        p_claim=leaves.p_claim,
+        ln_period_q=leaves.ln_period_q,
         scatter=jnp.asarray(0.0, F64),
         pos_mean=jnp.zeros(2, F64),
         ess=ess,
@@ -1496,11 +1580,15 @@ def _shrink_lane(channel, population, lane, st, engine, scale):
         last_det_d=jnp.where(last >= 0, last_d, lane.tick * channel.tick_days),
         claims=st.claims,
         n_grid=st.n_grid,
+        forecast_quantiles=st.forecast_quantiles,
         spacing_d=st.spacing_d,
         position_lag_d=st.position_lag_d,
     )
     return LaneResult(
         p_det=leaves.p_det,
+        fc_counts=leaves.fc_counts,
+        fc_variance=leaves.fc_variance,
+        available=leaves.available,
         scatter=leaves.scatter,
         pos_mean=leaves.pos_mean,
         p_claim=leaves.p_claim,
@@ -1673,6 +1761,7 @@ class ReportRefit(AbstractRefitBoundary):
         catalog_kind=CATALOG_KIND_NAME,
         report_kind=MEASUREMENT_KIND_NAME,
         n_grid=N_GRID,
+        forecast_quantiles=(1 / 6, 1 / 2, 5 / 6),
         spacing_d=GRID_SPACING_D,
         position_lag_d=POSITION_LAG_D,
         mass_window=MASS_WINDOW,
@@ -1730,6 +1819,11 @@ class ReportRefit(AbstractRefitBoundary):
         self.catalog_kind = str(catalog_kind)
         self.report_kind = str(report_kind)
         self.n_grid = int(n_grid)
+        self.forecast_quantiles = tuple(float(q) for q in forecast_quantiles)
+        if not self.forecast_quantiles or any(
+            not math.isfinite(q) or not 0 <= q <= 1 for q in self.forecast_quantiles
+        ):
+            raise ValueError("forecast_quantiles must be nonempty and in [0, 1]")
         self.spacing_d = float(spacing_d)
         self.position_lag_d = float(position_lag_d)
         self.mass_window = float(mass_window)
@@ -1766,6 +1860,7 @@ class ReportRefit(AbstractRefitBoundary):
             "catalog_kind": self.catalog_kind,
             "report_kind": self.report_kind,
             "n_grid": self.n_grid,
+            "forecast_quantiles": list(self.forecast_quantiles),
             "spacing_d": self.spacing_d,
             "position_lag_d": self.position_lag_d,
         }
@@ -1831,6 +1926,7 @@ class ReportRefit(AbstractRefitBoundary):
             catalog=names.index(self.catalog_kind),
             report=names.index(self.report_kind),
             n_grid=self.n_grid,
+            forecast_quantiles=self.forecast_quantiles,
             spacing_d=self.spacing_d,
             position_lag_d=self.position_lag_d,
             claims=study.observer.criterion.claims,
@@ -1950,6 +2046,7 @@ class ReportRefit(AbstractRefitBoundary):
         return _PostSettings(
             n_slots=channel.n_slots,
             n_grid=self.n_grid,
+            forecast_quantiles=self.forecast_quantiles,
             spacing_d=self.spacing_d,
             position_lag_d=self.position_lag_d,
             claims=study.observer.criterion.claims,
@@ -2127,6 +2224,7 @@ class ReportRefit(AbstractRefitBoundary):
         own = req.dirty & (req.source == flat[None])
         mine = own & readable[None, :, None]
         slices = {n: np.zeros((n_worlds, 2, count, *s), d) for n, s, d in spec}
+        slices["available"].fill(True)
         status = np.full((n_worlds, 2, count), int(RefitStatus.NO_SUPPORT), np.int64)
         diag = np.zeros((n_worlds, 2, count, self.n_diag))
         tick = np.asarray(req.tick)

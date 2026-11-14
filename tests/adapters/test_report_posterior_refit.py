@@ -521,6 +521,9 @@ def test_the_store_falls_back_to_a_fit_when_it_cannot_answer(world):
     )
     sound = ph.LaneResult(
         p_det=np.zeros(2),
+        fc_counts=np.zeros((2, 4, 3)),
+        fc_variance=np.zeros((2, 4, 3)),
+        available=np.ones((2, 4), bool),
         scatter=np.asarray(0.0),
         pos_mean=np.zeros(2),
         p_claim=np.zeros(2),

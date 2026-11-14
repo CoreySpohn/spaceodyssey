@@ -2407,6 +2407,51 @@ class ObservingModeChannel(AbstractChannelModel):
 
         return jax.vmap(one)(params)
 
+    def predicted_counts(
+        self, subject, channel_index: int, start_d, params: PlanetParameters
+    ):
+        """Predicted counts and model variance, each F64[n], for one variant.
+
+        `start_d` starts the science exposure, in days from the study epoch. The
+        mode selects the band and the channel selects its science duration. The
+        scene uses this channel model's catalog mass, including on a planning view.
+        Variances include the signal and every modeled noise term.
+        """
+        table = self.mode_table
+        duration_s = jnp.asarray(
+            tuple(table.duration_s(c) for c in range(table.catalog_channel)), F64
+        )[channel_index]
+        band_index = jnp.asarray(
+            tuple(
+                table.band_index(table.modes[table.mode_of(c)].name)
+                for c in range(table.catalog_channel)
+            ),
+            I64,
+        )[channel_index]
+        interval = ScienceInterval(
+            self.epoch_jd + jnp.asarray(start_d, F64) + 0.5 * duration_s * s2d,
+            duration_s,
+        )
+
+        def branch(band):
+            def run(_):
+                prepared = self._prepared(subject, band, nominal=True)
+                report = self.assets().reports[band]
+
+                def one(row):
+                    planet, _ = self._belief_planet(row)
+                    planet["Lambda"] = scale_au2(row, band)
+                    budget = report.budget(prepared, planet, interval)
+                    return budget.planet, budget.variance
+
+                return jax.vmap(one)(params)
+
+            return run
+
+        return jax.lax.switch(
+            band_index, tuple(branch(b) for b in range(self.n_bands)), None
+        )
+
     @property
     def overhead_d(self):
         """Days an observation spends settling before its science interval."""

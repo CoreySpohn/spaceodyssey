@@ -178,6 +178,7 @@ require_tier_reason = true
 # tier and the full suite, with headroom; regenerate with tools/program_budgets.py from
 # --budget-json runs of both.
 [tool.testbudget.module_compile_budget_by_file]
+"tests/adapters/test_forecast_leaves.py" = 1520
 "tests/criteria/test_criterion_contract.py" = 197
 "tests/core/test_refits_on.py" = 269
 "tests/studies/test_bracket_refits_on.py" = 514
@@ -196,7 +197,7 @@ require_tier_reason = true
 "tests/adapters/test_refit_lanes.py" = 603
 "tests/adapters/test_report_posterior.py" = 2247
 "tests/adapters/test_report_posterior_refit.py" = 5626
-"tests/adapters/test_report_refit.py" = 204
+"tests/adapters/test_report_refit.py" = 234
 "tests/adapters/test_report_shrinkage.py" = 1895
 "tests/adapters/test_report_shrinkage_rule.py" = 92
 "tests/adapters/test_reporting_law.py" = 1602

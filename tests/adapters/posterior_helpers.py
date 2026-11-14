@@ -107,11 +107,14 @@ def golden_slices(boundary, study, requests):
     computed = req.dirty & np.asarray(boundary._readable(study, channel))[None, :, None]
     spec = ph.slice_spec(study)
     slices = {name: np.zeros((*shape, *tail), dtype) for name, tail, dtype in spec}
+    slices["available"].fill(True)
     status = np.full(shape, int(ph.RefitStatus.NO_SUPPORT), np.int64)
     diagnostics = np.zeros((*shape, boundary.n_diag))
     fields = [f.name for f in dataclasses.fields(ph._FitLane) if f.name != "live"]
     summary_fields = (
         "p_det",
+        "fc_counts",
+        "fc_variance",
         "scatter",
         "pos_mean",
         "p_claim",
@@ -140,6 +143,8 @@ def golden_slices(boundary, study, requests):
             result = run(ph.RETRY_FACTOR)
         positional = (
             result.p_det,
+            result.fc_counts,
+            result.fc_variance,
             result.scatter,
             result.pos_mean,
             result.p_claim,
