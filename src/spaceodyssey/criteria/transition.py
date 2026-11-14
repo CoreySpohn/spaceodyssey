@@ -507,12 +507,17 @@ class TransitionTable(AbstractCriterion):
 
         def option(g, v):
             def track(slot, carry):
-                gain, later_time, left = carry
+                gain, later_time, left, track_gain = carry
                 credit, time, left = slot_package(slot, g, v, left)
-                return gain + credit, later_time + time, left
+                return (
+                    gain + credit,
+                    later_time + time,
+                    left,
+                    track_gain.at[slot].set(credit),
+                )
 
             # The first exposure serves every track; later rows share one allowance.
-            gain, later_time, _ = jax.lax.fori_loop(
+            gain, later_time, _, track_gain = jax.lax.fori_loop(
                 0,
                 state.node.size,
                 track,
@@ -520,17 +525,19 @@ class TransitionTable(AbstractCriterion):
                     jnp.asarray(0.0, F64),
                     jnp.zeros(costs.shape[-1], F64),
                     rows - (imaging == imaging[v]),
+                    jnp.zeros(state.node.size, F64),
                 ),
             )
-            return gain, costs[v] + later_time
+            return gain, costs[v] + later_time, track_gain
 
-        gain, time = jax.vmap(jax.vmap(option, in_axes=(None, 0)), in_axes=(0, None))(
-            jnp.arange(n_grid), jnp.arange(n_variants)
-        )
+        gain, time, track_gain = jax.vmap(
+            jax.vmap(option, in_axes=(None, 0)), in_axes=(0, None)
+        )(jnp.arange(n_grid), jnp.arange(n_variants))
         return StarOptions(
             gain,
             time,
             jnp.broadcast_to(jnp.arange(n_variants, dtype=I64), (n_grid, n_variants)),
+            track_gain,
         )
 
 

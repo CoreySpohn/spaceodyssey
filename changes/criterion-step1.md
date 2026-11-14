@@ -260,3 +260,10 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   from `test_bracket_stale.py`. Criterion verdicts replace confirmation, package
   admission covers funds, and imaging refit-wait tests retain the liveness guard.
   The duplicated bracket `_decide` harnesses and block-only helpers are gone.
+
+## Selection evidence follows shared row allocation
+
+- Transition packages expose each track's gain from the shared row allocation.
+  Final policy selection retains that allocation, while independent feasibility
+  remains available. An open track excluded by a shared row cap receives its
+  unpursued reason in the verdict.

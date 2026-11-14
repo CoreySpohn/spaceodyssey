@@ -795,7 +795,10 @@ class PackagePolicy(AbstractPolicy):
                     axis=-1,
                 )
             )
-            track_flat = track_valid.reshape(n, self.n_tracks, -1)
+            allocated = track_valid
+            if options.track_gain is not None:
+                allocated = track_valid & (jnp.moveaxis(options.track_gain, -1, 1) > 0)
+            track_flat = allocated.reshape(n, self.n_tracks, -1)
             track_selected = (
                 jnp.take_along_axis(
                     track_flat, jnp.maximum(selection.choice, 0)[:, None, None], axis=-1

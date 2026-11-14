@@ -43,6 +43,7 @@ from spaceodyssey.studies.scoring import (
 )
 from tests.adapters.test_truth_albedo import hand_population
 from tests.criteria.test_criterion_contract import _SumCriterion, _TwoLeafCriterion
+from tests.criteria.test_transition_table import package_inputs, two_step_table
 
 from .bracket_helpers import (
     N_SLOTS,
@@ -777,6 +778,66 @@ def test_open_reasons_use_the_final_policy_selection(scored_case):
         ),
     )
     assert verdict(result, study).reason[0, 0, 0] == "unsupported"
+
+
+@pytest.mark.slow(reason="physical fixture, shared-cap policy selection and verdict")
+def test_shared_row_exclusion_reaches_the_open_reason(scored_case):
+    """Fails if a standalone feasible track is selected after shared-cap exclusion."""
+    result, study = scored_case
+    modes = ModeTable(
+        (
+            dataclasses.replace(MODES.modes[0], name="image"),
+            dataclasses.replace(MODES.modes[1], name="a"),
+            dataclasses.replace(MODES.modes[1], name="b"),
+        ),
+        (1.0,),
+    )
+    table = dataclasses.replace(two_step_table(), on_pass=[4, 4], step_labels=[-1, -1])
+    one, settings = package_inputs(p=(1.0, 1.0), n_slots=N_SLOTS)
+    current = dataclasses.replace(
+        table.init_state(N_SLOTS, modes.n_bands), node=jnp.asarray([0, 1, 4, 4, 4, 4])
+    )
+    one = dataclasses.replace(
+        one,
+        state=pack(current),
+        n_det=jnp.full(N_SLOTS, 2),
+        p_det=jnp.ones_like(one.p_det),
+        fc_counts=jnp.full((*one.fc_counts.shape[:-1], modes.n_bands), 50.0),
+        fc_variance=jnp.ones((*one.fc_variance.shape[:-1], modes.n_bands)),
+    )
+    summary = jax.tree.map(lambda x: jnp.stack([x, x]), one)
+    summary = dataclasses.replace(
+        summary, available=summary.available.at[1].set(False), aux=one.aux
+    )
+    policy = dataclasses.replace(
+        study.agenda.policies[0], max_visits=1, max_spectra=1, settings=settings
+    )
+    study = dataclasses.replace(
+        study,
+        observer=dataclasses.replace(study.observer, criterion=table),
+        channel_model=dataclasses.replace(study.channel_model, mode_table=modes),
+        agenda=dataclasses.replace(study.agenda, policies=(policy,)),
+    )
+    decision = decide_once(
+        study, summary=summary, state=state_with(study), balance_d=100
+    )
+    assert int(decision.effects.channel_index[0]) == 0
+    assert decision.selected_d == 12.0
+    np.testing.assert_array_equal(decision.state.has_package[0, :2], [True, True])
+    np.testing.assert_array_equal(decision.state.selected[0, :2], [True, False])
+    result = SimpleNamespace(
+        carry=dataclasses.replace(
+            result.carry,
+            log=dataclasses.replace(
+                result.carry.log, valid=jnp.zeros_like(result.carry.log.valid)
+            ),
+            belief=jax.tree.map(lambda x: x[None], summary),
+            pstate=pack(decision.state)[None],
+        )
+    )
+    actual = verdict(result, study)
+    np.testing.assert_array_equal(actual.mission_label[0, 0, :2], [-1, -1])
+    np.testing.assert_array_equal(actual.reason[0, 0, :2], ["", "below_price"])
 
 
 def test_unsupported_includes_true_scale_in_the_detection_band(scored_case):

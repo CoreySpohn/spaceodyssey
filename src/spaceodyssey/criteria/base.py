@@ -11,11 +11,16 @@ import jax
 
 
 class StarOptions(eqx.Module):
-    """Package gains [G, V], resource times [G, V, R], and first channels [G, V]."""
+    """Package gains [G, V], resource times [G, V, R], and first channels [G, V].
+
+    track_gain [G, V, S], when supplied, retains each track's contribution under
+    the package's shared allocation. None uses independent track feasibility.
+    """
 
     gain: jax.Array
     time: jax.Array
     first_channel: jax.Array
+    track_gain: jax.Array | None = None
 
 
 class AbstractCriterion(eqx.Module):
