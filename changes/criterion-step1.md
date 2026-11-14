@@ -359,3 +359,12 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   sequences, changes to the exposed ordinal, imaging band isolation, distinct
   slot draws and the bracket declarations. Compare normalized draws only where
   the shared mask has finite positive generating variance. No tests are retired.
+
+## Row-level refresh eligibility
+
+- Observers may decline a row's refresh mark with `refits_on`, which defaults to
+  true. Both the compiled handler and keyed replay apply the hook after checking
+  the refit kind. A declined row is still accepted, released and logged, and
+  remains in the subject's revision set for later refits.
+- Add one core test with two executor cases, sharing one compiled run, for
+  declined marks and retained rows in both audiences. No tests are retired.

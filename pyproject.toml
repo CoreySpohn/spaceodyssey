@@ -178,6 +178,7 @@ require_tier_reason = true
 # tier and the full suite, with headroom; regenerate with tools/program_budgets.py from
 # --budget-json runs of both.
 [tool.testbudget.module_compile_budget_by_file]
+"tests/core/test_refits_on.py" = 269
 "tests/adapters/test_declared_population.py" = 886
 "tests/adapters/test_first_tier.py" = 3656
 "tests/adapters/test_jaxedith_summary.py" = 1078

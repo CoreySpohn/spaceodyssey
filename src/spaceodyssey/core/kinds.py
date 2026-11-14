@@ -101,6 +101,14 @@ class AbstractObserver(eqx.Module):
         """The `ObserverCapabilities` of this observer: incremental only."""
         return ObserverCapabilities()
 
+    def refits_on(self, rec) -> jax.Array:
+        """Whether this row marks a refresh: a scalar boolean, true by default.
+
+        Declining a row leaves its acceptance, release, folds and membership in
+        later revision sets unchanged; only its refresh mark is suppressed.
+        """
+        return jnp.asarray(True)
+
     def init(self, caps):
         """Initialize a fixed-shape belief state."""
         return MeanBelief(

@@ -413,7 +413,7 @@ def _release(study, carry, log, roots, at, state, seen, incremental, refit_kinds
     acquisition = int(log.acquisition_id[i])
     full = _row(carry.log, i)
     key = fold_key(roots, full, study) if incremental else None
-    eligible = kind in refit_kinds
+    eligible = kind in refit_kinds and bool(study.observer.refits_on(full))
     before = _fold_time_row(full, i in accepted, i in released)
     if reach & Audience.OBSERVER and i not in accepted:
         if log.accepted_tick[i] != at["tick"]:

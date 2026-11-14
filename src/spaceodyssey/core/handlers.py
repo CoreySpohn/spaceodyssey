@@ -425,11 +425,12 @@ def _apply_refund(c, rec, slot, first, study):
 def _mark_refresh(c, rec, accepted, released, study):
     """Mark the subject dirty for each audience that took an eligible row, and queue.
 
-    A row is eligible when its kind is one the observer refits; its status is not
-    consulted, so a correction that retracts a value also marks the subject. Later
-    marks coalesce into the checkpoint already queued.
+    A row is eligible when its kind is one the observer refits and `refits_on`
+    allows it; its status is not consulted, so a correction that retracts a value
+    also marks the subject. Later marks coalesce into the checkpoint already queued.
     """
     eligible = jnp.isin(rec.kind, jnp.asarray(study.caps.refit_kinds, I64))
+    eligible &= study.observer.refits_on(rec)
     mark_obs, mark_pol = accepted & eligible, released & eligible
     subject = rec.subject
     dirty = c.refresh_dirty
