@@ -647,6 +647,45 @@ class PopulationModel(eqx.Module):
         return population, sky, valid
 
     def draw_planets(self, key, star: "StarSpec", n, bands):
+        """Draw up to n distinct supported rows from fresh bounded system pools.
+
+        Each pool has n_pool_systems hosts. Append whole supported rows until
+        n exist, a fresh pool is empty, or 4 * max(1, ceil(n / pool size)) pools
+        have been drawn. Exhaustion retains finite fillers with zero validity.
+        The caller's key (including its retry fold) seeds fresh pools each time.
+        """
+        draws, valid = self._draw_planet_pool(key, star, n, bands)
+        count = valid.sum()
+        max_pools = 4 * max(1, math.ceil(n / self.n_pool_systems))
+
+        def incomplete(carry):
+            _, count, last_count, pool = carry
+            return (count < n) & (last_count > 0) & (pool < max_pools)
+
+        def append(carry):
+            draws, count, _, pool = carry
+            fresh, fresh_valid = self._draw_planet_pool(
+                jax.random.fold_in(key, pool), star, n, bands
+            )
+            fresh_count = fresh_valid.sum()
+            position = jnp.arange(n) - count
+            take = (position >= 0) & (position < fresh_count)
+            index = jnp.clip(position, 0, n - 1)
+            draws = jax.tree.map(
+                lambda old, new: jnp.where(
+                    take.reshape((n,) + (1,) * (old.ndim - 1)), new[index], old
+                ),
+                draws,
+                fresh,
+            )
+            return draws, jnp.minimum(n, count + fresh_count), fresh_count, pool + 1
+
+        draws, count, _, _ = jax.lax.while_loop(
+            incomplete, append, (draws, count, count, jnp.asarray(1, jnp.int64))
+        )
+        return draws, jnp.arange(n) < count
+
+    def _draw_planet_pool(self, key, star, n, bands):
         """Return physical draws [n] and a validity mask from a bounded system pool.
 
         Keep the first n supported present planets in system/slot order. When the

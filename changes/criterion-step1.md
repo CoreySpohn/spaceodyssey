@@ -206,11 +206,11 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   claim tuple has an empty last axis and values any planet. The scorer evaluates
   claims on truth with `claims_on_truth`, masking absent slots. Population truth
   carries no stored class code; outcome tables expose the evaluated `real` flag.
-- `PopulationModel.draw_planets` draws a bounded pool of 256 identical hosts by
-  default (`n_pool_systems`), keeps supported present planets in system order,
-  and returns parameters plus an original-entry validity mask. Exhaustion cycles
-  available supported draws; an empty pool uses finite inert parameters and zero
-  existence. Support includes both period and eccentricity. The expected supported
+- `PopulationModel.draw_planets` appends bounded fresh pools of 256 identical
+  hosts by default (`n_pool_systems`) until the requested distinct count is reached,
+  retaining supported present planets in system order. It returns parameters plus
+  an original-entry validity mask; exhausted padding has no inference weight, and
+  an empty pool uses finite inert parameters and zero existence. Support includes both period and eccentricity. The expected supported
   count uses a separate keyed pool of 256 systems (`n_estimate_systems`).
 - `ReportRefit` reads the decision view's population and the observer's claims.
   The first tier weights population draws from its slot key at their own scales,
@@ -840,3 +840,14 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
 - Remove the unused `candidate_slots` helper and its fixed thresholds. Candidate
   and refit-install checks exercise transition packages with declared settings,
   including a one-detection gate. Retain the independent slot-install assertions.
+
+
+## Full-sized population first tiers
+
+- Append fresh folded-key system pools until the requested distinct draw count
+  is reached, a fresh pool is empty, or the bounded pool count is exhausted. The
+  bound grows with the requested draw count; retries retain their distinct key
+  fold and request a larger cloud of fresh systems.
+- Solar-host checks require 4096 distinct first-tier rows and 16384 distinct retry
+  rows, with no row reused across the two keys. Empty-support and zero-padding
+  guards remain in force.

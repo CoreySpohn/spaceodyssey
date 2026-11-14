@@ -1,6 +1,7 @@
 """Population first tiers and claims at the decision/scoring boundary."""
 
 import dataclasses
+from types import SimpleNamespace
 
 import equinox as eqx
 import jax
@@ -22,7 +23,12 @@ from spaceodyssey.adapters.parameters import (
     semimajor_axis_au,
     truth_parameters,
 )
-from spaceodyssey.adapters.skyscapes import ExoVistaWorldSource, PopulationModel
+from spaceodyssey.adapters.skyscapes import (
+    Band,
+    ExoVistaWorldSource,
+    PopulationModel,
+    StarSpec,
+)
 from spaceodyssey.core.enums import EffectKind
 from spaceodyssey.criteria.claims import EarthCandidateClaim, claims_on_truth
 from tests.adapters.test_report_posterior_refit import _null_lane
@@ -301,7 +307,7 @@ def test_empty_support_and_exhaustion_are_bounded(boundary_inputs):
     study, _, p = boundary_inputs
     star, bands = study.world_source.stars[0], study.channel_model.bands
     draws, valid = p.draw_planets(KEY, star, 8, bands)
-    assert int(valid.sum()) == 2
+    assert int(valid.sum()) == 8
     again, _ = p.draw_planets(KEY, star, 8, bands)
     changed, _ = p.draw_planets(jax.random.fold_in(KEY, 1), star, 8, bands)
     np.testing.assert_array_equal(draws.ln_period_d, again.ln_period_d)
@@ -378,3 +384,24 @@ def test_dark_count_prior_handles_zero_and_roundoff_near_saturation():
     assert float(ph._dark_slot_prior(0.0, jnp.asarray(2), 6)) == 0.0
     assert float(ph._dark_slot_prior(8.0, jnp.asarray(0), 6)) == 0.0
     assert 0.0 < float(ph._dark_slot_prior(100.0, jnp.asarray(2), 6)) < 1.0
+
+
+@pytest.mark.slow(reason="draws 4096 and 16384 distinct supported population rows")
+def test_solar_first_tier_and_retry_reach_their_declared_distinct_sizes():
+    """Fails if the first tier or retry reuses an exhausted fixed system pool."""
+    population = PopulationModel.exovista()
+    star = StarSpec("Sun", 1.0, 10.0, 0.0, 0.0, 1.0, 4.8)
+    bands = (Band(500.0, 100.0), Band(940.0, 6.7))
+    lane = SimpleNamespace(key=KEY, slot=jnp.asarray(6))
+    original = None
+    for factor in (1, ph.RETRY_FACTOR):
+        size = ph.FIRST_TIER_DRAWS * factor
+        draws, valid = population.draw_planets(
+            ph._slot_key(lane, factor), star, size, bands
+        )
+        assert int(valid.sum()) == size
+        periods = np.asarray(draws.ln_period_d)
+        assert np.unique(periods).size == size
+        if original is not None:
+            assert not np.isin(periods, original).any()
+        original = periods
