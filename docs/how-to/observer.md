@@ -171,6 +171,30 @@ run = CompiledExecutor().run_worlds(ewma, batch, roots, 40)
 print(check_folded_once(ewma, run, batch, roots))
 ```
 
+## Physical summaries and observer grants
+
+`spaceodyssey.studies.bracket.SummaryObserver` holds a `DecisionSummary`, an
+explicit criterion and `Grants`. Its prior comes from the declared belief
+population and planning model. The summary holds existence and claim
+probabilities, detection forecasts, count and variance forecasts, availability,
+fit status and packed criterion state. `bytes_per_star()` reports one audience's
+summary storage; account for both observer and policy summaries when sizing a run.
+
+Released `MeasurementRow` payloads are decoded with their template and folded
+into the criterion state. Imaging rows, including nulls, and catalog rows can
+trigger refits. Spectrograph rows advance the criterion incrementally without
+triggering an orbit refit. Installing a refit replaces forecast leaves and
+preserves criterion state. Forecast renewal remains necessary because the
+summary retains forecasts rather than the full orbit cloud.
+
+Set access on the observer with `Grants(delivery=..., catalog_groups=...,
+policy_reads_measurements=..., kernel=...)`. `GRANT_PRESETS` provides `replan`,
+`oracle`, `prior_planned` and `shrinkage` configurations. The builder lowers
+those settings into the registry's column audiences; changing a preset means
+building a study with the corresponding observer grants. `grants_line(study)`
+reports effective access from the lowered study, and table exports retain it in
+`grants.txt`. Record that line beside comparisons.
+
 ## Checklist for a new observer
 
 Run `check_folded_once` as above. Then answer each item below and cover the ones that

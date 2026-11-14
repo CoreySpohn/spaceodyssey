@@ -188,3 +188,27 @@ print(preflight(declared, executor="compiled"))
 
 Declarations are assertions by the component. A clean `preflight` does not prove a
 policy keeps them, which is why the check compares them with a run.
+
+## Named state and physical package decisions
+
+A policy with structured state declares `state_layout(caps)`, a module template.
+In `decide`, restore it with
+`unpack(self.state_layout(study.caps), pstate)` and read named leaves. The agenda
+still stores a fixed-width vector; return `pack(state)` after updating the named
+leaves. The template owns the order, width and dtypes.
+`spaceodyssey.studies.bracket.PackagePolicy` uses this pattern for per-star row
+counts, last ticks, kickoff, stopping and the price trace. Scientific progress
+belongs to the observer's criterion state, which is rebuilt from released rows.
+
+For physical studies, the decision view exposes the declared planning model and
+belief population. Its world source is withheld. A separately declared generating
+model or truth population stays on the execution side. Read measured evidence
+through the audience-filtered snapshot and honor the grants on the observer.
+
+`PackagePolicy` asks the criterion for conditional packages over the declared
+mode table. Selection uses the lesser of remaining ledger balance and remaining
+days, and dispatches a package only at its selected current node. Spectrum and
+imaging row limits bound activity; the criterion owns requirements, repeats and
+verdicts. The policy has no separate confirmation counter or reserve heuristic.
+Its trace records the price decision; activity exports include early overspend
+and stranded budget alongside the effective grants.

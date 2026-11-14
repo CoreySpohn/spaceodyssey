@@ -668,3 +668,51 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   observer or policy difference.
 - Set the new test file's program budget from measured compile and persistent
   cache-load counts with standard headroom. No goldens or pinned hashes change.
+
+## Final pruning and documentation audit
+
+- Document named measurement and catalog rows, codec templates and audience
+  masking. Describe the summary's criterion state, grants on the observer,
+  decision-view inputs and named package-policy state.
+- Audit removals by their operational readers. Photomancy conversion-boundary
+  indexing, assertions that removed APIs are absent, frozen single-planet
+  physical helpers and unrelated toy-policy cursors retain their meanings.
+  Package decisions decode named state; they do not read the removed shadow
+  characterization vector. Forecast renewal remains, bounded by the declared
+  summary-memory ceiling.
+- Across the build, the test-function inventory grows from 1416 to 1545:
+  165 newly named functions, 36 old names removed or replaced and four moves
+  between files, for a net increase of 129. These are function counts, before
+  parameter expansion. The existing retirement entries describe the removed
+  block rules and the merged guards. This final audit adds or retires no tests
+  and expands no parameter matrix; independent retirement review remains pending.
+- At six slots, sixteen forecast nodes, thirty-six non-catalog variants, three
+  quantiles, one claim, three bands and a state width of thirty-six, summary
+  storage remains 169600 bytes per star per audience, below 256 KiB. For 150
+  stars and 37 channels, both audiences together use 50880000 bytes
+  (48.522949 MiB), excluding refit workspaces, logs and executable memory.
+- The preceding quick run passed 1898 tests in 211.19 s with 3.63 GB peak
+  per-process RSS and a 8945.9 MiB sampled process-tree footprint. The final
+  quick measurement passes the same 1898 tests in 238.32 s, with 3.45 GB peak
+  RSS and a 7922.9 MiB sampled process-tree footprint. Both reuse persistent
+  compiled programs; these shared-machine observations are not a paired cold
+  performance comparison. Historical cold pruning measurements remain recorded
+  with the affected guards above. No timing baseline is re-pinned locally.
+- The confirming full run passes all 3506 test calls in 2096.04 s, with 6.74 GB
+  peak worker RSS and a 17566.3 MiB sampled process-tree footprint. Its teardown
+  reports 5533 MiB live heap against the unchanged 5500 MiB guard in the combined
+  truth-swap/fork battery module. The fork battery alone uses 2819 MiB live heap;
+  module cleanup reduces it to 325 MiB. Separate the independent fork programs
+  into `test_bracket_fork.py`, retaining both tests, fixture inputs, assertions
+  and workloads. The split run passes both tests in 67.14 s, with 4.41 GB peak
+  worker RSS; live heaps after the calls are 1840 and 2819 MiB. No memory guard
+  or test tier changes. These are observed runs, not cold timing comparisons.
+- Regenerate per-file program ceilings from the measured quick and full runs
+  through `tools/program_budgets.py`, then replace the two battery-module entries
+  with measurements of their split files. This includes the scoring file's
+  measured 1243 programs and generated ceiling of 1440. Preserve the existing
+  golden pins and leave the CI quick baseline unchanged.
+- After the split and budget promotion, the quick tier passes 1898 tests in
+  211.29 s, with 4.08 GB peak worker RSS, a 11385.3 MiB sampled process-tree
+  footprint, zero skips and zero budget violations. The quick tier remains
+  below its 540 s local target.

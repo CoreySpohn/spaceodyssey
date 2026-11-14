@@ -901,7 +901,7 @@ class PopulationModel(eqx.Module):
 
 
 def _declared(bands):
-    """`bands` as a tuple of distinct `Band`s, at least one; refuse anything else."""
+    """Require a nonempty tuple of distinct `Band` instances."""
     bands = tuple(bands)
     if not bands or not all(isinstance(b, Band) for b in bands):
         raise ValueError("bands must be one or more `Band`s")
@@ -1184,7 +1184,7 @@ def star_spec_from_model(
     The model is `skyscapes.io.from_phoenix` at `teff_k` and the surface gravity of
     `mass_msun` and `radius_rsun` (solar metallicity, gravity capped at the grid edge
     of log g = 5), scaled to `dist_pc`. The spec carries the mean flux density in
-    each of `bands` (`Band`s, at least one).
+    each of `bands` (at least one `Band` instance).
     `luminosity_lsun` is the catalog value, which is what the exoEarth-candidate box
     uses, and is kept as given.
     """
@@ -1253,7 +1253,7 @@ class ExoVistaWorldSource(AbstractWorldSource):
         are exchangeable to a belief, which must not read meaning into the index. The
         stars must agree across universes.
 
-        `bands` are the declared `Band`s: each planet's albedo and each star's flux
+        `bands` are the declared `Band` instances: each planet's albedo and host flux
         are read in every one. A band the file's tables do not cover from edge to
         edge is refused, naming the file and its covered range. `generator` is the
         `PopulationModel` the files were drawn from.
