@@ -504,3 +504,47 @@ def test_row_allowances_keep_only_reachable_intermediate_credit():
     limited = dataclasses.replace(settings, remaining_rows=jnp.asarray([2, 5, 5], I64))
     opts = _options(table, table.init_state(1, 3), dark, limited)
     assert float(opts.gain[0, 0]) == 0.0
+
+
+def test_tracks_share_the_star_packages_remaining_rows_in_order():
+    """Fails if each track reuses a spectrum allowance or consumes the shared start."""
+    table = dataclasses.replace(two_step_table(), on_pass=[4, 4], step_labels=[-1, -1])
+    summary, settings = package_inputs(p=(1.0, 1.0), n_slots=2)
+    summary = dataclasses.replace(
+        summary,
+        n_det=jnp.full(2, 2, I64),
+        p_det=jnp.ones_like(summary.p_det),
+        fc_counts=jnp.full_like(summary.fc_counts, 50.0),
+    )
+    state = dataclasses.replace(table.init_state(2, 3), node=jnp.asarray([0, 1], I64))
+    limited = dataclasses.replace(settings, remaining_rows=jnp.asarray([1, 1, 1], I64))
+    opts = _options(table, state, summary, limited)
+    assert float(opts.gain[0, 0]) == 1.0
+    assert float(opts.time[0, 0, TELESCOPE]) == 12.0
+    image = dataclasses.replace(
+        spectral_row(mode=0, counts=50.0),
+        assignment=jnp.asarray([0, 1], I64),
+    )
+    after_image = _update(table, state, image)
+    after_spectrum = _update(table, after_image, spectral_row(mode=1, counts=50.0))
+    np.testing.assert_array_equal(after_spectrum.node, [4, 1])
+    assert float(table.value(after_spectrum, jnp.empty((2, 0)), 0)[0].sum()) == 1.0
+    reversed_state = dataclasses.replace(state, node=state.node[::-1])
+    reversed_opts = _options(table, reversed_state, summary, limited)
+    assert float(reversed_opts.gain[0, 0]) == 1.0
+    assert float(reversed_opts.time[0, 0, TELESCOPE]) == 22.0
+    enough = dataclasses.replace(settings, remaining_rows=jnp.asarray([1, 2, 2], I64))
+    opts = _options(table, state, summary, enough)
+    assert float(opts.gain[0, 0]) == 2.0
+    assert float(opts.time[0, 0, TELESCOPE]) == 32.0
+    ready = dataclasses.replace(summary, n_det=jnp.full(2, 3, I64))
+    opts = _options(table, table.init_state(2, 3), ready, limited)
+    assert float(opts.gain[0, 1]) == 2.0
+    assert float(opts.time[0, 1, TELESCOPE]) == 10.0
+    intermediate = dataclasses.replace(
+        two_step_table(), mode_names=("image", "a"), label_values=[0.0, 0.25, 1.0]
+    )
+    opts = _options(intermediate, reversed_state, summary, limited)
+    # The first track gains 0.75; the second retains only its 0.25 imaging credit.
+    assert float(opts.gain[0, 0]) == 1.0
+    assert float(opts.time[0, 0, TELESCOPE]) == 12.0

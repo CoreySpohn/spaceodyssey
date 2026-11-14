@@ -365,7 +365,7 @@ class TransitionTable(AbstractCriterion):
                 v,
             )
 
-        def slot_package(slot, first_g, first_v):
+        def slot_package(slot, first_g, first_v, remaining_rows):
             node = state.node[slot]
             step = jnp.minimum(node, self.n_steps - 1)
             candidate = (summary_star.status[slot] == SLOT_OK) & (
@@ -412,13 +412,14 @@ class TransitionTable(AbstractCriterion):
                         cost = jnp.where(~started, zero_cost, cost)
                         next_g = jnp.where(~started, first_g, next_g)
                         v = jnp.where(~started, first_v, v)
-                        p = jnp.where(left[v] > 0, p, 0.0)
+                        p = jnp.where(~started | (left[v] > 0), p, 0.0)
+                        consume = started & (reach > 0) & (p > 0)
                         return (
                             reach * p,
                             time + reach * cost,
                             next_g,
                             jnp.asarray(True),
-                            left - (imaging == imaging[v]),
+                            left - ((imaging == imaging[v]) & consume),
                         )
 
                     reach, time, g, started, left = jax.lax.fori_loop(
@@ -450,7 +451,8 @@ class TransitionTable(AbstractCriterion):
                         jnp.where(~started, first_g, next_g),
                         jnp.where(~started, first_v, v),
                     )
-                    p = jnp.where(left[v] > 0, p, 0.0)
+                    p = jnp.where(~started | (left[v] > 0), p, 0.0)
+                    consume = started & (reach > 0) & (p > 0)
                     return (
                         reach * p,
                         time + reach * cost,
@@ -459,7 +461,7 @@ class TransitionTable(AbstractCriterion):
                         variance.at[bands[v]].set(0.0),
                         jnp.maximum(0, images - imaging[v].astype(I64)),
                         jnp.asarray(True),
-                        left - (imaging == imaging[v]),
+                        left - ((imaging == imaging[v]) & consume),
                     )
 
                 after = jax.lax.fori_loop(
@@ -498,16 +500,29 @@ class TransitionTable(AbstractCriterion):
                     jnp.asarray(0.0, F64),
                     images,
                     jnp.asarray(False),
-                    rows,
+                    remaining_rows,
                 ),
             )
-            return target[slot] * result[6], result[2]
+            return target[slot] * result[6], result[2], result[9]
 
         def option(g, v):
-            gain, later_time = jax.vmap(slot_package, in_axes=(0, None, None))(
-                jnp.arange(state.node.size), g, v
+            def track(slot, carry):
+                gain, later_time, left = carry
+                credit, time, left = slot_package(slot, g, v, left)
+                return gain + credit, later_time + time, left
+
+            # The first exposure serves every track; later rows share one allowance.
+            gain, later_time, _ = jax.lax.fori_loop(
+                0,
+                state.node.size,
+                track,
+                (
+                    jnp.asarray(0.0, F64),
+                    jnp.zeros(costs.shape[-1], F64),
+                    rows - (imaging == imaging[v]),
+                ),
             )
-            return gain.sum(), costs[v] + later_time.sum(0)
+            return gain, costs[v] + later_time
 
         gain, time = jax.vmap(jax.vmap(option, in_axes=(None, 0)), in_axes=(0, None))(
             jnp.arange(n_grid), jnp.arange(n_variants)

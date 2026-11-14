@@ -134,8 +134,10 @@ bounds inference.
   probability times the conditional requirement-pass probability; nondetections
   deliver no counts or variance and earn no progress or continuation credit.
 - Packages receive remaining imaging/spectrum row allowances at both star and
-  track interfaces. Every continuation consumes its kind's allowance; unreachable
-  final credit is excluded while reachable intermediate credit is retained.
+  track interfaces. Tracks compose in their existing order, consuming one shared
+  per-star allowance. The shared first exposure consumes one row for all tracks;
+  every continuation consumes its kind's remaining allowance. Unreachable final
+  credit is excluded while reachable intermediate credit is retained.
 - Threshold pricing keeps strictly positive finite gain and net value, with none
   winning zero-net ties. Fixed resource-price sweeps end with deterministic joint
   feasibility pruning. Dispatch ranks by the named telescope-days column and
