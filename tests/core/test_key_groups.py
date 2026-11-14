@@ -12,7 +12,12 @@ from spaceodyssey.codec.checkpoint import DirectoryCheckpoint
 from spaceodyssey.core.battery.fork import _log_record
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.carry import empty_carry
-from spaceodyssey.core.checkpoint import named_leaves, rebuild
+from spaceodyssey.core.checkpoint import (
+    CheckpointCode,
+    CheckpointError,
+    named_leaves,
+    rebuild,
+)
 from spaceodyssey.core.enums import I64, EventKind, RecordStatus
 from spaceodyssey.core.events import empty_event_row, enqueue
 from spaceodyssey.core.executors.base import histories_equal, index_world
@@ -133,10 +138,14 @@ def test_without_key_groups_the_carry_and_records_are_unchanged():
     assert carry.log.group_ordinal is None
     assert len(jax.tree.leaves(carry)) == 133
     assert RealizeContext.from_record(rec, 1.0).group_ordinal.shape == (0,)
+    restored = rebuild(empty_carry(caps), dict(named_leaves(carry)))
+    assert restored.group_counts is None and restored.log.group_ordinal is None
+    for reader in (_log_record, _row):
+        assert reader(restored.log, 0).group_ordinal is None
 
 
 def test_only_a_written_completion_advances_its_subject_and_restores():
-    """Fails if full logs consume ordinals, subjects mix, or restore loses counters."""
+    """Fails if writes mix counters or restore accepts missing optional leaves."""
     study = _study(2, {0: (0,), 1: (0, 1)})
     truth, root = one_world()
     carry = empty_carry(study.caps)
@@ -145,9 +154,20 @@ def test_only_a_written_completion_advances_its_subject_and_restores():
     np.testing.assert_array_equal(rec.group_ordinal, [0, 0])
     np.testing.assert_array_equal(carry.group_counts[1], [1, 1])
     np.testing.assert_array_equal(carry.group_counts[0], 0)
-    restored = rebuild(empty_carry(study.caps), dict(named_leaves(carry)))
+    arrays = dict(named_leaves(carry))
+    restored = rebuild(empty_carry(study.caps), arrays)
     np.testing.assert_array_equal(restored.group_counts, carry.group_counts)
     np.testing.assert_array_equal(restored.log.group_ordinal, carry.log.group_ordinal)
+    group_paths = (".group_counts", ".log.group_ordinal")
+    for path in group_paths:
+        assert path in arrays
+        incomplete = {name: value for name, value in arrays.items() if name != path}
+        with pytest.raises(CheckpointError) as error:
+            rebuild(empty_carry(study.caps), incomplete)
+        assert error.value.code is CheckpointCode.C007
+    with pytest.raises(CheckpointError) as error:
+        rebuild(empty_carry(Capacities()), arrays)
+    assert error.value.code is CheckpointCode.C007
     full = dataclasses.replace(carry, n_log=jnp.asarray(study.caps.n_log, I64))
     full, emit, _ = done(full, _event(full, study, 1, 1), study, truth, root)
     assert not bool(emit.n_written)

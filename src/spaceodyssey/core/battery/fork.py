@@ -82,6 +82,11 @@ def key_report(coupling, *, record_key=draw_key, decision_key=policy_key, branch
 
 
 def _log_record(log, i):
+    """Rebuild a full row, including its saved pre-increment `group_ordinal`.
+
+    Enumerating record fields preserves every optional column; absent columns
+    remain `None`, so studies without key groups retain their record structure.
+    """
     cols = log_columns(log)
     return Record(
         **{

@@ -90,6 +90,10 @@ class CheckpointSink:
         arguments do not (the executor, the chunk size, the bound boundary and
         service); `templates` maps `carry`, `trace`, and when asked `view` and
         `effects` to a pytree with the structure to rebuild.
+
+        The carry template includes `group_counts` and `log.group_ordinal` arrays
+        when the study declares key groups. Both are `None` otherwise; restoring
+        must preserve that optional structure rather than initialize new counters.
         """
         raise NotImplementedError
 
@@ -151,6 +155,10 @@ def rebuild(template, arrays, *, row_axis=None):
     `row_axis` (0 or 1) the template is one trace row, with the world axis in front of
     it for a batched run: the saved array has one more axis, of any length, at
     `row_axis`. Anything else is `CheckpointCode.C007`.
+
+    Optional arrays such as `group_counts` and `log.group_ordinal` are required
+    exactly when present in the template. A `None` field contributes no saved
+    leaf and remains `None` in the rebuilt tree.
     """
     flat, treedef = jax.tree_util.tree_flatten_with_path(template)
     names = [jax.tree_util.keystr(p) for p, _ in flat]

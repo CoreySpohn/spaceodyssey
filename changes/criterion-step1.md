@@ -336,6 +336,9 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
 - Preserve ordinals through snapshots, their fingerprints, canonical comparison,
   replay row readers and checkpoint templates. The default carries no new array
   leaves; existing golden histories and pinned hashes remain unchanged.
+- Document the optional key-group structure in checkpoint restoration and fork
+  row reconstruction. Extend the existing core tests to reject missing enabled
+  checkpoint leaves and preserve absent counters and ordinals when disabled.
 - Add four core tests for ordinal timing, cancellation and duplicate handling,
   subject isolation, default layout, full logs, executor parity and checkpoint
   resume. No tests are retired.
