@@ -25,7 +25,7 @@ class ImagingCriterion(AbstractCriterion):
         return state
 
     def value(self, state, p_claim, tick):
-        raise NotImplementedError("imaging fixtures use BracketPolicy")
+        raise NotImplementedError("this fixture only tests belief folding")
 
     def options(self, state, summary_star, tick, modes, settings):
-        raise NotImplementedError("imaging fixtures use BracketPolicy")
+        raise NotImplementedError("this fixture only tests belief folding")

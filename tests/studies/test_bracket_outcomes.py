@@ -12,7 +12,7 @@ from .bracket_helpers import N_STEPS, N_WORLDS, build
 
 # Enough telescope days for a second visit to one star in each world, and few
 # enough to keep the admission trace bounded.
-BUDGET_D = 9.0
+BUDGET_D = 200.0
 pytestmark = pytest.mark.slow(reason="compiles the chunked refresh driver once")
 
 

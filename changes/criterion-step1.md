@@ -547,3 +547,38 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   impossible costs, none ties, resource conflicts, dispatch and diagnostics.
   Set the file's program budget from measured compiles and cache loads using
   standard headroom. No goldens or pinned hashes move.
+
+## Named policy state and package decisions
+
+- Allow policies to declare a codec layout and reject a study whose policy state
+  vector is too narrow. Keep undeclared policy vectors compatible.
+- Replace the rule-order bracket policy with `PackagePolicy`. Build criterion
+  packages from the policy summary, price them against visible ledger balances
+  and remaining days, and start only a selected package at its current node.
+  Enforce imaging and spectrum row caps, preserve catalog kickoff, and wait for
+  imaging refits only when measurement access is granted.
+- Initialize every audience's dark-slot existence, detection, claim and forecast
+  leaves from the declared belief population and planning model at zero time.
+  Reuse the first tier's population draw count and occurrence estimator.
+- Bind public operational settings during construction. Show balances at clock
+  resolution and reserve half a rounding quantum when selecting. Keep asset and
+  program budgets nonbinding while fitting the exact snapshot integer range.
+  A pending wait cannot start a second exposure on an occupied telescope.
+- Bound the price trace using daily waits, capped observation rows and forecast
+  renewals, and raise an explicit checked error if its capacity is exhausted.
+  Daily waits share a wake tick. Each fresh decision records price, cumulative
+  booked charge, selected package days, open opportunity, action and cumulative
+  expected package gain.
+- Add 14 package-policy tests covering dispatch timing, ledger and horizon
+  limits, both row caps, codec round trips, kickoff, refit permissions, prior
+  forecasts, empty-population initialization, trace exhaustion, occupied exposures
+  and complete-run accounting.
+  Retarget the existing first-tier policy test through the shared decision
+  harness. Move both survey guards into the bracket tests; retire no guard and
+  expand no shared parameter matrix.
+- Use an explicit transition criterion and sufficient time and funding in the
+  integration fixtures. Require spending in survey worlds with a target claim;
+  a world without one may remain idle. Keep accounting tests nonempty and bound
+  the private-measurement fixture's imaging rows. Move three construction-heavy
+  adapter checks to appropriate tiers and regenerate measured program budgets.
+  No golden histories or pinned hashes change.

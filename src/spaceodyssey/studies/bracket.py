@@ -12,7 +12,7 @@ grants into audience flags for each payload column of the record kinds.
 
 - `bracket_registry(grants, n_slots, n_bands)` declares the kind registry.
 - `bracket_study(...)` builds the `Study` of an arm.
-- `BracketPolicy` is the imaging decision rule every arm runs: follow-up, search.
+- `PackagePolicy` selects conditional packages against the visible ledger.
 - `bracket_boundary(study)` reads the refit kernel from the observer's grants.
 - `BoundExecutor` is the compiled executor with a boundary attached, so the batteries
   that call `run_worlds` without a `refit` argument run the arm as it is.
@@ -94,16 +94,15 @@ from spaceodyssey.core.records import (
 from spaceodyssey.core.refresh import REFRESH_PRODUCT_KIND, RefreshSchedule
 from spaceodyssey.core.snapshot import BeliefLayout
 from spaceodyssey.criteria.base import AbstractCriterion
+from spaceodyssey.criteria.transition import TransitionSettings
 from spaceodyssey.studies import builder, effect_rows
-from spaceodyssey.studies.scoring import row_log, verdict
+from spaceodyssey.studies.scoring import CriterionObjective, row_log, verdict
+from spaceodyssey.studies.selection import act, capacity_of, select
 
 # Candidates need repeated detections, a supported fit and a tight sky position.
 CANDIDATE_DETECTIONS, CANDIDATE_SCATTER_LOD = 3, 1.0
 # Kind indices of `bracket_registry`.
 KIND_NONE, KIND_PRODUCT, KIND_MEASUREMENT, KIND_CATALOG = range(4)
-# The telescope and the catalog lanes, and the shared budget resource column.
-LANE_TELESCOPE, LANE_CATALOG = 0, 1
-SHARED_RESOURCE = 2
 # Channel ids of the modes start here; the refresh product channels are 90 and 91.
 FIRST_CHANNEL_ID = 10
 # Seconds in a day, and the ticks in a day of the default 1 ms clock (the clock a
@@ -114,8 +113,6 @@ TICKS_PER_DAY = 86_400_000
 
 # Occupancy of the catalog mode, in ticks.
 CATALOG_TICKS = 1
-# Asset and program rows hold this much; no channel charges them.
-UNBOUNDED = 1.0e9
 
 
 class Grants(eqx.Module):
@@ -171,11 +168,6 @@ def bracket_registry(grants, n_slots, n_bands):
     )
 
 
-def pstate_size(n_subjects):
-    """Per star: last tick, visits, searches; then charged days, kickoff and stop."""
-    return n_subjects * 3 + 3
-
-
 # Days between forecast renewals of a summary, and the per-star rows a long study holds.
 RENEWAL_D = GRID_SPACING_D * (N_GRID - 1)
 # Refit products one renewal or visit adds to the log.
@@ -189,6 +181,7 @@ def default_capacities(
     n_slots,
     *,
     n_channels,
+    n_pstate: int,
     horizon_d,
     max_visits=MAX_VISITS,
     max_spectra=MAX_SPECTRA,
@@ -196,8 +189,8 @@ def default_capacities(
 ):
     """Capacities of the bracket study of `n_subjects` stars.
 
-    `n_pstate` holds the policy state (`pstate_size`). The required `horizon_d`
-    sets upper bounds that hold whatever the observing times, not typical counts.
+    `n_pstate` is the width declared by the policy state layout. The required
+    `horizon_d` bounds counts whatever the observing times, not typical counts.
     A star holds one catalog row, at most `max_visits` imaging rows and at most
     `max_spectra` spectrograph rows. Each imaging row and forecast renewal adds
     `REFIT_ROWS` refit products; spectrograph rows add none. The renewal bound is
@@ -214,7 +207,6 @@ def default_capacities(
 
     The floors are `n_log` 1024, `rows_per_subject` 32 and `max_sid` 4096.
     """
-    n_pstate = pstate_size(n_subjects)
     renewals = math.ceil(horizon_d / RENEWAL_D) + 1
     per_star = 1 + max_visits + max_spectra
     refits = REFIT_ROWS * (renewals + max_visits)
@@ -261,17 +253,17 @@ def channel_table(channel, caps, *, budget_unit_s=None):
     table = channel.mode_table
     for c in range(table.catalog_channel):
         occupancy.append(settle + round(table.duration_s(c) / tick_s))
-        lane.append(LANE_TELESCOPE)
+        lane.append(0)
         kind.append(KIND_MEASUREMENT)
     occupancy.append(CATALOG_TICKS)
-    lane.append(LANE_CATALOG)
+    lane.append(1)
     kind.append(KIND_CATALOG)
     n = len(occupancy)
     if n != caps.n_channels:
         raise ValueError(f"caps.n_channels is {caps.n_channels}, the channel has {n}")
     occupancy = jnp.asarray(occupancy, I64)
     days = occupancy.astype(F64) / per_day
-    on_telescope = jnp.asarray(lane, I64) == LANE_TELESCOPE
+    on_telescope = jnp.asarray(lane, I64) == 0
     cost = jnp.zeros((n, caps.n_resources), F64)
     cost = cost.at[:, table.resource("telescope_days")].set(
         jnp.where(on_telescope, days, 0.0)
@@ -343,33 +335,66 @@ def bracket_study(
     n_stars = int(channel.catalog_mass_kg.shape[0])
     if len(source.stars) != n_stars:
         raise ValueError("the world source and the channel disagree on the stars")
+    if isinstance(policy, PackagePolicy):
+        renewals = math.ceil(horizon_d / (GRID_SPACING_D * (N_GRID - 1.5))) + 1
+        # Row completions and refit products can interrupt daily waits.
+        trace_capacity = (
+            math.ceil(horizon_d)
+            + 1
+            + n_stars
+            * (4 * (1 + policy.max_visits + policy.max_spectra) + REFIT_ROWS * renewals)
+        )
+        policy = dataclasses.replace(policy, trace_capacity=trace_capacity)
     caps = caps or default_capacities(
         n_stars,
         channel.n_slots,
         n_channels=channel.n_channels,
+        n_pstate=policy.state_size(n_stars),
         horizon_d=horizon_d,
         max_visits=getattr(policy, "max_visits", MAX_VISITS),
         max_spectra=getattr(policy, "max_spectra", MAX_SPECTRA),
         ticks_per_day=built.context.clock.ticks_per_day,
     )
-    if isinstance(policy, BracketPolicy):
-        need = pstate_size(n_stars)
-        if caps.n_pstate < need:
-            raise ValueError(
-                f"caps.n_pstate is {caps.n_pstate}; the policy needs {need}"
-            )
-    caps = dataclasses.replace(caps, n_key_groups=channel.n_bands)
+    per_day = int(built.context.clock.ticks_per_day)
+    caps = dataclasses.replace(
+        caps,
+        n_key_groups=channel.n_bands,
+        snapshot_balances=True,
+        balance_quantum=1.0 / per_day,
+    )
     caps = bracket_registry(
         observer.grants, channel.n_slots, n_bands=channel.n_bands
     ).lower(caps, observer)
-    per_day = int(built.context.clock.ticks_per_day)
     horizon = round(horizon_d * per_day)
-    budget = jnp.full((caps.n_balance_rows, caps.n_resources), UNBOUNDED, F64)
-    budget = budget.at[-1, SHARED_RESOURCE].set(float(budget_d))
+    # These rows cannot bind before the shared budget and fit the tick quantum.
+    nonbinding_d = max(float(horizon_d), float(budget_d), 1.0)
+    budget = jnp.full((caps.n_balance_rows, caps.n_resources), nonbinding_d, F64)
+    resource = channel.mode_table.resource("telescope_days")
+    budget = budget.at[-1, resource].set(float(budget_d))
     schedule = RefreshSchedule(per_day, 0, *builder.PRODUCT_CHANNELS, KIND_PRODUCT)
+    channels = channel_table(channel, caps)
+    if isinstance(policy, PackagePolicy):
+        assumed = built if planning_model is None else planning_model.assets()
+        band_index = (
+            channel.imaging_band_index
+            if planning_model is None
+            else planning_model.imaging_band_index
+        )
+        policy = dataclasses.replace(
+            policy,
+            effect_caps=caps,
+            ticks_per_day=per_day,
+            settings=TransitionSettings(
+                candidate_detections=policy.candidate_detections,
+                candidate_scatter_lod=policy.candidate_scatter_lod,
+                imaging_lod_arcsec=assumed.reports[band_index].lod_arcsec,
+                channel_cost=channels.cost,
+                resources=channel.mode_table.resources,
+            ),
+        )
     study = builder.survey_1(
         caps,
-        channels=channel_table(channel, caps),
+        channels=channels,
         channel_model=channel,
         budget=budget,
         observer=observer,
@@ -380,8 +405,9 @@ def bracket_study(
         horizon_tick=horizon,
         phase_until=(horizon,),
     )
-    return dataclasses.replace(
+    study = dataclasses.replace(
         study,
+        objective=CriterionObjective(),
         clock=built.context.clock.clock,
         world_source=source,
         belief_population=belief_population,
@@ -390,6 +416,13 @@ def bracket_study(
             shared=((Purpose.MEASUREMENT, ("channel", "acquisition_index")),)
         ),
     )
+
+    if isinstance(observer, SummaryObserver):
+        prior = ReportRefit(kernel="posterior").initial_summary(study)
+        study = dataclasses.replace(
+            study, observer=dataclasses.replace(observer, prior=prior)
+        )
+    return study
 
 
 def bracket_boundary(study, **settings):
@@ -472,181 +505,253 @@ class BoundExecutor(CompiledExecutor):
         return self.run(study, truths, roots, n_steps, **kw)
 
 
-# Future epochs of the summary, their spacing [d], detection and block modes.
+# Future epochs of the summary and their spacing [d].
 N_NODES = N_GRID
 NODE_SPACING_D = GRID_SPACING_D
-N_DETECT, N_BLOCK = 6, 3
 
 
-class BracketPolicy(AbstractPolicy):
-    """Image known slots and search for new ones through each arm's summary.
+class PolicyState(eqx.Module):
+    """Per-star row counts and last ticks, kickoff, stop and price trace."""
 
-    Kickoff observes one catalog row per star. Subsequent decisions wait for report
-    refits, then favor follow-up of a known noncandidate slot at its best forecast
-    node and mode, followed by search. Visits are at least 15 days apart and bounded
-    by `max_visits` and `max_search`. A visit that exceeds the remaining budget
-    falls back to the cheapest mode; one refused visit stops the policy.
+    last_tick: jax.Array
+    n_imaging: jax.Array
+    n_spectra: jax.Array
+    kick: jax.Array
+    stopped: jax.Array
+    trace: jax.Array
+    n_trace: jax.Array
 
-    State holds each star's last visit tick, visit count and search count, followed
-    by charged days, the kickoff count and a stop flag. The observer's grants
-    determine whether decisions wait for measurement refits.
+
+class PackagePolicy(AbstractPolicy):
+    """Select conditional packages against the ledger after catalog kickoff.
+
+    The builder binds public operational settings once. Decisions read only the
+    snapshot, criterion, grants, mode table and horizon of the decision view.
+    Each fresh post-kickoff decision appends one price trace row.
     """
 
-    budget_d: float = eqx.field(static=True)
-    n_slots: int = eqx.field(static=True)
-    max_visits: int = eqx.field(default=24, static=True)
-    max_search: int = eqx.field(default=8, static=True)
-    followup_p: float = eqx.field(default=0.5, static=True)
+    trace_capacity: int = eqx.field(default=1, static=True)
+    max_visits: int = eqx.field(default=MAX_VISITS, static=True)
+    max_spectra: int = eqx.field(default=MAX_SPECTRA, static=True)
+    candidate_detections: int = eqx.field(default=3, static=True)
+    candidate_scatter_lod: jax.Array = eqx.field(
+        default=1.0, converter=lambda x: jnp.asarray(x, F64)
+    )
+    n_bisect: int = eqx.field(default=48, static=True)
+    effect_caps: Capacities | None = eqx.field(default=None, static=True, kw_only=True)
+    ticks_per_day: int = eqx.field(default=TICKS_PER_DAY, static=True, kw_only=True)
+    settings: TransitionSettings | None = eqx.field(default=None, kw_only=True)
+
+    def __check_init__(self):
+        """Refuse unusable trace shapes and row limits."""
+        if self.trace_capacity < 1 or min(self.max_visits, self.max_spectra) < 0:
+            raise ValueError("trace capacity must be positive and row caps nonnegative")
+
+    def _layout(self, n_subjects):
+        return PolicyState(
+            last_tick=jnp.zeros(n_subjects, I64),
+            n_imaging=jnp.zeros(n_subjects, I64),
+            n_spectra=jnp.zeros(n_subjects, I64),
+            kick=jnp.asarray(0, I64),
+            stopped=jnp.asarray(False),
+            trace=jnp.zeros((self.trace_capacity, 6), F64),
+            n_trace=jnp.asarray(0, I64),
+        )
+
+    def state_layout(self, caps) -> PolicyState:
+        """The codec template for this study's subject count."""
+        return self._layout(caps.n_subjects)
+
+    def state_size(self, n_subjects) -> int:
+        """Width of the codec-packed named state."""
+        return layout_size(self._layout(n_subjects))
 
     def declare(self):
-        """The campaign drain the policy ends with."""
+        """Permit the campaign drain at the horizon."""
         return Declaration(stops=((Scope.CAMPAIGN, Disposition.DRAIN),))
 
     def decide(self, pstate, view, study, key):
-        """One decision: kickoff, wait for a fresh summary, or act on it."""
-        caps, ch = study.caps, study.channels
-        model = study.channel_model
-        n = caps.n_subjects
-        stride = 3
-        per_day = jnp.round(SECONDS_PER_DAY / study.clock.tick_length_s).astype(I64)
-        stars = pstate[: n * stride].reshape(n, stride)
-        last_tick, n_vis, n_search = stars[:, 0], stars[:, 1], stars[:, 2]
-        charged, kick, stopped = pstate[n * stride : n * stride + 3]
-        belief = view.belief
-        n_detect = belief.p_det.shape[-1]
-        cost = ch.cost[:, SHARED_RESOURCE]
-        remaining = self.budget_d - charged
-        tick = view.tick
-        horizon = study.horizon_tick
-
-        # Kickoff: the catalog row of star `kick`.
-        kicking = kick < n
-        # Fresh: every report visit made has been read by a refit.
-        stale = jnp.any(n_vis > belief.n_obs.astype(F64))
+        """Return a catalog action, a refit wait, or one selected package step."""
+        caps, settings = self.effect_caps, self.settings
+        if caps is None or settings is None:
+            raise ValueError("bind the package policy with bracket_study")
+        settings = dataclasses.replace(
+            settings,
+            candidate_detections=self.candidate_detections,
+            candidate_scatter_lod=self.candidate_scatter_lod,
+        )
+        summary = view.belief
+        n = summary.p_exist.shape[0]
+        state = unpack(self._layout(n), pstate)
+        modes = study.channel_model.mode_table
+        criterion = study.observer.criterion
+        tick, per_day = view.tick, self.ticks_per_day
+        done = state.stopped | (tick >= study.horizon_tick)
+        kicking = state.kick < n
+        stale = jnp.any(state.n_imaging > summary.n_obs)
         if not study.observer.grants.policy_reads_measurements:
             stale = jnp.asarray(False)
-        next_day = ((tick // per_day) + 1) * per_day + 1
+        fresh = ~done & ~kicking & ~stale
 
-        node_ticks = belief.ref_tick[:, None] + jnp.round(
-            jnp.arange(N_NODES) * NODE_SPACING_D * per_day
-        ).astype(I64)
-        g_cur = jnp.clip(
-            jnp.round((tick - belief.ref_tick) / (NODE_SPACING_D * per_day)),
-            0,
-            N_NODES - 1,
-        ).astype(I64)
-        s_ix = jnp.arange(n)
-        imaging_channels = jnp.asarray(model.mode_table.imaging_channels, I64)
-        weight = jnp.maximum(cost[imaging_channels], 1e-9)
+        def refresh(state):
+            template = criterion.state_template(summary.p_exist.shape[1], modes.n_bands)
 
-        lod = model.assets().reports[model.imaging_band_index].lod_arcsec
-        candidate = candidate_slots(belief, lod)
-        p_claim = (
-            belief.p_claim.max(-1)
-            if belief.p_claim.shape[-1]
-            else jnp.ones_like(belief.p_exist)
-        )
-        known = (belief.n_det >= 1) | (p_claim >= 0.5)
-        eligible = known & ~candidate
-        eligible &= p_claim >= 0.05
-        late = node_ticks >= (last_tick + 15 * per_day)[:, None]
-        pd_val = (
-            belief.p_exist[:, :, None, None]
-            * belief.p_det
-            / weight[None, None, None, :]
-        )
-        pd_val = jnp.where(
-            late[:, None, :, None] & eligible[:, :, None, None], pd_val, -1.0
-        )
-        flat = pd_val.reshape(n, -1)
-        fu_best = flat.argmax(axis=1)
-        fu_score = flat.max(axis=1)
-        fu_slot = fu_best // (N_NODES * n_detect)
-        fu_node = (fu_best // n_detect) % N_NODES
-        fu_mode = fu_best % n_detect
-        fu_p = (
-            belief.p_exist[s_ix, fu_slot]
-            * belief.p_det[s_ix, fu_slot, fu_node, fu_mode]
-        )
-        fu_ok = (
-            (fu_score > 0)
-            & (fu_node == g_cur)
-            & (fu_p >= self.followup_p)
-            & (n_vis < self.max_visits)
-        )
-        fs = jnp.argmax(jnp.where(fu_ok, fu_score, -1.0))
-        do_follow = fu_ok[fs]
+            def options(star):
+                one = dataclasses.replace(
+                    summary, aux=jnp.broadcast_to(summary.aux, (n, summary.aux.size))
+                )
+                one = jax.tree.map(lambda x: x[star], one)
+                imaging = jnp.isin(
+                    jnp.arange(modes.catalog_channel),
+                    jnp.asarray(modes.imaging_channels, I64),
+                )
+                allowed = jnp.where(
+                    imaging,
+                    state.n_imaging[star] < self.max_visits,
+                    state.n_spectra[star] < self.max_spectra,
+                )
+                node_ticks = one.ref_tick + jnp.round(
+                    jnp.arange(one.available.shape[0]) * NODE_SPACING_D * per_day
+                ).astype(I64)
+                one = dataclasses.replace(
+                    one,
+                    available=one.available
+                    & allowed[None, :]
+                    & (node_ticks <= study.horizon_tick)[:, None],
+                )
+                return criterion.options(
+                    unpack(template, one.state), one, tick, modes, settings
+                )
 
-        rested = (tick - last_tick) >= 15 * per_day
-        slot_p = belief.p_exist[:, :, None] * belief.p_det[s_ix, :, g_cur, :]
-        slot_p *= p_claim[:, :, None]
-        slot_p = jnp.where(belief.n_det[:, :, None] == 0, slot_p, 0.0)
-        sp = 1.0 - jnp.prod(1.0 - slot_p, axis=1)
-        sp_val = sp / weight[None, :]
-        sp_ok = (
-            (rested | (n_vis == 0))[:, None]
-            & (n_search < self.max_search)[:, None]
-            & (n_vis < self.max_visits)[:, None]
-            & (sp >= 0.02)
+            options = jax.lax.map(options, jnp.arange(n))
+            n_grid = summary.available.shape[1]
+            current = jnp.clip(
+                jnp.round((tick - summary.ref_tick) / (NODE_SPACING_D * per_day)),
+                0,
+                n_grid - 1,
+            ).astype(I64)
+            available = jnp.arange(n_grid)[None, :, None] >= current[:, None, None]
+            first_imaging = jnp.isin(
+                options.first_channel, jnp.asarray(modes.imaging_channels, I64)
+            )
+            under_cap = jnp.where(
+                first_imaging,
+                state.n_imaging[:, None, None] < self.max_visits,
+                state.n_spectra[:, None, None] < self.max_spectra,
+            )
+            gain = jnp.where(available & under_cap, options.gain, 0.0)
+            resource = modes.resource("telescope_days")
+            days_left = jnp.maximum(
+                (study.horizon_tick - tick).astype(F64) / per_day, 0.0
+            )
+            selection = select(
+                gain,
+                options.time,
+                capacity_of(
+                    jnp.maximum(view.balance[-1] - caps.balance_quantum / 2, 0.0),
+                    days_left,
+                    resource,
+                ),
+                self.n_bisect,
+            )
+            star, option, starts = act(
+                selection, gain, options.time, current, ranking_resource=resource
+            )
+            safe_star, safe_option = jnp.maximum(star, 0), jnp.maximum(option, 0)
+            channel = options.first_channel.reshape(n, -1)[safe_star, safe_option]
+            # A queued wait can wake before the last exposure completes.
+            acted = (jnp.arange(self.trace_capacity) < state.n_trace) & (
+                state.trace[:, 4] > 0
+            )
+            last = jnp.max(jnp.where(acted, jnp.arange(self.trace_capacity), 0))
+            last_d = state.trace[last, 1] - jnp.where(
+                last > 0, state.trace[jnp.maximum(last - 1, 0), 1], 0.0
+            )
+            busy_until = jnp.max(state.last_tick) + jnp.round(last_d * per_day).astype(
+                I64
+            )
+            starts &= ~jnp.any(acted) | (tick >= busy_until)
+            imaging = jnp.isin(channel, jnp.asarray(modes.imaging_channels, I64))
+            spent_d = jnp.where(starts, settings.channel_cost[channel, resource], 0.0)
+            value = jnp.where(starts, gain.reshape(n, -1)[safe_star, safe_option], 0.0)
+            previous = jnp.where(
+                state.n_trace > 0,
+                state.trace[jnp.maximum(state.n_trace - 1, 0)],
+                jnp.zeros(6, F64),
+            )
+            finite = (gain > 0) & jnp.all(jnp.isfinite(options.time), axis=-1)
+            window_d = jnp.max(jnp.where(finite, options.time[..., resource], 0.0))
+            row = jnp.stack(
+                [
+                    selection.price[resource],
+                    previous[1] + spent_d,
+                    selection.selected_time[resource],
+                    window_d,
+                    starts.astype(F64),
+                    previous[5] + value,
+                ]
+            )
+            index = eqx.error_if(
+                state.n_trace,
+                fresh & (state.n_trace >= self.trace_capacity),
+                "package policy trace capacity exhausted",
+            )
+            state = dataclasses.replace(
+                state,
+                trace=state.trace.at[index].set(row),
+                n_trace=index + 1,
+                last_tick=state.last_tick.at[safe_star].set(
+                    jnp.where(starts, tick, state.last_tick[safe_star])
+                ),
+                n_imaging=state.n_imaging.at[safe_star].add(
+                    (starts & imaging).astype(I64)
+                ),
+                n_spectra=state.n_spectra.at[safe_star].add(
+                    (starts & ~imaging).astype(I64)
+                ),
+            )
+            return state, safe_star, channel, starts
+
+        state, star, channel, starts = jax.lax.cond(
+            fresh,
+            refresh,
+            lambda state: (
+                state,
+                jnp.asarray(0, I64),
+                jnp.asarray(0, I64),
+                jnp.asarray(False),
+            ),
+            state,
         )
-        sp_flat = jnp.where(sp_ok, sp_val, -1.0).reshape(-1)
-        sb = jnp.argmax(sp_flat)
-        do_search = sp_flat[sb] > 0
-        search_star, search_mode = sb // n_detect, sb % n_detect
-
-        star = jnp.where(do_follow, fs, search_star)
-        channel = imaging_channels[jnp.where(do_follow, fu_mode[fs], search_mode)]
-        act = do_follow | do_search
-        # Budget: a choice that does not fit falls back to the cheapest visit; when not
-        # even that fits, one attempt is made and the policy stops.
-        fits = cost[channel] <= remaining
-        cheapest = imaging_channels[jnp.argmin(weight)]
-        cheapest_fits = cost[cheapest] <= remaining
-        channel = jnp.where(fits, channel, cheapest)
-        attempt_last = act & ~fits & ~cheapest_fits
-        use = act & ~jnp.asarray(stopped > 0.5)
-        done = (tick >= horizon) | (stopped > 0.5)
-
-        observe_cat = kicking
         kind = jnp.select(
-            [done, observe_cat, stale & ~kicking, use],
-            [EffectKind.STOP, EffectKind.OBSERVE, EffectKind.WAIT, EffectKind.OBSERVE],
+            [done, kicking, starts],
+            [EffectKind.STOP, EffectKind.OBSERVE, EffectKind.OBSERVE],
             EffectKind.WAIT,
         )
-        cat_channel = model.mode_table.catalog_channel
-        eff_star = jnp.where(observe_cat, jnp.minimum(kick.astype(I64), n - 1), star)
-        eff_channel = jnp.where(observe_cat, cat_channel, channel)
-        wake = jnp.where(stale & ~kicking, next_day, tick + per_day)
+        star = jnp.where(kicking, jnp.minimum(state.kick, n - 1), star)
+        channel = jnp.where(kicking, modes.catalog_channel, channel)
+        # Daily waits share a tick so interruptions cannot create extra wait chains.
+        wake = ((tick // per_day) + 1) * per_day + 1
         eff = effect_rows.effects(
             caps,
-            kind=jnp.stack([kind, jnp.asarray(0, I64)]),
-            subject=eff_star,
-            channel_index=eff_channel,
+            kind=jnp.stack([kind]),
+            subject=star,
+            channel_index=channel,
             group=view.n_dec,
-            tick=jnp.stack(
-                [jnp.where(kind == EffectKind.WAIT, wake, 0), jnp.asarray(0, I64)]
-            ),
+            tick=jnp.where(kind == EffectKind.WAIT, wake, 0),
             lane=0,
             scope=Scope.CAMPAIGN,
             disposition=Disposition.DRAIN,
         )
-        observing = (kind == EffectKind.OBSERVE) & ~observe_cat
-        row = star
-        is_search = observing & ~do_follow
-        new = pstate
-        new = new.at[row * stride].set(
-            jnp.where(observing, tick.astype(F64), pstate[row * stride])
+        state = dataclasses.replace(
+            state, kick=state.kick + (kicking & ~done).astype(I64), stopped=done
         )
-        new = new.at[row * stride + 1].add(observing.astype(F64))
-        new = new.at[row * stride + 2].add(is_search.astype(F64))
-        base = n * stride
-        spent = jnp.where(observing & (cost[channel] <= remaining), cost[channel], 0.0)
-        new = new.at[base].add(spent)
-        new = new.at[base + 1].add(observe_cat.astype(F64))
-        new = new.at[base + 2].set(
-            jnp.maximum(pstate[base + 2], (observing & attempt_last).astype(F64))
+        packed = pack(state)
+        return (
+            eff,
+            jnp.pad(packed, (0, pstate.size - packed.size)),
+            jnp.asarray(0.0, F64),
         )
-        return eff, new, jnp.asarray(0.0, F64)
 
 
 def project_detections(belief):
@@ -746,7 +851,7 @@ class SummaryObserver(AbstractObserver):
 
         A summary forecasts `N_NODES` epochs `NODE_SPACING_D` days apart from its
         refit tick; once the policy's current node is the last one (`g_cur` in
-        `BracketPolicy.decide`) the forecast no longer moves with time, so the star
+        `PackagePolicy.decide`) the forecast no longer moves with time, so the star
         is renewed by a refit from the same rows.
         """
         elapsed = (tick - summary.ref_tick) / (NODE_SPACING_D * self.ticks_per_day)
@@ -914,9 +1019,10 @@ def activity_table(result, study) -> ActivityTable:
         for subject in refused:
             star["no_funds"][w, subject] += 1
     star["dropped"] = np.asarray(study.world_source.dropped, np.float64)
-    budget = float(np.asarray(study.budget)[-1, SHARED_RESOURCE])
+    resource = channel.mode_table.resource("telescope_days")
+    budget = float(np.asarray(study.budget)[-1, resource])
     world = {
-        "charged": budget - np.asarray(carry.ledger.balance)[:, -1, SHARED_RESOURCE],
+        "charged": budget - np.asarray(carry.ledger.balance)[:, -1, resource],
         "low_ess": (np.asarray(carry.belief.status) == SLOT_DEGRADED)
         .sum(axis=(1, 2))
         .astype(np.float64),

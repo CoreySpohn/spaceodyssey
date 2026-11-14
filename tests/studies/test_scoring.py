@@ -392,7 +392,7 @@ def test_the_objective_uses_true_counts_and_catalog_claims(scored_case):
 
 @pytest.fixture(scope="module")
 def built():
-    return build(budget_d=9.0)
+    return build()
 
 
 @pytest.mark.slow(reason="compiles the chunked refresh driver once")
@@ -401,6 +401,7 @@ def test_the_activity_table_agrees_with_the_log_and_the_ledger(built):
     source, study, _, _, _, run = built
     table = br.activity_table(run, study)
     rows = row_log(run, study)
+    assert rows["world"].size > 0
     log = run.carry.log
     measurements = (
         np.asarray(log.valid)

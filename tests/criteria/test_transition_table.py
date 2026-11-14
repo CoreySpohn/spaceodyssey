@@ -26,6 +26,7 @@ from spaceodyssey.criteria.transition import (
     load_transition_table,
     pass_probability,
 )
+from tests.studies.bracket_helpers import assert_trees_equal, random_state
 
 TELESCOPE = 2
 EXAMPLE = files("spaceodyssey.criteria") / "examples/h2o_then_o2.json"
@@ -101,26 +102,6 @@ def fold_passing_rows(table, n_rows):
     for _ in range(n_rows):
         state = _update(table, state, spectral_row())
     return state
-
-
-def random_state(template, seed):
-    leaves, structure = jax.tree.flatten(template)
-    keys = jax.random.split(jax.random.key(seed), len(leaves))
-    return jax.tree.unflatten(
-        structure,
-        [
-            jax.random.normal(k, x.shape, x.dtype)
-            if jnp.issubdtype(x.dtype, jnp.floating)
-            else jax.random.randint(k, x.shape, 0, 3, x.dtype)
-            for k, x in zip(keys, leaves, strict=True)
-        ],
-    )
-
-
-def assert_trees_equal(actual, expected):
-    assert jax.tree.structure(actual) == jax.tree.structure(expected)
-    for a, b in zip(jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True):
-        np.testing.assert_array_equal(a, b)
 
 
 def package_inputs(*, p=(0.75, 0.60), t_d=(10.0, 20.0), n_slots=1, n_grid=2):

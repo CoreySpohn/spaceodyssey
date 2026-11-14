@@ -1,7 +1,6 @@
 """Population first tiers and claims at the decision/scoring boundary."""
 
 import dataclasses
-from types import SimpleNamespace
 
 import equinox as eqx
 import jax
@@ -25,9 +24,15 @@ from spaceodyssey.adapters.parameters import (
 from spaceodyssey.adapters.skyscapes import ExoVistaWorldSource, PopulationModel
 from spaceodyssey.core.enums import EffectKind
 from spaceodyssey.criteria.claims import EarthCandidateClaim, claims_on_truth
-from spaceodyssey.studies import bracket as br
 from tests.adapters.test_report_posterior_refit import _null_lane
-from tests.studies.bracket_helpers import build, fixture_source
+from tests.studies.bracket_helpers import (
+    build,
+    decide_once,
+    effect_kind,
+    fixture_source,
+    state_with,
+    summary_selecting_node,
+)
 
 KEY = jax.random.PRNGKey(0)
 
@@ -80,7 +85,9 @@ def first_tier(boundary_inputs, population, claims=()):
         study,
         observer=dataclasses.replace(
             study.observer,
-            criterion=dataclasses.replace(study.observer.criterion, claims=claims),
+            criterion=dataclasses.replace(
+                study.observer.criterion, claims=claims, target_claim=None
+            ),
         ),
     )
     st = boundary._post_settings(study)
@@ -322,14 +329,7 @@ def test_empty_support_and_exhaustion_are_bounded(boundary_inputs):
 def test_a_dark_slot_with_zero_existence_does_not_schedule_followup(boundary_inputs):
     """Fails if an empty claim tuple makes an impossible dark slot look known."""
     study, _, _ = boundary_inputs
-    n = study.caps.n_subjects
-    channel = study.channel_model
-    summary = ph.DecisionSummary.zeros(n, channel.n_slots, ph.N_GRID, channel.n_modes)
-    summary = dataclasses.replace(summary, p_det=jnp.ones_like(summary.p_det))
-    state = jnp.zeros(n * 3 + 3).at[n * 3 + 1].set(n)
-    state = state.at[jnp.arange(n) * 3].set(-30 * br.TICKS_PER_DAY)
-    view = SimpleNamespace(belief=summary, tick=jnp.asarray(0), n_dec=jnp.asarray(0))
-    policy = study.agenda.policies[0]
+    summary = summary_selecting_node(study, node=0, detected=False)
     for probability, n_claims, expected_kind, searched in (
         (0.0, 0, EffectKind.WAIT, False),
         (0.1, 0, EffectKind.OBSERVE, True),
@@ -340,11 +340,14 @@ def test_a_dark_slot_with_zero_existence_does_not_schedule_followup(boundary_inp
             p_exist=jnp.full_like(summary.p_exist, probability),
             p_claim=jnp.zeros((*summary.p_exist.shape, n_claims)),
         )
-        eff, updated, _ = policy.decide(
-            state,
-            SimpleNamespace(belief=held, tick=view.tick, n_dec=view.n_dec),
-            study.decision_view(),
-            KEY,
+        criterion = dataclasses.replace(
+            study.observer.criterion,
+            claims=() if n_claims == 0 else (EarthCandidateClaim(),),
+            target_claim=None if n_claims == 0 else "earth_candidate",
         )
-        assert int(eff.kind[0]) == int(expected_kind)
-        assert bool(updated[jnp.arange(n) * 3 + 2].sum() > 0) == searched
+        local = dataclasses.replace(
+            study, observer=dataclasses.replace(study.observer, criterion=criterion)
+        )
+        decision = decide_once(local, summary=held, state=state_with(local))
+        assert effect_kind(decision) == int(expected_kind)
+        assert bool(decision.state.n_imaging.sum() > 0) == searched

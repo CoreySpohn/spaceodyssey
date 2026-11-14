@@ -1664,6 +1664,58 @@ def _fit_digest(item, st, population=None, bands=()):
     return h.digest()
 
 
+@eqx.filter_jit
+def _population_summary(channel, population, prior, st):
+    """Forecast the declared first-tier population before any reports exist."""
+
+    def star_summary(subject):
+        key = jax.random.fold_in(jax.random.PRNGKey(0), subject)
+        star = _population_star(channel, subject)
+        params, valid = population.draw_planets(key, star, st.n_first, channel.bands)
+        expected = population.expected_planets(
+            star, jax.random.fold_in(key, _EXPECTED_TAG), st.n_estimate_systems
+        )
+        supported = jnp.any(valid)
+        log_w = jnp.where(supported, jnp.where(valid, 0.0, -jnp.inf), 0.0)
+        leaves = summarize(
+            params,
+            log_w,
+            subject,
+            channel,
+            jnp.asarray(0, I64),
+            claims=st.claims,
+            n_grid=st.n_grid,
+            forecast_quantiles=st.forecast_quantiles,
+            spacing_d=st.spacing_d,
+            position_lag_d=st.position_lag_d,
+        )
+        leaves = jax.tree.map(
+            lambda x: jnp.where(supported, x, jnp.zeros_like(x)), leaves
+        )
+        return jnp.clip(expected / st.n_slots, 0.0, 1.0), leaves
+
+    existence, leaves = jax.lax.map(star_summary, jnp.arange(prior.n_subjects))
+
+    def slots(x):
+        return jnp.broadcast_to(
+            x[:, None], (prior.n_subjects, st.n_slots, *x.shape[1:])
+        )
+
+    return dataclasses.replace(
+        prior,
+        p_exist=slots(existence),
+        p_det=slots(leaves.p_det),
+        fc_counts=slots(leaves.fc_counts),
+        fc_variance=slots(leaves.fc_variance),
+        p_claim=slots(leaves.p_claim),
+        scatter=slots(leaves.scatter),
+        pos_mean=slots(leaves.pos_mean),
+        ln_period_q=slots(leaves.ln_period_q),
+        ess=slots(leaves.ess),
+        available=leaves.available,
+    )
+
+
 class ReportRefit(AbstractRefitBoundary):
     """The refit boundary of a decision study: summaries from visit reports.
 
@@ -2025,6 +2077,20 @@ class ReportRefit(AbstractRefitBoundary):
         return tuple(
             all(int(audiences.get(path, 0)) & flag for path in required)
             for flag in flags
+        )
+
+    def initial_summary(self, study):
+        """Initialize every audience from the belief population and planning model.
+
+        This needs no measurement or catalog permissions and uses the same draw
+        count, occurrence estimate and forecasts as the declared first tier.
+        """
+        view = study.decision_view()
+        return _population_summary(
+            view.channel_model,
+            view.belief_population,
+            study.observer.prior,
+            self._post_settings(study),
         )
 
     def _post_settings(self, study):

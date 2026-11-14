@@ -25,10 +25,12 @@ from tests.studies.bracket_helpers import (
     build,
     charged_days,
     columns_of,
+    decide_once,
     fixture_channel,
     fixture_source,
     fold_rows,
     spec_row,
+    state_with,
     telescope_rows,
     unpack_state,
     with_grants,
@@ -164,10 +166,10 @@ def test_true_snr_delivery_folds_the_true_columns(fixture_study):
 @pytest.mark.slow(reason="two short fixture runs on the chunked refresh driver")
 def test_a_policy_without_measurements_still_spends_and_never_waits_on_a_refit():
     """Fails if `prior_planned` stalls waiting for a refit it can never read."""
-    run = build(
+    built = build(
         "prior_planned",
         budget_d=BUDGET_D,
-        p_exist=0.3,
+        policy_kw={"max_visits": 2},
         n_round=2**9,
         n_rounds=1,
         n_centers=16,
@@ -176,8 +178,14 @@ def test_a_policy_without_measurements_still_spends_and_never_waits_on_a_refit()
         n_first=64,
         n_particles=128,
         ess_floor=1.0,
-    ).run
-    assert charged_days(run) > 0 and telescope_rows(run) >= 2
+    )
+    run = built.run
+    assert charged_days(run, built.study) > 0 and telescope_rows(run) >= 2
+    decision = decide_once(
+        built.study,
+        state=state_with(built.study, n_imaging=1),
+    )
+    assert int(decision.state.n_trace) == 1
 
 
 def test_csv_exports_keep_each_studys_grants(fixture_study, tmp_path):

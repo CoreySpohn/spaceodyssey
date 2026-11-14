@@ -303,10 +303,13 @@ def test_channel_and_source_bands_must_agree_at_study_construction(source, chann
                 prior=prior_summary(channel, len(source.stars)),
                 criterion=ImagingCriterion(claims=()),
             ),
-            policy=br.BracketPolicy(1.0, N_SLOTS),
+            policy=br.PackagePolicy(),
         )
 
 
+@pytest.mark.slow(
+    reason="builds the population forecast before checking refit construction"
+)
 def test_actual_invalid_spectrum_is_rejected_at_source_and_refit_construction(
     source, channel
 ):

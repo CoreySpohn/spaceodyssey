@@ -33,6 +33,7 @@ from tests.studies.bracket_helpers import (
     FIXTURE_BANDS,
     HORIZON_D,
     N_SLOTS,
+    assert_trees_equal,
     build,
     fixture_channel,
     fixture_files,
@@ -107,7 +108,7 @@ def build_study(worlds, belief_population=None, *, channel):
             prior=prior_summary(channel, len(worlds.stars)),
             criterion=ImagingCriterion(claims=()),
         ),
-        policy=bracket.BracketPolicy(BUDGET_D, N_SLOTS),
+        policy=bracket.PackagePolicy(),
         belief_population=belief_population,
     )
 
@@ -161,6 +162,7 @@ def test_the_generator_is_required():
         )
 
 
+@pytest.mark.slow(reason="builds population forecasts for several declared beliefs")
 def test_refit_bounds_come_from_the_belief_population_not_the_worlds(
     worlds, bounds_channel
 ):
@@ -169,12 +171,16 @@ def test_refit_bounds_come_from_the_belief_population_not_the_worlds(
     a = build_study(worlds_a, belief_population=GEN, channel=bounds_channel)
     b = build_study(worlds_b, belief_population=GEN, channel=bounds_channel)
     assert boundary_bounds(a) == boundary_bounds(b)
+    assert_trees_equal(a.observer.prior, b.observer.prior)
     narrow = dataclasses.replace(GEN, support=SupportRange((100.0, 1000.0)))
     assert boundary_bounds(
         build_study(worlds_a, belief_population=narrow, channel=bounds_channel)
     ) != boundary_bounds(a)
 
 
+@pytest.mark.slow(
+    reason="compiles population forecasts for a new support and host count"
+)
 def test_without_a_belief_population_the_bounds_are_the_generators(
     worlds, bounds_channel
 ):
