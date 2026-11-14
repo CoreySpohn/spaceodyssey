@@ -1,3 +1,7 @@
 # Unreleased sibling libraries, applied as uv overrides so each is installed at a pinned main
 # commit whatever version bounds other packages declare (a breaking change waiting for its
 # release tag reports the old major version). Move a pin deliberately; drop it once PyPI covers it.
+skyscapes @ git+https://github.com/CoreySpohn/skyscapes@3a187f58e975ea6d86bc1e538e1ec12c6381c5b5
+orbix @ git+https://github.com/CoreySpohn/orbix@272453b3cbb484c5b57358c7cac8e8f3adf05512
+photomancy @ git+https://github.com/CoreySpohn/photomancy@683476c0917f8632ad250cdab589ebf63a782a91
+jaxedith @ git+https://github.com/CoreySpohn/jaxedith@8d468eb59f7c33e909947d0931df4cc2e52bdf19
