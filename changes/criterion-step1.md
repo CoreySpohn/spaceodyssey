@@ -130,7 +130,9 @@ bounds inference.
 - Imaging requirements advance on the exposure that satisfies them. Candidate
   images are required before spectroscopy, with declared detection-count,
   status and position-scatter guards; passing imaging steps reduce that gate.
-  A completing image is charged once.
+  A completing image is charged once. Its progress probability is detection
+  probability times the conditional requirement-pass probability; nondetections
+  deliver no counts or variance and earn no progress or continuation credit.
 - Packages receive remaining imaging/spectrum row allowances at both star and
   track interfaces. Every continuation consumes its kind's allowance; unreachable
   final credit is excluded while reachable intermediate credit is retained.

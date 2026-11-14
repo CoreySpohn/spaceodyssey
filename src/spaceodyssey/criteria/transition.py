@@ -439,6 +439,9 @@ class TransitionTable(AbstractCriterion):
                         self.requirement_snr[step],
                         self.margin[step],
                     )
+                    if imaging_channels:
+                        # A null image delivers no counts or variance to the step.
+                        probability *= jnp.where(imaging[None, :], p_det, 1.0)
                     variants = step_variants[step] & ((images == 0) | imaging)
                     p, cost, next_g, v = best(probability, g, variants, left)
                     p = jnp.where(~started, probability[first_g, first_v], p)

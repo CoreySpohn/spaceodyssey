@@ -447,6 +447,48 @@ def test_an_imaging_step_costs_the_row_that_completes_its_fold():
     assert int(selection.choice[0]) == 0
 
 
+def test_imaging_progress_requires_a_delivered_detection():
+    """Fails if uncensored counts credit null images or their spectral continuations."""
+    summary, settings = package_inputs(p=(0.6, 1.0))
+    p_det = 0.5200394249187209  # Phi((50 - 7 * sqrt(50)) / sqrt(100)).
+    summary = dataclasses.replace(
+        summary,
+        n_det=jnp.full(1, 2, I64),
+        p_det=jnp.full_like(summary.p_det, p_det),
+        fc_counts=summary.fc_counts.at[:, :, 0].set(50.0),
+        fc_variance=summary.fc_variance.at[:, :, 0].set(100.0),
+    )
+    terminal = dataclasses.replace(
+        one_step_table(), mode_names=("image",), requirement_snr=[1.0]
+    )
+    continuation = dataclasses.replace(
+        two_step_table(),
+        mode_names=("image", "a"),
+        requirement_snr=[1.0, 5.0],
+        label_values=[0.0, 0.25, 1.0],
+    )
+    image_pass = p_det * float(ndtr(4.0))
+    for table, gain, time_d in (
+        (terminal, image_pass, 2.0),
+        (continuation, image_pass * (0.25 + 0.6 * 0.75), 2.0 + image_pass * 10.0),
+    ):
+        state = table.init_state(1, 3)
+        detected = _update(
+            table, state, spectral_row(mode=0, counts=50.0, variance=100.0)
+        )
+        assert int(detected.node[0]) == 1
+        null = _update(table, state, spectral_row(mode=0, counts=0.0, variance=0.0))
+        assert_trees_equal(null, state)
+        opts = _options(table, state, summary, settings)
+        assert float(opts.gain[0, 0]) == pytest.approx(gain)
+        assert float(opts.gain[0, 0]) <= p_det
+        assert float(opts.time[0, 0, TELESCOPE]) == pytest.approx(time_d)
+        no_detection = dataclasses.replace(summary, p_det=jnp.zeros_like(summary.p_det))
+        opts = _options(table, state, no_detection, settings)
+        assert float(opts.gain[0, 0]) == 0.0
+        assert float(opts.time[0, 0, TELESCOPE]) == 2.0
+
+
 def test_row_allowances_keep_only_reachable_intermediate_credit():
     """Fails if continuation credit survives its row cap or loses a reachable label."""
     table = dataclasses.replace(two_step_table(), label_values=[0.0, 0.5, 1.0])
