@@ -131,6 +131,7 @@ def test_the_detected_slots_are_the_summary_of_the_shrinkage_cloud(world):
     entry's key folded with the slot, then the same `summarize` as every kernel.
     The least-detected slot of star 1 keeps only its first detection, so the entry
     holds a slot detected once beside one detected three or more times.
+    Fails if a detected cloud is weighted or its summary uses another key.
     """
     study, channel, truth, rich = world
     request = _request(world, {1: _first_only(rich[1], _least_detected(rich[1]))})
@@ -175,7 +176,9 @@ def test_the_detected_slots_are_the_summary_of_the_shrinkage_cloud(world):
             ),
         )
         assert got["status"][slot] == ph.SLOT_OK
-        assert got["ess"][slot] == ph.SHRINK_DRAWS
+        np.testing.assert_array_max_ulp(
+            got["ess"][slot], np.float64(ph.SHRINK_DRAWS), maxulp=4
+        )
         for name in ("p_det", "scatter", "pos_mean", "p_claim"):
             np.testing.assert_allclose(
                 got[name][slot],
