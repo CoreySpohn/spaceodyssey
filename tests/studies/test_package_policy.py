@@ -16,8 +16,8 @@ from spaceodyssey.core.enums import (
     EffectKind,
     RecordStatus,
 )
-from spaceodyssey.core.snapshot import snapshot_view
 from spaceodyssey.core.records import pack, unpack
+from spaceodyssey.core.snapshot import snapshot_view
 from spaceodyssey.studies import bracket as br
 from tests.studies.bracket_helpers import (
     _decide,
@@ -368,7 +368,7 @@ def test_trace_value_is_the_current_label_after_failed_and_successful_rows(fixtu
 
 @pytest.mark.slow(reason="physical study and two decisions exercise ledger corrections")
 def test_trace_charged_days_follow_ledger_spending_and_refunds(fixture):
-    """Fails if the price trace counts requested charges instead of ledger net spending."""
+    """Fails if the charge trace ignores ledger spending or refunds."""
     summary = summary_selecting_node(fixture, node=0)
     resource = fixture.channel_model.mode_table.resource("telescope_days")
     budget_d = float(fixture.budget[-1, resource])
@@ -390,7 +390,7 @@ def test_trace_charged_days_follow_ledger_spending_and_refunds(fixture):
     reason="physical study and a decision after a refused imaging request"
 )
 def test_a_refused_imaging_start_does_not_wait_for_a_nonexistent_row(fixture):
-    """Fails if an imaging request without a released row stalls every later decision."""
+    """Fails if an imaging request without a row stalls later decisions."""
     summary = summary_selecting_node(fixture, node=0, detected=False)
     decision = decide_once(
         fixture,

@@ -16,7 +16,11 @@ from tests.core.helpers import one_world, worlds
 from tests.core.test_replay_refresh_quick import (
     ROOT,
     KeyedBoundary,
+)
+from tests.core.test_replay_refresh_quick import (
     built as hand_replay,
+)
+from tests.core.test_replay_refresh_quick import (
     study as replay_study,
 )
 

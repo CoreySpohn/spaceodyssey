@@ -61,10 +61,12 @@ from spaceodyssey.adapters.photomancy import (
     N_GRID,
     SLOT_DEGRADED,
     SLOT_KEPT,
-    SLOT_OK,
     SUMMARY_LEAVES,
     DecisionSummary,
     ReportRefit,
+)
+from spaceodyssey.adapters.photomancy import (
+    SLOT_OK as SLOT_OK,
 )
 from spaceodyssey.adapters.skyscapes import (
     Band,
