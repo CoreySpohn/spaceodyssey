@@ -427,3 +427,27 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   named scatter checks to forecasts and availability; preserve infinite model
   variance and reject NaNs. No tests are retired or parameter matrices expanded.
   Goldens and pinned hashes are unchanged.
+
+## Transition-table criteria and water/oxygen example
+
+- Add acyclic, repeated SNR requirements with measured per-band accumulators,
+  codec-packed state, named claims and terminal label values. Active steps retain
+  an explicitly associated achieved label; later packages price only new credit.
+  Failure edges are validated but no measurement decides a failure.
+- Price conditional packages from paired forecast quantiles and the lowered
+  channel resource vectors, including overheads. Imaging retains the detection,
+  fit-status and angular-scatter gate; sufficient counts with an unacceptable fit
+  or scatter require another imaging/refit step. Dark slots open with existence
+  times detection probability. The first exposure is charged once per star;
+  subsequent slot costs are weighted by the probability of reaching them.
+- Ship separate criterion and study-mode examples for water then oxygen. Both
+  continuum SNR requirements are explicitly assumed to be 5 pending emulated
+  spectra. The 940 and 760 nm modes explicitly assume resolving power 140,
+  throughput 0.29165, 300 s frames and widths equal to center over resolving power.
+  Mode loading also accepts an object containing assumptions and a modes list,
+  preserving the existing list format.
+- Add eleven tests covering the probability boundaries, repeats, state codec,
+  conditional gain and resource time, example declarations, measured assignments,
+  achieved credit, candidate gates, availability, variant choice and validation
+  under tracing. No tests retire or shared parameter matrices expand. Goldens
+  and pinned hashes are unchanged.

@@ -1,0 +1,34 @@
+{
+  "assumption": "Before emulated spectra, a pass means that the continuum SNR requirement was met, not a molecular detection. Both requirement_snr values are assumed to be 5.0 pending emulated spectra.",
+  "citations": ["stark_lower_2015", "latouf_bayesian_2023", "latouf_bayesian_2023a", "stark_paths_2024"],
+  "claims": ["earth_candidate"],
+  "target_claim": "earth_candidate",
+  "start": "h2o",
+  "steps": [
+    {
+      "name": "h2o",
+      "modes": ["ifs_940"],
+      "requirement_snr": 5.0,
+      "margin": 0.0,
+      "repeat": 1,
+      "on_pass": "o2",
+      "on_fail": null,
+      "achieved_label": "none"
+    },
+    {
+      "name": "o2",
+      "modes": ["ifs_760"],
+      "requirement_snr": 5.0,
+      "margin": 0.0,
+      "repeat": 1,
+      "on_pass": "h2o_o2",
+      "on_fail": null,
+      "achieved_label": "h2o"
+    }
+  ],
+  "labels": [
+    {"name": "none", "value": 0.0},
+    {"name": "h2o", "value": 0.5},
+    {"name": "h2o_o2", "value": 1.0}
+  ]
+}

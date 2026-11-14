@@ -179,6 +179,12 @@ def profile_modes(profile) -> tuple[ModeSpec, ...]:
 
 
 def load_mode_specs(path) -> tuple[ModeSpec, ...]:
-    """Read a JSON list with each mode's band declared as center_nm and width_nm."""
+    """Read a mode list or a documented object with a modes list.
+
+    Each band declares center_nm and width_nm. An object may also document the
+    study's assumptions without adding those annotations to the physical modes.
+    """
     rows = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(rows, dict):
+        rows = rows["modes"]
     return tuple(ModeSpec(**{**row, "band": Band(**row["band"])}) for row in rows)

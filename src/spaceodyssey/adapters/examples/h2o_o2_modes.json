@@ -1,0 +1,23 @@
+{
+  "assumption": "Assume both bands copy the characterization optics of the JATIS baseline: resolving power 140, optics throughput 0.29165, frame time 300 s, with band width center_nm / 140 at 940 and 760 nm.",
+  "modes": [
+    {
+      "name": "ifs_940",
+      "kind": "spectrograph",
+      "band": {"center_nm": 940.0, "width_nm": 6.714285714285714},
+      "optics_throughput": 0.29165,
+      "frame_time_s": 300.0,
+      "resolving_power": 140.0,
+      "snr_threshold": null
+    },
+    {
+      "name": "ifs_760",
+      "kind": "spectrograph",
+      "band": {"center_nm": 760.0, "width_nm": 5.428571428571429},
+      "optics_throughput": 0.29165,
+      "frame_time_s": 300.0,
+      "resolving_power": 140.0,
+      "snr_threshold": null
+    }
+  ]
+}
