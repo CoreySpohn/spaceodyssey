@@ -801,3 +801,10 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   for every declared claim: the number of planets beyond the cap satisfying
   that predicate. Counts use the source's checked world order. A source with
   drops but no retained overflow truth cannot report claim losses silently.
+
+## Imaging transition forecasts
+
+- Imaging requirements use the same exposure to advance the transition as the
+  measurement fold. The orbit-candidate image gate applies before spectroscopy;
+  passing imaging requirements also reduce the remaining detection gate.
+- A one-row imaging definition can complete within that row's charged budget.

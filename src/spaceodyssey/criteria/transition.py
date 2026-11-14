@@ -362,47 +362,45 @@ class TransitionTable(AbstractCriterion):
                 0, settings.candidate_detections - summary_star.n_det[slot]
             )
             images = jnp.maximum(images, (~candidate).astype(I64))
-            needs_images = images > 0
+            imaging_step = jnp.any(step_variants[step] & imaging)
+            needs_images = (images > 0) & ~imaging_step
             compatible = jnp.where(
                 needs_images, imaging[first_v], step_variants[step, first_v]
             )
+            compatible &= imaging[first_v] | (images == 0)
             compatible &= (node < self.n_steps) & available[first_g, first_v]
-            initial_reach = compatible.astype(F64)
             zero_cost = jnp.zeros(costs.shape[-1], F64)
-            if imaging_channels:
-                p_det = summary_star.p_det[slot][:, imaging_index]
-
-                def image_attempt(i, carry):
-                    reach, time, g = carry
-                    p, cost, next_g, _ = best(p_det, g, imaging, detection=True)
-                    p = jnp.where(i == 0, p_det[first_g, first_v], p)
-                    cost = jnp.where(i == 0, zero_cost, cost)
-                    next_g = jnp.where(i == 0, first_g, next_g)
-                    occupancy = jnp.where(
-                        (i == 0) & (summary_star.n_det[slot] == 0),
-                        summary_star.p_exist[slot],
-                        1.0,
-                    )
-                    return reach * p * occupancy, time + reach * cost, next_g
-
-                reach, time, g = jax.lax.fori_loop(
-                    0, images, image_attempt, (initial_reach, zero_cost, first_g)
-                )
-            else:
-                reach, time, g = (
-                    jnp.where(needs_images, 0.0, initial_reach),
-                    zero_cost,
-                    first_g,
-                )
+            occupancy = jnp.where(
+                summary_star.n_det[slot] == 0, summary_star.p_exist[slot], 1.0
+            )
 
             def table_step(i, carry):
-                node, reach, time, g, counts, variance, gain = carry
+                node, reach, time, g, counts, variance, gain, images, started = carry
                 active = node < self.n_steps
                 step = jnp.minimum(node, self.n_steps - 1)
+                imaging_step = jnp.any(step_variants[step] & imaging)
+                gate = jnp.where(active & ~imaging_step, images, 0)
+                if imaging_channels:
+                    p_det = summary_star.p_det[slot][:, imaging_index]
+
+                    def image_attempt(j, attempt):
+                        reach, time, g, started = attempt
+                        p, cost, next_g, _ = best(p_det, g, imaging, detection=True)
+                        p = jnp.where(~started, p_det[first_g, first_v], p)
+                        cost = jnp.where(~started, zero_cost, cost)
+                        next_g = jnp.where(~started, first_g, next_g)
+                        return reach * p, time + reach * cost, next_g, jnp.asarray(True)
+
+                    reach, time, g, started = jax.lax.fori_loop(
+                        0, gate, image_attempt, (reach, time, g, started)
+                    )
+                else:
+                    reach = jnp.where(gate > 0, 0.0, reach)
+                images = jnp.maximum(0, images - gate)
                 remaining = self.repeat[step] - jnp.where(i == 0, state.passes[slot], 0)
 
-                def spectral_attempt(j, attempt):
-                    reach, time, g, counts, variance = attempt
+                def step_attempt(j, attempt):
+                    reach, time, g, counts, variance, images, started = attempt
                     probability = pass_probability(
                         counts[bands][None, :, None],
                         variance[bands][None, :, None],
@@ -411,13 +409,13 @@ class TransitionTable(AbstractCriterion):
                         self.requirement_snr[step],
                         self.margin[step],
                     )
-                    p, cost, next_g, v = best(probability, g, step_variants[step])
-                    first = (i == 0) & (j == 0) & ~needs_images
-                    p = jnp.where(first, probability[first_g, first_v], p)
-                    cost = jnp.where(first, zero_cost, cost)
+                    variants = step_variants[step] & ((images == 0) | imaging)
+                    p, cost, next_g, v = best(probability, g, variants)
+                    p = jnp.where(~started, probability[first_g, first_v], p)
+                    cost = jnp.where(~started, zero_cost, cost)
                     next_g, v = (
-                        jnp.where(first, first_g, next_g),
-                        jnp.where(first, first_v, v),
+                        jnp.where(~started, first_g, next_g),
+                        jnp.where(~started, first_v, v),
                     )
                     return (
                         reach * p,
@@ -425,18 +423,30 @@ class TransitionTable(AbstractCriterion):
                         next_g,
                         counts.at[bands[v]].set(0.0),
                         variance.at[bands[v]].set(0.0),
+                        jnp.maximum(0, images - imaging[v].astype(I64)),
+                        jnp.asarray(True),
                     )
 
                 after = jax.lax.fori_loop(
                     0,
                     jnp.where(active, remaining, 0),
-                    spectral_attempt,
-                    (reach, time, g, counts, variance),
+                    step_attempt,
+                    (reach, time, g, counts, variance, images, started),
                 )
-                reach, time, g, counts, variance = after
+                reach, time, g, counts, variance, images, started = after
                 successor = jnp.where(active, self.on_pass[step], node)
                 gain += reach * (self._values(successor) - self._values(node))
-                return successor, reach, time, g, counts, variance, gain
+                return (
+                    successor,
+                    reach,
+                    time,
+                    g,
+                    counts,
+                    variance,
+                    gain,
+                    images,
+                    started,
+                )
 
             result = jax.lax.fori_loop(
                 0,
@@ -444,15 +454,17 @@ class TransitionTable(AbstractCriterion):
                 table_step,
                 (
                     node,
-                    reach,
-                    time,
-                    g,
+                    compatible.astype(F64) * occupancy,
+                    zero_cost,
+                    first_g,
                     state.sum_counts[slot],
                     state.sum_variance[slot],
                     jnp.asarray(0.0, F64),
+                    images,
+                    jnp.asarray(False),
                 ),
             )
-            return target[slot] * result[-1], result[2]
+            return target[slot] * result[6], result[2]
 
         def option(g, v):
             gain, later_time = jax.vmap(slot_package, in_axes=(0, None, None))(

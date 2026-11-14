@@ -26,6 +26,7 @@ from spaceodyssey.criteria.transition import (
     load_transition_table,
     pass_probability,
 )
+from spaceodyssey.studies.selection import select
 from tests.studies.bracket_helpers import assert_trees_equal, random_state
 
 TELESCOPE = 2
@@ -421,3 +422,26 @@ def test_invalid_tables_are_refused_but_numeric_fields_can_be_traced():
         )
     )(jnp.asarray(2.0))
     assert float(scatter) == 2.0
+
+
+def test_an_imaging_step_costs_the_row_that_completes_its_fold():
+    """Fails if a completing image is charged again as a gate or table step."""
+    table = dataclasses.replace(one_step_table(), mode_names=("image",))
+    summary, settings = package_inputs(p=(1.0, 1.0))
+    summary = dataclasses.replace(
+        summary,
+        n_det=jnp.zeros(1, I64),
+        p_det=jnp.ones_like(summary.p_det),
+        fc_counts=jnp.full_like(summary.fc_counts, 50.0),
+        fc_variance=jnp.ones_like(summary.fc_variance),
+    )
+    state = table.init_state(1, 3)
+    folded = _update(table, state, spectral_row(mode=0, counts=50.0))
+    assert int(folded.node[0]) == 1
+    opts = _options(table, state, summary, settings)
+    assert float(opts.gain[0, 0]) == 1.0
+    assert float(opts.time[0, 0, TELESCOPE]) == 2.0
+    selection = select(
+        opts.gain[None], opts.time[None], jnp.asarray([0.0, 0.0, 2.0]), 48
+    )
+    assert int(selection.choice[0]) == 0
