@@ -25,6 +25,7 @@ from spaceodyssey.adapters.physical_profile import JATIS_EAC1_V1
 from spaceodyssey.adapters.skyscapes import Band, ExoVistaWorldSource, PopulationModel
 from spaceodyssey.criteria.claims import EarthCandidateClaim
 from spaceodyssey.studies import bracket as br
+from tests.criteria import ImagingCriterion
 
 FIXTURE = pathlib.Path(__file__).parents[1] / "fixtures" / "exovista"
 N_SLOTS, N_WORLDS = 6, 2
@@ -122,7 +123,7 @@ def build(
         budget_d=budget_d,
         observer=br.SummaryObserver(
             prior=prior_summary(channel, n_stars, p_exist),
-            claims=(EarthCandidateClaim(),),
+            criterion=ImagingCriterion(claims=(EarthCandidateClaim(),)),
         ),
         policy=br.BracketPolicy(budget_d, N_SLOTS, **(policy_kw or {})),
     )

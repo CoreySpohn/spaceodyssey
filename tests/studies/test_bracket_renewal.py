@@ -11,6 +11,7 @@ from spaceodyssey.adapters.jaxedith import ObservingModeChannel
 from spaceodyssey.adapters.photomancy import N_GRID, DecisionSummary
 from spaceodyssey.core import index_world, replay_run
 from spaceodyssey.studies import bracket as br
+from tests.criteria import ImagingCriterion
 
 from .bracket_helpers import build
 
@@ -59,7 +60,7 @@ def test_the_observer_expires_a_summary_at_its_last_node():
     """
     zeros = DecisionSummary.zeros(2, 3, N_GRID, 1, n_an=1)
     zeros = dataclasses.replace(zeros, ref_tick=jnp.asarray([0, 0]))
-    observer = br.SummaryObserver(prior=zeros)
+    observer = br.SummaryObserver(prior=zeros, criterion=ImagingCriterion(claims=()))
     caps = types.SimpleNamespace(n_subjects=2)
     day = br.TICKS_PER_DAY
     spacing = br.NODE_SPACING_D

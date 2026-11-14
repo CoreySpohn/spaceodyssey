@@ -45,6 +45,7 @@ from spaceodyssey.core.kinds import (
     AbstractProcess,
     AbstractWorldSource,
 )
+from spaceodyssey.criteria.base import AbstractCriterion
 
 GROUP_PREFIX = "spaceodyssey."
 
@@ -56,6 +57,7 @@ FAMILIES = {
     "channel_model": AbstractChannelModel,
     "design": AbstractDesign,
     "objective": AbstractObjective,
+    "criterion": AbstractCriterion,
 }
 
 _NAME = re.compile(

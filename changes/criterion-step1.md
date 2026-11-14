@@ -394,3 +394,16 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   Require both engines independently in the reference and boundary runs; retain
   every slice, status, diagnostic and computed-mask comparison. No tests or
   parameter cases are added or retired, and no serialized golden changes.
+
+## Criterion state in the summary observer
+
+- Register the dependency-light criterion family and its abstract state, value,
+  and package interfaces. A summary stores one packed state vector per star;
+  changing the criterion changes its width without changing the summary tree.
+- Fold measured rows incrementally for each audience through the record codec.
+  Refits install only the fitted summary leaves and preserve criterion state.
+  Refit and outcome claims now come from the observer's declared criterion.
+- Add three contract tests for duplicate releases and track assignments, state
+  layouts and refit preservation, and imports without physical dependencies.
+  Existing imaging fixtures supply an explicit empty-state criterion. No tests
+  are retired, parameter matrices expanded, or goldens and pinned hashes changed.

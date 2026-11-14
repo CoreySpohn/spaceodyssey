@@ -42,6 +42,7 @@ from hwoutils.constants import Msun2kg
 from spaceodyssey.adapters.measurement import (
     MEASUREMENT_KIND_NAME,
     measurement_kind,
+    measurement_template,
 )
 from spaceodyssey.adapters.modes import ModeTable
 from spaceodyssey.adapters.parameters import CATALOG_KIND_NAME, catalog_kind
@@ -68,6 +69,7 @@ from spaceodyssey.core.enums import (
     Disposition,
     EffectKind,
     Purpose,
+    RecordStatus,
     Scope,
 )
 from spaceodyssey.core.executors.compiled import CompiledExecutor
@@ -78,10 +80,17 @@ from spaceodyssey.core.kinds import (
     ObserverCapabilities,
 )
 from spaceodyssey.core.ledger import ChannelTable
-from spaceodyssey.core.records import KindRegistry, RecordKind, unpack
+from spaceodyssey.core.records import (
+    KindRegistry,
+    RecordKind,
+    layout_size,
+    pack,
+    unpack,
+)
 from spaceodyssey.core.refresh import REFRESH_PRODUCT_KIND, RefreshSchedule
 from spaceodyssey.core.snapshot import BeliefLayout
-from spaceodyssey.criteria.claims import AbstractClaim, claims_on_truth
+from spaceodyssey.criteria.base import AbstractCriterion
+from spaceodyssey.criteria.claims import claims_on_truth
 from spaceodyssey.studies import builder, effect_rows
 
 # Candidates need repeated detections, a supported fit and a tight sky position.
@@ -310,8 +319,8 @@ def bracket_study(
         budget_d: Telescope days on the shared row.
         caps: Capacities; defaults to `default_capacities` for this horizon, the
             policy's visit and spectrum limits.
-        observer: The summary observer. It must be non-incremental and refit the
-            visit and catalog kinds.
+        observer: The summary observer. It folds criterion state incrementally
+            and refits the measurement and catalog kinds.
         policy: The decision policy.
         belief_population: The population decisions and refits start from; `None`
             is the world source's declared one (`Study.decision_view`).
@@ -612,19 +621,19 @@ _SLOT_LEAVES = tuple(
 
 
 class SummaryObserver(AbstractObserver):
-    """A `DecisionSummary` per star, set only by `install`.
+    """A `DecisionSummary` per star with incremental criterion state.
 
     `prior` is the first-tier summary of each star with no data; it is what the
     observer and the policy hold until the first refit, and it is built from the
-    belief's own prior, never from the truth. The study needs `every_ticks > 0` and
-    `rows_per_subject > 0`, as every non-incremental observer does. `bracket_study`
-    binds `mode_table` from its channel before any rows are processed.
+    belief's own prior, never from the truth. Refits replace only SUMMARY_LEAVES;
+    the packed criterion state survives every install. `bracket_study` binds
+    `mode_table` from its channel before initialization or row processing.
     """
 
     subject_leaves = SUMMARY_LEAVES
     prior: DecisionSummary
+    criterion: AbstractCriterion
     mode_table: ModeTable | None = eqx.field(static=True, default=None, kw_only=True)
-    claims: tuple[AbstractClaim, ...] = eqx.field(static=True, default=())
     catalog_kind: str = eqx.field(default=CATALOG_KIND_NAME, static=True)
     measurement_kind: str = eqx.field(default=MEASUREMENT_KIND_NAME, static=True)
     ticks_per_day: int = eqx.field(default=TICKS_PER_DAY, static=True)
@@ -632,7 +641,7 @@ class SummaryObserver(AbstractObserver):
     def capabilities(self):
         """Refit from imaging measurements and the truth catalog."""
         return ObserverCapabilities(
-            incremental=False,
+            incremental=True,
             refit=True,
             refit_kinds=(self.measurement_kind, self.catalog_kind),
         )
@@ -646,8 +655,38 @@ class SummaryObserver(AbstractObserver):
         )
 
     def init(self, caps):
-        """The prior summary of every star."""
-        return self.prior
+        """The prior summary and the criterion's initial packed state per star."""
+        if self.mode_table is None:
+            raise ValueError("bind the observer's mode table with bracket_study")
+        n_tracks, n_bands = self.prior.p_exist.shape[1], self.mode_table.n_bands
+        width = layout_size(self.criterion.state_template(n_tracks, n_bands))
+        state = pack(self.criterion.init_state(n_tracks, n_bands))
+        return dataclasses.replace(
+            self.prior, state=jnp.broadcast_to(state, (caps.n_subjects, width))
+        )
+
+    def fold(self, belief, rec, caps, key=None):
+        """Fold a measured row into its star's packed criterion state."""
+        if self.mode_table is None:
+            raise ValueError("bind the observer's mode table with bracket_study")
+        n_tracks, n_bands = belief.p_exist.shape[1], self.mode_table.n_bands
+        template = self.criterion.state_template(n_tracks, n_bands)
+
+        def updated(state):
+            row = unpack(measurement_template(n_tracks, n_bands), rec.payload)
+            value = self.criterion.update(
+                unpack(template, state[rec.subject]), row, self.mode_table
+            )
+            return state.at[rec.subject].set(pack(value))
+
+        take = rec.valid & (rec.kind == caps.kind_names.index(self.measurement_kind))
+        take &= rec.status == RecordStatus.COMPLETED
+        state = jax.lax.cond(take, updated, lambda state: state, belief.state)
+        return dataclasses.replace(belief, state=state)
+
+    def fold_summary(self, summary, rec, caps, key=None):
+        """Fold the measured columns released to the policy audience."""
+        return self.fold(summary, rec, caps, key=key)
 
     def expired(self, summary, tick, caps):
         """The stars whose forecast window the clock has reached its last node of.
@@ -662,11 +701,11 @@ class SummaryObserver(AbstractObserver):
 
     def init_summary(self, caps):
         """The policy starts from the same prior."""
-        return self.prior
+        return self.init(caps)
 
     def layout(self, caps):
         """One type for belief and summary; `n_obs` counts the visits read."""
-        shapes = self.prior
+        shapes = self.init(caps)
         return BeliefLayout(
             belief=shapes,
             summary=shapes,
@@ -813,7 +852,7 @@ def outcome_table(
     channel = study.channel_model
     claim_values = claims_on_truth(
         truths,
-        study.observer.claims,
+        study.observer.criterion.claims,
         channel.scenes.star_mass_kg / Msun2kg,
         jnp.asarray(channel.scenes.luminosity_lsun),
         channel.epoch_jd,

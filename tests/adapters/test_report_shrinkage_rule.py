@@ -29,6 +29,7 @@ from spaceodyssey.core.enums import EVERYONE, Audience
 from spaceodyssey.core.records import unpack
 from spaceodyssey.studies import bracket as br
 from tests.adapters.test_report_refit import make_study
+from tests.criteria import ImagingCriterion
 
 TRUTH = jax.tree.map(
     lambda x: x[0],
@@ -163,7 +164,7 @@ def test_the_shrinkage_arm_opens_what_the_kernel_reads():
     assert set(arm.groups) == set(ph.SHRINK_GROUPS)
     registry = br.bracket_registry("shrinkage", n_slots=2, n_bands=2)
     prior = ph.DecisionSummary.zeros(4, 2, 16, 2, n_an=4)
-    observer = br.SummaryObserver(prior=prior)
+    observer = br.SummaryObserver(prior=prior, criterion=ImagingCriterion(claims=()))
     caps = registry.lower(
         Capacities(n_subjects=4, rows_per_subject=6, refit_lanes=2), observer
     )

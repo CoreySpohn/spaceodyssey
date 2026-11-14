@@ -178,6 +178,7 @@ require_tier_reason = true
 # tier and the full suite, with headroom; regenerate with tools/program_budgets.py from
 # --budget-json runs of both.
 [tool.testbudget.module_compile_budget_by_file]
+"tests/criteria/test_criterion_contract.py" = 197
 "tests/core/test_refits_on.py" = 269
 "tests/studies/test_bracket_refits_on.py" = 514
 "tests/adapters/test_declared_population.py" = 886
@@ -195,9 +196,9 @@ require_tier_reason = true
 "tests/adapters/test_refit_lanes.py" = 603
 "tests/adapters/test_report_posterior.py" = 2247
 "tests/adapters/test_report_posterior_refit.py" = 5626
-"tests/adapters/test_report_refit.py" = 200
+"tests/adapters/test_report_refit.py" = 204
 "tests/adapters/test_report_shrinkage.py" = 1895
-"tests/adapters/test_report_shrinkage_rule.py" = 90
+"tests/adapters/test_report_shrinkage_rule.py" = 92
 "tests/adapters/test_reporting_law.py" = 1602
 "tests/adapters/test_skyscapes_scene.py" = 653
 "tests/adapters/test_summary_channel.py" = 416
@@ -298,7 +299,7 @@ require_tier_reason = true
 "tests/core/test_visible_relations.py" = 177
 "tests/core/test_wake_coalescing.py" = 77
 "tests/studies/test_allocator.py" = 361
-"tests/studies/test_bracket_arms.py" = 65
+"tests/studies/test_bracket_arms.py" = 68
 "tests/studies/test_bracket.py" = 565
 "tests/studies/test_bracket_batteries.py" = 709
 "tests/studies/test_bracket_capacities.py" = 10

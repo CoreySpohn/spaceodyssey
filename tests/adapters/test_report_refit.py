@@ -41,6 +41,7 @@ from spaceodyssey.core.records import (
 from spaceodyssey.core.refresh import RefitRequest
 from spaceodyssey.criteria.claims import EarthCandidateClaim
 from spaceodyssey.studies.bracket import SummaryObserver
+from tests.criteria import ImagingCriterion
 
 SLOTS, GRID, MODES = 2, 16, 2
 N_SUBJECTS, ROWS = 4, 6
@@ -88,7 +89,11 @@ def make_study(open_groups=("existence", "ephemeris", "class")):
         ]
     )
     prior = DecisionSummary.zeros(N_SUBJECTS, SLOTS, GRID, MODES, n_an=4, n_claims=1)
-    observer = SummaryObserver(prior=prior, claims=(EarthCandidateClaim(),))
+    observer = SummaryObserver(
+        prior=prior,
+        criterion=ImagingCriterion(claims=(EarthCandidateClaim(),)),
+        mode_table=StubChannel().mode_table,
+    )
     caps = registry.lower(
         Capacities(n_subjects=N_SUBJECTS, rows_per_subject=ROWS, refit_lanes=2),
         observer,
@@ -338,7 +343,7 @@ def test_a_wider_registered_kind_does_not_add_phantom_slots():
     prior = DecisionSummary.zeros(N_SUBJECTS, 1, GRID, MODES, n_an=4, n_claims=1)
     caps = registry.lower(
         Capacities(n_subjects=N_SUBJECTS, rows_per_subject=ROWS, refit_lanes=2),
-        SummaryObserver(prior=prior),
+        SummaryObserver(prior=prior, criterion=ImagingCriterion(claims=())),
     )
     ReportRefit(caps=caps)
 

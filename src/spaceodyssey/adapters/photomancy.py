@@ -443,10 +443,13 @@ class DecisionSummary(eqx.Module):
     ln_period_q: jax.Array  # [n, S, 3], 16, 50 and 84 percent quantiles
     ess: jax.Array  # [n, S], Kish effective size
     status: jax.Array  # I64 [n, S], slot fit code (`SLOT_NEVER_FIT` before any fit)
+    state: jax.Array  # F64 [n, W], packed criterion state, held across refits
     aux: jax.Array  # [n_an]
 
     @classmethod
-    def zeros(cls, n_subjects, n_slots, n_grid, n_modes, n_an=0, *, n_claims=0):
+    def zeros(
+        cls, n_subjects, n_slots, n_grid, n_modes, n_an=0, *, n_claims=0, n_state=0
+    ):
         """An all-zero summary of the given capacities."""
         n, s, g, m = n_subjects, n_slots, n_grid, n_modes
         return cls(
@@ -461,6 +464,7 @@ class DecisionSummary(eqx.Module):
             ln_period_q=jnp.zeros((n, s, 3), F64),
             ess=jnp.zeros((n, s), F64),
             status=jnp.full((n, s), SLOT_NEVER_FIT, I64),
+            state=jnp.zeros((n, n_state), F64),
             aux=jnp.zeros(n_an, F64),
         )
 
@@ -471,9 +475,7 @@ class DecisionSummary(eqx.Module):
 
     def bytes_per_star(self):
         """Bytes one star holds in one audience's summary."""
-        total = sum(
-            x.nbytes for name, x in zip(SUMMARY_LEAVES, self._leaves(), strict=True)
-        )
+        total = sum(x.nbytes for x in self._leaves()) + self.state.nbytes
         return total // self.n_subjects
 
     def _leaves(self):
@@ -482,7 +484,9 @@ class DecisionSummary(eqx.Module):
 
 # The per-star leaves, in `DecisionSummary` field order: the observer's subject leaves.
 SUMMARY_LEAVES = tuple(
-    f.name for f in dataclasses.fields(DecisionSummary) if f.name != "aux"
+    f.name
+    for f in dataclasses.fields(DecisionSummary)
+    if f.name not in ("aux", "state")
 )
 
 
@@ -1829,7 +1833,7 @@ class ReportRefit(AbstractRefitBoundary):
             n_grid=self.n_grid,
             spacing_d=self.spacing_d,
             position_lag_d=self.position_lag_d,
-            claims=study.observer.claims,
+            claims=study.observer.criterion.claims,
         ), len(report_row)
 
     def refit_batch(self, study, requests):
@@ -1948,7 +1952,7 @@ class ReportRefit(AbstractRefitBoundary):
             n_grid=self.n_grid,
             spacing_d=self.spacing_d,
             position_lag_d=self.position_lag_d,
-            claims=study.observer.claims,
+            claims=study.observer.criterion.claims,
             n_particles=self.n_particles,
             n_round=self.n_round,
             n_rounds=self.n_rounds,
@@ -2393,7 +2397,14 @@ class ReportRefit(AbstractRefitBoundary):
                     lambda x, e=e: np.broadcast_to(x, (len(e["dark"]), *x.shape)),
                     item["first"].result,
                 )
-        summary = scatter_results(DecisionSummary(**slices, aux=np.zeros(0)), results)
+        summary = scatter_results(
+            DecisionSummary(
+                **slices,
+                state=np.zeros((*slices["ref_tick"].shape, 0)),
+                aux=np.zeros(0),
+            ),
+            results,
+        )
         slices = {name: getattr(summary, name) for name in names}
         for item in per_entry.values():
             e = item["e"]

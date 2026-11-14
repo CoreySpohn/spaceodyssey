@@ -27,6 +27,7 @@ from spaceodyssey.adapters.skyscapes import (
 from spaceodyssey.core.records import unpack
 from tests.adapters.posterior_helpers import realize_visits, visit_request
 from tests.adapters.test_truth_albedo import STARS, hand_population
+from tests.criteria import ImagingCriterion
 from tests.studies.bracket_helpers import (
     BUDGET_D,
     FIXTURE_BANDS,
@@ -103,7 +104,8 @@ def build_study(worlds, belief_population=None, *, channel):
         horizon_d=HORIZON_D,
         budget_d=BUDGET_D,
         observer=bracket.SummaryObserver(
-            prior=prior_summary(channel, len(worlds.stars))
+            prior=prior_summary(channel, len(worlds.stars)),
+            criterion=ImagingCriterion(claims=()),
         ),
         policy=bracket.BracketPolicy(BUDGET_D, N_SLOTS),
         belief_population=belief_population,
@@ -254,7 +256,9 @@ def refit_one_planet(period_d, a_quadrature=True):
     result = boundary.refit_batch(study, visit_request(study, {0: visits}, tick=TICK))
     names = [name for name, _, _ in ph.slice_spec(study)]
     leaves = {n: x[0, 0] for n, x in zip(names, result.slices, strict=True)}
-    summary = ph.DecisionSummary(**leaves, aux=jnp.zeros(0))
+    summary = ph.DecisionSummary(
+        **leaves, state=jnp.zeros((*leaves["ref_tick"].shape, 0)), aux=jnp.zeros(0)
+    )
     rows = SimpleNamespace(
         detected=np.asarray(
             [

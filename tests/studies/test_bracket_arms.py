@@ -25,6 +25,7 @@ from spaceodyssey.studies.bracket import (
     SummaryObserver,
     candidate_slots,
 )
+from tests.criteria import ImagingCriterion
 
 A = np.array([3.0, 5.0, 4.0, 8.0, 6.0])
 B = np.array([2.0, 5.0, 1.0, 6.0, 6.0])
@@ -129,7 +130,7 @@ def test_an_arm_paired_with_itself_has_zero_gap_and_zero_error():
 def _install():
     """One compiled `(install, claims)` of a two-star, three-slot summary."""
     zeros = DecisionSummary.zeros(2, 3, N_GRID, 1, n_an=1, n_claims=1)
-    observer = SummaryObserver(prior=zeros)
+    observer = SummaryObserver(prior=zeros, criterion=ImagingCriterion(claims=()))
 
     def run(old, new):
         out = observer.install(old, new, 0)

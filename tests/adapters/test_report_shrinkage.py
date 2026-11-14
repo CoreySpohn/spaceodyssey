@@ -167,7 +167,7 @@ def test_the_detected_slots_are_the_summary_of_the_shrinkage_cloud(world):
             1,
             channel,
             TICK,
-            claims=study.observer.claims,
+            claims=study.observer.criterion.claims,
             last_det_d=max(
                 e * channel.tick_days
                 for e, flag in zip(ends, _flags(request, slot), strict=True)

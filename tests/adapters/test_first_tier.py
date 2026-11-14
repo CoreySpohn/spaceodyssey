@@ -77,7 +77,11 @@ def first_tier(boundary_inputs, population, claims=()):
     study, boundary, _ = boundary_inputs
     study = dataclasses.replace(study, belief_population=population)
     study = dataclasses.replace(
-        study, observer=dataclasses.replace(study.observer, claims=claims)
+        study,
+        observer=dataclasses.replace(
+            study.observer,
+            criterion=dataclasses.replace(study.observer.criterion, claims=claims),
+        ),
     )
     st = boundary._post_settings(study)
     lane = _null_lane(study.channel_model, st, 0, 1, key=KEY)
