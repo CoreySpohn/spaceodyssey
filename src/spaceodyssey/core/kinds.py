@@ -224,6 +224,10 @@ class AbstractPolicy(eqx.Module):
 
     version: int = eqx.field(default=1, kw_only=True)
 
+    def state_layout(self, caps) -> eqx.Module | None:
+        """Named state template, or None for an undeclared state vector."""
+        return None
+
     def decide(self, pstate, view, study, key):
         """Returns (EffectTable, new pstate, uniform draw u)."""
         raise NotImplementedError

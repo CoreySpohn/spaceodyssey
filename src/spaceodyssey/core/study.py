@@ -19,7 +19,7 @@ from spaceodyssey.core.kinds import (
     WithheldWorldSource,
 )
 from spaceodyssey.core.ledger import AssetTable, ChannelTable, charge_parts
-from spaceodyssey.core.records import lower_refit
+from spaceodyssey.core.records import layout_size, lower_refit
 from spaceodyssey.core.refresh import RefreshSchedule, refresh_enabled
 from spaceodyssey.core.snapshot import named_leaves
 
@@ -122,6 +122,13 @@ class Study(eqx.Module):
                 "Study capacities have no registered record kinds; lower a registry "
                 "into the capacities so payload columns carry their audiences"
             )
+        for policy in self.agenda.policies:
+            layout = policy.state_layout(self.caps)
+            if layout is not None and self.caps.n_pstate < layout_size(layout):
+                raise ValueError(
+                    f"caps.n_pstate is {self.caps.n_pstate}; the policy needs "
+                    f"{layout_size(layout)}"
+                )
         _check_layout(self.observer, self.caps)
         _check_refit(self.observer, self.caps, self.refresh)
         _check_refresh(self.observer, self.caps, self.refresh)
