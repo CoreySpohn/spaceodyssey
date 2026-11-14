@@ -14,7 +14,7 @@ from hypothesis.strategies import permutations
 
 from spaceodyssey.adapters.measurement import MeasurementRow, measurement_template
 from spaceodyssey.adapters.modes import ModeTable
-from spaceodyssey.adapters.parameters import catalog_template
+from spaceodyssey.adapters.parameters import catalog_template, scale_au2
 from spaceodyssey.core.carry import empty_trace, init_carry
 from spaceodyssey.core.enums import (
     I64,
@@ -775,3 +775,46 @@ def test_open_reasons_use_the_final_policy_selection(scored_case):
         ),
     )
     assert verdict(result, study).reason[0, 0, 0] == "unsupported"
+
+
+def test_unsupported_includes_true_scale_in_the_detection_band(scored_case):
+    """Fails if supported orbits hide an unrepresentable true photometric scale."""
+    result, study = scored_case
+    channel = study.channel_model
+    population = study.decision_view().belief_population
+    low, high = population.scale_range_au2(channel.detection_band)
+    payload = result.carry.log.payload
+    catalog = unpack(catalog_template(N_SLOTS, 2), payload[0, 0])
+    params = catalog.params
+    band = channel.imaging_band_index
+    assert population.support.contains(
+        float(jnp.exp(params.ln_period_d[2])), float(params.ecc[2])
+    )
+    assert low < float(jnp.log(scale_au2(params, band)[2])) < high
+    initial = jnp.broadcast_to(
+        pack(CRITERION.init_state(N_SLOTS, 2)), result.carry.belief.state.shape
+    )
+    factor = jnp.exp(high + 1.0) / scale_au2(params, band)[2]
+    for changed_band in (1 - band, band):
+        altered = dataclasses.replace(
+            catalog,
+            params=dataclasses.replace(
+                params, albedo=params.albedo.at[2, changed_band].multiply(factor)
+            ),
+        )
+        encoded = pack(altered)
+        changed = SimpleNamespace(
+            carry=dataclasses.replace(
+                result.carry,
+                belief=dataclasses.replace(result.carry.belief, state=initial),
+                log=dataclasses.replace(
+                    result.carry.log,
+                    payload=payload.at[0, 0, : encoded.size].set(encoded),
+                ),
+            )
+        )
+        expected = "unsupported" if changed_band == band else ""
+        assert verdict(changed, study).reason[0, 0, 0] == expected
+        np.testing.assert_array_equal(
+            changed.carry.belief.status, result.carry.belief.status
+        )

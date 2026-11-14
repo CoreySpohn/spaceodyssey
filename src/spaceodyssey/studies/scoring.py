@@ -13,7 +13,11 @@ from spaceodyssey.adapters.measurement import (
     participating_entries,
     usable_measurement,
 )
-from spaceodyssey.adapters.parameters import CATALOG_KIND_NAME, catalog_template
+from spaceodyssey.adapters.parameters import (
+    CATALOG_KIND_NAME,
+    catalog_template,
+    scale_au2,
+)
 from spaceodyssey.core.enums import F64, I64, RecordStatus
 from spaceodyssey.core.kinds import AbstractObjective
 from spaceodyssey.core.records import unpack
@@ -326,6 +330,15 @@ def verdict(result, study, criterion=None) -> Verdict:
                         jnp.exp(params.ln_period_d), params.ecc, strict=True
                     )
                 ]
+            )
+            low, high = population.scale_range_au2(channel.detection_band)
+            ln_scale_au2 = np.asarray(
+                jnp.log(scale_au2(params, channel.imaging_band_index))
+            )
+            unsupported |= np.asarray(joined) & (
+                ~np.isfinite(ln_scale_au2)
+                | (ln_scale_au2 < low)
+                | (ln_scale_au2 > high)
             )
             reason[w, star, unsupported & (mission[w, star] < 0)] = "unsupported"
     return Verdict(counts, mission, scorer, yield_, wrong, reason)

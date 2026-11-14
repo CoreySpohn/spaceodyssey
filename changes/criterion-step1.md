@@ -780,3 +780,10 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
 - The verdict reports `no_package` when no positive finite package exists and
   `below_price` when selection omits an available package. Selected tracks have
   no open rejection reason. Scorer-only `unsupported` takes precedence.
+
+### Scorer support includes photometric scale
+
+- An open joined track is `unsupported` when its true orbit or its true
+  log photometric scale in the declared detection band lies outside the belief
+  population's bounds. The scale uses the named radius/albedo conversion.
+  This attribution is scorer-only and does not alter any decision-side status.
