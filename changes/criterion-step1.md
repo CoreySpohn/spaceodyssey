@@ -869,3 +869,12 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
 - Seed the supported-count estimator by host identity and a fixed tag at both
   initialization and refit. New report-set keys and retry keys still redraw
   conditional orbit clouds, while the host's population count prior stays fixed.
+
+## Ledger-based charged-time diagnostics
+
+- Record net charged days from the initial budget minus the policy-visible ledger
+  balance at each refresh, at the snapshot's clock precision. Refunds reduce the
+  diagnostic; a newly requested exposure is charged only after ledger admission.
+- Store each subject's last requested completion tick in `PolicyState.last_tick`
+  to retain the occupied-exposure guard independently of charged-time changes.
+  The named state fields and six trace columns keep their existing shapes.

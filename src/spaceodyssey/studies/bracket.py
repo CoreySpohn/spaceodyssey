@@ -580,7 +580,7 @@ class PolicyState(eqx.Module):
     stale summaries and the horizon stop preserve this snapshot.
     """
 
-    last_tick: jax.Array
+    last_tick: jax.Array  # completion tick of the last requested exposure per subject
     n_imaging: jax.Array
     n_spectra: jax.Array
     kick: jax.Array
@@ -795,20 +795,10 @@ class PackagePolicy(AbstractPolicy):
             )
             safe_star, safe_option = jnp.maximum(star, 0), jnp.maximum(option, 0)
             channel = options.first_channel.reshape(n, -1)[safe_star, safe_option]
-            # A queued wait can wake before the last exposure completes.
-            acted = (jnp.arange(self.trace_capacity) < state.n_trace) & (
-                state.trace[:, 4] > 0
-            )
-            last = jnp.max(jnp.where(acted, jnp.arange(self.trace_capacity), 0))
-            last_d = state.trace[last, 1] - jnp.where(
-                last > 0, state.trace[jnp.maximum(last - 1, 0), 1], 0.0
-            )
-            busy_until = jnp.max(state.last_tick) + jnp.round(last_d * per_day).astype(
-                I64
-            )
-            starts &= ~jnp.any(acted) | (tick >= busy_until)
+            # A queued wait can wake before the last requested exposure completes.
+            starts &= tick >= jnp.max(state.last_tick)
             imaging = jnp.isin(channel, jnp.asarray(modes.imaging_channels, I64))
-            spent_d = jnp.where(starts, settings.channel_cost[channel, resource], 0.0)
+            charged_d = study.budget[-1, resource] - view.balance[-1, resource]
 
             def realized(stored, p_claim):
                 _, labels = criterion.value(unpack(template, stored), p_claim, tick)
@@ -818,17 +808,12 @@ class PackagePolicy(AbstractPolicy):
                 ].sum()
 
             value = jax.vmap(realized)(summary.state, summary.p_claim).sum()
-            previous = jnp.where(
-                state.n_trace > 0,
-                state.trace[jnp.maximum(state.n_trace - 1, 0)],
-                jnp.zeros(6, F64),
-            )
             finite = (gain > 0) & jnp.all(jnp.isfinite(options.time), axis=-1)
             window_d = jnp.max(jnp.where(finite, options.time[..., resource], 0.0))
             row = jnp.stack(
                 [
                     selection.price[resource],
-                    previous[1] + spent_d,
+                    charged_d,
                     selection.selected_time[resource],
                     window_d,
                     starts.astype(F64),
@@ -845,7 +830,11 @@ class PackagePolicy(AbstractPolicy):
                 trace=state.trace.at[index].set(row),
                 n_trace=index + 1,
                 last_tick=state.last_tick.at[safe_star].set(
-                    jnp.where(starts, tick, state.last_tick[safe_star])
+                    jnp.where(
+                        starts,
+                        tick + study.channels.occupancy_ticks[channel],
+                        state.last_tick[safe_star],
+                    )
                 ),
                 n_imaging=state.n_imaging.at[safe_star].add(
                     (starts & imaging).astype(I64)
@@ -1054,10 +1043,12 @@ def price_trace(
     """Return padded host price rows [W, T, 6] and written lengths [W].
 
     Only ``rows[w, :lengths[w]]`` are valid. Unwritten rows are zeroed rather
-    than exposed from the policy buffer. Columns are price, cumulative charged
+    than exposed from the policy buffer. Columns are price, ledger net charged
     days, selected days, window days, acted, and policy-visible realized criterion
     value: the sum of declared values of the current track labels. This value
     is recomputed from state at each refresh; unfinished forecast gain is excluded.
+    Charges use initial budget minus the visible ledger balance at that refresh,
+    before the new request is admitted; refunds therefore reduce net charged days.
     """
     policy = study.agenda.policies[0]
     state = unpack(policy.state_layout(study.caps), result.carry.pstate)

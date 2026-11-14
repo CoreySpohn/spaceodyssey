@@ -233,10 +233,11 @@ def test_no_admission_is_refused_for_funds(built):
     for world in range(built.roots.shape[0]):
         trace = policy_trace(built, world)
         assert np.any(trace[:, 4] > 0)
-        charged_d = float(
-            built.study.budget[-1, resource]
-            - built.run.carry.ledger.balance[world, -1, resource]
-        )
+        balance = float(built.run.carry.ledger.balance[world, -1, resource])
+        quantum = built.study.caps.balance_quantum
+        units = np.rint(balance / quantum)
+        units -= units * quantum > balance
+        charged_d = float(built.study.budget[-1, resource]) - units * quantum
         np.testing.assert_allclose(trace[-1, 1], charged_d, atol=1e-10, rtol=1e-12)
 
 
@@ -329,3 +330,23 @@ def test_trace_value_is_the_current_label_after_failed_and_successful_rows(fixtu
         assert float(decision.trace_row[5]) == expected
         state = decision.state
     assert decision.state.trace.shape[1] == 6
+
+
+@pytest.mark.slow(reason="physical study and two decisions exercise ledger corrections")
+def test_trace_charged_days_follow_ledger_spending_and_refunds(fixture):
+    """Fails if the price trace counts requested charges instead of ledger net spending."""
+    summary = summary_selecting_node(fixture, node=0)
+    resource = fixture.channel_model.mode_table.resource("telescope_days")
+    budget_d = float(fixture.budget[-1, resource])
+    first = decide_once(
+        fixture, summary=summary, state=state_with(fixture), balance_d=budget_d - 2.5
+    )
+    assert float(first.trace_row[1]) == pytest.approx(2.5)
+    refunded = decide_once(
+        fixture,
+        summary=summary,
+        state=first.state,
+        tick_d=2.0,
+        balance_d=budget_d - 1.5,
+    )
+    assert float(refunded.trace_row[1]) == pytest.approx(1.5)
