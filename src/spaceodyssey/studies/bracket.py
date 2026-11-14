@@ -38,6 +38,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import d2s, s2d
+from jaxtyping import Float, Int
 
 from spaceodyssey.adapters.measurement import (
     MEASUREMENT_KIND_NAME,
@@ -97,7 +98,7 @@ from spaceodyssey.criteria.base import AbstractCriterion
 from spaceodyssey.criteria.transition import TransitionSettings
 from spaceodyssey.studies import builder, effect_rows
 from spaceodyssey.studies.scoring import CriterionObjective, row_log, verdict
-from spaceodyssey.studies.selection import act, capacity_of, select
+from spaceodyssey.studies.selection import act, capacity_of, select, trace_scalars
 
 # Candidates need repeated detections, a supported fit and a tight sky position.
 CANDIDATE_DETECTIONS, CANDIDATE_SCATTER_LOD = 3, 1.0
@@ -905,6 +906,24 @@ class SummaryObserver(AbstractObserver):
 # -- Activity and paired grants ----------------------------------------------------
 
 
+def price_trace(
+    result, study
+) -> tuple[Float[np.ndarray, "W T 6"], Int[np.ndarray, " W"]]:  # noqa: F722
+    """Return padded host price rows [W, T, 6] and written lengths [W].
+
+    Only ``rows[w, :lengths[w]]`` are valid. Unwritten rows are zeroed rather
+    than exposed from the policy buffer. Columns are price, cumulative charged
+    days, selected days, window days, acted, and cumulative value.
+    """
+    policy = study.agenda.policies[0]
+    state = unpack(policy.state_layout(study.caps), result.carry.pstate)
+    lengths = np.asarray(state.n_trace, np.int64)
+    rows = np.zeros(state.trace.shape, np.float64)
+    for w, n in enumerate(lengths):
+        rows[w, :n] = np.asarray(state.trace[w, :n])
+    return rows, lengths
+
+
 def candidate_slots(belief, lod_arcsec):
     """The imaging candidates a summary nominates: ``bool[n_stars, n_slots]``.
 
@@ -933,6 +952,7 @@ class ActivityTable:
     star: dict
     world: dict
     grants: str = ""
+    price_trace: tuple[np.ndarray, np.ndarray] | None = None
 
     @property
     def n_worlds(self):
@@ -978,6 +998,11 @@ def activity_table(result, study) -> ActivityTable:
     order. Every world's completed catalog must equal that source world's truth
     catalog. Subsets, permutations and missing catalogs raise ValueError; dropped
     counts are then read by source index.
+
+    The ``trace_scalars`` late mask includes every measurement admission.
+    The package policy's first ``n_subjects`` decisions request the
+    kickoff catalogs; only later OBSERVE effects on woken steps are measurements.
+    Kickoff, waits and padded steps are excluded, with no mission-time cutoff.
     """
     carry, trace = result.carry, result.trace
     channel = study.channel_model
@@ -1022,13 +1047,34 @@ def activity_table(result, study) -> ActivityTable:
     star["dropped"] = np.asarray(study.world_source.dropped, np.float64)
     resource = channel.mode_table.resource("telescope_days")
     budget = float(np.asarray(study.budget)[-1, resource])
+    balance_d = np.asarray(carry.ledger.balance)[:, -1, resource]
+    price_rows, price_lengths = price_trace(result, study)
+    measurement = (
+        np.asarray(trace.wake)[:, :, None]
+        & (np.asarray(trace.n_dec)[:, :, None] > study.caps.n_subjects)
+        & (np.asarray(trace.eff_kind) == EffectKind.OBSERVE)
+    )
     world = {
-        "charged": budget - np.asarray(carry.ledger.balance)[:, -1, resource],
+        "charged": budget - balance_d,
         "low_ess": (np.asarray(carry.belief.status) == SLOT_DEGRADED)
         .sum(axis=(1, 2))
         .astype(np.float64),
+        "early_overspend": np.zeros(n_worlds, np.int64),
+        "stranded_d": np.zeros(n_worlds, np.float64),
     }
-    return ActivityTable(star=star, world=world, grants=grants_line(study))
+    for w, n in enumerate(price_lengths):
+        world["early_overspend"][w], world["stranded_d"][w] = trace_scalars(
+            jnp.asarray(price_rows[w, :n]),
+            final_balance_d=jnp.asarray(balance_d[w]),
+            admission_code=jnp.asarray(codes[w].ravel()),
+            admission_late=jnp.asarray(measurement[w].ravel()),
+        )
+    return ActivityTable(
+        star=star,
+        world=world,
+        grants=grants_line(study),
+        price_trace=(price_rows, price_lengths),
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1084,7 +1130,7 @@ class ArmsResult:
         return float(np.log(ma / mb)), se
 
     def to_csv(self, directory):
-        """Write each arm's tables and a `grants.txt` line for every arm."""
+        """Write arm tables, valid price rows and each arm's grants."""
         for name, table in self.activity.items():
             table.to_csv(directory, name.replace("+", "_"))
         pathlib.Path(directory, "grants.txt").write_text(
@@ -1092,6 +1138,26 @@ class ArmsResult:
                 f"{name}: {table.grants}\n" for name, table in self.activity.items()
             )
         )
+        names = (
+            "price",
+            "cum_charged_d",
+            "selected_d",
+            "window_d",
+            "acted",
+            "cum_value",
+        )
+        columns = {name: [] for name in ("arm", "world", "row", *names)}
+        for arm, table in self.activity.items():
+            if table.price_trace is None:
+                continue
+            rows, lengths = table.price_trace
+            for w, n in enumerate(lengths):
+                columns["arm"].extend([arm] * n)
+                columns["world"].extend([w] * n)
+                columns["row"].extend(range(n))
+                for i, name in enumerate(names):
+                    columns[name].extend(rows[w, :n, i])
+        _write_columns(pathlib.Path(directory, "price_trace.csv"), columns)
 
 
 def run_grants(presets, truths, roots, n_steps, *, executor=None) -> ArmsResult:

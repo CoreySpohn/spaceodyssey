@@ -600,3 +600,20 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   budgets from the measured file runs. Extend the existing capacity-default and
   codec round-trip guards for the new setting. No golden histories or pinned
   hashes change.
+
+## Price trace exports and budget diagnostics
+
+- Read each world's price trace through its declared policy-state codec and
+  retain padded rows with per-world written lengths on the activity table.
+  Compute diagnostics and export only the valid prefixes.
+- Report early overspend as every measurement admission refused for funds,
+  excluding catalog kickoff, waits and padding. Report stranded telescope days
+  from the final ledger balance when the written trace records open opportunity.
+- Write a combined price_trace.csv with arm, world and row coordinates beside
+  grants.txt and include both diagnostics in each world's table.
+- Add four tests, retire none, and expand no shared parameter matrix. Cover
+  poisoned padding, unequal and empty traces, multiple arms, a complete run,
+  two later package refusals after early spending, and an ample-funding control.
+  Both physical checks share one short run; the admission control compiles one
+  structure. Set the new file's program budget from its measured run with standard
+  headroom. No golden histories or pinned hashes change.
