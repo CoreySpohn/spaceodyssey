@@ -19,6 +19,7 @@ from tests.studies.bracket_helpers import (
     n_refreshes,
     policy_trace,
     random_state,
+    spec_row,
     starts_spectrograph,
     state_with,
     summary_selecting_node,
@@ -305,3 +306,26 @@ def test_a_package_cannot_promise_more_spectra_than_remain(fixture):
     )
     assert effect_kind(decision) == EffectKind.WAIT
     assert not bool(decision.state.has_package.any())
+
+
+@pytest.mark.slow(reason="physical study and repeated package decisions take 16 s cold")
+def test_trace_value_is_the_current_label_after_failed_and_successful_rows(fixture):
+    """Fails if unfinished forecast gain is repeatedly booked as realized value."""
+    criterion = dataclasses.replace(fixture.observer.criterion, repeat=jnp.asarray([2]))
+    study = dataclasses.replace(
+        fixture, observer=dataclasses.replace(fixture.observer, criterion=criterion)
+    )
+    modes = study.channel_model.mode_table
+    summary = summary_selecting_node(study, node=0)
+    current = criterion.init_state(summary.n_det.shape[1], modes.n_bands)
+    state = state_with(study)
+    rows = [spec_row(0, -10.0, 1.0), spec_row(0, 100.0, 1.0), spec_row(0, 100.0, 1.0)]
+    for index, (row, expected) in enumerate(zip(rows, (0.0, 0.0, 1.0), strict=True)):
+        current = criterion.update(current, row, modes)
+        summary = dataclasses.replace(
+            summary, state=summary.state.at[0].set(pack(current))
+        )
+        decision = decide_once(study, summary=summary, state=state, tick_d=2.0 * index)
+        assert float(decision.trace_row[5]) == expected
+        state = decision.state
+    assert decision.state.trace.shape[1] == 6

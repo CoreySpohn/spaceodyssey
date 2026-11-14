@@ -568,7 +568,7 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   renewals, and raise an explicit checked error if its capacity is exhausted.
   Daily waits share a wake tick. Each fresh decision records price, cumulative
   booked charge, selected package days, open opportunity, action and cumulative
-  expected package gain.
+  realized criterion value from the current policy-visible track labels.
 - Add 14 package-policy tests covering dispatch timing, ledger and horizon
   limits, both row caps, codec round trips, kickoff, refit permissions, prior
   forecasts, empty-population initialization, trace exhaustion, occupied exposures
@@ -815,3 +815,12 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   package. Continuations consume the shared allowance for their observing kind,
   including candidate images, rather than promising credit beyond the row cap.
 - Keep credit at reachable intermediate labels when a later label is out of reach.
+
+
+## Realized value in the price trace
+
+- Keep all six trace columns. `cum_value` is the sum of each track's current
+  declared label value, recomputed from policy-visible criterion state at each
+  fresh decision. Failed or unfinished actions add no forecast credit, and
+  completed labels are counted once. Claim probabilities affect package gains,
+  while this diagnostic records the labels actually reached.

@@ -810,7 +810,15 @@ class PackagePolicy(AbstractPolicy):
             starts &= ~jnp.any(acted) | (tick >= busy_until)
             imaging = jnp.isin(channel, jnp.asarray(modes.imaging_channels, I64))
             spent_d = jnp.where(starts, settings.channel_cost[channel, resource], 0.0)
-            value = jnp.where(starts, gain.reshape(n, -1)[safe_star, safe_option], 0.0)
+
+            def realized(stored, p_claim):
+                _, labels = criterion.value(unpack(template, stored), p_claim, tick)
+                values = jnp.concatenate([criterion.label_values, jnp.zeros(1, F64)])
+                return values[
+                    jnp.where(labels >= 0, labels, len(criterion.labels))
+                ].sum()
+
+            value = jax.vmap(realized)(summary.state, summary.p_claim).sum()
             previous = jnp.where(
                 state.n_trace > 0,
                 state.trace[jnp.maximum(state.n_trace - 1, 0)],
@@ -825,7 +833,7 @@ class PackagePolicy(AbstractPolicy):
                     selection.selected_time[resource],
                     window_d,
                     starts.astype(F64),
-                    previous[5] + value,
+                    value,
                 ]
             )
             index = eqx.error_if(
@@ -1048,7 +1056,9 @@ def price_trace(
 
     Only ``rows[w, :lengths[w]]`` are valid. Unwritten rows are zeroed rather
     than exposed from the policy buffer. Columns are price, cumulative charged
-    days, selected days, window days, acted, and cumulative value.
+    days, selected days, window days, acted, and policy-visible realized criterion
+    value: the sum of declared values of the current track labels. This value
+    is recomputed from state at each refresh; unfinished forecast gain is excluded.
     """
     policy = study.agenda.policies[0]
     state = unpack(policy.state_layout(study.caps), result.carry.pstate)
