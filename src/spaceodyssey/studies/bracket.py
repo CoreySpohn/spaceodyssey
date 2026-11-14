@@ -66,9 +66,11 @@ from spaceodyssey.core.enums import (
     CoincidentOrder,
     Disposition,
     EffectKind,
+    Purpose,
     Scope,
 )
 from spaceodyssey.core.executors.compiled import CompiledExecutor
+from spaceodyssey.core.keys import Coupling
 from spaceodyssey.core.kinds import (
     AbstractObserver,
     AbstractPolicy,
@@ -268,6 +270,19 @@ def channel_table(channel, caps, *, budget_unit_s=None):
         cost=cost,
         charge=cost,
         coincident_order=jnp.full(n, CoincidentOrder.FAULT_FIRST, I64),
+        key_groups=jnp.asarray(
+            [
+                [
+                    b == table.band_index(table.modes[table.mode_of(c)].name)
+                    for b in range(table.n_bands)
+                ]
+                for c in range(table.catalog_channel)
+            ]
+            + [[False] * table.n_bands],
+            bool,
+        )
+        if caps.n_key_groups
+        else None,
     )
 
 
@@ -333,6 +348,7 @@ def bracket_study(
             raise ValueError(
                 f"caps.n_pstate is {caps.n_pstate}; the policy needs {need}"
             )
+    caps = dataclasses.replace(caps, n_key_groups=channel.n_bands)
     caps = bracket_registry(arm, channel.n_slots, n_bands=channel.n_bands).lower(
         caps, observer
     )
@@ -360,6 +376,9 @@ def bracket_study(
         world_source=source,
         belief_population=belief_population,
         planning_model=planning_model,
+        coupling=Coupling(
+            shared=((Purpose.MEASUREMENT, ("channel", "acquisition_index")),)
+        ),
     )
 
 

@@ -343,3 +343,16 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   new capacity, channel membership and record ordinals; update the default-off
   guard and the snapshot fingerprint test double. The two generic null-field
   matrices each gain the corresponding declaration field.
+
+## Measurement draws follow observation identity
+
+- The bracket shares measurement keys across channel and acquisition index,
+  declares one key group per band and advances only the groups exposed by each
+  channel. The catalog channel belongs to no group.
+- Imaging and spectral measurement keys fold in the true slot, exposed band and
+  that band's ordinal on the subject, without duration. Channels without key
+  groups retain their earlier draw path.
+- Add three adapter tests for paired noise across different durations and
+  sequences, changes to the exposed ordinal, imaging band isolation, distinct
+  slot draws and the bracket declarations. Compare normalized draws only where
+  the shared mask has finite positive generating variance. No tests are retired.

@@ -184,6 +184,7 @@ require_tier_reason = true
 "tests/adapters/test_measurement_row.py" = 1003
 "tests/adapters/test_mode_table.py" = 553
 "tests/adapters/test_observing_mode.py" = 1379
+"tests/adapters/test_paired_noise.py" = 556
 "tests/adapters/test_photomancy_ofti.py" = 416
 "tests/adapters/test_planet_parameters.py" = 1366
 "tests/adapters/test_physical_context.py" = 560

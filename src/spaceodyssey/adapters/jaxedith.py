@@ -164,6 +164,7 @@ from spaceodyssey.adapters.physical_profile import (
     payload_column_names,
 )
 from spaceodyssey.core.enums import F64, I64
+from spaceodyssey.core.keys import fold64
 from spaceodyssey.core.kinds import AbstractChannelModel
 from spaceodyssey.core.records import (
     PayloadColumn,
@@ -2152,6 +2153,17 @@ class ObservingModeChannel(AbstractChannelModel):
         occupied = clock.seconds(jnp.maximum(end - start, 0))
         return ScienceInterval(mid_jd, duration), valid, occupied
 
+    def _measurement_keys(self, key, context, band_index):
+        """Per-slot keys, with a band's ordinal when key groups are declared."""
+        slots = jnp.arange(self.n_slots, dtype=I64)
+        if context.group_ordinal.size == 0:
+            return jax.vmap(lambda s: jax.random.fold_in(key, s))(slots)
+        return jax.vmap(
+            lambda s: fold64(
+                fold64(fold64(key, s), band_index), context.group_ordinal[band_index]
+            )
+        )(slots)
+
     def _imaging_row(self, truth, subject, index, key, context, duration_index):
         """A censored imaging measurement, with signal only in its exposed band."""
         built = self.assets()
@@ -2165,7 +2177,7 @@ class ObservingModeChannel(AbstractChannelModel):
         band = truth.band_index(mode.band.center_nm)
         planets = self._slot_planets(truth, subject, band)
         present = truth.present[subject]
-        keys = jax.vmap(lambda s: jax.random.fold_in(key, s))(jnp.arange(self.n_slots))
+        keys = self._measurement_keys(key, context, band_index)
 
         def one(planet, here, k):
             expected = report.budget(true_prep, planet, interval)
@@ -2241,9 +2253,13 @@ class ObservingModeChannel(AbstractChannelModel):
         limit = jnp.where(valid, built.law.limit_counts(reference), 0.0)
         true_counts = jnp.where(valid & truth.present[subject], expected.planet, 0.0)
         true_variance = jnp.where(valid, expected.variance, 0.0)
-        counts = true_counts + jnp.sqrt(true_variance) * jax.random.normal(
-            key, (self.n_slots,), dtype=F64
-        )
+        if context.group_ordinal.size:
+            keys = self._measurement_keys(key, context, band_index)
+            # Match the count component of imaging for modes sharing a band.
+            noise = jax.vmap(lambda k: jax.random.normal(k, (3,), dtype=F64)[0])(keys)
+        else:
+            noise = jax.random.normal(key, (self.n_slots,), dtype=F64)
+        counts = true_counts + jnp.sqrt(true_variance) * noise
         signal = jnp.zeros((self.n_slots, self.n_bands), F64)
         zeros = jnp.zeros(self.n_slots, F64)
         return pack(
