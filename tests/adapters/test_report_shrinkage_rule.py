@@ -159,10 +159,10 @@ def test_the_shrinkage_arm_opens_what_the_kernel_reads():
     The catalog grants orbit and scale; measured leaves are open to all audiences,
     while identity and generating counts and variance stay scorer-only.
     """
-    arm = br.ARMS["shrinkage"]
-    assert arm.kernel == "shrinkage"
-    assert set(arm.groups) == set(ph.SHRINK_GROUPS)
-    registry = br.bracket_registry("shrinkage", n_slots=2, n_bands=2)
+    grants = br.GRANT_PRESETS["shrinkage"]
+    assert grants.kernel == "shrinkage"
+    assert set(grants.catalog_groups) == set(ph.SHRINK_GROUPS)
+    registry = br.bracket_registry(grants, n_slots=2, n_bands=2)
     prior = ph.DecisionSummary.zeros(4, 2, 16, 2, n_an=4)
     observer = br.SummaryObserver(prior=prior, criterion=ImagingCriterion(claims=()))
     caps = registry.lower(

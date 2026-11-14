@@ -451,3 +451,22 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   achieved credit, candidate gates, availability, variant choice and validation
   under tracing. No tests retire or shared parameter matrices expand. Goldens
   and pinned hashes are unchanged.
+
+
+## Observer grants and effective access
+
+- Replace Arm, ARMS and the separate policy refit flag with static Grants on
+  SummaryObserver. The four presets are replan, oracle, prior_planned and
+  shrinkage; partial catalog grants remain explicit settings. Registry lowering
+  preserves scorer-only identities and releases true signals only for true_snr
+  delivery. The observer folds the selected counts and variance into criterion
+  state, and the policy consults observer grants before waiting for refits.
+- Decode association, model, population, delivery, catalog access, policy access
+  and kernel from each study into a grants line. OutcomeTable and ArmsResult
+  export grants.txt beside their CSV tables. Grant settings, including the
+  kernel, participate in study documents and their hashes.
+- Add five test functions (eight collected cases) for preset audiences, document
+  hashing and decoded access, measured versus true folding, never-refit policy
+  progress and CSV provenance. Retire the two named stale-policy tests in favor
+  of these checks. No shared parameter matrix expands. Goldens and pinned hashes
+  are unchanged.

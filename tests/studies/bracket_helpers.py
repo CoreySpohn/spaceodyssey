@@ -9,26 +9,35 @@ bands (`SURVEY_BANDS`, 500 and 910 nm) need a drawn or hand-built world.
 
 import dataclasses
 import pathlib
+from collections import namedtuple
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from spaceodyssey.adapters.jaxedith import (
     ObservingModeChannel,
     survey_grid_d,
     survey_table,
 )
+from spaceodyssey.adapters.measurement import measurement_template
 from spaceodyssey.adapters.modes import profile_modes
 from spaceodyssey.adapters.photomancy import GRID_SPACING_D, N_GRID, DecisionSummary
 from spaceodyssey.adapters.physical_profile import JATIS_EAC1_V1
 from spaceodyssey.adapters.skyscapes import Band, ExoVistaWorldSource, PopulationModel
+from spaceodyssey.core.carry import init_carry
+from spaceodyssey.core.enums import EVERYONE, F64, I64, RecordStatus
+from spaceodyssey.core.events import empty_event_row
+from spaceodyssey.core.handlers import h_release
+from spaceodyssey.core.records import pack, record_none, unpack, write_log
 from spaceodyssey.criteria.claims import EarthCandidateClaim
 from spaceodyssey.studies import bracket as br
 from tests.criteria import ImagingCriterion
 
 FIXTURE = pathlib.Path(__file__).parents[1] / "fixtures" / "exovista"
 N_SLOTS, N_WORLDS = 6, 2
+N_TRACKS, N_BANDS, BAND = 3, 2, 1
 HORIZON_D, BUDGET_D = 120.0, 2.0
 N_STEPS = 3000
 PERIOD_SCALE = 1.07
@@ -99,18 +108,22 @@ def prior_summary(channel, n_stars, p_exist=0.0):
     )
 
 
+BracketBuild = namedtuple("BracketBuild", "source study executor truths roots run")
+
+
 def build(
+    arm="oracle",
+    *,
     run=True,
     horizon_d=HORIZON_D,
     budget_d=BUDGET_D,
-    arm="oracle",
     p_exist=0.0,
     channel=None,
     policy_kw=None,
     source=None,
     **settings,
 ):
-    """`(source, study, executor, truths, roots, run)` of `arm` (the oracle by default).
+    """The source, study, executor, truths, roots and run of the named grant preset.
 
     `p_exist` is the prior slot existence probability. `settings` go to the arm's
     boundary, which reads the belief population. `channel` replaces
@@ -124,22 +137,110 @@ def build(
     study = br.bracket_study(
         source,
         channel,
-        arm=arm,
         horizon_d=horizon_d,
         budget_d=budget_d,
         observer=br.SummaryObserver(
+            grants=br.GRANT_PRESETS[arm],
             prior=prior_summary(channel, n_stars, p_exist),
             criterion=ImagingCriterion(claims=(EarthCandidateClaim(),)),
         ),
         policy=br.BracketPolicy(budget_d, N_SLOTS, **(policy_kw or {})),
     )
-    executor = br.BoundExecutor(boundary=br.bracket_boundary(study, arm, **settings))
+    executor = br.BoundExecutor(boundary=br.bracket_boundary(study, **settings))
     roots = jnp.stack(
-        [jax.random.fold_in(jax.random.PRNGKey(1), i) for i in range(N_WORLDS)]
+        [jax.random.fold_in(jax.random.PRNGKey(0), i) for i in range(N_WORLDS)]
     )
     truths = source.take(jnp.arange(N_WORLDS))
     out = executor.run_worlds(study, truths, roots, N_STEPS) if run else None
-    return source, study, executor, truths, roots, out
+    return BracketBuild(source, study, executor, truths, roots, out)
+
+
+def spec_row(slot, counts, variance, true_counts=1000.0, true_variance=1000.0):
+    row = jax.tree.map(
+        lambda x: jnp.zeros(x.shape, x.dtype), measurement_template(N_TRACKS, N_BANDS)
+    )
+    return dataclasses.replace(
+        row,
+        mode=jnp.asarray(1, I64),
+        valid_science=jnp.asarray(1.0, F64),
+        assignment=jnp.asarray([slot, -1, -1], I64),
+        counts=row.counts.at[0, BAND].set(counts),
+        variance=row.variance.at[0, BAND].set(variance),
+        true_counts=row.true_counts.at[0, BAND].set(true_counts),
+        true_variance=row.true_variance.at[0, BAND].set(true_variance),
+    )
+
+
+_release = eqx.filter_jit(h_release)
+
+
+def fold_rows(study, rows):
+    carry = init_carry(study, None)
+    for i, row in enumerate(rows):
+        rec = dataclasses.replace(
+            record_none(study.caps),
+            kind=jnp.asarray(br.KIND_MEASUREMENT, I64),
+            valid=jnp.asarray(True),
+            acquisition_id=jnp.asarray(i + 1, I64),
+            audience=jnp.asarray(EVERYONE, I64),
+            status=jnp.asarray(RecordStatus.COMPLETED, I64),
+            released_tick=jnp.asarray(-1, I64),
+            accepted_tick=jnp.asarray(-1, I64),
+            superseded_by=jnp.asarray(-1, I64),
+            payload=jnp.pad(pack(row), (0, study.caps.payload_width - pack(row).size)),
+            channel_index=jnp.asarray(1, I64),
+        )
+        carry, _ = write_log(carry, rec, study.caps)
+        event = dataclasses.replace(
+            empty_event_row(),
+            slot=jnp.asarray(i, I64),
+            audience=jnp.asarray(EVERYONE, I64),
+            tick=jnp.asarray(i + 1, I64),
+        )
+        for _ in range(2):
+            carry = _release(carry, event, study, None, jax.random.key(0))[0]
+    np.testing.assert_array_equal(carry.belief.state, carry.pbelief.state)
+    return carry.pbelief
+
+
+def unpack_state(study, summary):
+    return unpack(
+        study.observer.criterion.state_template(N_TRACKS, N_BANDS), summary.state
+    )
+
+
+def columns_of(registry, kind_name):
+    """Column audiences of one registered kind."""
+    kind = next(k for k in registry if k.name == kind_name)
+    return {c.name: c.audience for c in kind.columns}
+
+
+def with_grants(study, grants):
+    """Replace observer grants and lower the matching audience table."""
+    observer = dataclasses.replace(study.observer, grants=grants)
+    caps = br.bracket_registry(
+        grants, observer.prior.p_exist.shape[1], observer.mode_table.n_bands
+    ).lower(study.caps, observer)
+    return dataclasses.replace(study, observer=observer, caps=caps)
+
+
+def charged_days(run):
+    """Telescope days charged to the shared ledger across worlds."""
+    return float(
+        np.asarray(run.carry.ledger.debited - run.carry.ledger.refunded)[
+            ..., br.SHARED_RESOURCE
+        ].sum()
+    )
+
+
+def telescope_rows(run):
+    """Completed measurement rows across worlds."""
+    log = run.carry.log
+    return int(
+        np.count_nonzero(
+            np.asarray(log.valid) & (np.asarray(log.kind) == br.KIND_MEASUREMENT)
+        )
+    )
 
 
 __all__ = ["GRID_SPACING_D", "build", "fixture_source"]

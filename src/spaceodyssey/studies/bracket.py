@@ -6,14 +6,14 @@ ordering of the truth; to the belief the slots are exchangeable and it must not 
 meaning into the index. One lane is
 the telescope (every detection and block mode runs there and charges the shared
 budget row) and a second lane carries the catalog mode, which occupies one tick and
-costs nothing. The arms of the bracket are registries: the same policy, boundary and
-channel run in every arm, and an arm differs only in which audience may read which
-payload columns of the three record kinds (`ARMS`).
+costs nothing. Grants on the observer declare measurement delivery, catalog access,
+policy access and the refit kernel (`GRANT_PRESETS`). The registry lowers the
+grants into audience flags for each payload column of the record kinds.
 
-- `bracket_registry(arm)` is the kind registry of an arm.
+- `bracket_registry(grants, n_slots, n_bands)` declares the kind registry.
 - `bracket_study(...)` builds the `Study` of an arm.
 - `BracketPolicy` is the imaging decision rule every arm runs: follow-up, search.
-- `bracket_boundary(study, arm)` is the refit boundary an arm runs under.
+- `bracket_boundary(study)` reads the refit kernel from the observer's grants.
 - `BoundExecutor` is the compiled executor with a boundary attached, so the batteries
   that call `run_worlds` without a `refit` argument run the arm as it is.
 
@@ -45,7 +45,12 @@ from spaceodyssey.adapters.measurement import (
     measurement_template,
 )
 from spaceodyssey.adapters.modes import ModeTable
-from spaceodyssey.adapters.parameters import CATALOG_KIND_NAME, catalog_kind
+from spaceodyssey.adapters.parameters import (
+    CATALOG_GROUPS,
+    CATALOG_KIND_NAME,
+    catalog_group_of,
+    catalog_kind,
+)
 from spaceodyssey.adapters.photomancy import (
     GRID_SPACING_D,
     N_GRID,
@@ -59,7 +64,6 @@ from spaceodyssey.adapters.photomancy import (
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration
 from spaceodyssey.core.enums import (
-    EVERYONE,
     F64,
     I64,
     PUBLIC,
@@ -114,53 +118,55 @@ CATALOG_TICKS = 1
 UNBOUNDED = 1.0e9
 
 
-@dataclasses.dataclass(frozen=True)
-class Arm:
-    """What an arm lets each audience read.
+class Grants(eqx.Module):
+    """Declared measurement delivery, catalog access and refit kernel."""
 
-    Attributes:
-        name: The arm's label.
-        report_audience: Audience flags of every measured column.
-        groups: Catalog groups open to the observer and the policy.
-        kernel: The refit kernel the arm runs: `truth`, `posterior` or `shrinkage`.
-    """
+    delivery: str = eqx.field(default="measured", static=True)
+    catalog_groups: tuple[str, ...] = eqx.field(default=(), static=True)
+    policy_reads_measurements: bool = eqx.field(default=True, static=True)
+    kernel: str = eqx.field(default="posterior", static=True)
 
-    name: str
-    report_audience: int
-    groups: tuple[str, ...]
-    kernel: str
+    def __check_init__(self):
+        """Reject unknown delivery, catalog groups and kernels."""
+        if self.delivery not in ("measured", "true_snr"):
+            raise ValueError(f"unknown delivery {self.delivery!r}")
+        unknown = set(self.catalog_groups) - set(CATALOG_GROUPS)
+        if unknown:
+            raise ValueError(f"unknown catalog groups {sorted(unknown)}")
+        if self.kernel not in ("posterior", "truth", "shrinkage"):
+            raise ValueError(f"unknown kernel {self.kernel!r}")
 
 
-ARMS = {
-    "oracle": Arm("oracle", EVERYONE, ("existence", "ephemeris", "class"), "truth"),
-    "prior_planned": Arm(
-        "prior_planned", Audience.OBSERVER | Audience.SCORER, (), "posterior"
-    ),
-    "replan": Arm("replan", EVERYONE, (), "posterior"),
-    "replan+ephemeris": Arm("replan+ephemeris", EVERYONE, ("ephemeris",), "posterior"),
-    "replan+class": Arm("replan+class", EVERYONE, ("class",), "posterior"),
-    "shrinkage": Arm("shrinkage", EVERYONE, ("ephemeris", "class"), "shrinkage"),
+GRANT_PRESETS = {
+    "replan": Grants(),
+    "oracle": Grants(catalog_groups=CATALOG_GROUPS, kernel="truth"),
+    "prior_planned": Grants(policy_reads_measurements=False),
+    "shrinkage": Grants(catalog_groups=("ephemeris", "class"), kernel="shrinkage"),
 }
 
 
-def _arm(arm):
-    """The `Arm` named or given."""
-    if isinstance(arm, Arm):
-        return arm
-    if arm not in ARMS:
-        raise ValueError(f"unknown arm {arm!r}; known: {sorted(ARMS)}")
-    return ARMS[arm]
-
-
-def bracket_registry(arm, n_slots, n_bands):
-    """The kind registry of `arm`: none, refresh product, measurement, catalog."""
-    arm = _arm(arm)
+def bracket_registry(grants, n_slots, n_bands):
+    """The kinds and column audiences declared by the observer's grants."""
+    measured = Audience.OBSERVER | Audience.SCORER
+    if grants.policy_reads_measurements:
+        measured |= Audience.POLICY
+    measurement = measurement_kind(n_slots, n_bands, measured)
+    if grants.delivery == "true_snr":
+        measurement = dataclasses.replace(
+            measurement,
+            columns=tuple(
+                dataclasses.replace(c, audience=measured)
+                if c.name.startswith("true_")
+                else c
+                for c in measurement.columns
+            ),
+        )
     return KindRegistry(
         (
             RecordKind("none", ()),
             REFRESH_PRODUCT_KIND,
-            measurement_kind(n_slots, n_bands, arm.report_audience),
-            catalog_kind(n_slots, n_bands, arm.groups),
+            measurement,
+            catalog_kind(n_slots, n_bands, grants.catalog_groups),
         )
     )
 
@@ -300,21 +306,19 @@ def bracket_study(
     source,
     channel,
     *,
-    arm,
     horizon_d,
     budget_d,
-    caps=None,
-    observer=None,
-    policy=None,
-    belief_population=None,
+    observer,
+    policy,
     planning_model=None,
+    belief_population=None,
+    caps=None,
 ):
-    """The `Study` of `arm`: the stars of `source` on one telescope and one budget.
+    """The stars of `source` on one telescope, with grants on the observer.
 
     Args:
         source: The world source (stored universes), whose stars are the subjects.
         channel: The `ObservingModeChannel` of those stars.
-        arm: An arm name of `ARMS`, or an `Arm`.
         horizon_d: Study length in days.
         budget_d: Telescope days on the shared row.
         caps: Capacities; defaults to `default_capacities` for this horizon, the
@@ -327,11 +331,8 @@ def bracket_study(
         planning_model: The channel model decisions and refits plan with; `None` is
             `channel`.
     """
-    arm = _arm(arm)
     if channel.mode_table.bands != source.population.bands:
         raise ValueError("the channel and source disagree on the declared bands")
-    if observer is None or policy is None:
-        raise ValueError("bracket_study needs an observer and a policy")
     built = channel.assets()
     if isinstance(observer, SummaryObserver):
         observer = dataclasses.replace(
@@ -339,9 +340,6 @@ def bracket_study(
             mode_table=channel.mode_table,
             ticks_per_day=built.context.clock.ticks_per_day,
         )
-    if isinstance(policy, BracketPolicy):
-        reaches = bool(arm.report_audience & Audience.POLICY)
-        policy = dataclasses.replace(policy, refits_reach_policy=reaches)
     n_stars = int(channel.catalog_mass_kg.shape[0])
     if len(source.stars) != n_stars:
         raise ValueError("the world source and the channel disagree on the stars")
@@ -361,9 +359,9 @@ def bracket_study(
                 f"caps.n_pstate is {caps.n_pstate}; the policy needs {need}"
             )
     caps = dataclasses.replace(caps, n_key_groups=channel.n_bands)
-    caps = bracket_registry(arm, channel.n_slots, n_bands=channel.n_bands).lower(
-        caps, observer
-    )
+    caps = bracket_registry(
+        observer.grants, channel.n_slots, n_bands=channel.n_bands
+    ).lower(caps, observer)
     per_day = int(built.context.clock.ticks_per_day)
     horizon = round(horizon_d * per_day)
     budget = jnp.full((caps.n_balance_rows, caps.n_resources), UNBOUNDED, F64)
@@ -394,18 +392,68 @@ def bracket_study(
     )
 
 
-def bracket_boundary(study, arm, **settings):
-    """The refit boundary of `arm` for `study` (`ReportRefit` with the arm's kernel).
+def bracket_boundary(study, **settings):
+    """The refit boundary declared by the study observer's grants.
 
     Construction refuses a registry that hides a catalog group the kernel needs.
     `settings` are the kernel's own. The world source is not read: the kernels
     take their prior
     bounds from the study's belief population at refit time.
     """
-    arm = _arm(arm)
     return ReportRefit(
-        kernel=arm.kernel, truth_groups=arm.groups, caps=study.caps, **settings
+        kernel=study.observer.grants.kernel,
+        truth_groups=study.observer.grants.catalog_groups,
+        caps=study.caps,
+        **settings,
     )
+
+
+def grants_in_force(study) -> dict[str, str]:
+    """Decode effective access from the lowered study, rather than a preset label."""
+    caps = study.caps
+    observer = study.observer
+    registry = bracket_registry(
+        Grants(), observer.prior.p_exist.shape[1], observer.mode_table.n_bands
+    )
+
+    def columns(kind):
+        layout = registry[registry.index(kind)]
+        audience = caps.payload_audience[caps.kind_names.index(kind)]
+        return {c.name: a for c, a in zip(layout.columns, audience, strict=False)}
+
+    measured = columns(MEASUREMENT_KIND_NAME)
+    catalog = columns(CATALOG_KIND_NAME)
+    groups = [
+        g
+        for g in CATALOG_GROUPS
+        if all(
+            a & Audience.OBSERVER
+            for c, a in catalog.items()
+            if catalog_group_of(c) == g
+        )
+    ]
+    true_signal = all(
+        a & Audience.OBSERVER for c, a in measured.items() if c.startswith("true_")
+    )
+    policy_reads = all(
+        a & Audience.POLICY
+        for c, a in measured.items()
+        if not c.startswith(("identity", "true_"))
+    )
+    return {
+        "association": study.channel_model.association,
+        "model": "truth" if study.planning_model is None else "declared",
+        "population": "truth" if study.belief_population is None else "declared",
+        "delivery": "true_snr" if true_signal else "measured",
+        "catalog": ",".join(groups) or "none",
+        "policy_reads": "yes" if policy_reads else "no",
+        "kernel": study.observer.grants.kernel,
+    }
+
+
+def grants_line(study) -> str:
+    """A printable line of the grants recorded in the study document."""
+    return " ".join(f"{key}={value}" for key, value in grants_in_force(study).items())
 
 
 class BoundExecutor(CompiledExecutor):
@@ -440,15 +488,14 @@ class BracketPolicy(AbstractPolicy):
     falls back to the cheapest mode; one refused visit stops the policy.
 
     State holds each star's last visit tick, visit count and search count, followed
-    by charged days, the kickoff count and a stop flag. `refits_reach_policy` is
-    set by `bracket_study` from the arm's report audience.
+    by charged days, the kickoff count and a stop flag. The observer's grants
+    determine whether decisions wait for measurement refits.
     """
 
     budget_d: float = eqx.field(static=True)
     n_slots: int = eqx.field(static=True)
     max_visits: int = eqx.field(default=24, static=True)
     max_search: int = eqx.field(default=8, static=True)
-    refits_reach_policy: bool = eqx.field(default=True, static=True)
     followup_p: float = eqx.field(default=0.5, static=True)
 
     def declare(self):
@@ -476,7 +523,7 @@ class BracketPolicy(AbstractPolicy):
         kicking = kick < n
         # Fresh: every report visit made has been read by a refit.
         stale = jnp.any(n_vis > belief.n_obs.astype(F64))
-        if not self.refits_reach_policy:
+        if not study.observer.grants.policy_reads_measurements:
             stale = jnp.asarray(False)
         next_day = ((tick // per_day) + 1) * per_day + 1
 
@@ -634,6 +681,7 @@ class SummaryObserver(AbstractObserver):
     subject_leaves = SUMMARY_LEAVES
     prior: DecisionSummary
     criterion: AbstractCriterion
+    grants: Grants = Grants()
     mode_table: ModeTable | None = eqx.field(static=True, default=None, kw_only=True)
     catalog_kind: str = eqx.field(default=CATALOG_KIND_NAME, static=True)
     measurement_kind: str = eqx.field(default=MEASUREMENT_KIND_NAME, static=True)
@@ -675,6 +723,10 @@ class SummaryObserver(AbstractObserver):
 
         def updated(state):
             row = unpack(measurement_template(n_tracks, n_bands), rec.payload)
+            if self.grants.delivery == "true_snr":
+                row = dataclasses.replace(
+                    row, counts=row.true_counts, variance=row.true_variance
+                )
             value = self.criterion.update(
                 unpack(template, state[rec.subject]), row, self.mode_table
             )
@@ -787,6 +839,7 @@ class OutcomeTable:
     slot: dict
     star: dict
     world: dict
+    grants: str = ""
 
     @property
     def n_worlds(self):
@@ -794,7 +847,7 @@ class OutcomeTable:
         return int(next(iter(self.world.values())).shape[0])
 
     def to_csv(self, directory, name):
-        """Write `<name>_slot.csv`, `<name>_star.csv` and `<name>_world.csv`."""
+        """Write slot, star and world CSVs and their grants to `grants.txt`."""
         directory = pathlib.Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         for level, leaves in (("slot", self.slot), ("star", self.star)):
@@ -806,6 +859,7 @@ class OutcomeTable:
             _write_columns(directory / f"{name}_{level}.csv", frame)
         frame = {"world": np.arange(self.n_worlds), **self.world}
         _write_columns(directory / f"{name}_world.csv", frame)
+        (directory / "grants.txt").write_text(f"{name}: {self.grants}\n")
 
 
 def _write_columns(path, columns):
@@ -940,6 +994,7 @@ def outcome_table(
         slot=slot,
         star=star,
         world={k: np.asarray(v, np.float64) for k, v in world.items()},
+        grants=grants_line(study),
     )
 
 
@@ -989,9 +1044,12 @@ class ArmsResult:
         return float(np.log(ma / mb)), se
 
     def to_csv(self, directory):
-        """Write each arm's three tables under `directory`, named by arm."""
+        """Write each arm's tables and a `grants.txt` line for every arm."""
         for name, table in self.table.items():
             table.to_csv(directory, name.replace("+", "_"))
+        pathlib.Path(directory, "grants.txt").write_text(
+            "".join(f"{name}: {table.grants}\n" for name, table in self.table.items())
+        )
 
 
 def run_arms(

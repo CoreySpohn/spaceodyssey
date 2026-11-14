@@ -38,12 +38,14 @@ from spaceodyssey.adapters.skyscapes import (
 from spaceodyssey.core.records import layout_size, pack, unpack
 from spaceodyssey.criteria.claims import EarthCandidateClaim
 from spaceodyssey.studies import bracket as br
+from tests.criteria import ImagingCriterion
 from tests.studies.bracket_helpers import (
     N_SLOTS,
     build,
     fixture_channel,
     fixture_files,
     fixture_source,
+    prior_summary,
 )
 
 PLANET_EPOCHS = [(0, k, t) for k in range(3) for t in (0.0, 100.0, 400.0)]
@@ -292,7 +294,17 @@ def test_channel_and_source_bands_must_agree_at_study_construction(source, chann
         ),
     )
     with pytest.raises(ValueError, match="declared bands"):
-        br.bracket_study(source, mismatched, arm="oracle", horizon_d=1.0, budget_d=1.0)
+        br.bracket_study(
+            source,
+            mismatched,
+            horizon_d=1.0,
+            budget_d=1.0,
+            observer=br.SummaryObserver(
+                prior=prior_summary(channel, len(source.stars)),
+                criterion=ImagingCriterion(claims=()),
+            ),
+            policy=br.BracketPolicy(1.0, N_SLOTS),
+        )
 
 
 def test_actual_invalid_spectrum_is_rejected_at_source_and_refit_construction(

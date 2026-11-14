@@ -11,21 +11,23 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from spaceodyssey.adapters.measurement import measurement_template
 from spaceodyssey.adapters.modes import ModeSpec, ModeTable
 from spaceodyssey.adapters.photomancy import DecisionSummary
 from spaceodyssey.adapters.skyscapes import Band
 from spaceodyssey.core.capacities import Capacities
-from spaceodyssey.core.carry import init_carry
-from spaceodyssey.core.enums import EVERYONE, F64, I64, RecordStatus
-from spaceodyssey.core.events import empty_event_row
-from spaceodyssey.core.handlers import h_release
-from spaceodyssey.core.records import pack, record_none, unpack, write_log
+from spaceodyssey.core.enums import F64, I64, RecordStatus
+from spaceodyssey.core.records import pack, record_none
 from spaceodyssey.core.refresh import RefreshSchedule
 from spaceodyssey.criteria.base import AbstractCriterion, StarOptions
 from spaceodyssey.studies import bracket, builder
-
-N_TRACKS, N_BANDS, BAND = 3, 2, 1
+from tests.studies.bracket_helpers import (
+    BAND,
+    N_BANDS,
+    N_TRACKS,
+    fold_rows,
+    spec_row,
+    unpack_state,
+)
 
 
 class _SumState(eqx.Module):
@@ -105,7 +107,7 @@ def fixture_study():
     observer = bracket.SummaryObserver(
         prior=zeros_summary(), criterion=_SumCriterion(), mode_table=modes
     )
-    caps = bracket.bracket_registry("replan", N_TRACKS, N_BANDS).lower(
+    caps = bracket.bracket_registry(observer.grants, N_TRACKS, N_BANDS).lower(
         Capacities(n_subjects=2, n_an=1, rows_per_subject=8, refit_lanes=2), observer
     )
     return builder.survey_1(
@@ -118,60 +120,6 @@ def fixture_study():
 def with_criterion(study, criterion):
     return dataclasses.replace(
         study, observer=dataclasses.replace(study.observer, criterion=criterion)
-    )
-
-
-def spec_row(slot, counts, variance):
-    row = jax.tree.map(
-        lambda x: jnp.zeros(x.shape, x.dtype), measurement_template(N_TRACKS, N_BANDS)
-    )
-    return dataclasses.replace(
-        row,
-        mode=jnp.asarray(1, I64),
-        valid_science=jnp.asarray(1.0, F64),
-        assignment=jnp.asarray([slot, -1, -1], I64),
-        counts=row.counts.at[0, BAND].set(counts),
-        variance=row.variance.at[0, BAND].set(variance),
-        true_counts=row.true_counts + 1000.0,
-        true_variance=row.true_variance + 1000.0,
-    )
-
-
-_release = eqx.filter_jit(h_release)
-
-
-def fold_rows(study, rows):
-    carry = init_carry(study, None)
-    for i, row in enumerate(rows):
-        rec = dataclasses.replace(
-            record_none(study.caps),
-            kind=jnp.asarray(bracket.KIND_MEASUREMENT, I64),
-            valid=jnp.asarray(True),
-            acquisition_id=jnp.asarray(i + 1, I64),
-            audience=jnp.asarray(EVERYONE, I64),
-            status=jnp.asarray(RecordStatus.COMPLETED, I64),
-            released_tick=jnp.asarray(-1, I64),
-            accepted_tick=jnp.asarray(-1, I64),
-            superseded_by=jnp.asarray(-1, I64),
-            payload=jnp.pad(pack(row), (0, study.caps.payload_width - pack(row).size)),
-            channel_index=jnp.asarray(1, I64),
-        )
-        carry, _ = write_log(carry, rec, study.caps)
-        event = dataclasses.replace(
-            empty_event_row(),
-            slot=jnp.asarray(i, I64),
-            audience=jnp.asarray(EVERYONE, I64),
-            tick=jnp.asarray(i + 1, I64),
-        )
-        for _ in range(2):
-            carry = _release(carry, event, study, None, jax.random.key(0))[0]
-    np.testing.assert_array_equal(carry.belief.state, carry.pbelief.state)
-    return carry.pbelief
-
-
-def unpack_state(study, summary):
-    return unpack(
-        study.observer.criterion.state_template(N_TRACKS, N_BANDS), summary.state
     )
 
 

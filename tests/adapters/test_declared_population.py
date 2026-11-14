@@ -100,10 +100,10 @@ def build_study(worlds, belief_population=None, *, channel):
     return bracket.bracket_study(
         worlds,
         channel,
-        arm="oracle",
         horizon_d=HORIZON_D,
         budget_d=BUDGET_D,
         observer=bracket.SummaryObserver(
+            grants=bracket.GRANT_PRESETS["oracle"],
             prior=prior_summary(channel, len(worlds.stars)),
             criterion=ImagingCriterion(claims=()),
         ),
