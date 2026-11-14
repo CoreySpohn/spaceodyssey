@@ -13,6 +13,12 @@ from spaceodyssey.studies import builder
 from spaceodyssey.studies.toy import ThresholdStopPolicy, ToyPhotometry
 from tests.core import refresh_helpers
 from tests.core.helpers import one_world, worlds
+from tests.core.test_replay_refresh_quick import (
+    ROOT,
+    KeyedBoundary,
+    built as hand_replay,
+    study as replay_study,
+)
 
 KEY = jax.random.PRNGKey(0)
 PSTATE = jnp.zeros(1)
@@ -141,3 +147,30 @@ def test_a_user_sources_public_attribute_cannot_bypass_the_view():
     assert isinstance(view.world_source, core.WithheldWorldSource)
     with pytest.raises(RuntimeError, match="withheld"):
         view.world_source.draw(KEY, study.caps)
+
+
+class ProbeReplayRefit(KeyedBoundary):
+    """Replay-compatible keyed refit that enforces the decision-view boundary."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def refit_batch(self, study, requests):
+        _require_withheld(study)
+        self.calls += 1
+        return super().refit_batch(study, requests)
+
+
+@pytest.mark.medium(
+    reason="replays a hand-built refresh checkpoint and its negative control"
+)
+def test_replay_refit_passes_the_view_and_rejects_a_full_study(monkeypatch):
+    """Fails if the replay executor sends the full study to its refit boundary."""
+    study = replay_study()
+    carry, trace = hand_replay()
+    probe = ProbeReplayRefit()
+    core.replay_run(study, ROOT, carry, trace, refit=probe)
+    assert probe.calls > 0
+    monkeypatch.setattr(type(study), "decision_view", lambda self: self)
+    with pytest.raises(AssertionError, match="full study"):
+        core.replay_run(study, ROOT, carry, trace, refit=ProbeReplayRefit())
