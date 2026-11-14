@@ -1,77 +1,213 @@
-# Declared bands, a declared population and a truth that keeps every planet
+# Declared characterization criteria and package planning
 
-## Declared bands
+This record describes the completed interfaces and behavior. Compatibility and
+coverage notes below retain the removals and serialized changes made during the
+migration.
 
-- Every world-source constructor (`ExoVistaWorldSource.from_files`, `from_draws`,
-  `from_population`) and `star_spec_from_model` take a required `bands=`, a tuple of
-  `Band(center_nm, width_nm)`. No wavelength is a default. `PopulationTruth.albedo`
-  carries one geometric albedo per declared band (`[..., n_slots, n_bands]`), and
-  `from_files` refuses a band its stored spectra do not cover.
-- A channel built with the default profile now reads `flux_density_jy` as the mean over
-  the band (950 to 1050 nm for a `Band(1000, 100)`), where it was a single-wavelength
-  sample at the band center.
+## Declared populations, bands and truth (breaking)
 
-## The truth keeps every planet up to its capacity (breaking)
+- World-source constructors (`ExoVistaWorldSource.from_files`, `from_draws`,
+  `from_population`) and `star_spec_from_model` require `bands=`. A band is
+  `Band(center_nm, width_nm)`; no wavelength is a library default. Stored spectra
+  must cover every declared band. `PopulationTruth.albedo` has detection and band
+  axes, with one geometric albedo for every planet and band.
+- Host flux densities are band means, rather than center-wavelength samples. For
+  `Band(1000, 100)` this is the 950-1050 nm mean.
+- Every world-source constructor requires `generator`, a `PopulationModel`.
+  Its occurrence grid, types and config supply draws; `declared_population()`
+  returns that declaration. `PopulationModel.exovista()` explicitly constructs
+  the ExoVista population with `SupportRange()`.
+- Truth keeps every planet up to `n_slots`, ordered by descending periastron peak
+  flux ratio, without a belief-support filter. `dropped` counts only planets past
+  capacity. Extra slots use finite inert fillers. Separate scorer-only overflow
+  parameters retain dropped planets for claim-specific loss accounting.
+- `support`, `dropped_class1` and `occupancy` leave the world source. Truth has no
+  stored class code; claims evaluate its named physical parameters. The former
+  `population_ln_lam_range` helper and `ReportRefit(ln_lam_range=...)` are removed.
+- Belief support comes from the declared population: `period_support_d` and
+  `scale_range_au2(band)`, the padded range of log(albedo * radius_AU squared).
+  Radius bounds intersect type bounds with the mass-radius relation's range on
+  the occurrence grid. Unsupported truth is still observed and fit; decision-side
+  slot status depends on the fit, never on a comparison with truth.
 
-- `ExoVistaWorldSource` no longer filters planets by a support range. Each star keeps
-  its planets in descending peak flux ratio up to `n_slots`, whatever their period or
-  eccentricity. `dropped` counts only the planets past `n_slots`. A capacity above the
-  number of drawn planets fills the extra slots with the inert filler.
-- `support`, `dropped_class1` and `occupancy` are no longer attributes of the world
-  source. The class-1 planets in slots are `population.klass.sum(-1)`.
-- Every constructor takes a required keyword `generator`, a `PopulationModel` (no
-  default). `from_draws` draws from its occurrence grid, types and config, which replace
-  the `config` argument; `from_population` reads the albedo from its types, which replace
-  the `types` argument. `declared_population()` returns it.
-- `PopulationModel(occurrence, types, config, support)` is the declared population.
-  `PopulationModel.exovista()` is the ExoVista generator with `SupportRange()`.
-  `scale_range_au2(band)` is the range of `ln(albedo * radius^2)` in AU^2 the population
-  can draw in a band, padded by `LN_LAM_PAD`, and `period_support_d` is the period range
-  of its `SupportRange`.
-- `ReportRefit` reads its scale prior and period range from the belief population of the
-  study's decision view (`scale_range_au2(detection_band)` and `period_support_d`) when it
-  refits. Cached fits are keyed by those bounds. A study without a declared belief
-  population uses its world source's
-  `generator`. `photomancy.population_ln_lam_range` and the `ln_lam_range` argument of
-  `ReportRefit` are removed, and `ln_lam_range` leaves `ReportRefit.configuration()`.
-  `bracket_boundary` no longer reads the world source, and `bracket_study` takes
-  `belief_population=` and `planning_model=`.
+Over five drawn ExoVista worlds, 8240 planets were present. The old source dropped
+5506: 5399 outside belief support and 107 past capacity. Of those dropped, 5044
+lay beyond the 0.3404 arcsec outer working angle of a 500 nm mode and 11 were class
+1. The maximum per-star count was 21. Capacity bounds truth storage; support
+bounds inference.
 
-### Why the capacity holds every planet
+## Named parameters, modes and measurement rows (breaking)
 
-Over five drawn ExoVista worlds there were 8240 planets. The old source dropped 5506 of
-them: 5399 for lying outside the support range and 107 past `n_slots`. Of the dropped
-planets, 5044 lay beyond the 0.3404 arcsec outer working angle of a 500 nm mode, and 11
-were class 1. The largest number of planets on one star was 21. Filtering by the belief's
-support removed real planets from the truth, so a belief was never scored against a
-planet it cannot represent. The capacity alone now bounds the truth, and the belief's
-support bounds only the refit's prior.
+- `PlanetParameters` replaces positional orbit matrices above the photomancy
+  conversion boundary. Period, time, masses, radius and all band albedos travel
+  together, including through resampling and cached resummary. Mass and radius
+  conversions use named physical constants; inverse mass conversion caps at
+  131.6 Earth masses.
+- Observing sources require mode specs, science durations and a profile. The
+  immutable mode table owns channel order, bands, catalog channel and named
+  resources. Reports use the declared throughput, frame time and resolving power.
+  Imaging modes share a band and reporting threshold; incompatible modes or an
+  explicit reporting law with a different threshold are refused.
+- The stored fixture observes 1000/100 and 940/6.7 nm bands. Drawn-host tests cover
+  the unmodified survey's 500/100 and 910/6.5 nm modes. No stored spectrum is
+  extrapolated or relabeled.
+- `MeasurementRow` replaces visit and block record kinds. Its codec declares
+  exposure metadata, assignment, astrometry, counts and variance on detection and
+  band axes. Imaging exposes detected counts in its band; spectral rows expose
+  uncensored noisy counts. Measured variance uses reported information. Unexposed
+  bands are zero. Generating counts, variance and identity are scorer-only unless
+  an explicit grant opens them.
+- Imaging entries contribute identity evidence only when detected. Spectral
+  entries require finite counts and positive finite variance. Null padding cannot
+  create a join or association error. Truth association is declared explicitly;
+  inferred association remains deferred.
+- Completed measurements and partial measurements with valid finite science use
+  the same eligibility rule in incremental folds, host refolds and the JAX
+  objective. Unusable partials still contribute occupied time.
+- Measurement noise uses an observation identity: subject, scorer identity,
+  band and that band's ordinal, excluding duration. Completed logged rows advance
+  optional key-group counters; cancellations, duplicate or refused completions
+  do not. Undeclared key groups preserve the previous core layout.
 
-## Imaging-only bracket policy and summary (breaking)
+## Decision views, grants and inference
 
-- `DecisionSummary` and its slot leaves no longer carry `p_block`, `revealed`,
-  `n_spectra` or `n_blocks`. Summary construction no longer takes a block-mode
-  count. Refits no longer read block rows or override class probabilities from
-  revealed truth. Forecast renewal and replay remain covered in
-  `test_bracket_renewal.py`.
-- `ObservingModeChannel` removes `block_snr_required`, `block_snr`, `block_time`
-  and `reveal_columns`; `characterize_time(subject, snr_required)` requires the
-  caller's SNR requirement. Block rows temporarily retain accumulated SNR and
-  observable fraction, with every column scorer-only and no class reveal.
-- `BracketPolicy` keeps catalog kickoff, imaging follow-up and search. Block
-  selection, retries, retirement, characterization counts, reserves and the block
-  log are removed. `pstate_size(n_subjects)` now holds three values per star
-  (`last_tick`, `n_vis`, `n_search`) followed by `charged`, `kick`, `stopped`.
-  Capacity bounds hold one catalog row plus `max_visits` counting rows per star,
-  with refit and forecast-renewal products counted separately.
-- `outcome_table` removes the slot keys `revealed`, `claimed`, `claim_error_lod`,
-  `block_attempted`, `block_attempts`, `n_spectra`, `block_delivered`, `block_snr`
-  and `block_days`; the star keys `n_block` and `t_block`; and the world keys
-  `confirmed`, `false_claims`, `wasted_blocks`, `wasted_days` and `delivered`.
-  Their aggregation code and the `n_char` table/paired-run argument are removed.
-  Imaging endpoints retain their meanings, including observer-summary `candidate`.
+- Decision views withhold the world source, substitute the planning model and
+  belief population, and retain the observer's declarations. Only the exact
+  withheld-source sentinel marks an existing view; a user source's public
+  `withheld` attribute cannot bypass the boundary.
+- Observer `Grants` replace coded arms and the separate policy-refit switch.
+  Presets are `replan`, `oracle`, `prior_planned` and `shrinkage`. Grants, kernel
+  and declared inputs participate in documents and their hashes. Result exports
+  include a grants line and `grants.txt`.
+- Every observer entry point receives its own audience-masked record. Refresh
+  eligibility is evaluated separately for observer and policy, in execution and
+  replay. Scorer-only columns cannot schedule decision-side refits.
+- Detected-track fits draw the declared population's albedo mixture. Occurrence
+  cells and eligible type weights define the mixture; one type supplies all
+  bands. Host validation rejects selectable nonpositive or non-finite albedos.
+  Shrinkage holds radius and masses fixed and uses the declared log-albedo widths.
+- Dark-track first tiers weight whole population rows at their own physical
+  scales by the null-report likelihood, then resample whole rows. Evidence is the
+  mean likelihood over valid rows. Padding has zero weight, including in ESS and
+  fit status. Empty support has zero existence and finite inert leaves.
+- `draw_planets` appends fresh keyed pools of `n_pool_systems` hosts until the
+  requested distinct size is reached, a pool is empty, or the bounded pool count
+  is reached: 4 * max(1, ceil(requested / n_pool_systems)). Retry keys and larger
+  requests produce fresh larger clouds. Solar-host tests require 4096 distinct
+  first-tier rows and 16384 distinct retry rows with no reused rows between them.
+- The expected supported count uses a reproducible estimator, keyed by host index
+  and a fixed tag at initialization and all refits. Changing reports or retry
+  keys changes conditional clouds while preserving that count estimate.
+- Supported counts follow a Poisson model with that mean, conditioned on at least
+  the detected-track count. Each dark slot receives
+  E[min(N - detected, dark slots) | N >= detected] / dark slots before the existing
+  null-evidence Bayes update. The prior remains below one, including numerical
+  saturation handled by nextafter(1, 0). Zero mean and zero dark slots are guarded.
+- Failed or unsupported fits retain prior slot leaves with the new status. A
+  successful slot installs independently. Refits replace inference leaves while
+  preserving accumulated criterion state.
 
-### Retired coverage and replacement guards
+## Criteria, forecasts and packages
+
+- The dependency-light `criterion` family declares named state, updates, claims,
+  labels, values and package options. One storage codec packs named measurement,
+  catalog, criterion and policy layouts. A summary stores criterion state per
+  star; released measurements fold it incrementally in each audience.
+- Transition tables declare acyclic steps, allowed modes, requirements, margins,
+  repeats, successors and achieved labels. Rows coadd measured counts and
+  variance, with at most one pass per row. Active steps retain intermediate
+  credit. Failure edges are validated; this family does not infer failure.
+- The water/oxygen example explicitly assumes continuum SNR 5 for both steps
+  pending emulated spectra. Its modes declare 940/760 nm, resolving power 140,
+  throughput 0.29165, 300 s frames and widths center/resolving power. Its initial
+  node has no achieved label; zero-valued labels remain legal answers.
+- Refit forecasts carry paired count/variance quantiles by epoch and non-catalog
+  channel, plus claim probabilities and availability. Quantiles and dimensions
+  are configurable. Availability is all true with the current source model.
+- Package gain is incremental label credit weighted by reach probabilities and
+  target claims. Costs use charged resource vectors including overheads. The
+  first exposure is shared by the star; later slot costs are weighted by reach.
+- Imaging requirements advance on the exposure that satisfies them. Candidate
+  images are required before spectroscopy, with declared detection-count,
+  status and position-scatter guards; passing imaging steps reduce that gate.
+  A completing image is charged once.
+- Packages receive remaining imaging/spectrum row allowances at both star and
+  track interfaces. Every continuation consumes its kind's allowance; unreachable
+  final credit is excluded while reachable intermediate credit is retained.
+- Threshold pricing keeps strictly positive finite gain and net value, with none
+  winning zero-net ties. Fixed resource-price sweeps end with deterministic joint
+  feasibility pruning. Dispatch ranks by the named telescope-days column and
+  starts only the current node. Capacity is the lesser of visible ledger balance
+  and remaining days.
+
+## Policy state and diagnostics
+
+- `PackagePolicy` replaces rule-order selection and the cheapest-visit fallback.
+  It retains catalog kickoff, declared row caps and horizon drain. Both audiences
+  receive population forecasts at zero time, including without measurement grants.
+- Named policy state stores row-request counts, requested completion ticks,
+  kickoff, stop, bounded trace and final per-track selection evidence. The final
+  evidence includes its tick and survives stale waits and horizon stop.
+- Stale-summary waiting compares current released policy-visible imaging rows
+  with the summary's folded count. A refused start with no row cannot stall the
+  policy. An independent completion-tick guard prevents overlapping exposures.
+- Each fresh decision writes six trace columns: price, ledger net charged days,
+  selected package days, open-opportunity proxy, acted, and `cum_value`.
+  Charged days are initial budget minus the visible ledger at snapshot clock
+  precision, before the new request is admitted; refunds reduce net spending.
+- `cum_value` sums the declared values of the current policy-visible track labels.
+  Failed or unfinished actions add no forecast credit; completed labels count
+  once. The name and six-column export format remain unchanged.
+- The opportunity proxy is the largest finite positive-gain package time, not a
+  measured duration of continuous visibility windows. `stranded_d` uses final
+  unspent ledger balance when any written refresh recorded opportunity. A richer
+  window-duration definition remains unresolved.
+- `early_overspend` counts every measurement-package NO_FUNDS refusal, excluding
+  kickoff, waits and padding. Trace extraction returns padded rows with written
+  lengths; scalar calculations and CSV exports consume only valid prefixes.
+- Capacity accounts for daily waits, action refreshes and forecast renewal;
+  exhausted trace capacity raises an explicit error. Named row-capacity defaults
+  retain MAX_VISITS=24 and MAX_SPECTRA=12, with log/count/ID capacity floors.
+
+## Verdicts, activity and compatibility
+
+- The scorer joins actual participating observations to catalog identity, credits
+  each identity once, and reports mixed associations, duplicates, missed planets,
+  mission/scorer labels, yield and wrong answers. Correctness is independent of a
+  label's utility, so a correct zero-value negative is not wrong.
+- Open-track reasons are `no_package` or `below_price` from the retained final
+  selection; scorer-only `unsupported` overrides them for true period,
+  eccentricity or detection-band scale outside belief support.
+- `activity_table` and `run_grants` replace `outcome_table` and `run_arms`.
+  Activity includes occupied days by observing kind, visits, dropped planets,
+  refusals, ledger charges and degraded slots. Dropped claim counts are exported
+  as `dropped_claim_<name>`. Source-order catalogs are validated before attributing
+  dropped counts; unsupported source subsets or permutations are refused.
+- Per-effect `trace.eff_subject` attributes refusals to the requested subject.
+  Adding that provenance leaf changed checkpoint trace schemas and the 116
+  integer history digests, four fault histories and 14 compile-sharing raw hashes.
+  Excluding the leaf reproduces the earlier hashes. Float histories, snapshot
+  fingerprints and `tests/codec/hash_pin.json` remain unchanged.
+- Study capacities omit derived payload paths from JSON. `load_study(registry=)`
+  and run loading restore and validate those paths through the record registry.
+  Document content and pinned document hashes remain unchanged.
+- External criteria register through `BRACKET_KINDS`. Step-1 ladders require a
+  common concrete family, packed width and ordered claim schema; each entry
+  initializes its own state. Requirements and transition values remain traced.
+  Cross-criterion yield uses chronological scorer refolds; foreign criteria
+  require an observed allowed mode for every step, while native empty flights
+  retain their defined verdict.
+- With packed state width 36, summary memory at six slots, sixteen nodes,
+  thirty-six variants, three quantiles, one claim and three bands is 169600 bytes
+  per star per audience,
+  below the 256 KiB ceiling. For 150 stars, both audiences use 50880000 bytes,
+  excluding logs, executable memory and refit workspaces.
+- Removed APIs include the shadow characterization state, block-SNR channel
+  requirements and reveal/class plumbing, `n_char`, retirement/reserves, coded
+  arms, positional planet vectors, fixed class-conditioned first tiers and the
+  unused fixed-threshold `candidate_slots`. Their operational checks now exercise
+  criterion folds, packages, audience grants, verdicts and slot installation.
+## Retired coverage and replacement guards
 
 Twenty tests pinning removed block rules are retired; two forecast-renewal tests
 move without losing their guards, and one lightweight summary/channel API guard
@@ -118,770 +254,3 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   from `test_bracket_stale.py`. Criterion verdicts replace confirmation, package
   admission covers funds, and imaging refit-wait tests retain the liveness guard.
   The duplicated bracket `_decide` harnesses and block-only helpers are gone.
-- The observer-versus-policy outcome test remains: it distinguishes the two
-  summaries through imaging candidacy, which reads the observer's `n_det`, class
-  probability, status and scatter, independently of the raw row-log detections.
-- The shrinkage arm's paired gap now uses `charged`, the telescope days its imaging
-  decisions spend: the fixture oracle spent 1.11574074 days per world while the
-  shrinkage arm spent zero. This preserves a contrast that can differ between the
-  arms without manufacturing a confirmation endpoint.
-- Cold timing of the affected non-slow rule files before removal: 18 passing tests
-  in 38.55 s, sampled peak footprint 1937.3 MiB. Their capacity/renewal replacements
-  after removal: four passing tests in 5.24 s, sampled peak footprint 806.9 MiB.
-  The standalone lightweight summary/expiration checks pass in 3.31 s. These
-  timings describe the explicitly changed coverage, not a speedup at equal coverage.
-- Verification: 1766 quick-tier tests pass in 132.79 s with zero test-budget
-  violations; the focused slow renewal/replay, refit-cache and paired-arm checks
-  also pass. Per-file program budgets are regenerated from measured compilations
-  and cache loads with the standard headroom. No golden file changes.
-
-## Declared row capacities (breaking)
-
-- `default_capacities` requires `horizon_d` and accepts `max_spectra`, defaulting
-  to `MAX_SPECTRA = 12`. Each star's counting rows include one catalog row, up to
-  `MAX_VISITS = 24` imaging rows and the declared spectrum rows. Imaging rows
-  and forecast renewals each add `REFIT_ROWS` log products; spectra add none.
-  The 1024 log-row, 32 counting-row and 4096 ID values remain floors. Clock
-  horizons that cannot fit still fail at construction.
-- `bracket_study` sizes rows from the policy's imaging and spectrum limits, with
-  the declared limits as fallbacks. The survey channel-table test supplies its
-  horizon explicitly.
-- `test_bracket_capacities.py` replaces `test_bracket_characterization.py`.
-  Three tests (five collected cases) replace the two capacity tests: hand-pinned
-  small and survey bounds, sensitivity to spectrum limits and the required
-  horizon, and clock refusal with recovery on a longer tick. Net: one test
-  function and three collected cases added. No shared parameter matrix expands.
-
-
-## Named physical planet parameters and catalog rows (breaking)
-
-- `PlanetParameters` replaces unnamed orbit matrices above the photomancy boundary.
-  Periastron time is days from the study epoch; stellar and planet masses, physical
-  radius, and all declared-band albedos travel together through a cloud. The
-  photomancy conversion preserves its AU-squared scale and caps the inverse mass
-  relation at 131.6 Earth masses.
-- `TruthCatalogRow` is packed from named fields. The catalog kind and audience
-  groups come from its template; lowering preserves each kind's own column paths.
-  Refit validation uses those paths, excluding padding from wider kinds. Run
-  documents omit these derived paths and rebuild them from the stored registry;
-  pinned documents and goldens do not change.
-- `ObservingModeChannel.from_stars` requires `bands=` and exposes `n_bands`.
-  Study construction refuses channel/source band disagreement. Detected-slot fit
-  and shrinkage clouds draw albedo spectra with a fixed folded slot key from the
-  decision view's belief population, retaining the association during cached
-  resummary. Cache identity includes the population and band declarations.
-- The albedo mixture weights positive-rate occurrence cells, draws log-uniform
-  mass and scaled semimajor axis within each cell, then normalizes eligible type
-  weights including the configured candidate probability. It rejects locations
-  without selectable types. This is the occurrence prior before stability and
-  host/support/observation conditioning; one type supplies every band of a draw.
-  Source and refit host validation reject nonpositive or non-finite albedos of
-  selectable types in any declared band and require an explicit population repair.
-- The first tier retains its interim class-1 prior, scale window, fixed albedo,
-  semimajor-axis convention, pool, filter, evidence and search-occupancy law.
-  Shrinkage holds radius and masses fixed, with log-period width 1.5 times the
-  declared log-albedo width.
-- Fourteen test functions are added, including seventeen cases in the parameter
-  file, one lowering guard and one codec round-trip guard. Two observing-mode
-  functions retire into the parameter tests: catalog layout and stored positions.
-  The independent raw-file/exact-solver and tabulated-solver position guards
-  remain. Net: twelve functions and seventeen collected cases added; no shared
-  scenario matrix expands. Cache renewal pins the albedos bitwise and permits at
-  most four ULP in recomputed positions across the two compiled summary programs.
-
-## Configured catalog permission validation
-
-- `ReportRefit.check` reads column paths and audience permissions from the
-  configured `catalog_kind`. A renamed catalog works without the standard kind;
-  when both are registered, only the selected catalog's permissions determine
-  whether construction is allowed. Padding from wider kinds remains excluded.
-- One regression function adds three cases: a renamed catalog alone, a hidden
-  selected catalog beside an open standard catalog, and an open selected catalog
-  beside a hidden standard catalog. No tests retire or shared matrices expand.
-
-## Population first tiers and physical claims (breaking)
-
-- `AbstractClaim` and `EarthCandidateClaim` evaluate named physical parameters.
-  Weighted claim means become `DecisionSummary.p_claim [n, S, C]`; an empty
-  claim tuple has an empty last axis and values any planet. The scorer evaluates
-  claims on truth with `claims_on_truth`, masking absent slots. Population truth
-  carries no stored class code; outcome tables expose the evaluated `real` flag.
-- `PopulationModel.draw_planets` appends bounded fresh pools of 256 identical
-  hosts by default (`n_pool_systems`) until the requested distinct count is reached,
-  retaining supported present planets in system order. It returns parameters plus
-  an original-entry validity mask; exhausted padding has no inference weight, and
-  an empty pool uses finite inert parameters and zero existence. Support includes both period and eccentricity. The expected supported
-  count uses a separate keyed pool of 256 systems (`n_estimate_systems`).
-- `ReportRefit` reads the decision view's population and the observer's claims.
-  The first tier weights population draws from its slot key at their own scales,
-  resamples whole physical rows, and stores the expected count for resummary. Its
-  cache identity includes the population. `occupancy`, the fixed cloud seed, the
-  interim class window, `p_class` and `p_new` are removed. Dark slots carry
-  conditional detection probabilities and period quantiles, and per-slot
-  `p_exist` from a capacity-capped conditional Poisson count prior updated by null evidence. Detected
-  slots have existence one. Failed dark slots retain their prior summary leaves.
-- Imaging candidacy requires detections, supported status and position precision.
-  The policy reads claim probabilities separately and uses existence in both
-  search and follow-up probabilities, so an impossible slot cannot be followed
-  merely because the criterion has no claims.
-- Six regression functions are added for declared-population first tiers, empty
-  and all-false claims, scorer/catalog agreement, weighted claim probabilities,
-  bounded exhaustion and full support, and zero-existence policy decisions. The
-  exhaustion check also covers zero dark slots and saturated priors. The previous
-  interim semimajor-axis test becomes a physical claim boundary test. No tests
-  retire and no shared parameter matrix expands; net six functions added.
-- Program budgets include measured compiles and cache loads with the standard
-  headroom; existing larger allowances are retained for unmeasured slow cases.
-
-## Population padding has zero prior weight
-
-- Exhausted first-tier pools exclude padded rows before resampling and normalize
-  null evidence over valid draws. ESS, maximum weight and fit status use the same
-  mask. Empty supported pools retain zero existence and finite inert parameters.
-- One regression function checks three distinct survivors padded to four, both
-  without reports and after a miss. It pins equal prior mass, likelihood-weighted
-  resampling, evidence and ESS. No tests retire or shared matrices expand; net one
-  function added. First-tier likelihoods use each population row's own physical
-  scale, preserving its radius, masses and albedo spectrum when resampled.
-
-## Skyscapes public-name migration
-
-- Follow the upstream capitalized unit suffixes for population fields and
-  `Star.luminosity_Lsun`; observation times already pass positionally through the
-  renamed `time_jd` APIs. Read stellar coverage through `Star.wavelength_range_nm`.
-  Spaceodyssey parameter names and nonpositive selectable-albedo validation stay
-  unchanged; the formerly negative 1842 nm spectrum is now clipped to zero upstream
-  and still rejected. No golden or pinned values change.
-
-## First-tier inference preserves joint population draws
-
-- Evaluate each row's report likelihood with photomancy's public photometric
-  forward model and fixed-scale reporting law. Resample whole physical rows and
-  compute null evidence as the mean likelihood over valid rows. Both full and
-  exhausted pools preserve radius, mass and albedo correlations; padding has zero
-  weight. No replacement scale prior enters the first tier.
-- Strengthen the population test to check same-key radius and scale distributions.
-  Extend the padding regression to a full pool, with equal periods and distinct
-  radii and spectra, checking every physical field and preferential weight on
-  faint rows after a miss against an analytic face-on circular-orbit likelihood.
-  One parameter case is added; no test functions retire or shared matrices expand.
-
-## Named observing modes and a single spectral-channel model
-
-- Require mode specs, science durations and a profile when constructing an observing
-  source. The immutable mode table owns channel order, distinct bands, the catalog
-  channel and the named telescope-days resource. Build one report per band using
-  its declared throughput, frame time and resolving power.
-- Require imaging modes to share one band and reporting threshold, since the refit
-  fits one photometric scale and one reporting law per track. Refuse an explicit
-  law with a different threshold; an omitted law uses the declared threshold.
-- Remove the first-summary block model, its photon-rate divisor and implicit
-  first-band stellar flux. Spectral outcomes use the channel's own count budget;
-  reference-twin characterization times take a mode name and an explicit requirement.
-  Imaging summaries and observation costs use the table's channel indices.
-- Keep the stored ExoVista worlds and their covered 1000/100 and 940/6.7 nm bands.
-  Fixture mode specs change only the survey modes' bands. A PHOENIX-host drawn
-  survey test separately pins the unmodified 500/100 and 910/6.5 nm declarations.
-- Add eight mode-table tests and a survey-band assertion; retire the two tests for
-  the first-summary profile split and merge the survey grid test into named channel
-  lookup (net six test functions). The outer-angle likelihood probe keeps two
-  radius cases and the same tolerance, with brighter probes above the survey's
-  reporting threshold. Migrate dependent test helpers without changing populations.
-- Regenerate program budgets from measured runs with standard headroom, preserving
-  larger existing allowances where only part of a slow file was measured. No golden
-  or pinned hash changes.
-
-## One named measurement row (breaking)
-
-- Replace positional visit reports and block outcomes with `MeasurementRow` and
-  the `measurement` record kind. Its template defines scalar exposure metadata,
-  detection leaves and counts/variance on detection and band axes. Every writer
-  constructs named leaves and packs them through the shared codec.
-- Imaging exposes only detected counts in its band, with measured variance from
-  the reported limit and counts. Scorer-only true counts and variance use the
-  generating budget under the same detection mask. Spectrographs expose
-  uncensored noisy counts and observable variance in their band, alongside
-  scorer-only generating counts and model variance. Unexposed bands are zero.
-- Declare `association="truth"` on observing channels: assignment and private
-  identity follow the slot axis; other association settings fail explicitly.
-  The bracket registry is none, product, measurement, catalog. Summaries read
-  imaging measurements only, and posterior permissions check their required
-  named measured columns without requiring scorer-only truth grants.
-- Add five row-contract tests and move the null-row firewall test to the new
-  module (six functions there, net five added). The firewall compares the same
-  slot under absent and present-undetected controls after audience masking.
-  Strengthen the existing refit permission regression to require a computed
-  fit with ordinary measured grants. Migrate dependent test rows and helpers to
-  named leaves and audience masking. No shared parameter matrix expands and no
-  golden or pinned hash changes.
-- Keep cached and freshly fitted summaries at the cloud's stored precision.
-  Reject non-finite summary leaves from both cache admission and fitted output;
-  unsupported or failed slots keep their status and emit finite placeholders.
-- Center the detection-frequency control on the reporting threshold instead of
-  depending on a fixture planet landing near it. Increase the giant-planet
-  control's proposal pool to retain its ESS guard. Check refusal totals against
-  the actual trace and a controlled two-refusal trace rather than assuming that
-  an affordable-mode policy must request an unaffordable observation.
-- Extend the shrinkage registry guard to unpack measurement audience grants by
-  named leaf, checking that measured data remain open and generating identities,
-  counts and variances remain scorer-only. Strengthen one existing test; no test
-  functions or shared parameter cases are added or retired.
-
-## Optional observation identity counters
-
-- Declare optional per-subject key-group counters and per-channel group membership.
-  A realized record carries the subject's current ordinals; only a completion
-  successfully written to the log advances its channel's groups. Cancellations,
-  stale or duplicate completions, and full-log refusals consume no ordinal.
-- Preserve ordinals through snapshots, their fingerprints, canonical comparison,
-  replay row readers and checkpoint templates. The default carries no new array
-  leaves; existing golden histories and pinned hashes remain unchanged.
-- Document the optional key-group structure in checkpoint restoration and fork
-  row reconstruction. Extend the existing core tests to reject missing enabled
-  checkpoint leaves and preserve absent counters and ordinals when disabled.
-- Add four core tests for ordinal timing, cancellation and duplicate handling,
-  subject isolation, default layout, full logs, executor parity and checkpoint
-  resume. No tests are retired.
-- Extend the codec's explicit optional-field inventory and round trips for the
-  new capacity, channel membership and record ordinals; update the default-off
-  guard and the snapshot fingerprint test double. The two generic null-field
-  matrices each gain the corresponding declaration field.
-
-## Measurement draws follow observation identity
-
-- The bracket shares measurement keys across channel and acquisition index,
-  declares one key group per band and advances only the groups exposed by each
-  channel. The catalog channel belongs to no group.
-- Imaging and spectral measurement keys fold in the true slot, exposed band and
-  that band's ordinal on the subject, without duration. Channels without key
-  groups retain their earlier draw path.
-- Add three adapter tests for paired noise across different durations and
-  sequences, changes to the exposed ordinal, imaging band isolation, distinct
-  slot draws and the bracket declarations. Compare normalized draws only where
-  the shared mask has finite positive generating variance. No tests are retired.
-
-## Row-level refresh eligibility
-
-- Observers may decline a row's refresh mark with `refits_on`, which defaults to
-  true. Both the compiled handler and keyed replay apply the hook after checking
-  the refit kind. A declined row is still accepted, released and logged, and
-  remains in the subject's revision set for later refits.
-- Add one core test with two executor cases, sharing one compiled run, for
-  declined marks and retained rows in both audiences. No tests are retired.
-
-## Bracket refit marks follow observing modes
-
-- Bind the summary observer's static mode table from the study's channel model.
-  Spectrograph rows do not mark a refit; imaging rows, including nulls, and the
-  catalog row do. Spectra remain available to later refits.
-- Add one study test covering the declared channels and the same rule under JIT
-  and batching. No tests are retired.
-
-## Named per-star refit lanes
-
-- Gather imaging reports into a private per-star lane and retain track execution
-  groups by engine and row bucket. Detected, dark, shrinkage and stored-cloud
-  paths return named result modules, including physical draws and raw updater
-  status. Retry from the raw updater status and scatter summary leaves by name.
-- Add three tests: distinct-field scatter with failed and unsupported controls,
-  the raw-status retry mask, and bitwise parity with an executable positional
-  reference on both posterior engines using reduced proposal counts. Adapt
-  existing private-interface tests; no tests are retired, shared parameter
-  matrices expand, or serialized goldens and pinned hashes change.
-- Reduce the executable positional reference to direct fixture row gathering and
-  slice assembly, sharing numerical kernels and the lane runner. Remove copied
-  fit kernels, engine/bucket orchestration, cache, shrinkage and forwarding paths.
-  Require both engines independently in the reference and boundary runs; retain
-  every slice, status, diagnostic and computed-mask comparison. No tests or
-  parameter cases are added or retired, and no serialized golden changes.
-
-## Criterion state in the summary observer
-
-- Register the dependency-light criterion family and its abstract state, value,
-  and package interfaces. A summary stores one packed state vector per star;
-  changing the criterion changes its width without changing the summary tree.
-- Fold measured rows incrementally for each audience through the record codec.
-  Refits install only the fitted summary leaves and preserve criterion state.
-  Refit and outcome claims now come from the observer's declared criterion.
-- Add three contract tests for duplicate releases and track assignments, state
-  layouts and refit preservation, and imports without physical dependencies.
-  Existing imaging fixtures supply an explicit empty-state criterion. No tests
-  are retired, parameter matrices expanded, or goldens and pinned hashes changed.
-
-## Forecast and availability leaves
-
-- Summaries carry criterion-independent count quantiles and the model variance
-  of each selected draw for every future node and non-catalog channel. The
-  quantiles default to (1/6, 1/2, 5/6) and are configurable in the report refit.
-  Truth, posterior, shrinkage, dark-slot and stored-cloud paths carry these leaves.
-- Forecasts select the channel's band, albedo and science duration against its
-  nominal catalog-mass scene. Node epochs start the science exposure. Availability
-  is a Boolean per-star [G, V] leaf and is all true, including without a fit.
-- At S=6, G=16, V=36, Q=3, C=1, B=3, with three imaging durations and packed
-  state width W=2*S*B, the complete summary uses 169600 bytes per star per
-  audience (165.625 KiB), or 339200 bytes for both audiences (331.25 KiB).
-  The closed form is 8*(2 + S*(10+C+G*M) + 2*S*G*V*Q + W) + G*V bytes,
-  where M=3. The admission test enforces a 256 KiB ceiling per star per audience.
-- Add five tests for weighted forecasts, paired variance, configurable quantiles,
-  dark clouds, memory admission and one-point real-channel integration. Extend the
-  named scatter checks to forecasts and availability; preserve infinite model
-  variance and reject NaNs. No tests are retired or parameter matrices expanded.
-  Goldens and pinned hashes are unchanged.
-
-## Transition-table criteria and water/oxygen example
-
-- Add acyclic, repeated SNR requirements with measured per-band accumulators,
-  codec-packed state, named claims and terminal label values. Active steps retain
-  an explicitly associated achieved label; later packages price only new credit.
-  Failure edges are validated but no measurement decides a failure.
-- Price conditional packages from paired forecast quantiles and the lowered
-  channel resource vectors, including overheads. Imaging retains the detection,
-  fit-status and angular-scatter gate; sufficient counts with an unacceptable fit
-  or scatter require another imaging/refit step. Dark slots open with existence
-  times detection probability. The first exposure is charged once per star;
-  subsequent slot costs are weighted by the probability of reaching them.
-- Ship separate criterion and study-mode examples for water then oxygen. Both
-  continuum SNR requirements are explicitly assumed to be 5 pending emulated
-  spectra. The 940 and 760 nm modes explicitly assume resolving power 140,
-  throughput 0.29165, 300 s frames and widths equal to center over resolving power.
-  Mode loading also accepts an object containing assumptions and a modes list,
-  preserving the existing list format.
-- Add eleven tests covering the probability boundaries, repeats, state codec,
-  conditional gain and resource time, example declarations, measured assignments,
-  achieved credit, candidate gates, availability, variant choice and validation
-  under tracing. No tests retire or shared parameter matrices expand. Goldens
-  and pinned hashes are unchanged.
-
-
-## Observer grants and effective access
-
-- Replace Arm, ARMS and the separate policy refit flag with static Grants on
-  SummaryObserver. The four presets are replan, oracle, prior_planned and
-  shrinkage; partial catalog grants remain explicit settings. Registry lowering
-  preserves scorer-only identities and releases true signals only for true_snr
-  delivery. The observer folds the selected counts and variance into criterion
-  state, and the policy consults observer grants before waiting for refits.
-- Decode association, model, population, delivery, catalog access, policy access
-  and kernel from each study into a grants line. OutcomeTable and ArmsResult
-  export grants.txt beside their CSV tables. Grant settings, including the
-  kernel, participate in study documents and their hashes.
-- Add five test functions (eight collected cases) for preset audiences, document
-  hashing and decoded access, measured versus true folding, never-refit policy
-  progress and CSV provenance. Retire the two named stale-policy tests in favor
-  of these checks. No shared parameter matrix expands. Goldens and pinned hashes
-  are unchanged.
-
-
-## Track verdicts and activity accounting
-
-- Unpack measurement rows into a completion-ordered host log. Refold measured or
-  true counts through the criterion, join tracks to catalog identities, evaluate
-  catalog claims and credit each identity once. Report mixed associations,
-  duplicates, missed identities, observer labels, scorer labels, yield and wrong
-  labels. A JAX criterion objective computes the same true-column credit.
-- Replace outcome_table with activity_table and run_arms with run_grants.
-  Activity reports per-star visits, imaging and spectrograph days, dropped planets
-  and refusals, plus charged days and degraded slots per world. Paired results
-  retain both activity tables and verdicts and support contrasts of either.
-- Activity requires all source worlds in source order and validates their catalog
-  rows before attributing dropped counts. Per-effect eff_subject trace provenance
-  attributes refused observations to the requested subject, including a request
-  for another star than the one whose event woke the policy. This new named trace
-  leaf changes checkpoint trace schemas.
-- Rebaseline the integer history digests in tests/core/golden_histories.json
-  (116 entries) and tests/core/golden_pin.json (116 histories and four fault
-  histories) solely for trace.eff_subject. Removing that new column reproduces
-  every old integer digest; all float digests and statistics remain exact.
-  The 14 raw carry/trace hashes in test_compile_sharing.py also move solely for
-  the new leaf; excluding it reproduces each old hash. Snapshot fingerprints and
-  tests/codec/hash_pin.json are unchanged.
-- Move the two named outcome checks into test_scoring.py, rename the paired-run
-  check, and add six tests (net six) for refolds, identity joins, detection-order
-  invariance, the JAX objective, source-order refusal and effect provenance. No
-  other tests are retired or shared parameter matrices expanded. The canonical
-  field mutation matrix gains the one new trace leaf. Price-dependent open-slot
-  reasons await the final selection snapshot; unsupported remains a scorer-side
-  comparison against declared support.
-
-- Keep retained mission state and claim columns paired with the observer's
-  criterion when a scoring criterion is supplied. The override folds true rows
-  and evaluates catalog claims using its own schema; wrong-label comparisons
-  match label names across the two criteria. Mission labels retain observer
-  indices even when the scorer has no labels.
-- Add one three-case override regression on the existing scored-row fixture,
-  reusing the alternate criterion layouts and covering reordered claims, reordered
-  labels, missing labels and an empty scorer label set. Restore per-star visit
-  counts and occupied time by mode kind in the existing accounting test. No
-  tests are retired and no shared parameter matrices expand; net three cases.
-
-## Yield attribution across criteria
-
-- Count a completed flight under another criterion by reusing true-row verdict
-  folds and catalog identity credit. Native counting preserves the verdict,
-  including empty flights. Foreign transition tables require one observed allowed
-  mode per step in each world; missing coverage returns NaN. Unavailable
-  alternative modes do not prevent counting when every step remains covered.
-- Decompose the paired native yield contrast into definition alone and planning
-  response. Undefined cross coverage leaves both parts NaN while preserving the
-  native total contrast.
-- Add eight unit tests using the existing hand-scored log and study build. Cover
-  native identity, single-step strict requirements and true columns, absent modes,
-  attribution values, empty flights, per-world alternative coverage, chronological
-  multi-step resets, and missing cross coverage. No tests retire or shared
-  parameter matrices expand; net eight functions. Program budgets use measured
-  compiles and cache loads with standard headroom. No goldens or pinned hashes move.
-
-## Resource threshold selection
-
-- Select one positive-gain package per star with fixed-shape JAX coordinate
-  pricing and fixed-count bisection. None wins zero-net ties; non-finite costs
-  are excluded, and zero-cost columns do not enter price ratios. Deterministic
-  pruning of the lowest-gain conflicting packages enforces joint feasibility.
-- Dispatch selected packages only at their current node, ranking with an
-  explicitly supplied resource column. Cap telescope capacity by both ledger
-  balance and remaining days. Diagnose late fund refusals from admission evidence
-  and stranded days from the final balance and recorded open opportunity.
-- Declare jaxtyping directly for the public array shape annotations.
-- Add 17 unit cases (11 functions), retire none, and expand no shared test
-  matrices. Cover five refresh streams, enumerated toy value, finishing priority,
-  impossible costs, none ties, resource conflicts, dispatch and diagnostics.
-  Set the file's program budget from measured compiles and cache loads using
-  standard headroom. No goldens or pinned hashes move.
-
-## Named policy state and package decisions
-
-- Allow policies to declare a codec layout and reject a study whose policy state
-  vector is too narrow. Keep undeclared policy vectors compatible.
-- Replace the rule-order bracket policy with `PackagePolicy`. Build criterion
-  packages from the policy summary, price them against visible ledger balances
-  and remaining days, and start only a selected package at its current node.
-  Enforce imaging and spectrum row caps, preserve catalog kickoff, and wait for
-  imaging refits only when measurement access is granted.
-- Initialize every audience's dark-slot existence, detection, claim and forecast
-  leaves from the declared belief population and planning model at zero time.
-  Reuse the first tier's population draw count and occurrence estimator.
-- Bind public operational settings during construction. Show balances at clock
-  resolution with downward rounding when selecting. Keep asset and
-  program budgets nonbinding while fitting the exact snapshot integer range.
-  A pending wait cannot start a second exposure on an occupied telescope.
-- Bound the price trace using daily waits, capped observation rows and forecast
-  renewals, and raise an explicit checked error if its capacity is exhausted.
-  Daily waits share a wake tick. Each fresh decision records price, cumulative
-  booked charge, selected package days, open opportunity, action and cumulative
-  realized criterion value from the current policy-visible track labels.
-- Add 14 package-policy tests covering dispatch timing, ledger and horizon
-  limits, both row caps, codec round trips, kickoff, refit permissions, prior
-  forecasts, empty-population initialization, trace exhaustion, occupied exposures
-  and complete-run accounting.
-  Retarget the existing first-tier policy test through the shared decision
-  harness. Move both survey guards into the bracket tests; retire no guard and
-  expand no shared parameter matrix.
-- Use an explicit transition criterion and sufficient time and funding in the
-  integration fixtures. Require spending in survey worlds with a target claim;
-  a world without one may remain idle. Keep accounting tests nonempty and bound
-  the private-measurement fixture's imaging rows. Move three construction-heavy
-  adapter checks to appropriate tiers and regenerate measured program budgets.
-  No golden histories or pinned hashes change.
-
-## Exact funding and package policy regression guards
-
-- Offer a downward-rounded balance snapshot as an opt-in capacity setting;
-  retain nearest rounding by default. Compare the reconstructed quantum value
-  with the ledger before rounding down so floating-point division cannot hide
-  a deficit. Package selection consumes that conservative balance directly.
-- Express channel charges using the same tick quantum as the balance view.
-  An exactly funded exposure starts, while a quarter-tick deficit still waits.
-- Retain the truth-swap and fork batteries and the arm gap, log-ratio and install
-  guards. Exercise catalog kickoff and named package state across a fork, and
-  verify that a failed refit cannot promote a two-detection slot to a spectrum.
-- Strengthen the existing ledger test and add two test functions; retire none.
-  The new optional field adds one explicit-null rejection case to one existing
-  parameterized test, for three additional cases overall. Regenerate program
-  budgets from the measured file runs. Extend the existing capacity-default and
-  codec round-trip guards for the new setting. No golden histories or pinned
-  hashes change.
-
-## Price trace exports and budget diagnostics
-
-- Read each world's price trace through its declared policy-state codec and
-  retain padded rows with per-world written lengths on the activity table.
-  Compute diagnostics and export only the valid prefixes.
-- Report early overspend as every measurement admission refused for funds,
-  excluding catalog kickoff, waits and padding. Report stranded telescope days
-  from the final ledger balance when the written trace records open opportunity.
-- Write a combined price_trace.csv with arm, world and row coordinates beside
-  grants.txt and include both diagnostics in each world's table.
-- Add four tests, retire none, and expand no shared parameter matrix. Cover
-  poisoned padding, unequal and empty traces, multiple arms, a complete run,
-  two later package refusals after early spending, and an ample-funding control.
-  Both physical checks share one short run; the admission control compiles one
-  structure. Set the new file's program budget from its measured run with standard
-  headroom. No golden histories or pinned hashes change.
-
-## Bracket study document registration
-
-- Add an explicit BRACKET_KINDS mapping for the observer, policy, observing-mode
-  channel, stored world source, verdict objective, transition criterion and their
-  component declarations. Include the bound transition settings needed by the
-  package policy. Keep installed entry points unchanged.
-- Round-trip bracket and criterion-ladder documents with the installed kinds;
-  preserve every grant and distinguish grant, kernel and criterion changes in
-  their content hashes.
-- Add four tests, retire none, and expand no shared parameter matrix. Keep
-  registration and external-criterion state packing as unit checks. Run physical
-  document construction and a one-star, three-band, 30-day external-criterion
-  study in the slow tier. The external radius claim and per-band visit criterion
-  require no library changes; the loaded study rebuilds derived registry paths
-  before execution. Use prepared host fluxes and a three-node runtime forecast.
-- Set the two new file budgets from measured program counts with standard
-  headroom. No golden histories or pinned hashes change.
-
-## Criterion ladders over a union mode table
-
-- Add union_modes to retain first-seen mode names and reject conflicting specs.
-  Build every ladder entry on the base study's channel model and channel table.
-- Add ladder_studies with named missing-mode errors and a common concrete
-  criterion family, packed state width and ordered claim definitions. Retain the
-  base prior; initialize each entry's packed state from its own criterion.
-- Add four tests, retire none, and expand no shared parameter matrix. Cover
-  deduplication, conflicts, unchanged study fields, document hashes and round
-  trips, distinct start nodes, and incompatible families, widths and claims.
-  Use one hand-declared host and tiny population for the four-band document
-  fixture; its three consumers share a medium-tier channel and prior build.
-- Move needs_mode into the shared bracket helpers, preserving attribution's
-  explicitly supplied criterion. Regenerate both touched test-file program
-  budgets from measured counts with standard headroom. No goldens or pinned
-  hashes change.
-
-## Ladder execution and static truth firewall
-
-- Add three slow integration tests, retire none, and expand no shared parameter
-  matrix. Check that the 5.0/5.0 and 7.0/5.0 requirement ladders reuse backend
-  programs and repeat with bitwise-identical carries and traces.
-- Join completed measurement residuals by world, star, scorer identity, band and
-  recorded ordinal. Require different observation sequences and at least one
-  shared draw across the two-step and single-step criteria.
-- Run the measured replan preset with declared planning and population inputs,
-  no catalog grants, and the posterior kernel. Perturb generating fluxes by 1.1
-  and reverse stored slot order. Require a released payload difference in each
-  world and compare decisions and admissions before the earliest permitted
-  observer or policy difference.
-- Set the new test file's program budget from measured compile and persistent
-  cache-load counts with standard headroom. No goldens or pinned hashes change.
-
-## Final pruning and documentation audit
-
-- Document named measurement and catalog rows, codec templates and audience
-  masking. Describe the summary's criterion state, grants on the observer,
-  decision-view inputs and named package-policy state.
-- Audit removals by their operational readers. Photomancy conversion-boundary
-  indexing, assertions that removed APIs are absent, frozen single-planet
-  physical helpers and unrelated toy-policy cursors retain their meanings.
-  Package decisions decode named state; they do not read the removed shadow
-  characterization vector. Forecast renewal remains, bounded by the declared
-  summary-memory ceiling.
-- Across the build, the test-function inventory grows from 1416 to 1545:
-  165 newly named functions, 36 old names removed or replaced and four moves
-  between files, for a net increase of 129. These are function counts, before
-  parameter expansion. The existing retirement entries describe the removed
-  block rules and the merged guards. This final audit adds or retires no tests
-  and expands no parameter matrix; independent retirement review remains pending.
-- At six slots, sixteen forecast nodes, thirty-six non-catalog variants, three
-  quantiles, one claim, three bands and a state width of thirty-six, summary
-  storage remains 169600 bytes per star per audience, below 256 KiB. For 150
-  stars and 37 channels, both audiences together use 50880000 bytes
-  (48.522949 MiB), excluding refit workspaces, logs and executable memory.
-- The preceding quick run passed 1898 tests in 211.19 s with 3.63 GB peak
-  per-process RSS and a 8945.9 MiB sampled process-tree footprint. The final
-  quick measurement passes the same 1898 tests in 238.32 s, with 3.45 GB peak
-  RSS and a 7922.9 MiB sampled process-tree footprint. Both reuse persistent
-  compiled programs; these shared-machine observations are not a paired cold
-  performance comparison. Historical cold pruning measurements remain recorded
-  with the affected guards above. No timing baseline is re-pinned locally.
-- The confirming full run passes all 3506 test calls in 2096.04 s, with 6.74 GB
-  peak worker RSS and a 17566.3 MiB sampled process-tree footprint. Its teardown
-  reports 5533 MiB live heap against the unchanged 5500 MiB guard in the combined
-  truth-swap/fork battery module. The fork battery alone uses 2819 MiB live heap;
-  module cleanup reduces it to 325 MiB. Separate the independent fork programs
-  into `test_bracket_fork.py`, retaining both tests, fixture inputs, assertions
-  and workloads. The split run passes both tests in 67.14 s, with 4.41 GB peak
-  worker RSS; live heaps after the calls are 1840 and 2819 MiB. No memory guard
-  or test tier changes. These are observed runs, not cold timing comparisons.
-- Regenerate per-file program ceilings from the measured quick and full runs
-  through `tools/program_budgets.py`, then replace the two battery-module entries
-  with measurements of their split files. This includes the scoring file's
-  measured 1243 programs and generated ceiling of 1440. Preserve the existing
-  golden pins and leave the CI quick baseline unchanged.
-- After the split and budget promotion, the quick tier passes 1898 tests in
-  211.29 s, with 4.08 GB peak worker RSS, a 11385.3 MiB sampled process-tree
-  footprint, zero skips and zero budget violations. The quick tier remains
-  below its 540 s local target.
-
-## Audience-specific refresh eligibility
-
-- Evaluate `refits_on` separately on the observer and policy masked records in
-  execution and replay. Scorer-only columns cannot schedule either audience's
-  refit, and observer-only columns cannot schedule a policy refit.
-- Add one regression function with six cases for both release paths and scorer,
-  observer and public column grants, including zero and positive payload controls.
-  Retain the existing compiled-run and replay checks; retire no tests. Regenerate
-  the module's compile budget from its measured 329 programs with standard headroom.
-  No golden histories, document content or pins change.
-
-## Study loading restores named payload paths
-
-- Add `registry=` to `load_study` to validate the stored capacity declarations
-  and restore derived payload paths from the supplied record registry. Run loading
-  uses the same path. Study documents and their hashes remain unchanged.
-- Strengthen the bracket round trip with direct path comparisons, unchanged JSON,
-  posterior permissions and truth/shrinkage boundary construction on the loaded
-  study. The external-criterion integration loads with its registry and runs
-  without repairing grants after loading. No tests retire or shared matrices
-  expand. Regenerate both touched module budgets from measured runs.
-
-## Usable partial measurements share the science fold
-
-- Share one eligibility rule across the observer, policy summary, host scorer and
-  JAX objective: a completed row, or a partial row with valid science and at least
-  one finite positive delivered variance. Scorer substitutions of true columns
-  happen after this common eligibility check.
-- Retain status in the host row log. Unusable partials remain available for
-  occupied-time accounting, but cannot advance criterion state, contribute identity
-  evidence or supply foreign-criterion mode coverage.
-- Extend the existing fold/refold equivalence test through the actual observer and
-  policy folds, both scorer column choices and the objective. Cover a usable
-  partial, a no-science partial and zero, infinite and NaN variance controls.
-  Retire no tests and expand no shared parameter matrix. Regenerate scoring and
-  attribution module budgets from measured runs. No goldens or pins change.
-
-### Measurement participation in scorer joins
-
-- Imaging entries identify a planet only when actually detected. Null limits and
-  padding retain their measured assignments for likelihoods but have no identity
-  evidence. Spectral entries participate only with finite counts and positive
-  finite variance. Writers, host joins and the JAX objective share this rule.
-- A production-shaped all-null image leaves undetected catalog planets missed
-  and creates no misassociation or yield credit.
-
-- Synthetic cross-criterion imaging exposures now declare their actual detected
-  entries. Writer tests require identities on detections and reject identities
-  on null padding, while retaining the band-isolation and count checks.
-
-### Label correctness and initial open tracks
-
-- Verdict correctness compares the issued answer with the truth-folded answer
-  and the declared target predicate, independently of numerical label utility.
-  Correct certified negatives may carry zero yield without counting as wrong.
-- The example's initial step has no achieved label; unstarted tracks remain open
-  and can receive the scorer's unsupported reason.
-
-### Final selection reasons for open tracks
-
-- Packed policy state retains per-track package feasibility and selection plus
-  their tick at the last fresh post-kickoff decision. Stale-summary waits and
-  the horizon stop preserve that final snapshot. Per-track options use only
-  the policy summary, criterion state and declared operational settings.
-- The verdict reports `no_package` when no positive finite package exists and
-  `below_price` when selection omits an available package. Selected tracks have
-  no open rejection reason. Scorer-only `unsupported` takes precedence.
-
-### Scorer support includes photometric scale
-
-- An open joined track is `unsupported` when its true orbit or its true
-  log photometric scale in the declared detection band lies outside the belief
-  population's bounds. The scale uses the named radius/albedo conversion.
-  This attribution is scorer-only and does not alter any decision-side status.
-
-### Claim-specific losses at the truth capacity
-
-- World sources retain dropped planets' physical parameters in a separate
-  scorer-only overflow tree. The slot cap, brightest-first fill, flight catalogs
-  and drawn worlds keep their existing rules.
-- Activity/outcome world tables and their CSVs include `dropped_claim_<name>`
-  for every declared claim: the number of planets beyond the cap satisfying
-  that predicate. Counts use the source's checked world order. A source with
-  drops but no retained overflow truth cannot report claim losses silently.
-
-## Imaging transition forecasts
-
-- Imaging requirements use the same exposure to advance the transition as the
-  measurement fold. The orbit-candidate image gate applies before spectroscopy;
-  passing imaging requirements also reduce the remaining detection gate.
-- A one-row imaging definition can complete within that row's charged budget.
-
-## Row-bounded package continuations
-
-- Pass remaining imaging and spectrograph row allowances to every star and track
-  package. Continuations consume the shared allowance for their observing kind,
-  including candidate images, rather than promising credit beyond the row cap.
-- Keep credit at reachable intermediate labels when a later label is out of reach.
-
-
-## Realized value in the price trace
-
-- Keep all six trace columns. `cum_value` is the sum of each track's current
-  declared label value, recomputed from policy-visible criterion state at each
-  fresh decision. Failed or unfinished actions add no forecast credit, and
-  completed labels are counted once. Claim probabilities affect package gains,
-  while this diagnostic records the labels actually reached.
-
-
-## Dark-slot existence under a conditional count prior
-
-- Treat supported planet counts as Poisson with the declared reproducible
-  expected count, conditioned on at least the detected-track count. Share
-  E[min(N - detected, dark slots)] among dark slots before applying null-report
-  Bayes updates. This remains below one when the expected count exceeds capacity.
-- Guard zero dark slots and zero-rate populations. Bound floating-point roundoff
-  at one by the preceding representable probability.
-
-## Candidate gate regression checks
-
-- Remove the unused `candidate_slots` helper and its fixed thresholds. Candidate
-  and refit-install checks exercise transition packages with declared settings,
-  including a one-detection gate. Retain the independent slot-install assertions.
-
-
-## Full-sized population first tiers
-
-- Append fresh folded-key system pools until the requested distinct draw count
-  is reached, a fresh pool is empty, or the bounded pool count is exhausted. The
-  bound grows with the requested draw count; retries retain their distinct key
-  fold and request a larger cloud of fresh systems.
-- Solar-host checks require 4096 distinct first-tier rows and 16384 distinct retry
-  rows, with no row reused across the two keys. Empty-support and zero-padding
-  guards remain in force.
-
-## Decision-view source guard
-
-- Recognize the library's exact withheld-source sentinel before reusing a decision
-  view. An ordinary user source's public `withheld` attribute cannot expose the
-  world source or bypass substitution of the planning model and belief population.
-
-## Named count-column permission checks
-
-- Derive every required measured count-column path from the measurement codec,
-  then select the imaging band's columns by axis. Count naming follows the same
-  source as the rest of the posterior's permission requirements.
-
-## Stable host count estimates
-
-- Seed the supported-count estimator by host identity and a fixed tag at both
-  initialization and refit. New report-set keys and retry keys still redraw
-  conditional orbit clouds, while the host's population count prior stays fixed.
-
-## Ledger-based charged-time diagnostics
-
-- Record net charged days from the initial budget minus the policy-visible ledger
-  balance at each refresh, at the snapshot's clock precision. Refunds reduce the
-  diagnostic; a newly requested exposure is charged only after ledger admission.
-- Store each subject's last requested completion tick in `PolicyState.last_tick`
-  to retain the occupied-exposure guard independently of charged-time changes.
-  The named state fields and six trace columns keep their existing shapes.
-
-## Refit waits follow released imaging rows
-
-- Compare each summary's imaging-row count with released, current policy-visible
-  imaging rows. Refused starts that produce no row cannot create a permanent
-  stale-summary wait. Waiting for a real pending refit and the occupied-exposure
-  guard remain separate, and both still honor measurement permissions.
