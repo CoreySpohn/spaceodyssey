@@ -513,3 +513,20 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   labels, missing labels and an empty scorer label set. Restore per-star visit
   counts and occupied time by mode kind in the existing accounting test. No
   tests are retired and no shared parameter matrices expand; net three cases.
+
+## Yield attribution across criteria
+
+- Count a completed flight under another criterion by reusing true-row verdict
+  folds and catalog identity credit. Native counting preserves the verdict,
+  including empty flights. Foreign transition tables require one observed allowed
+  mode per step in each world; missing coverage returns NaN. Unavailable
+  alternative modes do not prevent counting when every step remains covered.
+- Decompose the paired native yield contrast into definition alone and planning
+  response. Undefined cross coverage leaves both parts NaN while preserving the
+  native total contrast.
+- Add eight unit tests using the existing hand-scored log and study build. Cover
+  native identity, single-step strict requirements and true columns, absent modes,
+  attribution values, empty flights, per-world alternative coverage, chronological
+  multi-step resets, and missing cross coverage. No tests retire or shared
+  parameter matrices expand; net eight functions. Program budgets use measured
+  compiles and cache loads with standard headroom. No goldens or pinned hashes move.

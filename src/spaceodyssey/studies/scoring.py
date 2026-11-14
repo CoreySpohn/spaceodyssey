@@ -12,6 +12,7 @@ from spaceodyssey.adapters.parameters import CATALOG_KIND_NAME, catalog_template
 from spaceodyssey.core.enums import F64, I64, RecordStatus
 from spaceodyssey.core.kinds import AbstractObjective
 from spaceodyssey.core.records import unpack
+from spaceodyssey.criteria.transition import TransitionTable
 
 MISASSOCIATED = "misassociated"
 DUPLICATE = "duplicate"
@@ -273,6 +274,70 @@ def verdict(result, study, criterion=None) -> Verdict:
             )
             reason[w, star, unsupported & (mission[w, star] < 0)] = "unsupported"
     return Verdict(counts, mission, scorer, yield_, wrong, reason)
+
+
+def cross_yield(result, study, criterion) -> np.ndarray:
+    """Yield F64[W] of a flight's true rows counted under criterion.
+
+    Native criteria retain the verdict even without measurements. Foreign
+    transition tables require, in each world, a row in at least one allowed
+    mode of every step. Other criterion families require every named mode.
+    Uncovered worlds receive NaN. Coverage uses completed measurement rows,
+    independently of whether their counts pass a requirement.
+    """
+    if eqx.tree_equal(criterion, study.observer.criterion):
+        return verdict(result, study).yield_
+    rows = row_log(result, study)
+    n_worlds = result.carry.belief.p_exist.shape[0]
+    names = tuple(m.name for m in study.channel_model.mode_table.modes)
+    observed = np.zeros((n_worlds, len(criterion.mode_names)), bool)
+    known = []
+    for i, name in enumerate(criterion.mode_names):
+        if name in names:
+            known.append(i)
+            observed[rows["world"][rows["mode"] == names.index(name)], i] = True
+    if isinstance(criterion, TransitionTable):
+        covered = (
+            (np.asarray(criterion.step_modes)[None, :, :] & observed[:, None, :])
+            .any(-1)
+            .all(-1)
+        )
+    else:
+        covered = observed.all(-1)
+    if not covered.any():
+        return np.full(n_worlds, np.nan, np.float64)
+    if isinstance(criterion, TransitionTable) and len(known) < len(
+        criterion.mode_names
+    ):
+        criterion = dataclasses.replace(
+            criterion,
+            mode_names=tuple(criterion.mode_names[i] for i in known),
+            step_modes=criterion.step_modes[:, jnp.asarray(known)],
+        )
+    return np.where(covered, verdict(result, study, criterion).yield_, np.nan)
+
+
+@dataclasses.dataclass(frozen=True)
+class Attribution:
+    """Paired yield changes F64[W] from the definition and planning response.
+
+    Missing cross coverage leaves both parts NaN; total remains the contrast
+    between the two native verdicts.
+    """
+
+    total: np.ndarray
+    definition_alone: np.ndarray
+    planning_response: np.ndarray
+
+
+def attribution(flown, counted) -> Attribution:
+    """Decompose two (result, study) flights using their declared criteria."""
+    result, study = flown
+    counted_result, counted_study = counted
+    native = verdict(result, study).yield_
+    foreign = cross_yield(result, study, counted_study.observer.criterion)
+    replanned = verdict(counted_result, counted_study).yield_
+    return Attribution(replanned - native, foreign - native, replanned - foreign)
 
 
 class CriterionObjective(AbstractObjective):
