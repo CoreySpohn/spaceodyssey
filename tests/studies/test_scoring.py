@@ -42,7 +42,14 @@ from spaceodyssey.studies.scoring import (
 )
 from tests.criteria.test_criterion_contract import _SumCriterion, _TwoLeafCriterion
 
-from .bracket_helpers import N_SLOTS, build, fixture_modes
+from .bracket_helpers import (
+    N_SLOTS,
+    build,
+    decide_once,
+    fixture_modes,
+    state_with,
+    summary_selecting_node,
+)
 
 MODES = ModeTable(fixture_modes(), (1.0,))
 
@@ -701,3 +708,70 @@ def test_the_examples_unstarted_tracks_are_open(scored_case):
     np.testing.assert_array_equal(actual.mission_label, -1)
     assert actual.counts["none"][0] == 0
     assert actual.reason[0, 0, 0] == "unsupported"
+
+
+@pytest.mark.medium(reason="compiles package selection and its per-track evidence")
+def test_open_reasons_use_the_final_policy_selection(scored_case):
+    """Fails if package feasibility and price rejection have the same open reason."""
+    result, study = scored_case
+    summary = summary_selecting_node(study, node=0)
+    summary = dataclasses.replace(
+        summary,
+        fc_counts=jnp.zeros_like(summary.fc_counts).at[:, 1].set(1000.0),
+        fc_variance=jnp.zeros_like(summary.fc_variance).at[:, 1].set(1.0),
+    )
+    decision = decide_once(
+        study, summary=summary, state=state_with(study), tick_d=1.0, balance_d=0.0
+    )
+    initial = jnp.broadcast_to(
+        pack(CRITERION.init_state(N_SLOTS, 2)), result.carry.belief.state.shape
+    )
+    result = SimpleNamespace(
+        carry=dataclasses.replace(
+            result.carry,
+            belief=dataclasses.replace(result.carry.belief, state=initial),
+            pstate=jnp.broadcast_to(pack(decision.state), result.carry.pstate.shape),
+        )
+    )
+    actual = verdict(result, study)
+    assert actual.reason[0, 0, 0] == "no_package"
+    assert actual.reason[0, 0, 1] == "below_price"
+    assert int(decision.state.selection_tick) == study.observer.ticks_per_day
+    assert not bool(decision.state.has_package[0, 0])
+    assert bool(decision.state.has_package[0, 1])
+    assert not np.asarray(decision.state.selected).any()
+
+    affordable = decide_once(
+        study, summary=summary, state=decision.state, tick_d=2.0, balance_d=10.0
+    )
+    assert bool(affordable.state.selected[0, 1])
+    stopped = decide_once(
+        study,
+        summary=summary,
+        state=affordable.state,
+        tick_d=float(study.horizon_tick) / study.observer.ticks_per_day,
+    )
+    assert int(stopped.state.selection_tick) == 2 * study.observer.ticks_per_day
+    np.testing.assert_array_equal(stopped.state.selected, affordable.state.selected)
+    selected = SimpleNamespace(
+        carry=dataclasses.replace(result.carry, pstate=pack(affordable.state)[None])
+    )
+    assert verdict(selected, study).reason[0, 0, 1] == ""
+
+    payload = result.carry.log.payload
+    catalog = unpack(catalog_template(N_SLOTS, 2), payload[0, 0])
+    catalog = dataclasses.replace(
+        catalog,
+        params=dataclasses.replace(
+            catalog.params,
+            ln_period_d=catalog.params.ln_period_d.at[2].set(jnp.log(1.0)),
+        ),
+    )
+    encoded = pack(catalog)
+    result.carry = dataclasses.replace(
+        result.carry,
+        log=dataclasses.replace(
+            result.carry.log, payload=payload.at[0, 0, : encoded.size].set(encoded)
+        ),
+    )
+    assert verdict(result, study).reason[0, 0, 0] == "unsupported"

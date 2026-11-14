@@ -191,9 +191,11 @@ class Verdict:
     Mission labels index the observer criterion's labels; scorer labels index
     the scoring criterion's labels. Wrong-label comparisons use label names.
 
-    `reason` marks unlabeled tracks joined to truth outside the declared belief
-    support as `unsupported`. Other open-slot reasons need the final selection
-    snapshot and are left empty until the selection layer supplies it.
+    `reason` uses the policy's last fresh post-kickoff selection snapshot:
+    `no_package` for no feasible positive-gain variant, `below_price` for a
+    package omitted by selection, and empty for selected tracks. A truth join
+    outside belief support overrides either open reason with `unsupported`.
+    Before any selection refresh, only the truth-side override is available.
     """
 
     counts: dict[str, np.ndarray]
@@ -230,6 +232,8 @@ def verdict(result, study, criterion=None) -> Verdict:
     for w in range(n_worlds):
         carry = jax.tree.map(lambda x, w=w: x[w], result.carry)
         catalogs, has_catalog = _catalogs(carry, study)
+        policy = study.agenda.policies[0]
+        selection = unpack(policy.state_layout(study.caps), carry.pstate)
         for star in range(n_stars):
             present = np.asarray(catalogs.present[star]) & bool(has_catalog[star])
             seen = np.zeros((n_slots, n_slots + 1), bool)
@@ -308,6 +312,12 @@ def verdict(result, study, criterion=None) -> Verdict:
                     | (mission_names[mission[w, star]] != scorer_names[scorer[w, star]])
                 )
             )
+            if hasattr(selection, "selection_tick") and int(selection.n_trace) > 0:
+                open_tracks = mission[w, star] < 0
+                has_package = np.asarray(selection.has_package[star])
+                selected = np.asarray(selection.selected[star])
+                reason[w, star, open_tracks & ~has_package] = "no_package"
+                reason[w, star, open_tracks & has_package & ~selected] = "below_price"
             support = population.support
             unsupported = np.asarray(joined) & np.asarray(
                 [

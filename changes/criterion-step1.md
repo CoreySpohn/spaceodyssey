@@ -770,3 +770,13 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   Correct certified negatives may carry zero yield without counting as wrong.
 - The example's initial step has no achieved label; unstarted tracks remain open
   and can receive the scorer's unsupported reason.
+
+### Final selection reasons for open tracks
+
+- Packed policy state retains per-track package feasibility and selection plus
+  their tick at the last fresh post-kickoff decision. Stale-summary waits and
+  the horizon stop preserve that final snapshot. Per-track options use only
+  the policy summary, criterion state and declared operational settings.
+- The verdict reports `no_package` when no positive finite package exists and
+  `below_price` when selection omits an available package. Selected tracks have
+  no open rejection reason. Scorer-only `unsupported` takes precedence.

@@ -358,7 +358,9 @@ def bracket_study(
             + n_stars
             * (4 * (1 + policy.max_visits + policy.max_spectra) + REFIT_ROWS * renewals)
         )
-        policy = dataclasses.replace(policy, trace_capacity=trace_capacity)
+        policy = dataclasses.replace(
+            policy, trace_capacity=trace_capacity, n_tracks=channel.n_slots
+        )
     caps = caps or default_capacities(
         n_stars,
         channel.n_slots,
@@ -567,7 +569,12 @@ NODE_SPACING_D = GRID_SPACING_D
 
 
 class PolicyState(eqx.Module):
-    """Per-star row counts and last ticks, kickoff, stop and price trace."""
+    """Row counts, price trace and final fresh per-track selection evidence.
+
+    has_package and selected are [n_subjects, n_tracks]. selection_tick is the
+    last fresh post-kickoff decision tick, valid when n_trace > 0. Waits for
+    stale summaries and the horizon stop preserve this snapshot.
+    """
 
     last_tick: jax.Array
     n_imaging: jax.Array
@@ -576,6 +583,9 @@ class PolicyState(eqx.Module):
     stopped: jax.Array
     trace: jax.Array
     n_trace: jax.Array
+    has_package: jax.Array
+    selected: jax.Array
+    selection_tick: jax.Array
 
 
 class PackagePolicy(AbstractPolicy):
@@ -586,6 +596,7 @@ class PackagePolicy(AbstractPolicy):
     Each fresh post-kickoff decision appends one price trace row.
     """
 
+    n_tracks: int = eqx.field(default=0, static=True)
     trace_capacity: int = eqx.field(default=1, static=True)
     max_visits: int = eqx.field(default=MAX_VISITS, static=True)
     max_spectra: int = eqx.field(default=MAX_SPECTRA, static=True)
@@ -612,6 +623,9 @@ class PackagePolicy(AbstractPolicy):
             stopped=jnp.asarray(False),
             trace=jnp.zeros((self.trace_capacity, 6), F64),
             n_trace=jnp.asarray(0, I64),
+            has_package=jnp.zeros((n_subjects, self.n_tracks), bool),
+            selected=jnp.zeros((n_subjects, self.n_tracks), bool),
+            selection_tick=jnp.asarray(0, I64),
         )
 
     def state_layout(self, caps) -> PolicyState:
@@ -675,11 +689,42 @@ class PackagePolicy(AbstractPolicy):
                     & allowed[None, :]
                     & (node_ticks <= study.horizon_tick)[:, None],
                 )
-                return criterion.options(
-                    unpack(template, one.state), one, tick, modes, settings
+                criterion_state = unpack(template, one.state)
+
+                def track_options(track):
+                    track_state = jax.tree.map(
+                        lambda x: x[track][None], criterion_state
+                    )
+                    track_summary = dataclasses.replace(
+                        one,
+                        **{
+                            name: getattr(one, name)[track][None]
+                            for name in (
+                                "p_exist",
+                                "n_det",
+                                "p_det",
+                                "fc_counts",
+                                "fc_variance",
+                                "scatter",
+                                "pos_mean",
+                                "p_claim",
+                                "ln_period_q",
+                                "ess",
+                                "status",
+                            )
+                        },
+                        state=pack(track_state),
+                    )
+                    return criterion.options(
+                        track_state, track_summary, tick, modes, settings
+                    )
+
+                return (
+                    criterion.options(criterion_state, one, tick, modes, settings),
+                    jax.lax.map(track_options, jnp.arange(self.n_tracks)),
                 )
 
-            options = jax.lax.map(options, jnp.arange(n))
+            options, track_options = jax.lax.map(options, jnp.arange(n))
             n_grid = summary.available.shape[1]
             current = jnp.clip(
                 jnp.round((tick - summary.ref_tick) / (NODE_SPACING_D * per_day)),
@@ -709,6 +754,29 @@ class PackagePolicy(AbstractPolicy):
                     resource,
                 ),
                 self.n_bisect,
+            )
+            track_valid = (
+                available[:, None, :, :]
+                & under_cap[:, None, :, :]
+                & (track_options.gain > 0)
+                & jnp.isfinite(track_options.gain)
+                & jnp.all(
+                    jnp.isfinite(track_options.time) & (track_options.time >= 0),
+                    axis=-1,
+                )
+            )
+            track_flat = track_valid.reshape(n, self.n_tracks, -1)
+            track_selected = (
+                jnp.take_along_axis(
+                    track_flat, jnp.maximum(selection.choice, 0)[:, None, None], axis=-1
+                )[..., 0]
+                & (selection.choice >= 0)[:, None]
+            )
+            state = dataclasses.replace(
+                state,
+                has_package=track_valid.any(axis=(-2, -1)),
+                selected=track_selected,
+                selection_tick=tick,
             )
             star, option, starts = act(
                 selection, gain, options.time, current, ranking_resource=resource
