@@ -270,7 +270,15 @@ def test_the_shrinkage_arm_runs_beside_the_oracle_on_the_fixture():
     for name, settings in (("oracle", {}), ("shrinkage", SMALL)):
         _, study, executor, truths, roots, _ = build(run=False, arm=name, **settings)
         arms[name] = (study, executor.boundary)
-    out = br.run_grants(arms, truths, roots, N_STEPS)
+    summaries = {}
+
+    class RecordingExecutor:
+        def run(self, study, truths, roots, n_steps, *, refit):
+            result = br.BoundExecutor().run(study, truths, roots, n_steps, refit=refit)
+            summaries[refit.kernel] = jax.tree.map(np.asarray, result.carry.belief)
+            return result
+
+    out = br.run_grants(arms, truths, roots, N_STEPS, executor=RecordingExecutor())
     assert set(out.activity) == {"oracle", "shrinkage"}
     reference = out.activity["oracle"]
     mine = out.activity["shrinkage"]
@@ -278,5 +286,12 @@ def test_the_shrinkage_arm_runs_beside_the_oracle_on_the_fixture():
         assert set(getattr(mine, part)) == set(getattr(reference, part))
     mean, se, _, n = out.gap("oracle", "shrinkage", "charged")
     assert n == N_WORLDS and np.isfinite(mean) and np.isfinite(se)
-    assert (np.asarray(mine.world["low_ess"]) == 0).all()
+    summary = summaries["shrinkage"]
+    degraded = summary.status == ph.SLOT_DEGRADED
+    detected = summary.n_det > 0
+    assert degraded.any() and detected.any()
+    assert not degraded[detected].any()
+    assert (summary.status[detected] == ph.SLOT_OK).all()
+    assert (summary.ess[degraded] < arms["shrinkage"][1].ess_floor).all()
+    np.testing.assert_array_equal(mine.world["low_ess"], degraded.sum(axis=(1, 2)))
     jax.clear_caches()
