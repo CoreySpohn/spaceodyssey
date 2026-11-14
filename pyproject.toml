@@ -178,6 +178,7 @@ require_tier_reason = true
 # tier and the full suite, with headroom; regenerate with tools/program_budgets.py from
 # --budget-json runs of both.
 [tool.testbudget.module_compile_budget_by_file]
+"tests/studies/test_scoring.py" = 1317
 "tests/criteria/test_transition_table.py" = 329
 "tests/adapters/test_forecast_leaves.py" = 1520
 "tests/criteria/test_criterion_contract.py" = 205
@@ -231,7 +232,7 @@ require_tier_reason = true
 "tests/core/test_canonical_fields.py" = 78
 "tests/core/test_charging.py" = 169
 "tests/core/test_coincident_order.py" = 109
-"tests/core/test_compile_sharing.py" = 456
+"tests/core/test_compile_sharing.py" = 460
 "tests/core/test_config_timeline.py" = 155
 "tests/core/test_conformance_guards.py" = 235
 "tests/core/test_conservation.py" = 205
@@ -302,11 +303,11 @@ require_tier_reason = true
 "tests/core/test_visible_relations.py" = 177
 "tests/core/test_wake_coalescing.py" = 77
 "tests/studies/test_allocator.py" = 361
-"tests/studies/test_bracket_arms.py" = 68
+"tests/studies/test_bracket_arms.py" = 76
 "tests/studies/test_bracket.py" = 565
 "tests/studies/test_bracket_batteries.py" = 709
 "tests/studies/test_bracket_capacities.py" = 10
-"tests/studies/test_bracket_outcomes.py" = 763
+"tests/studies/test_bracket_outcomes.py" = 871
 "tests/studies/test_bracket_renewal.py" = 598
 "tests/studies/test_bracket_survey.py" = 788
 "tests/studies/test_gradients.py" = 206

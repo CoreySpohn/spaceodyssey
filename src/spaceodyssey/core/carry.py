@@ -184,6 +184,7 @@ class Trace(eqx.Module):
     release_version: jax.Array  # I64[2] after the step
     eff_kind: jax.Array
     eff_disruptive: jax.Array
+    eff_subject: jax.Array
     admit_code: jax.Array
     belief_mean: jax.Array
     belief_aux: jax.Array
@@ -279,6 +280,7 @@ def empty_trace(caps):
         release_version=jnp.zeros(2, I64),
         eff_kind=jnp.zeros(caps.n_effects, I64),
         eff_disruptive=jnp.zeros(caps.n_effects, B),
+        eff_subject=jnp.zeros(caps.n_effects, I64),
         admit_code=jnp.full(caps.n_effects, AdmissionCode.NONE, I64),
         belief_mean=jnp.zeros(caps.n_subjects, F64),
         belief_aux=jnp.zeros(caps.n_an, F64),

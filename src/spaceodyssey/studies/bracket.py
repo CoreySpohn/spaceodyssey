@@ -37,7 +37,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.constants import Msun2kg
+from hwoutils.constants import d2s, s2d
 
 from spaceodyssey.adapters.measurement import (
     MEASUREMENT_KIND_NAME,
@@ -94,8 +94,8 @@ from spaceodyssey.core.records import (
 from spaceodyssey.core.refresh import REFRESH_PRODUCT_KIND, RefreshSchedule
 from spaceodyssey.core.snapshot import BeliefLayout
 from spaceodyssey.criteria.base import AbstractCriterion
-from spaceodyssey.criteria.claims import claims_on_truth
 from spaceodyssey.studies import builder, effect_rows
+from spaceodyssey.studies.scoring import row_log, verdict
 
 # Candidates need repeated detections, a supported fit and a tight sky position.
 CANDIDATE_DETECTIONS, CANDIDATE_SCATTER_LOD = 3, 1.0
@@ -108,7 +108,7 @@ SHARED_RESOURCE = 2
 FIRST_CHANNEL_ID = 10
 # Seconds in a day, and the ticks in a day of the default 1 ms clock (the clock a
 # bracket study runs on is the profile's declared `tick_length_s`).
-SECONDS_PER_DAY = 86_400.0
+SECONDS_PER_DAY = d2s
 TICKS_PER_DAY = 86_400_000
 
 
@@ -796,7 +796,7 @@ class SummaryObserver(AbstractObserver):
         )
 
 
-# -- Outcomes and paired arms ----------------------------------------------------
+# -- Activity and paired grants ----------------------------------------------------
 
 
 def candidate_slots(belief, lod_arcsec):
@@ -807,7 +807,7 @@ def candidate_slots(belief, lod_arcsec):
     above the size floor, never a degraded, unsupported or failed one) and a
     predicted-position scatter under one lambda over D (`lod_arcsec`, in arcsec like
     the summary's `scatter`). The policy reads its own summary through this rule
-    and the outcome table reads the observer's.
+    and the observer keeps its own summary.
     """
     return (
         (belief.n_det >= CANDIDATE_DETECTIONS)
@@ -817,26 +817,13 @@ def candidate_slots(belief, lod_arcsec):
 
 
 @dataclasses.dataclass(frozen=True)
-class OutcomeTable:
-    """What every arm reports, per slot, per star and per world.
+class ActivityTable:
+    """Per-star activity [W, n] and per-world accounting [W].
 
-    Each field is a dict of NumPy arrays with a leading world axis: `slot` leaves are
-    ``[W, n_stars, n_slots]``, `star` leaves ``[W, n_stars]`` and `world` leaves
-    ``[W]``.
-
-    Slot leaves: `present`, `real`, `n_det` (visits that detected it), `detected`,
-    `detected_again` and `candidate` (the observer's final summary meets
-    `candidate_slots`).
-
-    Star leaves: `visited`, `n_visits`, `n_search`, `n_followup`, `t_search` and
-    `t_followup` (telescope days), and `dropped` (planets the slots could not hold).
-
-    World leaves: `charged` (telescope days spent), `low_ess` (slots whose last
-    refit was degraded, `SLOT_DEGRADED`) and `no_funds` (admissions refused for lack
-    of budget).
+    Star leaves are n_visits, t_imaging and t_spectrograph (days), dropped and
+    no_funds. World leaves are charged (days) and low_ess (degraded slots).
     """
 
-    slot: dict
     star: dict
     world: dict
     grants: str = ""
@@ -847,18 +834,18 @@ class OutcomeTable:
         return int(next(iter(self.world.values())).shape[0])
 
     def to_csv(self, directory, name):
-        """Write slot, star and world CSVs and their grants to `grants.txt`."""
+        """Write star and world CSVs and the study's grants."""
         directory = pathlib.Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
-        for level, leaves in (("slot", self.slot), ("star", self.star)):
-            shape = next(iter(leaves.values())).shape
-            index = np.stack(np.meshgrid(*[np.arange(n) for n in shape], indexing="ij"))
-            labels = ["world", "star", "slot"][: len(shape)]
-            frame = {k: v.reshape(-1) for k, v in zip(labels, index, strict=False)}
-            frame.update({k: v.reshape(-1) for k, v in leaves.items()})
-            _write_columns(directory / f"{name}_{level}.csv", frame)
-        frame = {"world": np.arange(self.n_worlds), **self.world}
-        _write_columns(directory / f"{name}_world.csv", frame)
+        shape = next(iter(self.star.values())).shape
+        world, star = np.indices(shape)
+        frame = {"world": world.ravel(), "star": star.ravel()}
+        frame.update({k: v.ravel() for k, v in self.star.items()})
+        _write_columns(directory / f"{name}_star.csv", frame)
+        _write_columns(
+            directory / f"{name}_world.csv",
+            {"world": np.arange(self.n_worlds), **self.world},
+        )
         (directory / "grants.txt").write_text(f"{name}: {self.grants}\n")
 
 
@@ -878,124 +865,63 @@ def _rows_of(log, w, kind):
     return rows[np.argsort(log["end_tick"][w][rows], kind="stable")]
 
 
-def outcome_table(
-    result,
-    truths,
-    study,
-    *,
-    dropped=None,
-    check_detection=False,
-):
-    """The `OutcomeTable` of a `run_worlds` result.
+def activity_table(result, study) -> ActivityTable:
+    """Activity and ledger accounting for all source worlds in source order.
 
-    Args:
-        result: The `RunResult` of the batch.
-        truths: The `PopulationTruth` batch the run used (`source.take(...)`).
-        study: The `Study` that ran.
-        dropped: Optional ``[W, n_stars]`` planets the slots could not hold (the
-            source's `dropped` rows of those worlds); zeros when not given.
-        check_detection: Also fill the slot leaves `det_expected` and `det_variance`:
-            the sum over the slot's visits of the channel's detection probability
-            at the true elements, and of its Bernoulli variance. It makes one
-            channel call per visit, so it is off by default.
-
-    A detection-mode visit is a follow-up when an earlier visit of its star (in
-    completion order) detected a slot, a search otherwise.
+    The result must cover study.world_source's complete world batch in source
+    order. Every world's completed catalog must equal that source world's truth
+    catalog. Subsets, permutations and missing catalogs raise ValueError; dropped
+    counts are then read by source index.
     """
     carry, trace = result.carry, result.trace
-    present = np.asarray(truths.present)
     channel = study.channel_model
-    claim_values = claims_on_truth(
-        truths,
-        study.observer.criterion.claims,
-        channel.scenes.star_mass_kg / Msun2kg,
-        jnp.asarray(channel.scenes.luminosity_lsun),
-        channel.epoch_jd,
+    n_worlds = carry.log.valid.shape[0]
+    restriction = (
+        "activity_table requires all study.world_source worlds in source order "
+        "with matching truth catalogs"
     )
-    real = present & np.asarray(claim_values.all(-1))
-    n_w, n, n_slots = present.shape
+    if n_worlds != len(study.world_source.dropped):
+        raise ValueError(restriction)
+    truths = study.world_source.take(jnp.arange(n_worlds))
     log = {
         name: np.asarray(getattr(carry.log, name))
-        for name in (
-            "kind",
-            "subject",
-            "valid",
-            "payload",
-            "start_tick",
-            "end_tick",
-            "channel_index",
-        )
+        for name in ("kind", "subject", "valid", "payload", "end_tick")
     }
-    n_det = np.zeros((n_w, n, n_slots), np.int64)
-    names = ("n_visits", "n_search", "n_followup")
-    star = {k: np.zeros((n_w, n)) for k in names}
-    for k in ("t_search", "t_followup"):
-        star[k] = np.zeros((n_w, n))
-    expected = np.zeros((n_w, n, n_slots))
-    variance = np.zeros((n_w, n, n_slots))
-    channel = study.channel_model
-    per_day = round(SECONDS_PER_DAY / float(study.clock.tick_length_s))
-    for w in range(n_w):
-        seen = np.zeros(n, bool)
-        if check_detection:
-            truth = jax.tree_util.tree_map(lambda x, w=w: x[w], truths)
-            true_elements = channel.truth_parameters(truth)
-        for r in _rows_of(log, w, KIND_MEASUREMENT):
-            row = unpack(channel.measurement_template, log["payload"][w, r])
-            if channel.mode_table.modes[int(row.mode)].kind != "imaging":
-                continue
-            s = int(log["subject"][w, r])
-            days = (log["end_tick"][w, r] - log["start_tick"][w, r]) / per_day
-            hit = np.asarray(row.detected) > 0.5
-            star["n_visits"][w, s] += 1
-            stage = "followup" if seen[s] else "search"
-            star[f"t_{stage}"][w, s] += days
-            star[f"n_{stage}"][w, s] += 1
-            if check_detection:
-                mode = int(log["channel_index"][w, r])
-                when = float(row.time_d) - float(channel.epoch_jd)
-                p = np.asarray(
-                    channel.detect_probability(
-                        s, mode, when, jax.tree.map(lambda x, s=s: x[s], true_elements)
-                    )
-                )
-                expected[w, s] += p * present[w, s]
-                variance[w, s] += p * (1 - p) * present[w, s]
-            n_det[w, s] += hit
-            seen[s] |= bool(hit.any())
-    belief = carry.belief
-    lod = float(channel.assets().reports[channel.imaging_band_index].lod_arcsec)
-    candidate = np.asarray(candidate_slots(belief, lod))
-    star["visited"] = (star["n_visits"] > 0).astype(np.float64)
-    star["dropped"] = (
-        np.zeros((n_w, n)) if dropped is None else np.asarray(dropped, np.float64)
-    )
+    for w in range(n_worlds):
+        truth = jax.tree.map(lambda x, w=w: x[w], truths)
+        for star in range(study.caps.n_subjects):
+            indices = _rows_of(log, w, KIND_CATALOG)
+            indices = indices[log["subject"][w, indices] == star]
+            expected = np.asarray(channel._catalog_row(truth, star, 0, None, None))
+            if not indices.size or not np.array_equal(
+                log["payload"][w, indices[-1], : expected.size], expected
+            ):
+                raise ValueError(restriction)
+    shape = (n_worlds, study.caps.n_subjects)
+    star = {
+        name: np.zeros(shape, np.float64)
+        for name in ("n_visits", "t_imaging", "t_spectrograph", "no_funds")
+    }
+    rows = row_log(result, study)
+    for i, w in enumerate(rows["world"]):
+        subject = rows["star"][i]
+        kind = channel.mode_table.modes[rows["mode"][i]].kind
+        star["n_visits"][w, subject] += 1
+        star[f"t_{kind}"][w, subject] += rows["occupied_s"][i] * s2d
+    codes, subjects = np.asarray(trace.admit_code), np.asarray(trace.eff_subject)
+    for w in range(n_worlds):
+        refused = subjects[w][codes[w] == AdmissionCode.NO_FUNDS]
+        for subject in refused:
+            star["no_funds"][w, subject] += 1
+    star["dropped"] = np.asarray(study.world_source.dropped, np.float64)
     budget = float(np.asarray(study.budget)[-1, SHARED_RESOURCE])
-    balance = np.asarray(carry.ledger.balance)[:, -1, SHARED_RESOURCE]
     world = {
-        "charged": budget - balance,
-        "low_ess": (np.asarray(belief.status) == SLOT_DEGRADED).sum(axis=(1, 2)),
-        "no_funds": (
-            np.asarray(trace.admit_code).reshape(n_w, -1) == int(AdmissionCode.NO_FUNDS)
-        ).sum(axis=1),
+        "charged": budget - np.asarray(carry.ledger.balance)[:, -1, SHARED_RESOURCE],
+        "low_ess": (np.asarray(carry.belief.status) == SLOT_DEGRADED)
+        .sum(axis=(1, 2))
+        .astype(np.float64),
     }
-    slot = {
-        "present": present,
-        "real": real,
-        "n_det": n_det,
-        "detected": n_det > 0,
-        "detected_again": n_det > 1,
-        "candidate": candidate,
-    }
-    if check_detection:
-        slot["det_expected"] = expected
-        slot["det_variance"] = variance
-    return OutcomeTable(
-        slot=slot,
-        star=star,
-        world={k: np.asarray(v, np.float64) for k, v in world.items()},
-        grants=grants_line(study),
-    )
+    return ActivityTable(star=star, world=world, grants=grants_line(study))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1006,10 +932,17 @@ class ArmsResult:
     world and its standard error is that of the mean of the differences.
     """
 
-    table: dict
+    activity: dict
+    verdict: dict = dataclasses.field(default_factory=dict)
 
     def _endpoint(self, arm, endpoint):
-        return np.asarray(self.table[arm].world[endpoint], np.float64)
+        if endpoint in self.activity[arm].world:
+            value = self.activity[arm].world[endpoint]
+        elif endpoint in ("yield_", "wrong"):
+            value = getattr(self.verdict[arm], endpoint)
+        else:
+            value = self.verdict[arm].counts[endpoint]
+        return np.asarray(value, np.float64)
 
     def gap(self, a, b, endpoint):
         """``(mean, se, correlation, n)`` of `endpoint` of arm `a` minus arm `b`.
@@ -1045,44 +978,25 @@ class ArmsResult:
 
     def to_csv(self, directory):
         """Write each arm's tables and a `grants.txt` line for every arm."""
-        for name, table in self.table.items():
+        for name, table in self.activity.items():
             table.to_csv(directory, name.replace("+", "_"))
         pathlib.Path(directory, "grants.txt").write_text(
-            "".join(f"{name}: {table.grants}\n" for name, table in self.table.items())
+            "".join(
+                f"{name}: {table.grants}\n" for name, table in self.activity.items()
+            )
         )
 
 
-def run_arms(
-    arms,
-    truths,
-    roots,
-    n_steps,
-    *,
-    executor=None,
-    dropped=None,
-    check_detection=False,
-):
-    """Run every arm on the same truths and roots; return their `ArmsResult`.
+def run_grants(presets, truths, roots, n_steps, *, executor=None) -> ArmsResult:
+    """Run presets on shared truths and roots, retaining activity and verdicts.
 
-    Args:
-        arms: A dict of name to ``(Study, boundary)``.
-        truths: The `PopulationTruth` batch, shared by every arm.
-        roots: One root key per world, shared by every arm.
-        n_steps: Step budget of each run.
-        executor: A `CompiledExecutor`; each arm runs with its own boundary through
-            it. Defaults to `BoundExecutor`.
-        dropped: Passed to `outcome_table`.
-        check_detection: Passed to `outcome_table`.
+    presets maps each name to (Study, boundary). The truth batch must cover each
+    study's source worlds in source order, as required by activity_table.
     """
-    tables = {}
-    for name, (study, boundary) in arms.items():
+    activity, verdicts = {}, {}
+    for name, (study, boundary) in presets.items():
         base = BoundExecutor() if executor is None else executor
         run = base.run(study, truths, roots, n_steps, refit=boundary)
-        tables[name] = outcome_table(
-            run,
-            truths,
-            study,
-            dropped=dropped,
-            check_detection=check_detection,
-        )
-    return ArmsResult(table=tables)
+        activity[name] = activity_table(run, study)
+        verdicts[name] = verdict(run, study)
+    return ArmsResult(activity=activity, verdict=verdicts)

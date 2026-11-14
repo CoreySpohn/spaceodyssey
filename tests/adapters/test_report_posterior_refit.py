@@ -428,13 +428,13 @@ def test_degraded_slots_reach_the_outcome_table(world):
     status = _slices(study, result, 0, 0)["status"]
     n_degraded = int((status == ph.SLOT_DEGRADED).sum())
     assert n_degraded > 0
-    _, built, _, truths, _, run = build(arm="prior_planned", **SMALL)
+    _, built, _, _, _, run = build(arm="prior_planned", **SMALL)
     belief = run.carry.belief
     belief = eqx.tree_at(
         lambda b: b.status, belief, belief.status.at[0, 0].set(jnp.asarray(status))
     )
     run = eqx.tree_at(lambda r: r.carry.belief, run, belief)
-    table = br.outcome_table(run, truths, built)
+    table = br.activity_table(run, built)
     assert int(table.world["low_ess"][0]) == n_degraded
     assert int(table.world["low_ess"][1]) == 0
     assert not np.asarray(br.candidate_slots(belief, 1.0)).any()

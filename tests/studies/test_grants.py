@@ -9,9 +9,9 @@ from spaceodyssey.codec import dump_study, load_study
 from spaceodyssey.core.enums import Audience
 from spaceodyssey.studies.bracket import (
     GRANT_PRESETS,
+    ActivityTable,
     ArmsResult,
     Grants,
-    OutcomeTable,
     bracket_boundary,
     bracket_registry,
     grants_in_force,
@@ -183,8 +183,7 @@ def test_a_policy_without_measurements_still_spends_and_never_waits_on_a_refit()
 def test_csv_exports_keep_each_studys_grants(fixture_study, tmp_path):
     """Fails if CSV export omits grants or overwrites another arm's grants."""
     line = grants_line(fixture_study)
-    table = OutcomeTable(
-        slot={"present": np.ones((1, 1, 1))},
+    table = ActivityTable(
         star={"visited": np.ones((1, 1))},
         world={"charged": np.ones(1)},
         grants=line,
@@ -192,7 +191,7 @@ def test_csv_exports_keep_each_studys_grants(fixture_study, tmp_path):
     table.to_csv(tmp_path, "one")
     assert (tmp_path / "grants.txt").read_text() == f"one: {line}\n"
     other = dataclasses.replace(table, grants="kernel=shrinkage")
-    ArmsResult(table={"one": table, "two": other}).to_csv(tmp_path)
+    ArmsResult(activity={"one": table, "two": other}).to_csv(tmp_path)
     assert (
         tmp_path / "grants.txt"
     ).read_text() == f"one: {line}\ntwo: kernel=shrinkage\n"

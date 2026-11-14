@@ -267,11 +267,11 @@ def test_the_shrinkage_arm_runs_beside_the_oracle_on_the_fixture():
     for name, settings in (("oracle", {}), ("shrinkage", SMALL)):
         _, study, executor, truths, roots, _ = build(run=False, arm=name, **settings)
         arms[name] = (study, executor.boundary)
-    out = br.run_arms(arms, truths, roots, N_STEPS)
-    assert set(out.table) == {"oracle", "shrinkage"}
-    reference = out.table["oracle"]
-    mine = out.table["shrinkage"]
-    for part in ("slot", "star", "world"):
+    out = br.run_grants(arms, truths, roots, N_STEPS)
+    assert set(out.activity) == {"oracle", "shrinkage"}
+    reference = out.activity["oracle"]
+    mine = out.activity["shrinkage"]
+    for part in ("star", "world"):
         assert set(getattr(mine, part)) == set(getattr(reference, part))
     mean, se, _, n = out.gap("oracle", "shrinkage", "charged")
     assert n == N_WORLDS and np.isfinite(mean) and np.isfinite(se)

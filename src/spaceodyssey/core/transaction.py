@@ -1131,6 +1131,7 @@ def finish_trace(trace, effects, codes, u, wake, carry, study, snapshot_fp=0):
         snapshot_fp=jnp.where(wake, jnp.asarray(snapshot_fp, I64), 0),
         eff_kind=effects.kind,
         eff_disruptive=effects.disruptive,
+        eff_subject=jnp.where(wake, effects.subject, 0),
         admit_code=codes,
         pol_u=jnp.where(wake, u, 0.0),
         belief_mean=belief_mean,

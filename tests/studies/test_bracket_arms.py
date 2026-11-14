@@ -20,8 +20,8 @@ from spaceodyssey.adapters.photomancy import (
 )
 from spaceodyssey.core.enums import RefitStatus
 from spaceodyssey.studies.bracket import (
+    ActivityTable,
     ArmsResult,
-    OutcomeTable,
     SummaryObserver,
     candidate_slots,
 )
@@ -33,9 +33,9 @@ B = np.array([2.0, 5.0, 1.0, 6.0, 6.0])
 
 def _result():
     def table(x):
-        return OutcomeTable(slot={}, star={}, world={"charged": x})
+        return ActivityTable(star={}, world={"charged": x})
 
-    return ArmsResult(table={"a": table(A), "b": table(B)})
+    return ArmsResult(activity={"a": table(A), "b": table(B)})
 
 
 def test_gap_matches_the_paired_closed_form():
@@ -51,9 +51,9 @@ def test_gap_matches_the_paired_closed_form():
 def test_the_log_ratio_has_a_known_answer_for_a_pure_rescaling():
     """Arm a is twice arm b world by world: value ln 2 and no paired error."""
     result = ArmsResult(
-        table={
-            "a": OutcomeTable(slot={}, star={}, world={"charged": 2.0 * B}),
-            "b": OutcomeTable(slot={}, star={}, world={"charged": B}),
+        activity={
+            "a": ActivityTable(star={}, world={"charged": 2.0 * B}),
+            "b": ActivityTable(star={}, world={"charged": B}),
         }
     )
     value, se = result.log_ratio("a", "b", "charged")
@@ -68,9 +68,9 @@ def test_the_log_ratio_error_matches_a_bootstrap_of_the_worlds():
     xa = common + rng.poisson(3.0, 300)
     xb = common + rng.poisson(1.0, 300)
     result = ArmsResult(
-        table={
-            "a": OutcomeTable(slot={}, star={}, world={"charged": xa}),
-            "b": OutcomeTable(slot={}, star={}, world={"charged": xb}),
+        activity={
+            "a": ActivityTable(star={}, world={"charged": xa}),
+            "b": ActivityTable(star={}, world={"charged": xb}),
         }
     )
     _, se = result.log_ratio("a", "b", "charged")
@@ -82,9 +82,9 @@ def test_the_log_ratio_error_matches_a_bootstrap_of_the_worlds():
 def test_the_log_ratio_of_a_zero_mean_is_undefined():
     """An endpoint with a zero mean in either arm gives NaN, not inf."""
     result = ArmsResult(
-        table={
-            "a": OutcomeTable(slot={}, star={}, world={"false_claims": np.zeros(4)}),
-            "b": OutcomeTable(slot={}, star={}, world={"false_claims": B[:4]}),
+        activity={
+            "a": ActivityTable(star={}, world={"false_claims": np.zeros(4)}),
+            "b": ActivityTable(star={}, world={"false_claims": B[:4]}),
         }
     )
     value, se = result.log_ratio("a", "b", "false_claims")

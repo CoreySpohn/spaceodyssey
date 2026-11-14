@@ -223,6 +223,7 @@ CANONICAL_FIELDS = {
         "release_version",
         "eff_kind",
         "eff_disruptive",
+        "eff_subject",
         "admit_code",
         "belief_mean",
         "belief_aux",

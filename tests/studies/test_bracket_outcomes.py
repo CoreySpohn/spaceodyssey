@@ -1,15 +1,11 @@
-"""The outcome table and `run_arms` on the fixture run (oracle arm, real refit)."""
+"""Visit pacing and paired grants on the fixture run with a real refit."""
 
-import dataclasses
 import itertools
 
-import equinox as eqx
 import jax
-import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from spaceodyssey.core.enums import AdmissionCode
 from spaceodyssey.studies import bracket as br
 
 from .bracket_helpers import N_STEPS, N_WORLDS, build
@@ -23,38 +19,12 @@ pytestmark = pytest.mark.slow(reason="compiles the chunked refresh driver once")
 @pytest.fixture(scope="module")
 def built():
     _, study, executor, truths, roots, run = build(budget_d=BUDGET_D)
-    table = br.outcome_table(run, truths, study)
+    table = br.activity_table(run, study)
     return study, executor, truths, roots, run, table
 
 
-def test_the_table_agrees_with_the_log_and_the_ledger(built):
-    """Fails if counts, telescope charges or refusal totals disagree with raw data."""
-    study, _, truths, _, run, table = built
-    log = run.carry.log
-    kind, valid = np.asarray(log.kind), np.asarray(log.valid)
-    visits = ((kind == br.KIND_MEASUREMENT) & valid).sum(axis=1)
-    np.testing.assert_array_equal(table.star["n_visits"].sum(axis=1), visits)
-    days = table.star["t_search"] + table.star["t_followup"]
-    np.testing.assert_allclose(days.sum(axis=1), table.world["charged"], atol=1e-9)
-    codes = np.asarray(run.trace.admit_code).reshape(N_WORLDS, -1)
-    np.testing.assert_array_equal(
-        table.world["no_funds"], (codes == AdmissionCode.NO_FUNDS).sum(axis=1)
-    )
-    control_codes = jnp.full_like(run.trace.admit_code, int(AdmissionCode.NONE))
-    controlled = (
-        control_codes.reshape(N_WORLDS, -1).at[:, :2].set(int(AdmissionCode.NO_FUNDS))
-    )
-    control = eqx.tree_at(
-        lambda r: r.trace.admit_code, run, controlled.reshape(control_codes.shape)
-    )
-    totals = br.outcome_table(control, truths, study)
-    np.testing.assert_array_equal(totals.world["no_funds"], 2)
-    assert np.all(table.slot["detected_again"] <= table.slot["detected"])
-    assert np.all(table.slot["detected"] <= table.slot["present"])
-
-
 def test_a_visit_waits_for_a_refit_that_read_the_previous_one(built):
-    """A star's next visit starts on a later day than the release of its last row."""
+    """Fails if a star is revisited before a refit read its last released row."""
     _, _, _, _, run, _ = built
     log = run.carry.log
     kind, valid = np.asarray(log.kind), np.asarray(log.valid)
@@ -73,34 +43,24 @@ def test_a_visit_waits_for_a_refit_that_read_the_previous_one(built):
     assert checked > 0, "no star was visited twice"
 
 
-def test_run_arms_is_deterministic_and_a_self_pair_is_zero(built):
-    """Two runs of one arm give bitwise equal tables; the self gap is zero."""
+def test_run_grants_is_deterministic_and_a_self_pair_is_zero(built):
+    """Fails if shared truths and roots change a table or a self contrast is nonzero."""
     study, executor, truths, roots, _, table = built
     arms = {"a": (study, executor.boundary), "b": (study, executor.boundary)}
-    out = br.run_arms(arms, truths, roots, N_STEPS)
-    for name in ("slot", "star", "world"):
-        for key, value in getattr(out.table["a"], name).items():
+    out = br.run_grants(arms, truths, roots, N_STEPS)
+    for name in ("star", "world"):
+        for key, value in getattr(out.activity["a"], name).items():
             reference = getattr(table, name)[key]
             np.testing.assert_array_equal(value, reference)
-            np.testing.assert_array_equal(getattr(out.table["b"], name)[key], reference)
+            np.testing.assert_array_equal(
+                getattr(out.activity["b"], name)[key], reference
+            )
+    for name in ("a", "b"):
+        scored = br.verdict(built[4], study)
+        np.testing.assert_array_equal(out.verdict[name].yield_, scored.yield_)
+        for key, value in out.verdict[name].counts.items():
+            np.testing.assert_array_equal(value, scored.counts[key])
+    assert out.gap("a", "b", "yield_")[:2] == (0.0, 0.0)
     mean, se, _, n = out.gap("a", "b", "charged")
     assert (mean, se, n) == (0.0, 0.0, N_WORLDS)
     jax.clear_caches()
-
-
-def test_the_table_reads_the_observer_summary_not_the_policy_summary(built):
-    """Fails if imaging candidacy follows the policy summary instead of the observer."""
-    study, _, truths, _, run, _ = built
-    zeros = jax.tree_util.tree_map(jnp.zeros_like, run.carry.belief)
-    held = dataclasses.replace(
-        zeros,
-        n_det=zeros.n_det.at[:, 0, 0].set(3),
-    )
-    observer_only = eqx.tree_at(
-        lambda c: (c.belief, c.pbelief), run.carry, (held, zeros)
-    )
-    policy_only = eqx.tree_at(lambda c: (c.belief, c.pbelief), run.carry, (zeros, held))
-    got = br.outcome_table(dataclasses.replace(run, carry=observer_only), truths, study)
-    none = br.outcome_table(dataclasses.replace(run, carry=policy_only), truths, study)
-    assert got.slot["candidate"][:, 0, 0].all()
-    assert not none.slot["candidate"].any()

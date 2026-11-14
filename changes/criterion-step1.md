@@ -470,3 +470,35 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   progress and CSV provenance. Retire the two named stale-policy tests in favor
   of these checks. No shared parameter matrix expands. Goldens and pinned hashes
   are unchanged.
+
+
+## Track verdicts and activity accounting
+
+- Unpack measurement rows into a completion-ordered host log. Refold measured or
+  true counts through the criterion, join tracks to catalog identities, evaluate
+  catalog claims and credit each identity once. Report mixed associations,
+  duplicates, missed identities, observer labels, scorer labels, yield and wrong
+  labels. A JAX criterion objective computes the same true-column credit.
+- Replace outcome_table with activity_table and run_arms with run_grants.
+  Activity reports per-star visits, imaging and spectrograph days, dropped planets
+  and refusals, plus charged days and degraded slots per world. Paired results
+  retain both activity tables and verdicts and support contrasts of either.
+- Activity requires all source worlds in source order and validates their catalog
+  rows before attributing dropped counts. Per-effect eff_subject trace provenance
+  attributes refused observations to the requested subject, including a request
+  for another star than the one whose event woke the policy. This new named trace
+  leaf changes checkpoint trace schemas.
+- Rebaseline the integer history digests in tests/core/golden_histories.json
+  (116 entries) and tests/core/golden_pin.json (116 histories and four fault
+  histories) solely for trace.eff_subject. Removing that new column reproduces
+  every old integer digest; all float digests and statistics remain exact.
+  The 14 raw carry/trace hashes in test_compile_sharing.py also move solely for
+  the new leaf; excluding it reproduces each old hash. Snapshot fingerprints and
+  tests/codec/hash_pin.json are unchanged.
+- Move the two named outcome checks into test_scoring.py, rename the paired-run
+  check, and add six tests (net six) for refolds, identity joins, detection-order
+  invariance, the JAX objective, source-order refusal and effect provenance. No
+  other tests are retired or shared parameter matrices expanded. The canonical
+  field mutation matrix gains the one new trace leaf. Price-dependent open-slot
+  reasons await the final selection snapshot; unsupported remains a scorer-side
+  comparison against declared support.
