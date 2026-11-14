@@ -672,6 +672,8 @@ class PackagePolicy(AbstractPolicy):
             )
             & jnp.isin(view.log.channel_index, jnp.asarray(modes.imaging_channels, I64))
             & (view.log.superseded_by < 0)
+            & jnp.isin(view.log.kind, jnp.asarray(study.caps.refit_kinds, I64))
+            & jnp.isin(view.log.status, jnp.asarray(study.caps.refit_statuses, I64))
         )
         released_count = jnp.sum(
             released_images[None, :]

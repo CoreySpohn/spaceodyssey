@@ -153,8 +153,10 @@ bounds inference.
   kickoff, stop, bounded trace and final per-track selection evidence. The final
   evidence includes its tick and survives stale waits and horizon stop.
 - Stale-summary waiting compares current released policy-visible imaging rows
-  with the summary's folded count. A refused start with no row cannot stall the
-  policy. An independent completion-tick guard prevents overlapping exposures.
+  eligible under the declared refit kinds and statuses with the summary's folded
+  count. Refused starts, failed rows and acquisitions retracted by a correction
+  cannot leave a permanent stale gap. An independent completion-tick guard
+  prevents overlapping exposures.
 - Each fresh decision writes six trace columns: price, ledger net charged days,
   selected package days, open-opportunity proxy, acted, and `cum_value`.
   Charged days are initial budget minus the visible ledger at snapshot clock

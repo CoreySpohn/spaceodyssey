@@ -16,7 +16,7 @@ from spaceodyssey.core.enums import (
     EffectKind,
     RecordStatus,
 )
-from spaceodyssey.core.records import pack, unpack
+from spaceodyssey.core.records import pack, refit_rows, unpack
 from spaceodyssey.core.snapshot import snapshot_view
 from spaceodyssey.studies import bracket as br
 from tests.studies.bracket_helpers import (
@@ -171,8 +171,11 @@ def test_the_initial_state_starts_the_catalog_kickoff(fixture):
     assert int(d.state.kick) == 1 and int(d.state.n_trace) == 0
 
 
+@pytest.mark.slow(
+    reason="released-row/refit controls and physical study take 22 s cold"
+)
 def test_measurement_grants_gate_waiting_for_a_refit(fixture):
-    """Fails if stale summaries are ignored or private rows stall the policy."""
+    """Fails if stale summaries are ignored or excluded rows stall the policy."""
     summary = summary_selecting_node(fixture, node=0)
     state = state_with(fixture, n_imaging=1)
     carry = init_carry(fixture, None)
@@ -208,6 +211,41 @@ def test_measurement_grants_gate_waiting_for_a_refit(fixture):
     private = dataclasses.replace(fixture, observer=observer)
     d = decide_once(private, summary=summary, state=state)
     assert int(d.state.n_trace) == 1
+    failed = dataclasses.replace(log, status=log.status.at[0].set(RecordStatus.FAILED))
+    retracted = dataclasses.replace(
+        log,
+        valid=log.valid.at[1].set(True),
+        kind=log.kind.at[1].set(br.KIND_MEASUREMENT),
+        channel_index=log.channel_index.at[1].set(log.channel_index[0]),
+        audience=log.audience.at[1].set(int(EVERYONE)),
+        status=log.status.at[1].set(RecordStatus.FAILED),
+        accepted_tick=log.accepted_tick.at[1].set(0),
+        released_tick=log.released_tick.at[1].set(0),
+        acquisition_id=log.acquisition_id.at[1].set(log.acquisition_id[0]),
+        revision=log.revision.at[1].set(1),
+    )
+    for excluded in (failed, retracted):
+        assert not bool(
+            refit_rows(excluded, fixture.caps, Audience.POLICY, 0).valid.any()
+        )
+        for tick_d in (2, 4):
+            fresh = dataclasses.replace(
+                carry,
+                log=excluded,
+                tick=jnp.asarray(tick_d * fixture.observer.ticks_per_day),
+            )
+            effects, updated, _ = _decide(
+                fixture, packed, snapshot_view(fresh, Audience.POLICY, fixture.caps)
+            )
+            assert int(effects.kind[0]) == EffectKind.OBSERVE
+            assert (
+                int(
+                    unpack(
+                        fixture.agenda.policies[0].state_layout(fixture.caps), updated
+                    ).n_trace
+                )
+                == 1
+            )
 
 
 def test_exhausted_trace_capacity_is_an_explicit_failure(fixture):
