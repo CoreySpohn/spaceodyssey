@@ -9,7 +9,7 @@ migration.
 - World-source constructors (`ExoVistaWorldSource.from_files`, `from_draws`,
   `from_population`) and `star_spec_from_model` require `bands=`. A band is
   `Band(center_nm, width_nm)`; no wavelength is a library default. Stored spectra
-  must cover every declared band. `PopulationTruth.albedo` has detection and band
+  must cover every declared band. `PopulationTruth.albedo` has slot and band
   axes, with one geometric albedo for every planet and band.
 - Host flux densities are band means, rather than center-wavelength samples. For
   `Band(1000, 100)` this is the 950-1050 nm mean.
@@ -72,8 +72,8 @@ bounds inference.
 ## Decision views, grants and inference
 
 - Decision views withhold the world source, substitute the planning model and
-  belief population, and retain the observer's declarations. Only the exact
-  withheld-source sentinel marks an existing view; a user source's public
+  belief population, and retain the observer's declarations. A private opaque
+  withheld-source marker identifies an existing view; a user source's public
   `withheld` attribute cannot bypass the boundary.
 - Observer `Grants` replace coded arms and the separate policy-refit switch.
   Presets are `replan`, `oracle`, `prior_planned` and `shrinkage`. Grants, kernel
