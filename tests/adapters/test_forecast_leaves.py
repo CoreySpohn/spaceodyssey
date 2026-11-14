@@ -84,6 +84,7 @@ def test_dark_slots_forecast_their_cloud(cloud):
     """Fails if first-tier slots drop forecast leaves or occupancy scales counts."""
     channel = PreparedChannel()
     settings = SimpleNamespace(
+        n_slots=2,
         claims=(),
         n_grid=3,
         spacing_d=ph.GRID_SPACING_D,
@@ -93,7 +94,9 @@ def test_dark_slots_forecast_their_cloud(cloud):
     leaves = ph._first_leaves(channel, 0, 7, 2, cloud, 0.0, 0.5, settings)
     result = ph._dark_result(leaves, jnp.asarray(3.0), jnp.asarray(0), cloud)
     expected = summarize_forecast(channel, cloud, jnp.zeros(3))
-    assert float(result.p_exist) == 0.25
+    np.testing.assert_allclose(
+        result.p_exist, 1 - 1.25 * np.exp(-0.5), atol=1e-15, rtol=0
+    )
     np.testing.assert_array_equal(result.fc_counts, expected.fc_counts)
     np.testing.assert_array_equal(result.fc_variance, expected.fc_variance)
     np.testing.assert_array_equal(result.available, True)
