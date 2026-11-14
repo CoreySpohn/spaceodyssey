@@ -221,8 +221,12 @@ def test_an_audience_that_cannot_read_the_columns_installs_nothing(world):
         int(RefitStatus.DEGRADED),
     )
     assert np.any(_slices(study, result, 0, 0)["p_exist"])
+    assert not bool(result.computed[0, 1, 0])
     for name, value in _slices(study, result, 1, 0).items():
-        assert not np.any(value), name
+        if name == "available":
+            assert np.all(value), name
+        else:
+            assert not np.any(value), name
 
 
 def test_a_low_ess_fit_is_retried_then_installed_as_degraded(world):
