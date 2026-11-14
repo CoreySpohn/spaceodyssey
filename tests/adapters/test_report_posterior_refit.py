@@ -5,6 +5,7 @@ counts: they check structure (independence, masks, statuses), not accuracy.
 """
 
 import dataclasses
+import math
 
 import equinox as eqx
 import jax
@@ -396,7 +397,7 @@ def _null_lane(channel, st, star, n_rows, key=(1, 2)):
 def test_the_search_probability_follows_the_posterior_occupancy(world, n_rows):
     """Fails if a dark slot ignores null evidence when updating existence.
 
-    The prior is the supported expected count per dark slot, clipped to one;
+    For N ~ Poisson(expected_count), the prior is E[min(N, N_SLOTS)] / N_SLOTS;
     the posterior is q L / (1 - q + q L) for the first-tier null evidence L.
     """
     study, channel, _, _ = world
@@ -408,10 +409,17 @@ def test_the_search_probability_follows_the_posterior_occupancy(world, n_rows):
     like = float(jnp.exp(cloud.log_evidence))
     expected_count = population.expected_planets(
         ph._population_star(channel, lane.subject),
-        jax.random.fold_in(lane.key, ph._EXPECTED_TAG),
+        jax.random.fold_in(
+            jax.random.fold_in(jax.random.PRNGKey(0), lane.subject), ph._EXPECTED_TAG
+        ),
         st.n_estimate_systems,
     )
-    q = min(float(expected_count) / N_SLOTS, 1.0)
+    mean = float(expected_count)
+    mass = [math.exp(-mean) * mean**k / math.factorial(k) for k in range(N_SLOTS)]
+    q = (
+        sum(k * probability for k, probability in enumerate(mass))
+        + N_SLOTS * (1.0 - sum(mass))
+    ) / N_SLOTS
     expected = q * like / (1.0 - q + q * like)
     got = float(ph._first_tier_lane(channel, population, lane, st, 1).result.p_exist)
     assert got == pytest.approx(expected, rel=1e-10, abs=1e-14)
