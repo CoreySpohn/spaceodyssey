@@ -694,6 +694,14 @@ class PackagePolicy(AbstractPolicy):
                     & allowed[None, :]
                     & (node_ticks <= study.horizon_tick)[:, None],
                 )
+                star_settings = dataclasses.replace(
+                    settings,
+                    remaining_rows=jnp.where(
+                        imaging,
+                        self.max_visits - state.n_imaging[star],
+                        self.max_spectra - state.n_spectra[star],
+                    ),
+                )
                 criterion_state = unpack(template, one.state)
 
                 def track_options(track):
@@ -721,11 +729,11 @@ class PackagePolicy(AbstractPolicy):
                         state=pack(track_state),
                     )
                     return criterion.options(
-                        track_state, track_summary, tick, modes, settings
+                        track_state, track_summary, tick, modes, star_settings
                     )
 
                 return (
-                    criterion.options(criterion_state, one, tick, modes, settings),
+                    criterion.options(criterion_state, one, tick, modes, star_settings),
                     jax.lax.map(track_options, jnp.arange(self.n_tracks)),
                 )
 

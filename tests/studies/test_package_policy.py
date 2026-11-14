@@ -288,3 +288,20 @@ def test_an_empty_belief_population_has_finite_zero_forecasts(fixture):
     for name in ("p_exist", "p_det", "p_claim", "fc_counts", "fc_variance", "ess"):
         value = np.asarray(getattr(summary, name))
         assert np.isfinite(value).all() and not value.any()
+
+
+@pytest.mark.slow(reason="physical study and package selection take 16 s cold locally")
+def test_a_package_cannot_promise_more_spectra_than_remain(fixture):
+    """Fails if a two-pass package is started with only one spectrum row left."""
+    criterion = dataclasses.replace(fixture.observer.criterion, repeat=jnp.asarray([2]))
+    study = dataclasses.replace(
+        fixture, observer=dataclasses.replace(fixture.observer, criterion=criterion)
+    )
+    summary = summary_selecting_node(study, node=0)
+    decision = decide_once(
+        study,
+        summary=summary,
+        state=state_with(study, n_spectra=br.MAX_SPECTRA - 1),
+    )
+    assert effect_kind(decision) == EffectKind.WAIT
+    assert not bool(decision.state.has_package.any())

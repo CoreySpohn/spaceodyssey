@@ -445,3 +445,20 @@ def test_an_imaging_step_costs_the_row_that_completes_its_fold():
         opts.gain[None], opts.time[None], jnp.asarray([0.0, 0.0, 2.0]), 48
     )
     assert int(selection.choice[0]) == 0
+
+
+def test_row_allowances_keep_only_reachable_intermediate_credit():
+    """Fails if continuation credit survives its row cap or loses a reachable label."""
+    table = dataclasses.replace(two_step_table(), label_values=[0.0, 0.5, 1.0])
+    summary, settings = package_inputs(p=(1.0, 1.0))
+    summary = dataclasses.replace(
+        summary, fc_counts=jnp.full_like(summary.fc_counts, 50.0)
+    )
+    limited = dataclasses.replace(settings, remaining_rows=jnp.asarray([3, 1, 1], I64))
+    opts = _options(table, table.init_state(1, 3), summary, limited)
+    assert float(opts.gain[0, 1]) == 0.5
+    assert float(opts.time[0, 1, TELESCOPE]) == 10.0
+    dark = dataclasses.replace(summary, n_det=jnp.zeros(1, I64))
+    limited = dataclasses.replace(settings, remaining_rows=jnp.asarray([2, 5, 5], I64))
+    opts = _options(table, table.init_state(1, 3), dark, limited)
+    assert float(opts.gain[0, 0]) == 0.0

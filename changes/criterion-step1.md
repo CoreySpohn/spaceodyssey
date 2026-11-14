@@ -808,3 +808,10 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   measurement fold. The orbit-candidate image gate applies before spectroscopy;
   passing imaging requirements also reduce the remaining detection gate.
 - A one-row imaging definition can complete within that row's charged budget.
+
+## Row-bounded package continuations
+
+- Pass remaining imaging and spectrograph row allowances to every star and track
+  package. Continuations consume the shared allowance for their observing kind,
+  including candidate images, rather than promising credit beyond the row cap.
+- Keep credit at reachable intermediate labels when a later label is out of reach.
