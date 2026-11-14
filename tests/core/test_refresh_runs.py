@@ -203,9 +203,17 @@ def _mutation_pair():
         max_bundle_size=2,
         max_config_switches=1,
         n_ops=2,
+        n_key_groups=1,
     )
     # 20 steps: a refresh has run and an event is still pending (60 drains the queue).
     study = refresh_study(100, caps=caps)
+    study = dataclasses.replace(
+        study,
+        channels=dataclasses.replace(
+            study.channels,
+            key_groups=jnp.ones((caps.n_channels, caps.n_key_groups), jnp.bool_),
+        ),
+    )
     # one configuration switch per asset at tick 50, inside the run
     study = eqx.tree_at(
         lambda s: s.assets.config_switch_ticks,
@@ -226,9 +234,11 @@ def _mutation_pair():
 @pytest.mark.medium(reason="the two-program refresh pair compiles the executor cold")
 @pytest.mark.parametrize("field", sorted(REFRESH_ONLY))
 def test_refresh_leaf_mutation_fails_parity(field):
-    """Each conditional refresh leaf is compared; a compiled-only change is caught."""
+    """Fails if a conditional leaf is absent or its corruption escapes parity."""
     host, comp = _mutation_pair()
     assert base.histories_equal(host.history(), comp.history()).go  # control
+    assert np.asarray(comp.carry.group_counts).sum() > 0
+    assert np.any(np.asarray(comp.carry.log.group_ordinal) > 0)
     mutant = _perturb(comp, field.split("."))
     assert not base.histories_equal(host.history(), mutant.history()).ok, field
 
