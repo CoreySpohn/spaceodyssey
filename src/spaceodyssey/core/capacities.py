@@ -92,6 +92,8 @@ class Capacities:
     max_config_switches: int = dataclasses.field(default=0, metadata=OPTIONAL)
     # Asset ops states: the number of states an asset can be in; one (off) by default.
     n_ops: int = dataclasses.field(default=1, metadata=OPTIONAL)
+    # Per-subject counters used to address realized records; zero disables them.
+    n_key_groups: int = dataclasses.field(default=0, metadata=OPTIONAL)
 
     @property
     def ops(self) -> bool:
@@ -151,6 +153,7 @@ class Capacities:
             ("max_bundles", self.max_bundles),
             ("max_bundle_size", self.max_bundle_size),
             ("max_config_switches", self.max_config_switches),
+            ("n_key_groups", self.n_key_groups),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")

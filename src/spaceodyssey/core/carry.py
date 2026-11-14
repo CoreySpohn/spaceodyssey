@@ -63,6 +63,7 @@ class Carry(eqx.Module):
     # decision index of the last request refused as stale, -1 for none; present only
     # while `caps.snapshot_balances` is on (the policy view shows it)
     query_refused: jax.Array | None = None
+    group_counts: jax.Array | None = None  # I64[n_subjects, K]
 
 
 def _zero_belief(caps):
@@ -144,6 +145,9 @@ def empty_carry(caps, balance=None):
         refresh_dirty=jnp.zeros((2, n_refresh), B),
         refresh_status=jnp.full((2, n_refresh), -1, I64),
         query_refused=jnp.asarray(-1, I64) if caps.snapshot_balances else None,
+        group_counts=jnp.zeros((caps.n_subjects, caps.n_key_groups), I64)
+        if caps.n_key_groups
+        else None,
     )
 
 

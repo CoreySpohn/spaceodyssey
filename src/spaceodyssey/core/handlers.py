@@ -30,6 +30,7 @@ from spaceodyssey.core.lift import lifting_jit
 from spaceodyssey.core.records import (
     AWARD_COLUMNS,
     BUNDLE_COLUMNS,
+    GROUP_COLUMNS,
     OPS_COLUMNS,
     REFUND_COLUMNS,
     Record,
@@ -59,6 +60,7 @@ _OPTIONAL_ROW = (
     *AWARD_COLUMNS,
     *BUNDLE_COLUMNS,
     *OPS_COLUMNS,
+    *GROUP_COLUMNS,
 )
 _ROW_FIELDS = tuple(
     f for f in dataclasses.fields(Record) if f.name not in _OPTIONAL_ROW
@@ -112,6 +114,8 @@ def _realize_rec(c, study, truth, root, base, fraction):
     The draw key always uses the completed-status coordinate, so a partial occupancy
     shares its variate with its full twin.
     """
+    if c.group_counts is not None:
+        base = dataclasses.replace(base, group_ordinal=c.group_counts[base.subject])
     coords = dataclasses.replace(base, status=jnp.asarray(RecordStatus.COMPLETED, I64))
     key = draw_key(
         root,
@@ -209,6 +213,12 @@ def h_done(c, ev, study, truth, root):
     c1 = _tree_set(c, double_settle=c.double_settle | dup)
     c2, slot = write_log(c1, rec, caps)
     written = c2.n_log > c1.n_log
+    if c2.group_counts is not None:
+        increments = channels.key_groups[channel_index].astype(I64) * written
+        c2 = _tree_set(
+            c2,
+            group_counts=c2.group_counts.at[ev.subject].add(increments),
+        )
     c3 = _release_row(c2, written, rec, slot, channels.audience[channel_index], study)
     return c3, _emit(written.astype(I64), slot), rec
 

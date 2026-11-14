@@ -43,6 +43,7 @@ CANONICAL_FIELDS = {
         "refresh_dirty",
         "refresh_status",
         "query_refused",
+        "group_counts",
     ),
     "carry.ev": (
         "kind",
@@ -108,6 +109,7 @@ CANONICAL_FIELDS = {
         "award_tos",
         "bundle",
         "ops",
+        "group_ordinal",
     ),
     "carry.ledger": (
         "balance",
@@ -276,6 +278,11 @@ def balances_on(carry):
     return carry.query_refused is not None
 
 
+def key_groups_on(carry):
+    """Whether completed rows carry per-subject counter ordinals."""
+    return carry.group_counts is not None
+
+
 def awards_on(carry):
     """Whether the carry holds the award state (the window generations exist)."""
     return carry.ledger.win_gen is not None
@@ -322,6 +329,8 @@ CONDITIONAL_FIELDS = {
     "carry.ledger.ops_state": ops_on,
     "trace.program": programs_on,
     "carry.query_refused": balances_on,
+    "carry.group_counts": key_groups_on,
+    "carry.log.group_ordinal": key_groups_on,
     "carry.ledger.win_state": awards_on,
     "carry.ledger.win_gen": awards_on,
     "carry.ledger.lane_award_gens": awards_on,

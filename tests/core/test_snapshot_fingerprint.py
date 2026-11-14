@@ -159,6 +159,7 @@ def test_an_empty_leaf_moves_the_fingerprint(monkeypatch):
         refund_index=view.log.refund_index,
         award_gen=view.log.award_gen,
         bundle=view.log.bundle,
+        group_ordinal=view.log.group_ordinal,
         **{n: getattr(view.log, n) for n in names},
     )
     shim = types.SimpleNamespace(

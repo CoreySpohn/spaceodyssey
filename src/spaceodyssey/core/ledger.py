@@ -35,6 +35,8 @@ class ChannelTable(eqx.Module):
     # F64[n_ops, C, R]: the cost of each channel per asset ops state, present only while
     # the capacities hold ops states. Entry 0 is the cost at the nominal state.
     cost_by_ops: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
+    # B[C, K]: which counters a completed row of each channel advances.
+    key_groups: jax.Array | None = dataclasses.field(default=None, metadata=OPTIONAL)
 
 
 class Ledger(eqx.Module):

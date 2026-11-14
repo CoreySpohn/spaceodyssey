@@ -273,6 +273,7 @@ class RealizeContext(eqx.Module):
     fraction: jax.Array
     config_id: jax.Array
     ops_state: jax.Array
+    group_ordinal: jax.Array = eqx.field(default_factory=lambda: jnp.zeros(0, I64))
 
     @classmethod
     def from_record(cls, rec, fraction):
@@ -285,6 +286,9 @@ class RealizeContext(eqx.Module):
             config_id=jnp.asarray(rec.config_id, I64),
             # the asset's ops state at admission; 0 where ops states are off
             ops_state=jnp.asarray(0 if rec.ops is None else rec.ops, I64),
+            group_ordinal=jnp.zeros(0, I64)
+            if rec.group_ordinal is None
+            else rec.group_ordinal,
         )
 
 

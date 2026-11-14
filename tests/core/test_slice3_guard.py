@@ -203,11 +203,18 @@ def test_a_malformed_slice_3a_capacity_is_refused(bad):
 def test_the_slice_3a_capacities_default_to_off():
     """Fails if a default capacity turns a feature on (pinned studies would move)."""
     caps = Capacities()
-    assert (caps.awards, caps.refunds, caps.n_commitments, caps.snapshot_balances) == (
+    assert (
+        caps.awards,
+        caps.refunds,
+        caps.n_commitments,
+        caps.snapshot_balances,
+        caps.n_key_groups,
+    ) == (
         False,
         False,
         0,
         False,
+        0,
     )
     marked = [f.name for f in dataclasses.fields(Capacities) if f.metadata == OPTIONAL]
     assert marked == [
@@ -220,6 +227,7 @@ def test_the_slice_3a_capacities_default_to_off():
         "max_bundle_size",
         "max_config_switches",
         "n_ops",
+        "n_key_groups",
     ]
 
 

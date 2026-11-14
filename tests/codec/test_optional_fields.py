@@ -43,9 +43,16 @@ CAP_FIELDS = (
     "max_bundle_size",
     "max_config_switches",
     "n_ops",
+    "n_key_groups",
 )
 STUDY_FIELDS = ("key_version", "planning_model", "belief_population")
-CHANNEL_FIELDS = ("pricing", "surcharge", "failure_kind", "refund_deadline_ticks")
+CHANNEL_FIELDS = (
+    "pricing",
+    "surcharge",
+    "failure_kind",
+    "refund_deadline_ticks",
+    "key_groups",
+)
 RECORD_FIELDS = (
     "nonrefundable",
     "refund_index",
@@ -53,6 +60,7 @@ RECORD_FIELDS = (
     "award_gens",
     "award_rules",
     "award_tos",
+    "group_ordinal",
 )
 AWARD_COLUMNS = (
     "amount",
@@ -131,6 +139,7 @@ def test_a_nondefault_optional_field_is_written_and_round_trips():
         max_bundle_size=3,
         max_config_switches=4,
         n_ops=3,
+        n_key_groups=2,
     )
     study = builder.survey_1(caps=caps, key_version=2)
     doc = _doc(study)
@@ -145,6 +154,7 @@ def test_a_nondefault_optional_field_is_written_and_round_trips():
         3,
         4,
         3,
+        2,
     ]
     text = _text(study)
     loaded = load_study(text, TOY_KINDS)
@@ -169,6 +179,7 @@ def test_a_missing_optional_field_loads_at_its_default():
         0,
         0,
         1,
+        0,
     ]
     assert_same_pytree(study, loaded)
 
@@ -376,7 +387,9 @@ def test_a_populated_program_column_round_trips():
 
 
 def _refund_channel_study():
-    study = builder.survey_1(caps=dataclasses.replace(Capacities(), refunds=True))
+    study = builder.survey_1(
+        caps=dataclasses.replace(Capacities(), refunds=True, n_key_groups=2)
+    )
     n, r = study.channels.cost.shape
     channels = dataclasses.replace(
         study.channels,
@@ -384,12 +397,13 @@ def _refund_channel_study():
         surcharge=jnp.full((n, r), 2.0),
         failure_kind=jnp.asarray([-1, -1, 2], I64),
         refund_deadline_ticks=jnp.asarray([0, 0, 50], I64),
+        key_groups=jnp.asarray([[True, False], [True, True], [False, False]]),
     )
     return dataclasses.replace(study, channels=channels)
 
 
 def test_a_channel_refund_declaration_is_written_and_round_trips():
-    """Fails if a pricing, surcharge, failure kind or deadline is dropped."""
+    """Fails if a refund or counter-group declaration is dropped."""
     study = _refund_channel_study()
     doc = _doc(study)
     assert set(CHANNEL_FIELDS) <= set(doc["study"]["channels"])
@@ -464,8 +478,8 @@ def test_a_record_written_with_a_null_award_identity_column_is_refused(name):
 
 
 def test_a_populated_record_refund_columns_round_trip():
-    """Fails if a refund column is dropped, omitted or rebuilt with another dtype."""
-    caps = dataclasses.replace(Capacities(), refunds=True, awards=True)
+    """Fails if a refund or ordinal column is dropped or rebuilt with another dtype."""
+    caps = dataclasses.replace(Capacities(), refunds=True, awards=True, n_key_groups=2)
     rec = dataclasses.replace(
         record_none(caps),
         nonrefundable=jnp.full(caps.n_resources, 2.0),
@@ -474,6 +488,7 @@ def test_a_populated_record_refund_columns_round_trip():
         award_gens=jnp.arange(caps.n_resources, dtype=I64),
         award_rules=jnp.arange(caps.n_resources, dtype=I64) % 4,
         award_tos=jnp.arange(caps.n_resources, dtype=I64) + 1,
+        group_ordinal=jnp.asarray([2, 1], I64),
     )
     node = encode(rec, ("record",), _RECORD_KINDS)
     assert set(RECORD_FIELDS) <= set(node)

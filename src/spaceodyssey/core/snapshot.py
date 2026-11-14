@@ -11,6 +11,7 @@ import numpy as np
 from spaceodyssey.core.capacities import OPTIONAL
 from spaceodyssey.core.enums import F64, I64, Audience, B, RecordStatus, version_slot
 from spaceodyssey.core.records import (
+    GROUP_COLUMNS,
     LOG_INT_FIELDS,
     REFUND_COLUMNS,
     RecordLog,
@@ -304,7 +305,7 @@ def snapshot_view(carry, audience, caps):
     )
     # the ops state that priced a row is not part of the policy's view
     cols["ops"] = None
-    for name in REFUND_COLUMNS:
+    for name in (*REFUND_COLUMNS, *GROUP_COLUMNS):
         col = getattr(log, name)
         if col is None:
             cols[name] = None
@@ -397,7 +398,8 @@ def conditional_view_leaves(view):
         () if view.balance_q is None else (view.balance_rows, view.balance_q)
     ) + (() if view.query_refused is None else (view.query_refused,))
     bundle = () if view.log.bundle is None else (view.log.bundle,)
-    return (view.log.product, *program, *refunds, *bundle, *balance)
+    groups = () if view.log.group_ordinal is None else (view.log.group_ordinal,)
+    return (view.log.product, *program, *refunds, *bundle, *balance, *groups)
 
 
 def snapshot_fingerprint(view, layout):

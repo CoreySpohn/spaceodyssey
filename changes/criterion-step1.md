@@ -326,3 +326,20 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   named leaf, checking that measured data remain open and generating identities,
   counts and variances remain scorer-only. Strengthen one existing test; no test
   functions or shared parameter cases are added or retired.
+
+## Optional observation identity counters
+
+- Declare optional per-subject key-group counters and per-channel group membership.
+  A realized record carries the subject's current ordinals; only a completion
+  successfully written to the log advances its channel's groups. Cancellations,
+  stale or duplicate completions, and full-log refusals consume no ordinal.
+- Preserve ordinals through snapshots, their fingerprints, canonical comparison,
+  replay row readers and checkpoint templates. The default carries no new array
+  leaves; existing golden histories and pinned hashes remain unchanged.
+- Add four core tests for ordinal timing, cancellation and duplicate handling,
+  subject isolation, default layout, full logs, executor parity and checkpoint
+  resume. No tests are retired.
+- Extend the codec's explicit optional-field inventory and round trips for the
+  new capacity, channel membership and record ordinals; update the default-off
+  guard and the snapshot fingerprint test double. The two generic null-field
+  matrices each gain the corresponding declaration field.
