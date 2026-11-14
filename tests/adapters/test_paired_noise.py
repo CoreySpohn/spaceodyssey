@@ -114,6 +114,7 @@ def test_imaging_draws_use_the_exposed_band_ordinal(study, truth):
     assert not np.allclose(za, zc)
 
 
+@pytest.mark.medium(reason="builds the bracket study fixture")
 def test_bracket_declares_exposed_groups_and_measurement_coupling(study):
     """Fails if catalog rows consume ordinals or measurements retain sequence."""
     t = study.channel_model.mode_table
