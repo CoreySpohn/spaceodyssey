@@ -662,7 +662,21 @@ class PackagePolicy(AbstractPolicy):
         tick, per_day = view.tick, self.ticks_per_day
         done = state.stopped | (tick >= study.horizon_tick)
         kicking = state.kick < n
-        stale = jnp.any(state.n_imaging > summary.n_obs)
+        released_images = (
+            view.log.valid
+            & (
+                view.log.kind
+                == study.caps.kind_names.index(study.observer.measurement_kind)
+            )
+            & jnp.isin(view.log.channel_index, jnp.asarray(modes.imaging_channels, I64))
+            & (view.log.superseded_by < 0)
+        )
+        released_count = jnp.sum(
+            released_images[None, :]
+            & (jnp.arange(n)[:, None] == view.log.subject[None, :]),
+            axis=-1,
+        )
+        stale = jnp.any(released_count > summary.n_obs)
         if not study.observer.grants.policy_reads_measurements:
             stale = jnp.asarray(False)
         fresh = ~done & ~kicking & ~stale

@@ -8,10 +8,19 @@ import numpy as np
 import pytest
 
 from spaceodyssey.adapters.photomancy import ReportRefit
-from spaceodyssey.core.enums import AdmissionCode, EffectKind
+from spaceodyssey.core.carry import init_carry
+from spaceodyssey.core.enums import (
+    EVERYONE,
+    AdmissionCode,
+    Audience,
+    EffectKind,
+    RecordStatus,
+)
+from spaceodyssey.core.snapshot import snapshot_view
 from spaceodyssey.core.records import pack, unpack
 from spaceodyssey.studies import bracket as br
 from tests.studies.bracket_helpers import (
+    _decide,
     assert_trees_equal,
     build,
     decide_once,
@@ -166,8 +175,33 @@ def test_measurement_grants_gate_waiting_for_a_refit(fixture):
     """Fails if stale summaries are ignored or private rows stall the policy."""
     summary = summary_selecting_node(fixture, node=0)
     state = state_with(fixture, n_imaging=1)
-    d = decide_once(fixture, summary=summary, state=state)
-    assert effect_kind(d) == EffectKind.WAIT and int(d.state.n_trace) == 0
+    carry = init_carry(fixture, None)
+    log = dataclasses.replace(
+        carry.log,
+        valid=carry.log.valid.at[0].set(True),
+        kind=carry.log.kind.at[0].set(br.KIND_MEASUREMENT),
+        channel_index=carry.log.channel_index.at[0].set(
+            fixture.channel_model.mode_table.imaging_channels[0]
+        ),
+        audience=carry.log.audience.at[0].set(int(EVERYONE)),
+        status=carry.log.status.at[0].set(RecordStatus.COMPLETED),
+        accepted_tick=carry.log.accepted_tick.at[0].set(0),
+        released_tick=carry.log.released_tick.at[0].set(0),
+    )
+    carry = dataclasses.replace(carry, log=log, pbelief=summary)
+    packed = jnp.pad(pack(state), (0, fixture.caps.n_pstate - pack(state).size))
+    effects, updated, _ = _decide(
+        fixture, packed, snapshot_view(carry, Audience.POLICY, fixture.caps)
+    )
+    assert int(effects.kind[0]) == EffectKind.WAIT
+    assert (
+        int(
+            unpack(
+                fixture.agenda.policies[0].state_layout(fixture.caps), updated
+            ).n_trace
+        )
+        == 0
+    )
     observer = dataclasses.replace(
         fixture.observer, grants=br.GRANT_PRESETS["prior_planned"]
     )
@@ -350,3 +384,19 @@ def test_trace_charged_days_follow_ledger_spending_and_refunds(fixture):
         balance_d=budget_d - 1.5,
     )
     assert float(refunded.trace_row[1]) == pytest.approx(1.5)
+
+
+@pytest.mark.slow(
+    reason="physical study and a decision after a refused imaging request"
+)
+def test_a_refused_imaging_start_does_not_wait_for_a_nonexistent_row(fixture):
+    """Fails if an imaging request without a released row stalls every later decision."""
+    summary = summary_selecting_node(fixture, node=0, detected=False)
+    decision = decide_once(
+        fixture,
+        summary=summary,
+        state=state_with(fixture, n_imaging=1),
+        tick_d=2.0,
+    )
+    assert effect_kind(decision) == EffectKind.OBSERVE
+    assert int(decision.state.n_imaging.sum()) == 3

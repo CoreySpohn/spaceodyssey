@@ -878,3 +878,10 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
 - Store each subject's last requested completion tick in `PolicyState.last_tick`
   to retain the occupied-exposure guard independently of charged-time changes.
   The named state fields and six trace columns keep their existing shapes.
+
+## Refit waits follow released imaging rows
+
+- Compare each summary's imaging-row count with released, current policy-visible
+  imaging rows. Refused starts that produce no row cannot create a permanent
+  stale-summary wait. Waiting for a real pending refit and the occupied-exposure
+  guard remain separate, and both still honor measurement permissions.
