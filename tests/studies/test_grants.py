@@ -169,7 +169,7 @@ def test_a_policy_without_measurements_still_spends_and_never_waits_on_a_refit()
     built = build(
         "prior_planned",
         budget_d=BUDGET_D,
-        policy_kw={"max_visits": 2},
+        policy_kw={"max_visits": 3},  # the criterion gate needs three detections
         n_round=2**9,
         n_rounds=1,
         n_centers=16,
