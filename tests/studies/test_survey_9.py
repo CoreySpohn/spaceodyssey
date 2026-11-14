@@ -16,6 +16,7 @@ import dataclasses
 from types import SimpleNamespace
 
 import equinox as eqx
+import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 import pytest
@@ -219,6 +220,9 @@ class _PlanScript(ScriptedPrograms):
 
     def decide(self, pstate, view, study, key):
         eff, _, _ = super().decide(pstate, view, study, key)
+        eff = dataclasses.replace(
+            eff, subject=jnp.full_like(eff.subject, eff.subject[0])
+        )
         advance = (eff.kind[0] == EffectKind.OBSERVE) & (view.n_dec < self.n_plan)
         new_ps = pstate.at[0].add(advance.astype(F64))
         return eff, new_ps, jr.uniform(key, dtype=F64)

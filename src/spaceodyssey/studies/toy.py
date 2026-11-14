@@ -453,7 +453,8 @@ class FixedPlanPolicy(AbstractPolicy):
         stop_scope, stop_disp = int(self.stop_scope), int(self.stop_disp)
         bundle_ch = int(self.bundle_ch)
         kinds = [EffectKind.NONE] * caps.n_effects
-        subjects = [0] * caps.n_effects
+        subject = plan[min(pos, len(plan) - 1)][0] if plan else 0
+        subjects = [subject] * caps.n_effects
         channels = [0] * caps.n_effects
         ticks = [0] * caps.n_effects
         scopes = [0] * caps.n_effects
