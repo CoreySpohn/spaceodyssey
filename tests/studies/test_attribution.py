@@ -19,18 +19,13 @@ from spaceodyssey.studies.scoring import (
     row_log,
     verdict,
 )
-from tests.studies.bracket_helpers import build
+from tests.studies.bracket_helpers import build, needs_mode
 from tests.studies.test_scoring import CRITERION, MODES, hand_scored_log
 
 
 @pytest.fixture(scope="module")
 def scored_case():
     return hand_scored_log(build(run=False).study)
-
-
-def needs_mode(name):
-    """A one-step requirement on an explicitly named observing mode."""
-    return dataclasses.replace(CRITERION, mode_names=(name,))
 
 
 def flight(scored_case, criterion, exposures):
@@ -114,8 +109,10 @@ def test_a_stricter_requirement_counts_no_more_than_the_flown_one(scored_case):
 def test_a_criterion_needing_an_unobserved_mode_has_no_cross_yield(scored_case):
     """Fails if a definition is counted on modes the flight never observed."""
     result, study = scored_case
-    assert np.isnan(cross_yield(result, study, needs_mode("ifs_760"))).all()
-    assert np.isnan(cross_yield(result, study, needs_mode(MODES.modes[0].name))).all()
+    assert np.isnan(cross_yield(result, study, needs_mode("ifs_760", CRITERION))).all()
+    assert np.isnan(
+        cross_yield(result, study, needs_mode(MODES.modes[0].name, CRITERION))
+    ).all()
 
 
 def test_the_two_parts_sum_to_the_total(scored_case, scored_case_strict):
@@ -221,7 +218,9 @@ def test_multistep_cross_yield_follows_chronological_resets(scored_case):
 
 def test_missing_cross_coverage_propagates_only_to_attribution_parts(scored_case):
     """Fails if undefined cross data erase the defined native yield contrast."""
-    counted = flight(scored_case, needs_mode(MODES.modes[0].name), [(0, 6.0, 1.0)])
+    counted = flight(
+        scored_case, needs_mode(MODES.modes[0].name, CRITERION), [(0, 6.0, 1.0)]
+    )
     a = attribution(scored_case, counted)
     np.testing.assert_allclose(a.total, [0.7], atol=1e-12)
     assert np.isnan(a.definition_alone).all()

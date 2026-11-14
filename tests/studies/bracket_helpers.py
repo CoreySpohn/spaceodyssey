@@ -137,6 +137,12 @@ def fixture_criterion():
     )
 
 
+def needs_mode(name, criterion=None):
+    """A one-step requirement on an explicitly named observing mode."""
+    criterion = fixture_criterion() if criterion is None else criterion
+    return dataclasses.replace(criterion, mode_names=(name,))
+
+
 BracketBuild = namedtuple("BracketBuild", "source study executor truths roots run")
 
 

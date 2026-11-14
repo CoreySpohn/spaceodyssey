@@ -635,3 +635,20 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   before execution. Use prepared host fluxes and a three-node runtime forecast.
 - Set the two new file budgets from measured program counts with standard
   headroom. No golden histories or pinned hashes change.
+
+## Criterion ladders over a union mode table
+
+- Add union_modes to retain first-seen mode names and reject conflicting specs.
+  Build every ladder entry on the base study's channel model and channel table.
+- Add ladder_studies with named missing-mode errors and a common concrete
+  criterion family, packed state width and ordered claim definitions. Retain the
+  base prior; initialize each entry's packed state from its own criterion.
+- Add four tests, retire none, and expand no shared parameter matrix. Cover
+  deduplication, conflicts, unchanged study fields, document hashes and round
+  trips, distinct start nodes, and incompatible families, widths and claims.
+  Use one hand-declared host and tiny population for the four-band document
+  fixture; its three consumers share a medium-tier channel and prior build.
+- Move needs_mode into the shared bracket helpers, preserving attribution's
+  explicitly supplied criterion. Regenerate both touched test-file program
+  budgets from measured counts with standard headroom. No goldens or pinned
+  hashes change.

@@ -188,3 +188,14 @@ def load_mode_specs(path) -> tuple[ModeSpec, ...]:
     if isinstance(rows, dict):
         rows = rows["modes"]
     return tuple(ModeSpec(**{**row, "band": Band(**row["band"])}) for row in rows)
+
+
+def union_modes(*mode_sets: tuple[ModeSpec, ...]) -> tuple[ModeSpec, ...]:
+    """Keep modes in first-seen name order, refusing conflicting declarations."""
+    modes = {}
+    for mode_set in mode_sets:
+        for mode in mode_set:
+            if mode.name in modes and modes[mode.name] != mode:
+                raise ValueError(f"conflicting specifications for mode {mode.name!r}")
+            modes.setdefault(mode.name, mode)
+    return tuple(modes.values())

@@ -32,6 +32,7 @@ import csv
 import dataclasses
 import math
 import pathlib
+from collections.abc import Sequence
 
 import equinox as eqx
 import jax
@@ -104,6 +105,7 @@ from spaceodyssey.core.records import (
 )
 from spaceodyssey.core.refresh import REFRESH_PRODUCT_KIND, RefreshSchedule
 from spaceodyssey.core.snapshot import BeliefLayout
+from spaceodyssey.core.study import Study
 from spaceodyssey.criteria.base import AbstractCriterion
 from spaceodyssey.criteria.claims import EarthCandidateClaim
 from spaceodyssey.criteria.transition import TransitionSettings, TransitionTable
@@ -436,6 +438,47 @@ def bracket_study(
             study, observer=dataclasses.replace(observer, prior=prior)
         )
     return study
+
+
+def ladder_studies(
+    base: Study, criteria: Sequence[AbstractCriterion]
+) -> tuple[Study, ...]:
+    """Replace only the criterion on studies sharing the base channel table.
+
+    Build the base channel with ``union_modes`` of all entries' declarations.
+    Entries must share the base criterion's concrete family, packed state width
+    and ordered claim definitions, since its prior and claim probabilities are
+    retained. The observer initializes packed state from each entry at runtime.
+    """
+    observer = base.observer
+    modes = base.channel_model.mode_table
+    names = {mode.name for mode in modes.modes}
+    n_tracks = observer.prior.p_exist.shape[1]
+    criterion = observer.criterion
+    width = layout_size(criterion.state_template(n_tracks, modes.n_bands))
+    studies = []
+    for entry in criteria:
+        for name in entry.mode_names:
+            if name not in names:
+                raise ValueError(
+                    f"criterion mode {name!r} is absent from the base table"
+                )
+        if type(entry) is not type(criterion):
+            raise ValueError("ladder entries must share the base criterion family")
+        if layout_size(entry.state_template(n_tracks, modes.n_bands)) != width:
+            raise ValueError("ladder entries must share the base criterion state width")
+        if not eqx.tree_equal(
+            entry.claims, criterion.claims
+        ) or observer.prior.p_claim.shape[-1] != len(entry.claims):
+            raise ValueError(
+                "ladder entries must share the base criterion claim schema"
+            )
+        studies.append(
+            dataclasses.replace(
+                base, observer=dataclasses.replace(observer, criterion=entry)
+            )
+        )
+    return tuple(studies)
 
 
 def bracket_boundary(study, **settings):
