@@ -18,14 +18,19 @@ from spaceodyssey.adapters.photomancy import (
     SLOT_OK,
     DecisionSummary,
 )
-from spaceodyssey.core.enums import EffectKind, RefitStatus
+from spaceodyssey.core.enums import EffectKind
 from spaceodyssey.studies.bracket import (
     ActivityTable,
     ArmsResult,
     SummaryObserver,
-    candidate_slots,
 )
 from tests.criteria import ImagingCriterion
+from tests.criteria.test_transition_table import (
+    MODES,
+    _options,
+    one_step_table,
+    package_inputs,
+)
 from tests.studies.bracket_helpers import (
     build,
     decide_once,
@@ -100,29 +105,23 @@ def test_the_log_ratio_of_a_zero_mean_is_undefined():
 
 def test_a_candidate_needs_detections_status_and_a_tight_position():
     """Fails if detections, fit status or position scatter do not gate nomination."""
-    lod = 0.04
-
-    def belief(**override):
-        base = DecisionSummary.zeros(1, 1, N_GRID, 1)
-        leaves = {
-            "n_det": jnp.asarray([[3]]),
-            "status": jnp.asarray([[int(RefitStatus.OK)]]),
-            "scatter": jnp.asarray([[0.5 * lod]]),
-        }
-        leaves.update({k: jnp.asarray(v) for k, v in override.items()})
-        return dataclasses.replace(base, **leaves)
-
-    assert bool(candidate_slots(belief(), lod)[0, 0])
-    withheld = {
-        "two detections": {"n_det": [[2]]},
-        "degraded refit": {"status": [[int(RefitStatus.DEGRADED)]]},
-        "no refit yet": {"status": [[int(RefitStatus.NO_SUPPORT)]]},
-        "failed refit": {"status": [[int(RefitStatus.FAILED)]]},
-        "never fit": {"status": [[SLOT_NEVER_FIT]]},
-        "wide scatter": {"scatter": [[1.5 * lod]]},
-    }
-    for reason, change in withheld.items():
-        assert not bool(candidate_slots(belief(**change), lod)[0, 0]), reason
+    summary, settings = package_inputs()
+    table = one_step_table()
+    state = table.init_state(1, 3)
+    assert float(_options(table, state, summary, settings).gain[0, 1]) > 0
+    for change in (
+        {"n_det": jnp.asarray([2])},
+        {"status": jnp.asarray([SLOT_DEGRADED])},
+        {"status": jnp.asarray([SLOT_NO_SUPPORT])},
+        {"status": jnp.asarray([SLOT_FAILED])},
+        {"status": jnp.asarray([SLOT_NEVER_FIT])},
+        {"scatter": jnp.asarray([0.15])},
+    ):
+        withheld = dataclasses.replace(summary, **change)
+        assert float(_options(table, state, withheld, settings).gain[0, 1]) == 0
+    configured = dataclasses.replace(settings, candidate_detections=1)
+    one_detection = dataclasses.replace(summary, n_det=jnp.asarray([1]))
+    assert float(_options(table, state, one_detection, configured).gain[0, 1]) > 0
 
 
 def test_an_arm_paired_with_itself_has_zero_gap_and_zero_error():
@@ -141,7 +140,38 @@ def _install():
 
     def run(old, new):
         out = observer.install(old, new, 0)
-        return out, candidate_slots(out, 1.0)
+        prepared, settings = package_inputs(n_slots=3)
+        prepared = dataclasses.replace(
+            prepared, n_det=out.n_det[0], status=out.status[0], scatter=out.scatter[0]
+        )
+        table = one_step_table()
+
+        def candidate(track):
+            one = jax.tree.map(lambda x: x, prepared)
+            one = dataclasses.replace(
+                one,
+                **{
+                    name: getattr(one, name)[track][None]
+                    for name in (
+                        "p_exist",
+                        "n_det",
+                        "status",
+                        "scatter",
+                        "p_det",
+                        "p_claim",
+                        "fc_counts",
+                        "fc_variance",
+                    )
+                },
+            )
+            return (
+                table.options(
+                    table.init_state(1, MODES.n_bands), one, 0, MODES, settings
+                ).gain[0, 1]
+                > 0
+            )
+
+        return out, jax.vmap(candidate)(jnp.arange(3))[None]
 
     return eqx.filter_jit(run)
 

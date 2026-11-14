@@ -119,7 +119,6 @@ from spaceodyssey.studies.scoring import (
 from spaceodyssey.studies.selection import act, capacity_of, select, trace_scalars
 
 # Candidates need repeated detections, a supported fit and a tight sky position.
-CANDIDATE_DETECTIONS, CANDIDATE_SCATTER_LOD = 3, 1.0
 # Kind indices of `bracket_registry`.
 KIND_NONE, KIND_PRODUCT, KIND_MEASUREMENT, KIND_CATALOG = range(4)
 # Channel ids of the modes start here; the refresh product channels are 90 and 91.
@@ -1067,23 +1066,6 @@ def price_trace(
     for w, n in enumerate(lengths):
         rows[w, :n] = np.asarray(state.trace[w, :n])
     return rows, lengths
-
-
-def candidate_slots(belief, lod_arcsec):
-    """The imaging candidates a summary nominates: ``bool[n_stars, n_slots]``.
-
-    A slot is a candidate when it holds at least `CANDIDATE_DETECTIONS` detections,
-    a slot status of `SLOT_OK` (a fit
-    above the size floor, never a degraded, unsupported or failed one) and a
-    predicted-position scatter under one lambda over D (`lod_arcsec`, in arcsec like
-    the summary's `scatter`). The policy reads its own summary through this rule
-    and the observer keeps its own summary.
-    """
-    return (
-        (belief.n_det >= CANDIDATE_DETECTIONS)
-        & (belief.status == SLOT_OK)
-        & (belief.scatter < CANDIDATE_SCATTER_LOD * lod_arcsec)
-    )
 
 
 @dataclasses.dataclass(frozen=True)

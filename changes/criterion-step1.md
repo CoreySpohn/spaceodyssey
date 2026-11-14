@@ -834,3 +834,9 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   Bayes updates. This remains below one when the expected count exceeds capacity.
 - Guard zero dark slots and zero-rate populations. Bound floating-point roundoff
   at one by the preceding representable probability.
+
+## Candidate gate regression checks
+
+- Remove the unused `candidate_slots` helper and its fixed thresholds. Candidate
+  and refit-install checks exercise transition packages with declared settings,
+  including a one-detection gate. Retain the independent slot-install assertions.
