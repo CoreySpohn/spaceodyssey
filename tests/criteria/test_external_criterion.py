@@ -23,7 +23,7 @@ from spaceodyssey.criteria.base import AbstractCriterion, StarOptions
 from spaceodyssey.criteria.claims import AbstractClaim
 from spaceodyssey.plugins import installed_kinds
 from spaceodyssey.studies import bracket as br
-from tests.studies.bracket_helpers import fixture_files, fixture_modes, with_grants
+from tests.studies.bracket_helpers import fixture_files, fixture_modes
 
 
 class SmallRadiusClaim(AbstractClaim):
@@ -214,9 +214,15 @@ def test_a_criterion_defined_outside_the_library_runs_unchanged():
             study.observer, prior=boundary.initial_summary(study)
         ),
     )
-    loaded = load_study(dump_study(study, resolver).to_json(), resolver)
-    # Runtime payload paths are derived from the registry, outside the document.
-    study = with_grants(loaded, loaded.observer.grants)
+    loaded = load_study(
+        dump_study(study, resolver).to_json(),
+        resolver,
+        registry=br.bracket_registry(
+            study.observer.grants, channel.n_slots, channel.n_bands
+        ),
+    )
+    assert loaded.caps.payload_paths == study.caps.payload_paths
+    study = loaded
     run = br.BoundExecutor(boundary=boundary).run_worlds(
         study, source.take(jnp.arange(1)), jnp.asarray([jax.random.PRNGKey(0)]), 256
     )

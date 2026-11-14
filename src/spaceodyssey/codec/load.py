@@ -52,6 +52,7 @@ from spaceodyssey.codec.kinds import (
     is_version_field,
     optional_default,
 )
+from spaceodyssey.codec.records import check_lowering
 from spaceodyssey.core.capacities import Capacities, require_x64
 from spaceodyssey.core.study import Agenda, Study
 
@@ -79,7 +80,9 @@ def tolerating_null_arrays(fields):
         _NULL_OK.reset(token)
 
 
-def load_study(document, kinds=None, *, files=None, max_file_bytes=DEFAULT_MAX_BYTES):
+def load_study(
+    document, kinds=None, *, registry=None, files=None, max_file_bytes=DEFAULT_MAX_BYTES
+):
     """Rebuild the `Study` a `StudyDocument` (or its JSON text) describes.
 
     `kinds` is a `KindResolver` or the mapping `dump_study` took. A module stored
@@ -88,6 +91,11 @@ def load_study(document, kinds=None, *, files=None, max_file_bytes=DEFAULT_MAX_B
     an array whose data does not match its declared shape or dtype, and a module
     whose validation fails each raise `DocumentError` carrying the JSON pointer of
     the offending value.
+
+    `registry` is the `KindRegistry` the study's capacities were lowered from.
+    When supplied, it must reproduce the stored capacity declarations and restores
+    their derived `payload_paths`, needed by readers of named record columns.
+    These paths are omitted from study documents and do not affect their hashes.
 
     `files` is the directory of array files a dump with large arrays wrote; a
     reference to a file that is missing, or whose bytes do not match the stored
@@ -106,6 +114,11 @@ def load_study(document, kinds=None, *, files=None, max_file_bytes=DEFAULT_MAX_B
         study = decode(document.study, ("study",), as_resolver(kinds))
     if not isinstance(study, Study):
         raise DocumentError("the document's study is not a Study", "/study")
+    if registry is not None:
+        check_lowering(registry, study)
+        study = dataclasses.replace(
+            study, caps=registry.lower(study.caps, study.observer)
+        )
     return study
 
 

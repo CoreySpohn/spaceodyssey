@@ -211,15 +211,14 @@ def load_run(
     if isinstance(document, str):
         document = RunDocument.from_json(document)
     run = document.run
+    registry = decode_records(document.records)
     study = load_study(
         StudyDocument(study=document.study, schema_version=document.schema_version),
         kinds,
+        registry=registry,
         files=files,
         max_file_bytes=max_file_bytes,
     )
-    registry = decode_records(document.records)
-    check_lowering(registry, study)
-    study = dataclasses.replace(study, caps=registry.lower(study.caps, study.observer))
     boundaries = {}
     for side in _SIDES:
         if side in run.get("refit", {}):

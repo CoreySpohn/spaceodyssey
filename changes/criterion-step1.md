@@ -727,3 +727,14 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   Retain the existing compiled-run and replay checks; retire no tests. Regenerate
   the module's compile budget from its measured 329 programs with standard headroom.
   No golden histories, document content or pins change.
+
+## Study loading restores named payload paths
+
+- Add `registry=` to `load_study` to validate the stored capacity declarations
+  and restore derived payload paths from the supplied record registry. Run loading
+  uses the same path. Study documents and their hashes remain unchanged.
+- Strengthen the bracket round trip with direct path comparisons, unchanged JSON,
+  posterior permissions and truth/shrinkage boundary construction on the loaded
+  study. The external-criterion integration loads with its registry and runs
+  without repairing grants after loading. No tests retire or shared matrices
+  expand. Regenerate both touched module budgets from measured runs.

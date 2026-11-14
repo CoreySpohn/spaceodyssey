@@ -9,6 +9,7 @@ import pytest
 
 from spaceodyssey.codec import KindResolver, dump_study, load_study
 from spaceodyssey.plugins import installed_kinds
+from spaceodyssey.studies import bracket as br
 from spaceodyssey.studies.bracket import BRACKET_KINDS, GRANT_PRESETS, Grants
 from tests.studies.bracket_helpers import build, fixture_source, with_grants
 
@@ -27,6 +28,38 @@ def assert_leaves_equal(actual, expected):
         if isinstance(a, jax.Array):
             assert (a.shape, a.dtype, a.weak_type) == (b.shape, b.dtype, b.weak_type)
         np.testing.assert_array_equal(a, b)
+
+
+def assert_loaded_boundary(document, original):
+    """Exercise derived registry paths on the loaded study before any repair."""
+    loaded = load_study(
+        document,
+        RESOLVER,
+        registry=br.bracket_registry(
+            original.observer.grants,
+            original.channel_model.n_slots,
+            original.channel_model.n_bands,
+        ),
+    )
+    assert loaded.caps.payload_paths == original.caps.payload_paths
+    assert_leaves_equal(loaded, original)
+    assert (
+        dump_study(loaded, RESOLVER).to_json()
+        == dump_study(original, RESOLVER).to_json()
+    )
+    grants = loaded.observer.grants
+    if grants.kernel == "posterior" and grants.catalog_groups:
+        with pytest.raises(
+            NotImplementedError, match="posterior kernel reads no catalog"
+        ):
+            br.bracket_boundary(loaded)
+        return
+    boundary = br.bracket_boundary(loaded)
+    if loaded.observer.grants.kernel == "posterior":
+        assert boundary._readable(loaded, loaded.channel_model) == (
+            True,
+            loaded.observer.grants.policy_reads_measurements,
+        )
 
 
 @pytest.fixture(scope="module")
@@ -90,11 +123,11 @@ def test_the_bracket_kinds_resolve_beside_the_installed_ones():
 def test_a_bracket_study_round_trips_and_its_hash_names_the_grants_and_the_kernel(
     fixture_study,
 ):
-    """Fails if a kind is unregistered, or a grant or the kernel is outside the
-    hashed document.
+    """Fails if loading loses runnable registry paths, or grants and kernels
+    are outside the hashed document.
     """
     doc = dump_study(fixture_study, RESOLVER)
-    assert_leaves_equal(load_study(doc, RESOLVER), fixture_study)
+    assert_loaded_boundary(doc, fixture_study)
     oracle = dump_study(with_grants(fixture_study, GRANT_PRESETS["oracle"]), RESOLVER)
     groups = ("ephemeris", "class")
     truth_k = dump_study(
@@ -111,6 +144,7 @@ def test_a_bracket_study_round_trips_and_its_hash_names_the_grants_and_the_kerne
     )
     for grants in (
         GRANT_PRESETS["oracle"],
+        GRANT_PRESETS["shrinkage"],
         Grants(delivery="true_snr"),
         Grants(catalog_groups=groups),
         Grants(policy_reads_measurements=False),
@@ -118,7 +152,7 @@ def test_a_bracket_study_round_trips_and_its_hash_names_the_grants_and_the_kerne
         changed = with_grants(fixture_study, grants)
         changed_doc = dump_study(changed, RESOLVER)
         assert changed_doc.content_hash != doc.content_hash
-        assert_leaves_equal(load_study(changed_doc, RESOLVER), changed)
+        assert_loaded_boundary(changed_doc, changed)
     criterion = dataclasses.replace(
         fixture_study.observer.criterion, requirement_snr=[6.0]
     )
@@ -134,4 +168,4 @@ def test_a_bracket_study_round_trips_and_its_hash_names_the_grants_and_the_kerne
     assert {k: v for k, v in doc.study["observer"].items() if k != "criterion"} == {
         k: v for k, v in ladder_doc.study["observer"].items() if k != "criterion"
     }
-    assert_leaves_equal(load_study(ladder_doc.to_json(), RESOLVER), ladder)
+    assert_loaded_boundary(ladder_doc.to_json(), ladder)
