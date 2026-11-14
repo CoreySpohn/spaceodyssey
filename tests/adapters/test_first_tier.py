@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import Rearth2AU
+from scipy.stats import poisson
 from skyscapes.population import (
     PopulationConfig,
     earth_like,
@@ -103,9 +104,11 @@ def test_the_first_tier_draws_the_belief_population(boundary_inputs):
     population = boundary_inputs[2]
     for p, expected in ((population, 0.25), (population_scaled(population, 2.0), 0.5)):
         out, lane, st = first_tier(boundary_inputs, p)
-        assert float(out.result.p_exist) == pytest.approx(
-            expected / int(lane.n_undetected)
-        )
+        n_dark = int(lane.n_undetected)
+        n_detected = st.n_slots - n_dark
+        want = poisson.sf(n_detected + np.arange(n_dark), expected).sum()
+        want /= poisson.sf(n_detected - 1, expected) * n_dark
+        assert float(out.result.p_exist) == pytest.approx(want)
         elements = out.result.draws
         draws, _ = p.draw_planets(
             ph._slot_key(lane, 1),
@@ -318,7 +321,7 @@ def test_empty_support_and_exhaustion_are_bounded(boundary_inputs):
         assert float(out.result.p_exist) == 0.0
     params, _, _ = hand_cloud()
     st = boundary_inputs[1]._post_settings(study)
-    for n_dark, expected, want in ((2, 100.0, 1.0), (0, 100.0, 0.0), (2, 0.0, 0.0)):
+    for n_dark, expected, want in ((0, 100.0, 0.0), (2, 0.0, 0.0)):
         got = ph._first_leaves(
             study.channel_model, 0, 0, n_dark, params, 0.0, expected, st
         )[0]
@@ -351,3 +354,27 @@ def test_a_dark_slot_with_zero_existence_does_not_schedule_followup(boundary_inp
         decision = decide_once(local, summary=held, state=state_with(local))
         assert effect_kind(decision) == int(expected_kind)
         assert bool(decision.state.n_imaging.sum() > 0) == searched
+
+
+@pytest.mark.slow(reason="physical channel plus two conditional dark-slot summaries")
+def test_dark_existence_stays_below_one_and_falls_after_misses(boundary_inputs):
+    """Fails if a high expected count saturates occupancy and makes misses inert."""
+    study, boundary, _ = boundary_inputs
+    params, _, _ = hand_cloud()
+    st = boundary._post_settings(study)
+    # Six slots, four detected tracks, two dark: condition Poisson(8) on N >= 4.
+    before = ph._first_leaves(study.channel_model, 0, 0, 2, params, 0.0, 8.0, st)[0]
+    after = ph._first_leaves(
+        study.channel_model, 0, 0, 2, params, jnp.log(0.1), 8.0, st
+    )[0]
+    assert 0.0 < float(after) < float(before) < 1.0
+    # P(N >= 5 | N >= 4) + P(N >= 6 | N >= 4), divided among two slots.
+    assert float(before) == pytest.approx(0.8923851513715046)
+    assert float(after) == pytest.approx(0.45332481716385115)
+
+
+def test_dark_count_prior_handles_zero_and_roundoff_near_saturation():
+    """Fails if an empty or very abundant population gives an invalid dark prior."""
+    assert float(ph._dark_slot_prior(0.0, jnp.asarray(2), 6)) == 0.0
+    assert float(ph._dark_slot_prior(8.0, jnp.asarray(0), 6)) == 0.0
+    assert 0.0 < float(ph._dark_slot_prior(100.0, jnp.asarray(2), 6)) < 1.0

@@ -218,7 +218,7 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   cache identity includes the population. `occupancy`, the fixed cloud seed, the
   interim class window, `p_class` and `p_new` are removed. Dark slots carry
   conditional detection probabilities and period quantiles, and per-slot
-  `p_exist` from a clipped expected-count prior updated by null evidence. Detected
+  `p_exist` from a capacity-capped conditional Poisson count prior updated by null evidence. Detected
   slots have existence one. Failed dark slots retain their prior summary leaves.
 - Imaging candidacy requires detections, supported status and position precision.
   The policy reads claim probabilities separately and uses existence in both
@@ -824,3 +824,13 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   fresh decision. Failed or unfinished actions add no forecast credit, and
   completed labels are counted once. Claim probabilities affect package gains,
   while this diagnostic records the labels actually reached.
+
+
+## Dark-slot existence under a conditional count prior
+
+- Treat supported planet counts as Poisson with the declared reproducible
+  expected count, conditioned on at least the detected-track count. Share
+  E[min(N - detected, dark slots)] among dark slots before applying null-report
+  Bayes updates. This remains below one when the expected count exceeds capacity.
+- Guard zero dark slots and zero-rate populations. Bound floating-point roundoff
+  at one by the preceding representable probability.

@@ -1441,12 +1441,36 @@ def _first_tier_lane(channel, population, lane, st, scale):
     )
 
 
+def _dark_slot_prior(expected, n_dark, n_slots):
+    """E[min(N - d, n_dark) | N >= d] / n_dark, for N ~ Poisson(expected).
+
+    d is the detected-track count. Survival sums retain the finite-capacity
+    count prior without saturating a dark slot at one. Roundoff at one is
+    bounded by the adjacent representable probability so nulls remain usable.
+    """
+    detected = n_slots - n_dark
+    ranks = jnp.arange(1, n_slots + 1, dtype=F64)
+    survival = jax.scipy.special.gammainc(detected + ranks, expected)
+    condition = jnp.where(
+        detected > 0,
+        jax.scipy.special.gammainc(jnp.maximum(detected, 1).astype(F64), expected),
+        1.0,
+    )
+    mean = jnp.sum(jnp.where(ranks <= n_dark, survival, 0.0))
+    prior = mean / (jnp.maximum(n_dark, 1) * jnp.where(condition > 0, condition, 1.0))
+    return jnp.where(
+        (n_dark > 0) & (condition > 0),
+        jnp.clip(prior, 0.0, jnp.nextafter(jnp.asarray(1.0, F64), 0.0)),
+        0.0,
+    )
+
+
 def _first_leaves(
     channel, subject, tick, n_undetected, elements, log_evidence, expected, st
 ):
     """Existence [scalar] and the dark cloud's conditional summary leaves."""
     zeros = jnp.zeros(elements.ln_period_d.shape[0], F64)
-    prior = jnp.clip(expected / jnp.maximum(n_undetected, 1), 0.0, 1.0)
+    prior = _dark_slot_prior(expected, n_undetected, st.n_slots)
     p_exist = jnp.where(n_undetected > 0, posterior_occupancy(prior, log_evidence), 0.0)
     leaves = summarize(
         elements,
@@ -1692,7 +1716,7 @@ def _population_summary(channel, population, prior, st):
         leaves = jax.tree.map(
             lambda x: jnp.where(supported, x, jnp.zeros_like(x)), leaves
         )
-        return jnp.clip(expected / st.n_slots, 0.0, 1.0), leaves
+        return _dark_slot_prior(expected, jnp.asarray(st.n_slots), st.n_slots), leaves
 
     existence, leaves = jax.lax.map(star_summary, jnp.arange(prior.n_subjects))
 
