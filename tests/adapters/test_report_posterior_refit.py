@@ -25,6 +25,12 @@ from spaceodyssey.core.enums import RefitStatus
 from spaceodyssey.core.records import pack, unpack
 from spaceodyssey.studies import bracket as br
 from tests.adapters.posterior_helpers import realize_visits, visit_request
+from tests.criteria.test_transition_table import (
+    MODES,
+    _options,
+    one_step_table,
+    package_inputs,
+)
 from tests.studies.bracket_helpers import (
     FIXTURE_BANDS,
     N_SLOTS,
@@ -430,7 +436,8 @@ def test_degraded_slots_reach_the_outcome_table(world):
     """Fails if activity misses degraded slots across stars or mixes worlds.
 
     Install a real degraded refit's codes beside one additional degraded slot in
-    each world. Other slots are never fit, so none can support a claim.
+    each world. Other slots are never fit; neither status can start a spectrum
+    even with enough detections and a tight position.
     """
     study, _, star0, _ = world
     request = visit_request(study, {0: star0}, tick=TICK)
@@ -438,7 +445,7 @@ def test_degraded_slots_reach_the_outcome_table(world):
     status = _slices(study, result, 0, 0)["status"]
     n_degraded = int((status == ph.SLOT_DEGRADED).sum())
     assert n_degraded > 0
-    _, built, _, _, _, run = build(arm="prior_planned", **SMALL)
+    _, built, _, _, _, run = build(arm="prior_planned", horizon_d=1.0, **SMALL)
     belief = run.carry.belief
     controlled = jnp.full_like(belief.status, ph.SLOT_NEVER_FIT)
     controlled = controlled.at[:, 1, 0].set(ph.SLOT_DEGRADED)
@@ -447,7 +454,18 @@ def test_degraded_slots_reach_the_outcome_table(world):
     run = eqx.tree_at(lambda r: r.carry.belief, run, belief)
     table = br.activity_table(run, built)
     np.testing.assert_array_equal(table.world["low_ess"], [n_degraded + 1, 1])
-    assert not np.asarray(br.candidate_slots(belief, 1.0)).any()
+    summary, settings = package_inputs()
+    criterion = one_step_table()
+    current = criterion.init_state(1, MODES.n_bands)
+
+    def spectrum_gain(status):
+        one = dataclasses.replace(summary, status=status[None])
+        return _options(criterion, current, one, settings).gain[0, 1]
+
+    assert float(spectrum_gain(jnp.asarray(ph.SLOT_OK))) > 0
+    np.testing.assert_array_equal(
+        jax.vmap(spectrum_gain)(belief.status.reshape(-1)), 0.0
+    )
 
 
 DAY = 86_400_000
