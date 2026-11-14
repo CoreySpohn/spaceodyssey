@@ -10,7 +10,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from spaceodyssey.adapters.jaxedith import ObservingModeChannel
+from spaceodyssey.adapters.jaxedith import (
+    ObservingModeChannel,
+    survey_grid_d,
+    survey_table,
+)
+from spaceodyssey.adapters.modes import profile_modes
 from spaceodyssey.adapters.physical_profile import JATIS_EAC1_V1
 from spaceodyssey.adapters.skyscapes import (
     ExoVistaWorldSource,
@@ -92,21 +97,23 @@ def built():
     ), "no exoEarth candidate in a slot"
     channel = ObservingModeChannel.from_stars(
         hosts,
-        bands=source.population.bands,
+        modes=profile_modes(JATIS_EAC1_V1),
         n_slots=N_SLOTS,
         epoch_jd=epoch_jd,
         profile=JATIS_EAC1_V1,
-        n_grid=N_GRID_POINTS,
+        durations_d=survey_grid_d(survey_table(JATIS_EAC1_V1), N_GRID_POINTS),
     )
     return build_fixture(channel=channel, source=source, budget_d=6.0, horizon_d=90.0)
 
 
-def test_the_survey_channel_sets_the_policy_grids(built):
-    """The summary's mode counts are the channel's grids, not six and three."""
-    _, study, _, _, _, _ = built
-    channel = study.channel_model
-    assert channel.n_modes == channel.n_block_modes == N_GRID_POINTS
-    assert study.caps.n_channels == 2 * N_GRID_POINTS + 1
+def test_the_survey_modes_keep_the_declared_bands(built):
+    """Fails if the survey hosts observe fixture bands instead of the survey bands."""
+    table = built[1].channel_model.mode_table
+    assert table.bands == SURVEY_BANDS
+    assert [(b.center_nm, b.width_nm) for b in table.bands] == [
+        (500.0, 100.0),
+        (910.0, 6.5),
+    ]
 
 
 def test_the_survey_run_completes_and_visits_the_stars(built):

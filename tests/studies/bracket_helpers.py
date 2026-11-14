@@ -3,18 +3,25 @@
 The fixture is one ExoVista universe of two stars (`tests/fixtures/exovista`); the
 second world is the first with every period scaled, so the two worlds differ in
 what the records show. The files tabulate 900 to 1094 nm, so the fixture declares
-the first-summary report band (1000 nm) first and a 940 nm band second; the survey
+covered bands at 1000 nm and 940 nm; the survey
 bands (`SURVEY_BANDS`, 500 and 910 nm) need a drawn or hand-built world.
 """
 
+import dataclasses
 import pathlib
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from spaceodyssey.adapters.jaxedith import ObservingModeChannel
+from spaceodyssey.adapters.jaxedith import (
+    ObservingModeChannel,
+    survey_grid_d,
+    survey_table,
+)
+from spaceodyssey.adapters.modes import profile_modes
 from spaceodyssey.adapters.photomancy import GRID_SPACING_D, N_GRID, DecisionSummary
+from spaceodyssey.adapters.physical_profile import JATIS_EAC1_V1
 from spaceodyssey.adapters.skyscapes import Band, ExoVistaWorldSource, PopulationModel
 from spaceodyssey.criteria.claims import EarthCandidateClaim
 from spaceodyssey.studies import bracket as br
@@ -24,7 +31,6 @@ N_SLOTS, N_WORLDS = 6, 2
 HORIZON_D, BUDGET_D = 120.0, 2.0
 N_STEPS = 3000
 PERIOD_SCALE = 1.07
-# The first-summary report band first: that channel reads the flux of the first band.
 FIXTURE_BANDS = (Band(1000.0, 100.0), Band(940.0, 6.7))
 SURVEY_BANDS = (Band(500.0, 100.0), Band(910.0, 6.5))  # detection, characterization
 
@@ -51,13 +57,25 @@ def fixture_source(n_worlds=N_WORLDS):
     )
 
 
+def fixture_modes():
+    """Survey modes in covered bands: stored spectra cover 900 to 1094 nm."""
+    return tuple(
+        dataclasses.replace(mode, band=band)
+        for mode, band in zip(profile_modes(JATIS_EAC1_V1), FIXTURE_BANDS, strict=True)
+    )
+
+
 def fixture_channel(source, **kw):
-    """The observing-mode channel of the fixture stars."""
+    """The stored spectra cover 900 to 1094 nm, so the fixture observes the survey's
+    modes in covered bands.
+    """
     return ObservingModeChannel.from_stars(
         source.stars,
         n_slots=N_SLOTS,
-        bands=source.population.bands,
         epoch_jd=source.epoch_jd,
+        modes=fixture_modes(),
+        durations_d=survey_grid_d(survey_table(JATIS_EAC1_V1), 3),
+        profile=JATIS_EAC1_V1,
         **kw,
     )
 

@@ -265,3 +265,28 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   radii and spectra, checking every physical field and preferential weight on
   faint rows after a miss against an analytic face-on circular-orbit likelihood.
   One parameter case is added; no test functions retire or shared matrices expand.
+
+## Named observing modes and a single spectral-channel model
+
+- Require mode specs, science durations and a profile when constructing an observing
+  source. The immutable mode table owns channel order, distinct bands, the catalog
+  channel and the named telescope-days resource. Build one report per band using
+  its declared throughput, frame time and resolving power.
+- Require imaging modes to share one band and reporting threshold, since the refit
+  fits one photometric scale and one reporting law per track. Refuse an explicit
+  law with a different threshold; an omitted law uses the declared threshold.
+- Remove the first-summary block model, its photon-rate divisor and implicit
+  first-band stellar flux. Spectral outcomes use the channel's own count budget;
+  reference-twin characterization times take a mode name and an explicit requirement.
+  Imaging summaries and observation costs use the table's channel indices.
+- Keep the stored ExoVista worlds and their covered 1000/100 and 940/6.7 nm bands.
+  Fixture mode specs change only the survey modes' bands. A PHOENIX-host drawn
+  survey test separately pins the unmodified 500/100 and 910/6.5 nm declarations.
+- Add eight mode-table tests and a survey-band assertion; retire the two tests for
+  the first-summary profile split and merge the survey grid test into named channel
+  lookup (net six test functions). The outer-angle likelihood probe keeps two
+  radius cases and the same tolerance, with brighter probes above the survey's
+  reporting threshold. Migrate dependent test helpers without changing populations.
+- Regenerate program budgets from measured runs with standard headroom, preserving
+  larger existing allowances where only part of a slow file was measured. No golden
+  or pinned hash changes.

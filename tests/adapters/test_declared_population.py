@@ -35,6 +35,7 @@ from tests.studies.bracket_helpers import (
     build,
     fixture_channel,
     fixture_files,
+    fixture_source,
     prior_summary,
 )
 from tests.studies.bracket_helpers import br as bracket
@@ -43,7 +44,7 @@ GEN = PopulationModel.exovista()
 BANDS = FIXTURE_BANDS
 # A Sun-like host at 1.3 pc, so a 20-day orbit (0.14 AU) clears the inner working
 # angle; the flux is the 1000 nm flux of the nearer fixture star scaled to 1.3 pc.
-NEAR_STARS = (StarSpec("HIP 0", 1.0, 1.3, 10.0, 20.0, 1.0, 7.2, 3555.0),)
+NEAR_STARS = (StarSpec("HIP 0", 1.0, 1.3, 10.0, 20.0, 1.0, 7.2),)
 SMALL = dict(
     n_round=2**9,
     n_rounds=1,
@@ -211,23 +212,37 @@ def refit_one_planet(period_d, a_quadrature=True):
     `summary` is the observer's `DecisionSummary` after the refit and `rows.detected`
     the slot-0 detection flag of each visit.
     """
+    template = fixture_source(1).stars[0]
+    flux_scale = 3555.0 / template.flux_at(FIXTURE_BANDS[0].center_nm)
+    hosts = tuple(
+        dataclasses.replace(
+            star,
+            band_fluxes_jy=tuple(
+                (band.center_nm, template.flux_at(band.center_nm) * flux_scale)
+                for band in FIXTURE_BANDS
+            ),
+        )
+        for star in NEAR_STARS
+    )
     pop = hand_population(
         n_planets=1,
         periods_d=[period_d],
         radii_rearth=[11.0],
-        stars=NEAR_STARS,
+        stars=hosts,
         mass_Mearth=[300.0],
         inc_deg=0.0 if a_quadrature else 90.0,
         type_index=[8],
     )
     pop = jax.tree.map(lambda x: jnp.concatenate([x, x]), pop)  # two worlds
     source = ExoVistaWorldSource.from_population(
-        pop, NEAR_STARS, n_slots=N_SLOTS, bands=FIXTURE_BANDS, generator=GEN
+        pop, hosts, n_slots=N_SLOTS, bands=FIXTURE_BANDS, generator=GEN
     )
     _, study, *_ = build(run=False, arm="replan", source=source)
     channel = study.channel_model
     truth = source.take(0)
-    visits = realize_visits(channel, truth, 0, 4, [30.0])
+    visits = realize_visits(
+        channel, truth, 0, channel.mode_table.channel("detection", 1), [30.0]
+    )
     boundary = ph.ReportRefit(
         kernel="posterior",
         truth_groups=(),

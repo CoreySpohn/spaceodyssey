@@ -14,7 +14,7 @@ import pytest
 
 from spaceodyssey.adapters.jaxedith import VISIT_REST
 from spaceodyssey.adapters.skyscapes import ExoVistaWorldSource, PopulationModel
-from tests.adapters.test_observing_mode import DETECT_MODE, _context, _truth
+from tests.adapters.test_observing_mode import DETECT_DURATION, _context, _truth
 from tests.studies.bracket_helpers import (
     FIXTURE_BANDS,
     N_SLOTS,
@@ -40,12 +40,13 @@ def test_absent_slot_row_equals_a_present_undetected_slot_row():
     kept = jnp.asarray([*range(N_SLOTS - 1), WIDE_SLOTS - 1])
     truth = jax.tree_util.tree_map(lambda x: x[:, kept], _truth(source, 0))
     present = np.asarray(truth.present[0])
-    context = _context(channel, 100.0, 160000.0)
+    mode = channel.mode_table.channel("detection", DETECT_DURATION)
+    context = _context(channel, 100.0, channel.mode_table.duration_s(mode))
     keys = jax.random.split(jax.random.key(3), 8)
     rows = np.asarray(
         jax.vmap(
             lambda k: channel.realize(
-                truth, 0, DETECT_MODE, 1.0, k, None, None, context=context
+                truth, 0, mode, 1.0, k, None, None, context=context
             )
         )(keys)
     )

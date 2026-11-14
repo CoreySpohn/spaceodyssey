@@ -70,8 +70,22 @@ def world():
     source, study, _, _, _, _ = build(run=False, arm="replan", **SMALL)
     channel = study.channel_model
     truth = jax.tree_util.tree_map(lambda x: x[0], source.population)
-    star0 = _thin(realize_visits(channel, truth, 0, 4, [30.0 * i for i in range(1, 7)]))
-    star1 = realize_visits(channel, truth, 1, 4, [30.0 * i for i in range(1, 5)])
+    star0 = _thin(
+        realize_visits(
+            channel,
+            truth,
+            0,
+            channel.mode_table.channel("detection", 1),
+            [30.0 * i for i in range(1, 7)],
+        )
+    )
+    star1 = realize_visits(
+        channel,
+        truth,
+        1,
+        channel.mode_table.channel("detection", 1),
+        [30.0 * i for i in range(1, 5)],
+    )
     star1 = [(np.where(np.arange(len(r)) < N_SLOTS, 0.0, r), e) for r, e in star1]
     return study, channel, star0, star1
 
@@ -126,8 +140,19 @@ def test_an_entry_does_not_depend_on_its_lane_neighbors(world):
     study, channel, _, _ = world
     truth = jax.tree_util.tree_map(lambda x: x[0], fixture_source().population)
     days = [30.0 * i for i in range(1, 7)]
-    rich = {s: realize_visits(channel, truth, s, 4, days) for s in (0, 1)}
-    other = realize_visits(channel, truth, 1, 3, [20.0 * i for i in range(1, 5)])
+    rich = {
+        s: realize_visits(
+            channel, truth, s, channel.mode_table.channel("detection", 1), days
+        )
+        for s in (0, 1)
+    }
+    other = realize_visits(
+        channel,
+        truth,
+        1,
+        channel.mode_table.channel("detection", 0),
+        [20.0 * i for i in range(1, 5)],
+    )
     names = [name for name, _, _ in ph.slice_spec(study)]
 
     def request(star, visits):
@@ -220,7 +245,11 @@ def _giant_visits(world, factor=11.0):
         lambda t: t.Rp_AU, truth, truth.Rp_AU.at[1, GIANT_SLOT].multiply(factor)
     )
     days = [30.0 * i for i in range(1, 7)]
-    return {1: realize_visits(channel, big, 1, 4, days)}
+    return {
+        1: realize_visits(
+            channel, big, 1, channel.mode_table.channel("detection", 1), days
+        )
+    }
 
 
 def _earth_sized(population):
@@ -294,10 +323,10 @@ def _null_lane(channel, st, star, n_rows, key=(1, 2)):
     """A first-tier lane of `star` read through `n_rows` null reports."""
     width = channel.widths()[0]
     columns = jx.visit_columns(N_SLOTS)
-    mode = 4
+    mode = channel.mode_table.channel("detection", 1)
     rows = np.zeros((n_rows, width))
     for i in range(n_rows):
-        duration = channel.exposures_s[mode]
+        duration = channel.mode_table.duration_s(mode)
         rows[i, columns.index("time_d")] = channel.epoch_jd + 30.0 * (i + 1)
         rows[i, columns.index("science_s")] = duration
         rows[i, columns.index("occupied_s")] = duration
@@ -399,7 +428,13 @@ def test_a_renewal_summarizes_the_stored_cloud_like_a_refit(world):
     """
     study, channel, _, _ = world
     truth = jax.tree_util.tree_map(lambda x: x[0], fixture_source().population)
-    rich = realize_visits(channel, truth, 0, 4, [30.0 * i for i in range(1, 7)])
+    rich = realize_visits(
+        channel,
+        truth,
+        0,
+        channel.mode_table.channel("detection", 1),
+        [30.0 * i for i in range(1, 7)],
+    )
     first = visit_request(study, {0: rich}, tick=TICK)
     later = visit_request(study, {0: rich}, tick=TICK + 225 * DAY)
     kept = _boundary(study, 2, ess_floor=1.0, resummary=True)
@@ -438,7 +473,9 @@ def test_the_store_falls_back_to_a_fit_when_it_cannot_answer(world):
     study, channel, _, _ = world
     truth = jax.tree_util.tree_map(lambda x: x[0], fixture_source().population)
     days = [30.0 * i for i in range(1, 7)]
-    rich = realize_visits(channel, truth, 0, 4, days)
+    rich = realize_visits(
+        channel, truth, 0, channel.mode_table.channel("detection", 1), days
+    )
     kept = _boundary(study, 2, ess_floor=1.0, resummary=True)
     kept.refit_batch(study, visit_request(study, {0: rich[:5]}, tick=TICK))
     stored = dict(kept.resummary_stats)

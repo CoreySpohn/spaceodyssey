@@ -109,9 +109,11 @@ def true_report_position(channel, source, s, k, t):
     """True sky position computed directly from the channel's stored-truth path."""
     truth = source.take(0)
     planet = jax.tree.map(lambda x: x[k], channel._slot_planets(truth, s, 0))
-    report = channel.assets().report
+    report = channel.assets().reports[channel.imaging_band_index]
     rates = report.rates(
-        channel._prepared(s, nominal=False), planet, source.epoch_jd + t
+        channel._prepared(s, channel.imaging_band_index, nominal=False),
+        planet,
+        source.epoch_jd + t,
     )
     return jnp.stack([rates.ra_arcsec[0], rates.dec_arcsec[0]])
 
@@ -283,7 +285,12 @@ def test_earth_candidate_uses_the_physical_semimajor_axis_convention():
 
 def test_channel_and_source_bands_must_agree_at_study_construction(source, channel):
     """Fails if a channel silently reads different bands than its source declares."""
-    mismatched = dataclasses.replace(channel, bands=tuple(reversed(channel.bands)))
+    mismatched = dataclasses.replace(
+        channel,
+        mode_table=dataclasses.replace(
+            channel.mode_table, modes=tuple(reversed(channel.mode_table.modes))
+        ),
+    )
     with pytest.raises(ValueError, match="declared bands"):
         br.bracket_study(source, mismatched, arm="oracle", horizon_d=1.0, budget_d=1.0)
 
@@ -299,7 +306,15 @@ def test_actual_invalid_spectrum_is_rejected_at_source_and_refit_construction(
             [fixture_files()], n_slots=N_SLOTS, bands=bad_bands, generator=population
         )
     _, study, *_ = build(run=False, source=source, channel=channel, arm="replan")
-    bad_channel = dataclasses.replace(channel, bands=(*channel.bands, *bad_bands))
+    extra = dataclasses.replace(
+        channel.mode_table.modes[-1], name="invalid", band=bad_bands[0]
+    )
+    bad_channel = dataclasses.replace(
+        channel,
+        mode_table=dataclasses.replace(
+            channel.mode_table, modes=(*channel.mode_table.modes, extra)
+        ),
+    )
     study = dataclasses.replace(study, planning_model=bad_channel)
     with pytest.raises(ValueError, match="Warm_Neptune_1AU_Clouds"):
         ph.ReportRefit(kernel="posterior")._post_settings(study)

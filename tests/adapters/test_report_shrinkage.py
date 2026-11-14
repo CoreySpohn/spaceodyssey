@@ -76,7 +76,12 @@ def world():
     channel = study.channel_model
     truth = jax.tree_util.tree_map(lambda x: x[0], source.population)
     days = [30.0 * i for i in range(1, 7)]
-    rich = {s: realize_visits(channel, truth, s, 4, days) for s in (0, 1)}
+    rich = {
+        s: realize_visits(
+            channel, truth, s, channel.mode_table.channel("detection", 1), days
+        )
+        for s in (0, 1)
+    }
     return study, channel, truth, rich
 
 
@@ -95,7 +100,13 @@ def test_an_entry_does_not_depend_on_its_lane_neighbors(world):
     follow the shared slot codes.
     """
     study, channel, truth, rich = world
-    other = realize_visits(channel, truth, 0, 3, [20.0 * i for i in range(1, 5)])
+    other = realize_visits(
+        channel,
+        truth,
+        0,
+        channel.mode_table.channel("detection", 0),
+        [20.0 * i for i in range(1, 5)],
+    )
     stack = lambda *r: jax.tree_util.tree_map(lambda *x: np.concatenate(x), *r)  # noqa: E731
     first = stack(_request(world, {1: rich[1]}), _request(world, {0: rich[0]}))
     moved = stack(_request(world, {0: rich[0]}), _request(world, {1: rich[1]}))

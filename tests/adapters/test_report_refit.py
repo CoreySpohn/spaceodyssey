@@ -15,6 +15,7 @@ import pytest
 pytest.importorskip("photomancy")
 
 from spaceodyssey.adapters.jaxedith import block_outcome_kind
+from spaceodyssey.adapters.modes import ModeTable, profile_modes
 from spaceodyssey.adapters.parameters import (
     CATALOG_GROUPS,
     PlanetParameters,
@@ -27,6 +28,7 @@ from spaceodyssey.adapters.photomancy import (
     report_kind,
     search_probability_truth,
 )
+from spaceodyssey.adapters.physical_profile import JATIS_EAC1_V1
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.enums import EVERYONE, Audience, RefitStatus
 from spaceodyssey.core.records import (
@@ -48,6 +50,9 @@ N_BANDS = 2
 class StubChannel(eqx.Module):
     """A smooth sensitivity model with the three methods the summary reads."""
 
+    mode_table: ModeTable = eqx.field(
+        static=True, default=ModeTable(profile_modes(JATIS_EAC1_V1), (1.0, 2.0))
+    )
     n_bands: int = eqx.field(static=True, default=N_BANDS)
     n_modes: int = eqx.field(static=True, default=MODES)
     tick_days: float = eqx.field(static=True, default=1.0)

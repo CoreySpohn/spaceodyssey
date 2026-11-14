@@ -235,13 +235,9 @@ def default_capacities(
 
 
 def channel_table(channel, caps, *, budget_unit_s=None):
-    """The `ChannelTable` of the observing modes of `channel`.
+    """Charge each observation's science plus overhead to telescope_days.
 
-    A detection mode occupies the settling time plus its exposure; a block mode its
-    length (plus the settling time on a survey channel, whose characterization
-    observations carry the same overhead as detections); the catalog mode one tick.
-    Telescope modes charge their occupancy in days to the shared resource; the
-    catalog mode charges nothing.
+    The catalog occupies one tick and charges nothing.
     """
     built = channel.assets()
     clock = built.context.clock
@@ -249,15 +245,12 @@ def channel_table(channel, caps, *, budget_unit_s=None):
     per_day = int(clock.ticks_per_day)
     tick_s = float(clock.clock.tick_length_s)
     occupancy, lane, kind = [], [], []
-    for exposure in channel.exposures_s:
-        occupancy.append(settle + round(exposure / tick_s))
+    table = channel.mode_table
+    for c in range(table.catalog_channel):
+        mode = table.modes[table.mode_of(c)]
+        occupancy.append(settle + round(table.duration_s(c) / tick_s))
         lane.append(LANE_TELESCOPE)
-        kind.append(KIND_VISIT)
-    for days in channel.block_days:
-        # a survey characterization settles like a detection; a block is its length
-        occupancy.append((settle if channel.survey else 0) + round(days * per_day))
-        lane.append(LANE_TELESCOPE)
-        kind.append(KIND_BLOCK)
+        kind.append(KIND_VISIT if mode.kind == "imaging" else KIND_BLOCK)
     occupancy.append(CATALOG_TICKS)
     lane.append(LANE_CATALOG)
     kind.append(KIND_CATALOG)
@@ -268,7 +261,9 @@ def channel_table(channel, caps, *, budget_unit_s=None):
     days = occupancy.astype(F64) / per_day
     on_telescope = jnp.asarray(lane, I64) == LANE_TELESCOPE
     cost = jnp.zeros((n, caps.n_resources), F64)
-    cost = cost.at[:, SHARED_RESOURCE].set(jnp.where(on_telescope, days, 0.0))
+    cost = cost.at[:, table.resource("telescope_days")].set(
+        jnp.where(on_telescope, days, 0.0)
+    )
     return ChannelTable(
         id=jnp.arange(FIRST_CHANNEL_ID, FIRST_CHANNEL_ID + n, dtype=I64),
         lane=jnp.asarray(lane, I64),
@@ -314,7 +309,7 @@ def bracket_study(
             `channel`.
     """
     arm = _arm(arm)
-    if channel.bands != source.population.bands:
+    if channel.mode_table.bands != source.population.bands:
         raise ValueError("the channel and source disagree on the declared bands")
     if observer is None or policy is None:
         raise ValueError("bracket_study needs an observer and a policy")
@@ -469,9 +464,10 @@ class BracketPolicy(AbstractPolicy):
             N_NODES - 1,
         ).astype(I64)
         s_ix = jnp.arange(n)
-        weight = jnp.maximum(cost[:n_detect], 1e-9)
+        imaging_channels = jnp.asarray(model.mode_table.imaging_channels, I64)
+        weight = jnp.maximum(cost[imaging_channels], 1e-9)
 
-        lod = model.assets().report.lod_arcsec
+        lod = model.assets().reports[model.imaging_band_index].lod_arcsec
         candidate = candidate_slots(belief, lod)
         p_claim = (
             belief.p_claim.max(-1)
@@ -527,13 +523,14 @@ class BracketPolicy(AbstractPolicy):
         search_star, search_mode = sb // n_detect, sb % n_detect
 
         star = jnp.where(do_follow, fs, search_star)
-        channel = jnp.where(do_follow, fu_mode[fs], search_mode)
+        channel = imaging_channels[jnp.where(do_follow, fu_mode[fs], search_mode)]
         act = do_follow | do_search
         # Budget: a choice that does not fit falls back to the cheapest visit; when not
         # even that fits, one attempt is made and the policy stops.
         fits = cost[channel] <= remaining
-        cheapest_fits = cost[0] <= remaining
-        channel = jnp.where(fits, channel, 0)
+        cheapest = imaging_channels[jnp.argmin(weight)]
+        cheapest_fits = cost[cheapest] <= remaining
+        channel = jnp.where(fits, channel, cheapest)
         attempt_last = act & ~fits & ~cheapest_fits
         use = act & ~jnp.asarray(stopped > 0.5)
         done = (tick >= horizon) | (stopped > 0.5)
@@ -544,7 +541,7 @@ class BracketPolicy(AbstractPolicy):
             [EffectKind.STOP, EffectKind.OBSERVE, EffectKind.WAIT, EffectKind.OBSERVE],
             EffectKind.WAIT,
         )
-        cat_channel = caps.n_channels - 1
+        cat_channel = model.mode_table.catalog_channel
         eff_star = jnp.where(observe_cat, jnp.minimum(kick.astype(I64), n - 1), star)
         eff_channel = jnp.where(observe_cat, cat_channel, channel)
         wake = jnp.where(stale & ~kicking, next_day, tick + per_day)
@@ -848,7 +845,7 @@ def outcome_table(
             n_det[w, s] += hit
             seen[s] |= bool(hit.any())
     belief = carry.belief
-    lod = float(study.channel_model.assets().report.lod_arcsec)
+    lod = float(channel.assets().reports[channel.imaging_band_index].lod_arcsec)
     candidate = np.asarray(candidate_slots(belief, lod))
     star["visited"] = (star["n_visits"] > 0).astype(np.float64)
     star["dropped"] = (

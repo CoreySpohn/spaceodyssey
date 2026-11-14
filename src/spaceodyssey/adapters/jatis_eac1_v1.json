@@ -47,6 +47,7 @@
     },
     "modes": {
       "detection": {
+        "kind": "imaging",
         "wavelength_nm": 500.0,
         "bin_width_nm": 100.0,
         "optics_throughput": 0.3439,
@@ -55,6 +56,7 @@
         "snr_required": 7.0
       },
       "characterization": {
+        "kind": "spectrograph",
         "wavelength_nm": 910.0,
         "resolving_power": 140.0,
         "bin_width_nm": 6.5,

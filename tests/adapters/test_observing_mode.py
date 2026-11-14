@@ -19,7 +19,7 @@ from tests.studies.bracket_helpers import (
 
 pytestmark = pytest.mark.medium(reason="loads the fixture and compiles the channel")
 
-DETECT_MODE = 4  # 160000 s
+DETECT_DURATION = 1
 
 
 @pytest.fixture(scope="module")
@@ -51,12 +51,11 @@ def test_absent_slot_never_detects(source, channel):
     """Fails if a visit reports a detection in a slot that holds no planet."""
     truth = _truth(source, 0)
     truth = eqx.tree_at(lambda t: t.present, truth, truth.present.at[0, -1].set(False))
-    context = _context(channel, 100.0, 160000.0)
+    mode = channel.mode_table.channel("detection", DETECT_DURATION)
+    context = _context(channel, 100.0, channel.mode_table.duration_s(mode))
     keys = jax.random.split(jax.random.key(3), 24)
     rows = jax.vmap(
-        lambda k: channel.realize(
-            truth, 0, DETECT_MODE, 1.0, k, None, None, context=context
-        )
+        lambda k: channel.realize(truth, 0, mode, 1.0, k, None, None, context=context)
     )(keys)
     names = visit_columns(N_SLOTS)
     absent = [s for s in range(N_SLOTS) if not bool(truth.present[0, s])]
@@ -72,18 +71,20 @@ def test_a_star_row_ignores_the_other_stars_truth(source, channel):
     mixed = jax.tree_util.tree_map(
         lambda a, b: a.at[1].set(b[1]) if a.ndim >= 2 else a, truth, other
     )
-    context = _context(channel, 100.0, 160000.0)
+    mode = channel.mode_table.channel("detection", DETECT_DURATION)
+    context = _context(channel, 100.0, channel.mode_table.duration_s(mode))
     key = jax.random.key(5)
 
     def row(t):
-        return channel.realize(t, 0, DETECT_MODE, 1.0, key, None, None, context=context)
+        return channel.realize(t, 0, mode, 1.0, key, None, None, context=context)
 
     np.testing.assert_array_equal(np.asarray(row(truth)), np.asarray(row(mixed)))
 
 
 def test_realized_detection_matches_the_stated_probability(source, channel):
     """Detection frequency over 2000 keys is within 3 standard errors of the model."""
-    context = _context(channel, 100.0, 160000.0)
+    mode = channel.mode_table.channel("detection", DETECT_DURATION)
+    context = _context(channel, 100.0, channel.mode_table.duration_s(mode))
     interval = channel._interval(context, settle=True)[0]
     time_d = float(interval.midpoint_jd) - float(source.epoch_jd)
     names = visit_columns(N_SLOTS)
@@ -98,15 +99,13 @@ def test_realized_detection_matches_the_stated_probability(source, channel):
                 elements = jax.tree.map(
                     lambda x, star=star, slot=slot: x[star, slot][None], params
                 )
-                p = float(
-                    channel.detect_probability(star, DETECT_MODE, time_d, elements)[0]
-                )
+                p = float(channel.detect_probability(star, mode, time_d, elements)[0])
                 if not 0.02 < p < 0.98:
                     continue
                 keys = jax.random.split(jax.random.key(11 + checked), 2000)
                 rows = jax.vmap(
                     lambda k, t=truth, s=star: channel.realize(
-                        t, s, DETECT_MODE, 1.0, k, None, None, context=context
+                        t, s, mode, 1.0, k, None, None, context=context
                     )
                 )(keys)
                 got = float(rows[:, column_index(names, f"detected_{slot}")].mean())

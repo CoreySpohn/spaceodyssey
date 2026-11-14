@@ -18,7 +18,12 @@ from orbix.kepler import markley_solve_trig
 from skyscapes.io import from_exovista
 from skyscapes.population import PlanetPopulation
 
-from spaceodyssey.adapters.jaxedith import ObservingModeChannel
+from spaceodyssey.adapters.jaxedith import (
+    ObservingModeChannel,
+    survey_grid_d,
+    survey_table,
+)
+from spaceodyssey.adapters.modes import profile_modes
 from spaceodyssey.adapters.physical_profile import JATIS_EAC1_V1
 from spaceodyssey.adapters.skyscapes import (
     Band,
@@ -35,7 +40,10 @@ BANDS = (Band(500.0, 100.0), Band(940.0, 6.7))
 # Bands inside the fixture files' 900 to 1094 nm tables.
 FILE_BANDS = (Band(910.0, 6.5), Band(940.0, 6.7))
 STARS = tuple(
-    StarSpec(f"HIP {k}", 1.0, 5.0 + k, 10.0, 20.0, 1.0, 1.0, 1.0e3) for k in range(2)
+    StarSpec(
+        f"HIP {k}", 1.0, 5.0 + k, 10.0, 20.0, 1.0, 1.0, ((500.0, 1.0e3), (940.0, 1.0e3))
+    )
+    for k in range(2)
 )
 # The same hosts with their flux in each survey band, written out (no model atmosphere).
 SURVEY_STARS = tuple(
@@ -47,7 +55,6 @@ SURVEY_STARS = tuple(
         20.0,
         1.0,
         1.0,
-        60.0,
         ((500.0, 60.0), (910.0, 90.0)),
     )
     for k in range(2)
@@ -238,11 +245,11 @@ def test_every_constructor_needs_declared_bands(build):
 def survey_channel():
     return ObservingModeChannel.from_stars(
         SURVEY_STARS,
-        bands=SURVEY_BANDS,
+        modes=profile_modes(JATIS_EAC1_V1),
         n_slots=2,
         epoch_jd=2451545.0,
         profile=JATIS_EAC1_V1,
-        n_grid=3,
+        durations_d=survey_grid_d(survey_table(JATIS_EAC1_V1), 3),
     )
 
 
@@ -280,7 +287,8 @@ def test_the_channel_reads_the_albedo_of_each_report_band(survey_channel, truth)
     char = survey_channel._slot_planets(twice, 0, twice.band_index(910.0))["Lambda"]
     np.testing.assert_allclose(char, 2.0 * det, rtol=1e-12)
     assert survey_channel.detection_band == SURVEY_BANDS[0]
-    block = survey_channel._block_band
+    table = survey_channel.mode_table
+    block = table.bands[table.band_index("characterization")]
     assert block.center_nm == SURVEY_BANDS[1].center_nm
     assert block.width_nm == pytest.approx(SURVEY_BANDS[1].width_nm, rel=1e-12)
     context = _one_day(survey_channel)
@@ -290,7 +298,9 @@ def test_the_channel_reads_the_albedo_of_each_report_band(survey_channel, truth)
     def rows(t):
         return (
             survey_channel._visit_row(t, 0, 0, key, context),
-            survey_channel._block_row(t, 0, 0, key, context),
+            survey_channel._block_row(
+                t, 0, table.mode_of(table.channel("characterization", 0)), key, context
+            ),
         )
 
     visit, block_row = (np.asarray(x) for x in rows(truth))

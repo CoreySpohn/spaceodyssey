@@ -405,11 +405,11 @@ def photomancy_bindings():
 # (albedo also has a trailing band axis `B`), and for one subject at `time_d`,
 # days from the study epoch:
 #
-# - `detect_probability(subject, mode, time_d, elements) -> (n,)`
+# - `detect_probability(subject, channel_index, time_d, params) -> (n,)`
 # - `sky_position(subject, time_d, elements) -> (n, 2)`: east and north, arcsec
 # - `luminosity(subject) -> float`: solar luminosities
 #
-# and carries `n_modes` and `tick_days` (days per clock tick).
+# and carries `mode_table.imaging_channels` and `tick_days` (days per clock tick).
 
 N_GRID = 16
 GRID_SPACING_D = 15.0
@@ -530,7 +530,7 @@ def _grid_times(channel, ref_tick, tick_days, n_grid, spacing_d):
 
 def _detect_draws(elements, subject, channel, times):
     """Detection probability of every draw: `[G, M, n]`."""
-    modes = jnp.arange(channel.n_modes)
+    modes = jnp.asarray(channel.mode_table.imaging_channels, I64)
 
     def at(mode, time):
         return channel.detect_probability(subject, mode, time, elements)
@@ -1167,7 +1167,6 @@ def _population_star(channel, subject):
         0.0,
         0.0,
         channel.luminosity(subject),
-        0.0,
         0.0,
     )
 

@@ -917,7 +917,7 @@ class StarSpec:
 
     `band_fluxes_jy` holds the mean flux density of every declared band as
     ``(center_nm, flux_density_jy)`` pairs, in the declared order (`flux_at` reads
-    them). `flux_density_jy` is the flux in the first declared band.
+    them).
     """
 
     name: str
@@ -927,18 +927,14 @@ class StarSpec:
     dec_deg: float
     luminosity_lsun: float
     diameter_mas: float
-    flux_density_jy: float
     band_fluxes_jy: tuple = ()
 
-    def flux_at(self, wavelength_nm=None):
+    def flux_at(self, wavelength_nm):
         """Flux density [Jy] in the band centered on `wavelength_nm`.
 
-        `None` is `flux_density_jy`, the flux in the first declared band. A
-        wavelength must be the center of a band the spec was built with
+        The wavelength must be the center of a band the spec was built with
         (`band_fluxes_jy`).
         """
-        if wavelength_nm is None:
-            return self.flux_density_jy
         for center, flux in self.band_fluxes_jy:
             if math.isclose(center, float(wavelength_nm), rel_tol=1e-9):
                 return flux
@@ -1166,7 +1162,6 @@ def _spec_of_star(star, hip_name, bands, epoch_jd, luminosity_lsun=None):
             star.luminosity_Lsun if luminosity_lsun is None else luminosity_lsun
         ),
         diameter_mas=float(star.diameter_arcsec) / mas2arcsec,
-        flux_density_jy=band_fluxes[0][1],
         band_fluxes_jy=band_fluxes,
     )
 
@@ -1189,7 +1184,7 @@ def star_spec_from_model(
     The model is `skyscapes.io.from_phoenix` at `teff_k` and the surface gravity of
     `mass_msun` and `radius_rsun` (solar metallicity, gravity capped at the grid edge
     of log g = 5), scaled to `dist_pc`. The spec carries the mean flux density in
-    each of `bands` (`Band`s, at least one; `flux_density_jy` is the first one's).
+    each of `bands` (`Band`s, at least one).
     `luminosity_lsun` is the catalog value, which is what the exoEarth-candidate box
     uses, and is kept as given.
     """

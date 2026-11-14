@@ -19,8 +19,7 @@ from tests.studies.bracket_helpers import FIXTURE_BANDS, fixture_source
 
 N_SLOTS = 4
 STARS = tuple(
-    StarSpec(f"HIP {k}", 1.0, 5.0 + k, 10.0, 20.0, 1.0 + 0.2 * k, 1.0, 1.0e3)
-    for k in range(2)
+    StarSpec(f"HIP {k}", 1.0, 5.0 + k, 10.0, 20.0, 1.0 + 0.2 * k, 1.0) for k in range(2)
 )
 KEYS = jax.random.split(jax.random.PRNGKey(0), 6)
 GEN = PopulationModel.exovista()

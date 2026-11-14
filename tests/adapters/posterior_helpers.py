@@ -19,7 +19,7 @@ def visit_context(channel, start_d, mode):
     per_day = int(built.context.clock.ticks_per_day)
     settle = int(built.context.settle_ticks)
     start = round(start_d * per_day)
-    end = start + settle + round(channel.exposures_s[mode] * 1000)
+    end = start + settle + round(channel.mode_table.duration_s(mode) * 1000)
     zero = jnp.asarray(0)
     return RealizeContext(
         jnp.asarray(start), jnp.asarray(end), zero, jnp.asarray(1.0), zero, zero

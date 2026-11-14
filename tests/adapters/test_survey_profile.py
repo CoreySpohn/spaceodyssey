@@ -17,21 +17,22 @@ from jaxedith import zodi_fn_ayo
 from optixstuff import ExposureConfig
 
 from spaceodyssey.adapters import jaxedith as jx
+from spaceodyssey.adapters.modes import profile_modes
 from spaceodyssey.adapters.physical_profile import (
-    FIRST_SUMMARY_V1,
     JATIS_EAC1_V1,
     check_profile,
     load_profile,
 )
 from spaceodyssey.adapters.skyscapes import Band, StarSpec, star_spec_from_model
 from spaceodyssey.studies import bracket as br
+from tests.studies.bracket_helpers import fixture_modes
 
 BANDS = (Band(500.0, 100.0), Band(910.0, 6.5), Band(551.0, 88.0))  # detection, IFS, V
 EPOCH_JD = 2462502.5
 
 
 def test_profile_loads_and_is_complete():
-    """The survey profile is a complete profile and holds the Table 3 values."""
+    """Fails if the profile loses a published mode, detector or overhead value."""
     profile = load_profile(JATIS_EAC1_V1)
     assert profile["label"] == JATIS_EAC1_V1
     assert "extends" not in profile
@@ -54,24 +55,11 @@ def test_profile_loads_and_is_complete():
     assert math.isclose(overhead["coronagraph"], 2.4 / 24.0)
 
 
-def test_the_first_summary_profile_is_unchanged():
-    """The default profile has no survey table and keeps its settling and columns."""
-    base, survey = load_profile(FIRST_SUMMARY_V1), load_profile(JATIS_EAC1_V1)
-    assert load_profile() == base
-    assert "survey" not in base
-    assert base["keepout"]["settling_time_d"] == 1.0
-    assert [c["name"] for c in base["payload_columns"]] == [
-        c["name"] for c in survey["payload_columns"]
-    ]
-    names = [c["name"] for c in survey["conventions"]]
-    assert set(c["name"] for c in base["conventions"]) <= set(names)
-    assert len(names) == len(set(names))
-
-
 def test_a_star_spec_reads_its_flux_by_band():
-    """`flux_at` returns the band's flux; an unknown band is refused."""
-    star = StarSpec("s", 1.0, 10.0, 0.0, 0.0, 1.0, 0.0, 5.0, ((500.0, 7.0),))
-    assert star.flux_at() == 5.0
+    """Fails if flux lookup accepts an omitted wavelength or an undeclared band."""
+    star = StarSpec("s", 1.0, 10.0, 0.0, 0.0, 1.0, 0.0, ((500.0, 7.0),))
+    with pytest.raises(TypeError):
+        star.flux_at()
     assert star.flux_at(500.0) == 7.0
     with pytest.raises(ValueError, match="no flux at 910"):
         star.flux_at(910.0)
@@ -103,11 +91,11 @@ def stars():
 def channel(stars):
     return jx.ObservingModeChannel.from_stars(
         stars,
-        bands=BANDS,
+        modes=profile_modes(JATIS_EAC1_V1),
         n_slots=2,
         epoch_jd=EPOCH_JD,
         profile=JATIS_EAC1_V1,
-        n_grid=4,
+        durations_d=jx.survey_grid_d(jx.survey_table(JATIS_EAC1_V1), 4),
     )
 
 
@@ -116,36 +104,22 @@ medium = pytest.mark.medium(reason="builds two reports on the response package")
 
 @medium
 def test_band_flux_is_the_mean_over_the_band(stars):
-    """The 500 nm flux is a band mean: positive and unlike the 910 nm flux."""
+    """Fails if hosts reuse one flux for distinct bands instead of band means."""
     for star in stars:
         assert [c for c, _ in star.band_fluxes_jy] == [500.0, 910.0, 551.0]
         assert star.flux_at(500.0) > 0 and star.flux_at(910.0) > 0
         assert star.flux_at(500.0) != star.flux_at(910.0)
-        assert star.flux_density_jy == star.flux_at(500.0)
-
-
-@medium
-def test_from_yip_defaults_to_the_header_wavelength(channel):
-    """With no wavelength the report reads the header's, as before the argument."""
-    default = jx.ObservingModeChannel.from_stars(
-        [_spec()], bands=(Band(1000.0, 100.0),), n_slots=1, epoch_jd=EPOCH_JD
-    )
-    assert default.assets().report.wavelength_nm == pytest.approx(1000.0)
-    assert default.assets().char_report is None
-    assert not default.survey
-    assert default.exposures_s == jx.DETECTION_EXPOSURES_S
-    assert default.block_days == jx.BLOCK_DAYS
-    assert default.block_rate_divisor == jx.BLOCK_RATE_DIVISOR
-    assert float(default.assets().law.threshold) == 5.0
 
 
 def _spec():
-    return StarSpec("one", 1.0, 10.0, 0.0, 0.0, 1.0, 0.0, 80.0)
+    return StarSpec("one", 1.0, 10.0, 0.0, 0.0, 1.0, 0.0, ())
 
 
 @medium
 def test_lambda_over_d_zodi_and_exozodi_follow_the_report_wavelength(channel, stars):
-    """Each report's lambda/D, zero point and exozodi are those of its wavelength.
+    """Fails if angular scales or background colors use another report's wavelength.
+
+    Each report's lambda/D, zero point and exozodi are those of its wavelength.
 
     The exozodi is the host's own color,
     n 10^(-0.4 22) L_V/L_V,sun (f_lambda/F0)/(f_V/F0_V), written out with the V band
@@ -158,8 +132,18 @@ def test_lambda_over_d_zodi_and_exozodi_follow_the_report_wavelength(channel, st
     ratios = {}
     for k, (name, spec) in enumerate(zip(("G", "K"), stars, strict=True)):
         for report, wl, scenes, leakage in (
-            (built.report, 500.0, channel.scenes, channel.leakage),
-            (built.char_report, 910.0, channel.char_scenes, channel.char_leakage),
+            (
+                built.reports[channel.imaging_band_index],
+                500.0,
+                channel.scenes,
+                channel.leakage,
+            ),
+            (
+                built.reports[channel.mode_table.band_index("characterization")],
+                910.0,
+                channel.band_scenes[channel.mode_table.band_index("characterization")],
+                channel.band_leakage[channel.mode_table.band_index("characterization")],
+            ),
         ):
             scene = jax.tree_util.tree_map(lambda x, k=k: x[k], scenes)
             assert report.wavelength_nm == wl
@@ -208,27 +192,37 @@ def test_lambda_over_d_zodi_and_exozodi_follow_the_report_wavelength(channel, st
     assert ratios["G", 910.0] == pytest.approx(1.0, abs=0.15)
     assert ratios["K", 910.0] > 1.2
     assert abs(ratios["K", 910.0] - 1.0) > 2.0 * abs(ratios["G", 910.0] - 1.0)
-    ratio = built.report.lod_arcsec / built.char_report.lod_arcsec
+    ratio = (
+        built.reports[channel.imaging_band_index].lod_arcsec
+        / built.reports[channel.mode_table.band_index("characterization")].lod_arcsec
+    )
     assert float(ratio) == pytest.approx(500.0 / 910.0)
 
 
 @medium
 def test_the_channel_holds_the_survey_declarations(channel):
-    """Grids, thresholds, aperture and overhead of the survey channel."""
+    """Fails if channel construction drops the survey grid, aperture or threshold."""
     grid = np.geomspace(1.0 / 24.0, 60.0, 4)
-    assert channel.survey
     assert channel.n_detect == channel.n_block_modes == 4
-    np.testing.assert_allclose(channel.block_days, grid)
-    np.testing.assert_allclose(channel.exposures_s, grid * 86400.0)
+    np.testing.assert_allclose(channel.mode_table.durations_d, grid)
     assert float(channel.assets().law.threshold) == 7.0
-    assert channel.block_rate_divisor == 1.0
     # 8 m inscribed, obscured area fraction 0.17481
     assert channel.diameter_m == pytest.approx(8.0 / (1.0 - 0.17481001240599225))
     assert channel.overhead_d == pytest.approx(3.4 / 24.0, abs=1e-6)
     built = channel.assets()
-    assert built.report.wavelength_nm == 500.0 and built.report.ppfact == 30.0
-    assert built.char_report.bin_width_nm == pytest.approx(6.5)
-    assert built.char_report.detector_spec.frame_time_s == 300.0
+    assert (
+        built.reports[channel.imaging_band_index].wavelength_nm == 500.0
+        and built.reports[channel.imaging_band_index].ppfact == 30.0
+    )
+    assert built.reports[
+        channel.mode_table.band_index("characterization")
+    ].bin_width_nm == pytest.approx(6.5)
+    assert (
+        built.reports[
+            channel.mode_table.band_index("characterization")
+        ].detector_spec.frame_time_s
+        == 300.0
+    )
 
 
 @medium
@@ -243,11 +237,14 @@ def test_channel_table_charges_the_overhead_to_every_observation(channel):
     settle = int(channel.assets().context.settle_ticks)
     assert settle == round(3.4 / 24.0 * per_day)
     occupancy = np.asarray(table.occupancy_ticks)
-    det = [settle + round(s * 1000) for s in channel.exposures_s]
-    char = [settle + round(d * per_day) for d in channel.block_days]
+    det = [
+        settle + round(channel.mode_table.duration_s(c) * 1000)
+        for c in channel.mode_table.imaging_channels
+    ]
+    char = [settle + round(d * per_day) for d in channel.mode_table.durations_d]
     assert occupancy[:4].tolist() == det
     assert occupancy[4:8].tolist() == char
-    cost = np.asarray(table.cost)[:8, br.SHARED_RESOURCE]
+    cost = np.asarray(table.cost)[:8, channel.mode_table.resource("telescope_days")]
     np.testing.assert_allclose(cost, occupancy[:8] / per_day)
 
 
@@ -266,7 +263,9 @@ def _face_on_planet(scene, a_au, radius_earth=1.0, albedo=0.3):
 
 @medium
 def test_ifs_snr_matches_a_hand_calculation(channel):
-    """One-channel SNR of a fixed planet: first-principles counts, hand variances.
+    """Fails if spectral counts or noise use an extra channel divisor.
+
+    One-channel SNR of a fixed planet: first-principles counts, hand variances.
 
     The planet rate is the photon flux in the 6.5 nm bin times the collecting area,
     optics, QE and counting efficiency, the contrast and the response throughput; the
@@ -274,9 +273,11 @@ def test_ifs_snr_matches_a_hand_calculation(channel):
     divisor) and a systematic floor of leakage / 30.
     """
     built = channel.assets()
-    report = built.char_report
+    report = built.reports[channel.mode_table.band_index("characterization")]
     subject = 1
-    prepared = channel._prepared(subject, nominal=True, char=True)
+    prepared = channel._prepared(
+        subject, channel.mode_table.band_index("characterization"), nominal=True
+    )
     scene = prepared.scene
     planet = _face_on_planet(scene, a_au=1.5 * math.sqrt(0.4))
     t_s = 3.0 * 3600.0
@@ -295,26 +296,31 @@ def test_ifs_snr_matches_a_hand_calculation(channel):
     background = float(r.leakage[0] + r.zodi[0] + r.exozodi[0]) * t_s
     floor = float(r.leakage[0]) / 30.0 * t_s
     expected = signal / math.sqrt(signal + background + floor**2)
-    snr, observable = channel._characterize(prepared, planet, interval)
+    snr, observable = channel._block(
+        prepared, planet, interval, channel.mode_table.band_index("characterization")
+    )
     assert float(snr) == pytest.approx(expected, rel=1e-6)
     assert float(observable) == 1.0
 
 
 @medium
 def test_characterization_grid_and_threshold(channel):
-    """SNR rises along the grid; the delivery threshold is the IFS requirement of 5."""
+    """Fails if spectral SNR fails to grow with duration at a fixed requirement."""
     subject = 1
-    prepared = channel._prepared(subject, nominal=True, char=True)
+    prepared = channel._prepared(
+        subject, channel.mode_table.band_index("characterization"), nominal=True
+    )
     planet = _face_on_planet(prepared.scene, a_au=1.5 * math.sqrt(0.4))
     snr = [
         float(
-            channel._characterize(
+            channel._block(
                 prepared,
                 planet,
                 jx.ScienceInterval(jnp.asarray(EPOCH_JD), jnp.asarray(d * 86400.0)),
+                channel.mode_table.band_index("characterization"),
             )[0]
         )
-        for d in channel.block_days
+        for d in channel.mode_table.durations_d
     ]
     assert snr == sorted(snr) and snr[0] < snr[-1]
     requirement = jx.survey_table(JATIS_EAC1_V1)["modes"]["characterization"][
@@ -327,63 +333,74 @@ def test_characterization_grid_and_threshold(channel):
 
 @medium
 def test_solved_times_meet_their_requirements(channel):
-    """The twin's detection and IFS times solve counts = 7 limit and SNR = 5."""
+    """Fails if solved twin exposures miss counts = 7 limit or spectral SNR = 5."""
     subject = 0
     built = channel.assets()
     t_det = float(channel.detect_time(subject))
-    t_char = float(channel.characterize_time(subject, 5.0))
+    t_char = float(channel.characterize_time(subject, "characterization", 5.0))
     assert 0 < t_det < t_char < 60.0
     # detection: expected counts equal the threshold times the planet-free noise
-    prepared = channel._prepared(subject, nominal=True)
+    prepared = channel._prepared(subject, channel.imaging_band_index, nominal=True)
     planet = _face_on_planet(prepared.scene, a_au=1.0)
     planet["Mp"] = jnp.zeros(())
     interval = jx.ScienceInterval(jnp.asarray(EPOCH_JD), jnp.asarray(t_det * 86400.0))
-    counts = built.report.budget(prepared, planet, interval).planet
-    free = built.report.budget(prepared, jx.planet_free(planet), interval)
+    counts = (
+        built.reports[channel.imaging_band_index]
+        .budget(prepared, planet, interval)
+        .planet
+    )
+    free = built.reports[channel.imaging_band_index].budget(
+        prepared, jx.planet_free(planet), interval
+    )
     assert float(counts) == pytest.approx(
         7.0 * float(built.law.limit_counts(free)), rel=1e-6
     )
     # characterization
-    prepared = channel._prepared(subject, nominal=True, char=True)
+    prepared = channel._prepared(
+        subject, channel.mode_table.band_index("characterization"), nominal=True
+    )
     interval = jx.ScienceInterval(jnp.asarray(EPOCH_JD), jnp.asarray(t_char * 86400.0))
-    snr, _ = channel._characterize(prepared, planet, interval)
+    snr, _ = channel._block(
+        prepared, planet, interval, channel.mode_table.band_index("characterization")
+    )
     assert float(snr) == pytest.approx(5.0, rel=1e-6)
 
 
 @medium
 def test_a_survey_channel_needs_the_band_fluxes():
-    """A star without the survey bands is refused, not read at the wrong wavelength."""
+    """Fails if a missing host band silently uses flux at another wavelength."""
     with pytest.raises(ValueError, match="no flux at 500"):
         jx.ObservingModeChannel.from_stars(
             [_spec()],
-            bands=BANDS,
+            modes=profile_modes(JATIS_EAC1_V1),
             n_slots=1,
             epoch_jd=EPOCH_JD,
             profile=JATIS_EAC1_V1,
-            n_grid=2,
+            durations_d=(1.0, 2.0),
         )
 
 
 @medium
 def test_a_first_summary_channel_needs_the_report_band_first():
-    """Fails if the default channel reads a host's flux from a band it does not observe.
-
-    The first-summary report is at 1000 nm and reads the flux of a star's first
-    declared band; a star that declares 500 nm first is refused.
-    """
-    star = StarSpec("blue", 1.0, 10.0, 0.0, 0.0, 1.0, 0.0, 7.0, ((500.0, 7.0),))
-    with pytest.raises(ValueError, match="declares the 500 nm band first"):
+    """Fails if a named channel reads the flux of a different declared band."""
+    star = StarSpec("blue", 1.0, 10.0, 0.0, 0.0, 1.0, 0.0, ((500.0, 7.0),))
+    with pytest.raises(ValueError, match="no flux at 1000"):
         jx.ObservingModeChannel.from_stars(
-            [star], bands=BANDS, n_slots=1, epoch_jd=EPOCH_JD
+            [star],
+            modes=fixture_modes(),
+            durations_d=(1.0,),
+            profile=JATIS_EAC1_V1,
+            n_slots=1,
+            epoch_jd=EPOCH_JD,
         )
 
 
 @medium
 def test_the_photometric_aperture_is_that_of_the_inscribed_diameter(channel):
-    """Both survey reports use a core of 0.7 lambda/D of the inscribed diameter."""
+    """Fails if a band report uses the circumscribed photometric aperture radius."""
     ratio = 1.0 / (1.0 - 0.17481001240599225)
     want = math.pi * (0.7 * ratio) ** 2
-    for report in (channel.assets().report, channel.assets().char_report):
+    for report in channel.assets().reports:
         area = float(report.optical_path.coronagraph.core_area(20.0, 500.0))
         assert area == pytest.approx(want, rel=0.03)
     assert jx.survey_aperture_radius_lod(jx.survey_table(JATIS_EAC1_V1)) == (
@@ -394,7 +411,9 @@ def test_the_photometric_aperture_is_that_of_the_inscribed_diameter(channel):
 
 @medium
 def test_solved_times_follow_the_closed_form_of_the_rates(channel):
-    """With a noiseless detector the times are the closed form of the term rates.
+    """Fails if solved exposures disagree with the closed-form rate equation.
+
+    With a noiseless detector the times are the closed form of the term rates.
 
     Detection: t = SNR^2 C_b / (C_p^2 - (SNR C_sp)^2) with the planet out of the noise;
     characterization: the same with the planet counted in C_b. The rates are the
@@ -403,10 +422,26 @@ def test_solved_times_follow_the_closed_form_of_the_rates(channel):
     subject = 0
     built = channel.assets()
     for report, char, snr, t_solved in (
-        (built.report, False, 7.0, float(channel.detect_time(subject))),
-        (built.char_report, True, 5.0, float(channel.characterize_time(subject, 5.0))),
+        (
+            built.reports[channel.imaging_band_index],
+            False,
+            7.0,
+            float(channel.detect_time(subject)),
+        ),
+        (
+            built.reports[channel.mode_table.band_index("characterization")],
+            True,
+            5.0,
+            float(channel.characterize_time(subject, "characterization", 5.0)),
+        ),
     ):
-        prepared = channel._prepared(subject, nominal=True, char=char)
+        prepared = channel._prepared(
+            subject,
+            channel.mode_table.band_index("characterization")
+            if char
+            else channel.imaging_band_index,
+            nominal=True,
+        )
         planet = _face_on_planet(prepared.scene, a_au=math.sqrt(1.0))
         planet["Mp"] = jnp.asarray(5.972e24)
         r = report.rates(prepared, planet, jnp.asarray([EPOCH_JD]))
@@ -419,22 +454,28 @@ def test_solved_times_follow_the_closed_form_of_the_rates(channel):
 
 @medium
 def test_a_requirement_above_the_floor_limit_has_infinite_time(channel):
-    """Where the closed-form denominator is not positive the solved time is infinite.
+    """Fails if an unreachable spectral requirement returns a finite exposure.
+
+    Where the closed-form denominator is not positive the solved time is infinite.
 
     The signal-to-noise ratio of a noiseless detector saturates at C_p / C_sp, so a
     requirement above it has `C_p^2 - (SNR C_sp)^2 <= 0` and no finite time; one below
     it has the closed-form time.
     """
     built = channel.assets()
-    prepared = channel._prepared(0, nominal=True, char=True)
+    prepared = channel._prepared(
+        0, channel.mode_table.band_index("characterization"), nominal=True
+    )
     planet = _face_on_planet(prepared.scene, a_au=math.sqrt(1.0))
     planet["Mp"] = jnp.asarray(5.972e24)
-    r = built.char_report.rates(prepared, planet, jnp.asarray([EPOCH_JD]))
+    r = built.reports[channel.mode_table.band_index("characterization")].rates(
+        prepared, planet, jnp.asarray([EPOCH_JD])
+    )
     c_p, c_sp = float(r.planet[0]), float(r.floor[0])
     limit = c_p / c_sp
 
     def solve(snr):
-        return float(channel.characterize_time(0, snr))
+        return float(channel.characterize_time(0, "characterization", snr))
 
     assert math.isinf(solve(1.5 * limit))
     assert math.isfinite(solve(0.5 * limit))
@@ -442,13 +483,15 @@ def test_a_requirement_above_the_floor_limit_has_infinite_time(channel):
 
 @medium
 def test_the_baseline_exozodi_takes_the_host_color():
-    """The default profile's exozodi follows the host's colour at the report wavelength.
+    """Fails if exozodi loses the host's spectral color.
 
-    Compared with the solar-colour form n * F_1zodi(lambda) * L_V (the one-zodi value
-    of the AYO local zodi), the ratio is the host's colour over the zodi's. The zodi is
+    The channel's exozodi follows the host's color at the report wavelength.
+
+    Compared with the solar-color form n * F_1zodi(lambda) * L_V (the one-zodi value
+    of the AYO local zodi), the ratio is the host's color over the zodi's. The zodi is
     slightly redder than the Sun, so the Sun-like host sits below one (0.81 at 1000
     nm); a K dwarf is redder than the Sun and sits more than 30 percent above the
-    Sun-like host. A solar-colour exozodi would give the same ratio for both hosts.
+    Sun-like host. A solar-color exozodi would give the same ratio for both hosts.
     """
     hosts = tuple(
         star_spec_from_model(
@@ -468,9 +511,14 @@ def test_the_baseline_exozodi_takes_the_host_color():
         )
     )
     base = jx.ObservingModeChannel.from_stars(
-        hosts, bands=(Band(1000.0, 100.0),), n_slots=1, epoch_jd=EPOCH_JD, n_grid=4
+        hosts,
+        modes=(fixture_modes()[0],),
+        durations_d=(1.0,),
+        profile=JATIS_EAC1_V1,
+        n_slots=1,
+        epoch_jd=EPOCH_JD,
     )
-    report = base.assets().report
+    report = base.assets().reports[base.imaging_band_index]
     assert report.stellar_exozodi
     wl = report.wavelength_nm
     exposure = ExposureConfig(
@@ -487,9 +535,9 @@ def test_the_baseline_exozodi_takes_the_host_color():
         v_mag = -2.5 * math.log10(spec.flux_at(551.0) / 3631.0)
         abs_v = v_mag - 5.0 * math.log10(float(scene.dist_pc) / 10.0)
         lum_v = 10.0 ** (-0.4 * (abs_v - 4.83))
-        solar_colour = float(
+        solar_color = float(
             scene.n_exozodi * zodi_fn_ayo(report.observatory, exposure, scene) * lum_v
         )
-        ratio.append(float(prepared.exozodi_1au) / solar_colour)
+        ratio.append(float(prepared.exozodi_1au) / solar_color)
     assert 0.7 < ratio[0] < 1.0
     assert ratio[1] > 1.3 * ratio[0]

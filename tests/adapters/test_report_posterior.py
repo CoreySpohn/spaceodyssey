@@ -32,7 +32,7 @@ from spaceodyssey.adapters.photomancy import (
 from spaceodyssey.core.enums import RefitStatus
 from tests.studies.bracket_helpers import fixture_channel, fixture_source
 
-STAR, MODE, PROBE_NODE = 0, 4, 80
+STAR, MODE, PROBE_NODE = 0, 1, 80
 
 
 @pytest.fixture(scope="module")
@@ -48,9 +48,9 @@ def _probe_rows(channel, sep_arcsec, days=(100.0, 140.0)):
     standard deviation of each row at the planet's geometry.
     """
     built = channel.assets()
-    report, law = built.report, built.law
+    report, law = built.reports[channel.imaging_band_index], built.law
     n = channel.n_slots
-    prepared = channel._prepared(STAR, nominal=True)
+    prepared = channel._prepared(STAR, channel.imaging_band_index, nominal=True)
     a_au = sep_arcsec * prepared.dist_pc
     planet = jx.nominal_planet(
         a_au=a_au,
@@ -66,7 +66,7 @@ def _probe_rows(channel, sep_arcsec, days=(100.0, 140.0)):
     names = jx.visit_columns(n)
     rows, intervals, limits = [], [], []
     for i, day in enumerate(days):
-        duration = channel.exposures_s[MODE]
+        duration = channel.mode_table.duration_s(MODE)
         interval = jx.ScienceInterval(
             jnp.asarray(channel.epoch_jd + day), jnp.asarray(duration)
         )
@@ -80,7 +80,7 @@ def _probe_rows(channel, sep_arcsec, days=(100.0, 140.0)):
         row[names.index("valid_science")] = 1.0
         row[names.index("limit_counts_0")] = limit
         if i == 1:
-            row[names.index("counts_0")] = 6.0 * limit
+            row[names.index("counts_0")] = (law.threshold + 1.0) * limit
             for c in ("ra_err_0", "dec_err_0"):
                 row[names.index(c)] = 1e-3
         rows.append(row)
@@ -106,7 +106,7 @@ def test_report_likelihood_equals_the_channel_law_at_truth(channel):
     sep = float(data0.sep_grid[0, PROBE_NODE])
     rows, intervals, planet, _limits = _probe_rows(channel, sep)
     data = photomancy_report(channel, STAR, rows, 0)
-    prepared = channel._prepared(STAR, nominal=True)
+    prepared = channel._prepared(STAR, channel.imaging_band_index, nominal=True)
     mass = float(prepared.star_mass_kg)
     a_au = float(planet["a"])
     period = (
@@ -147,14 +147,15 @@ def test_report_likelihood_equals_the_channel_law_at_truth(channel):
         total += float(jx.loglike_report(law, row, predicted))
         if seen:
             total -= float(law.log_position_density(row, predicted, True))
+    assert np.isfinite(ours) and np.isfinite(total)
     np.testing.assert_allclose(ours, total, atol=1e-3, rtol=0)
 
 
 def _circular(channel, sep_lod, radius_re, albedo):
     """Photomancy elements of a face-on circular planet at `sep_lod` lambda over D."""
-    prepared = channel._prepared(STAR, nominal=True)
+    prepared = channel._prepared(STAR, channel.imaging_band_index, nominal=True)
     mass = float(prepared.star_mass_kg)
-    lod = float(channel.assets().report.lod_arcsec)
+    lod = float(channel.assets().reports[channel.imaging_band_index].lod_arcsec)
     a_au = sep_lod * lod * float(prepared.dist_pc)
     period = 2.0 * np.pi * np.sqrt(a_au**3 / (G * mass))  # days, G in AU^3/(kg d^2)
     scale = albedo * (radius_re * Rearth2AU) ** 2
@@ -178,13 +179,15 @@ def _agreement(channel, el_phot, mode, days, detected):
         from_photomancy(el_phot[None], jnp.full((1, channel.n_bands), 0.3), 0),
     )
     planet, mass = channel._belief_planet(el_channel)
-    prepared = channel._prepared(STAR, nominal=True, mass_kg=mass)
+    prepared = channel._prepared(
+        STAR, channel.imaging_band_index, nominal=True, mass_kg=mass
+    )
     built = channel.assets()
-    report, law_ = built.report, built.law
+    report, law_ = built.reports[channel.imaging_band_index], built.law
     names = jx.visit_columns(channel.n_slots)
     rows, intervals = [], []
     for day, seen in zip(days, detected, strict=True):
-        duration = channel.exposures_s[mode]
+        duration = channel.mode_table.duration_s(mode)
         interval = jx.ScienceInterval(
             jnp.asarray(channel.epoch_jd + day), jnp.asarray(duration)
         )
@@ -237,13 +240,15 @@ def _agreement(channel, el_phot, mode, days, detected):
 
 
 @pytest.mark.medium(reason="builds the channel grid and eight budgets, 10 s cold")
-@pytest.mark.parametrize("radius_re", [3.5, 11.0])
+@pytest.mark.parametrize("radius_re", [9.0, 28.0])
 def test_a_bright_planet_past_the_outer_angle_agrees_with_the_channel(
     channel, radius_re
 ):
-    """A 3.5 or an 11 Earth-radius planet at 29 lambda/D, beyond the 28 lambda/D where
-    an outer-angle grid stopped (the signal-to-noise is about 10 and 100): two
-    detections agree with the channel to 0.01 nats, and the grid reaches past 40.
+    """Fails if the separation grid cuts off detectable planets beyond the outer angle.
+
+    Two detections of a 9 or 28 Earth-radius probe at 29 lambda/D agree with the
+    channel to 0.01 nats, and the grid reaches past 40 lambda/D. Both probes exceed
+    the survey reporting threshold at the declared intermediate duration.
 
     The grid cut gave this detection a zero likelihood (minus infinity). The noise
     level rises by a factor of two every 0.1 lambda/D here, and the report model
@@ -251,7 +256,7 @@ def test_a_bright_planet_past_the_outer_angle_agrees_with_the_channel(
     0.15 nats at 3.5 Earth radii and 6.6 nats at 11. The grid places half its nodes
     where a coarse pilot sees the curve change, which brings both to about 1e-3.
     """
-    lod = float(channel.assets().report.lod_arcsec)
+    lod = float(channel.assets().reports[channel.imaging_band_index].lod_arcsec)
     el = _circular(channel, 29.0, radius_re, 0.5)
     ours, theirs, data = _agreement(channel, el, MODE, (100.0, 140.0), (True, True))
     top = float(jnp.max(jnp.where(jnp.isfinite(data.dmag0_grid), data.sep_grid, 0.0)))
@@ -262,27 +267,33 @@ def test_a_bright_planet_past_the_outer_angle_agrees_with_the_channel(
 
 @pytest.mark.medium(reason="builds the channel grid and nine budgets, 10 s cold")
 def test_a_general_orbit_agrees_with_the_channel_within_the_declared_terms(channel):
-    """An eccentric, inclined, phased orbit given in photomancy's convention: the
-    report likelihood equals the channel's at the truth to 0.163 nats over three rows.
+    """Fails if orbit-convention conversion changes the report likelihood.
 
-    The elements pass through `from_photomancy` for the channel (the periastron phase
-    becomes days and the scale supplies the physical radius) and are placed directly in
-    photomancy's convention for the belief, so a wrong time axis or phase conversion
-    moves the planet and the likelihood by many nats. The bound is three rows at the
-    declared terms: planet motion over a 320,000 s exposure (5.3e-2 nats per row at
-    most) and grid interpolation (5e-3 at most). The two detections
-    sit at expected signal-to-noise of 5.8 and 9.7, above the 5-sigma detection
-    threshold (a detection row whose expected counts fall below it has zero
-    likelihood by construction), and the null at 4.5.
+    Three rows of an eccentric, inclined orbit agree within the original 0.174-nat
+    allowance for motion during an exposure and sensitivity-grid interpolation.
+    The declared intermediate exposure is shorter than the 320,000 s exposure
+    used to set that allowance. The detection rows exceed the survey's threshold.
     """
     base = _circular(channel, 8.0, 0.5, 0.4)
     el = base.at[1].set(0.3).at[2].set(0.5).at[3].set(1.0).at[4].set(2.0).at[5].set(0.3)
     days = (85.0, 140.0, 230.0)
-    ours, theirs, _ = _agreement(channel, el, 5, days, (True, False, True))
+    ours, theirs, _ = _agreement(
+        channel,
+        el,
+        channel.mode_table.channel("detection", 1),
+        days,
+        (True, False, True),
+    )
     assert np.isfinite(ours) and np.isfinite(theirs)
     np.testing.assert_allclose(ours, theirs, atol=3 * (5.3e-2 + 5e-3), rtol=0)
     # the rows are sensitive to the phase: a different periastron phase is not close
-    moved, _, _ = _agreement(channel, el.at[5].set(0.8), 5, days, (True, False, True))
+    moved, _, _ = _agreement(
+        channel,
+        el.at[5].set(0.8),
+        channel.mode_table.channel("detection", 1),
+        days,
+        (True, False, True),
+    )
     assert not np.isfinite(moved) or abs(moved - ours) > 1.0
 
 

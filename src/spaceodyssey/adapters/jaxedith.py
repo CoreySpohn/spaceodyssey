@@ -97,7 +97,6 @@ from hwoutils.constants import (
     Mearth2kg,
     Msun2kg,
     Rearth2AU,
-    d2s,
     nm2m,
     rad2arcsec,
     s2d,
@@ -140,6 +139,7 @@ from yippy.datasets import CATALOG, DATA_RELEASE_TAG
 from yippy.performance import PROFILE_STEP_PIX
 from zodi import MAG_1ZODI_V_ARCSEC2, MV_SUN, exozodi_flux_ratio_band
 
+from spaceodyssey.adapters.modes import ModeTable
 from spaceodyssey.adapters.parameters import (
     PlanetParameters,
     TruthCatalogRow,
@@ -162,7 +162,6 @@ from spaceodyssey.adapters.physical_profile import (
     load_profile,
     payload_column_names,
 )
-from spaceodyssey.adapters.skyscapes import Band, _declared
 from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience
 from spaceodyssey.core.kinds import AbstractChannelModel
 from spaceodyssey.core.records import PayloadColumn, RecordKind, layout_size, pack
@@ -497,6 +496,7 @@ class SummaryReport(eqx.Module):
     nominal: PreparedScene
     wavelength_nm: float
     bin_width_nm: float
+    resolving_power: float | None = eqx.field(static=True)
     orbit_epoch_jd: float
     bg_multiplier: float
     ppfact: float
@@ -525,6 +525,7 @@ class SummaryReport(eqx.Module):
         field_radius_lod,
         leakage_step_lod,
         stellar_exozodi=True,
+        resolving_power=None,
     ):
         """Validate the declarations and cache the nominal scene."""
         if not isinstance(detector_spec, DetectorSpec):
@@ -549,6 +550,7 @@ class SummaryReport(eqx.Module):
         self.detector_spec = detector_spec
         self.wavelength_nm = float(wavelength_nm)
         self.bin_width_nm = float(bin_width_nm)
+        self.resolving_power = resolving_power
         self.orbit_epoch_jd = float(orbit_epoch_jd)
         self.bg_multiplier = float(bg_multiplier)
         self.ppfact = float(ppfact)
@@ -583,6 +585,7 @@ class SummaryReport(eqx.Module):
         diameter_m=None,
         aperture_radius_lod=None,
         stellar_exozodi=True,
+        resolving_power=None,
     ):
         """Build the summary path on a response package.
 
@@ -598,6 +601,8 @@ class SummaryReport(eqx.Module):
         `aperture_radius_lod` is the radius of the circular photometric aperture
         [lambda/D of the response's circumscribed aperture] that sets the core
         throughput, area and pixel count; None keeps the package default.
+        `resolving_power` records the spectral resolution; `bin_width_nm` remains
+        the explicitly declared width used for the photon counts.
         `stellar_exozodi` (default True) gives the exozodi the host's own colour (see
         `prepare`); False keeps the solar-colour one-zodi form.
         """
@@ -635,6 +640,7 @@ class SummaryReport(eqx.Module):
             field_radius_lod=backend.OWA,
             leakage_step_lod=PROFILE_STEP_PIX * backend.stellar_pixel_scale_lod,
             stellar_exozodi=stellar_exozodi,
+            resolving_power=resolving_power,
         )
 
     # -- Cached factors ----------------------------------------------------
@@ -1652,12 +1658,6 @@ def _truth_planet(truth, subject, built):
 
 # -- Observing-mode channel ----------------------------------------------------------
 
-# Detection exposures [s] and block lengths [d] of the observing modes. The block
-# signal-to-noise ratio divides every photon rate by `BLOCK_RATE_DIVISOR`: a
-# 20 percent band at resolving power 140 holds 28 spectral channels.
-DETECTION_EXPOSURES_S = (10_000.0, 20_000.0, 40_000.0, 80_000.0, 160_000.0, 320_000.0)
-BLOCK_DAYS = (5.0, 15.0, 45.0)
-BLOCK_RATE_DIVISOR = 28.0
 # The reference planet of a block's duration: an Earth twin on a face-on circular
 # orbit at the Earth's insolation, so it sits at quadrature at every epoch.
 REFERENCE_ALBEDO = 0.3
@@ -1677,8 +1677,6 @@ PILOT_FRACTION, ADAPTIVE_MIX = 4, 0.5
 # The probe planet of `sensitivity_grid`: an Earth twin's scale (albedo times radius
 # squared) in AU squared, only a unit the counts are divided back out of.
 PROBE_LAMBDA = REFERENCE_ALBEDO * Rearth2AU**2
-
-MODE_DETECT, MODE_BLOCK, MODE_CATALOG = 0, 1, 2
 
 VISIT_KIND_NAME = "visit_report"
 BLOCK_KIND_NAME = "block_outcome"
@@ -1765,11 +1763,10 @@ class ReportData(eqx.Module):
 class _ModeAssets(eqx.Module):
     """What an observing-mode channel builds from its declarations."""
 
-    report: SummaryReport
+    reports: tuple[SummaryReport, ...]
     context: eqx.Module
     law: ReportingLaw
     calibration_id: int
-    char_report: SummaryReport | None = None
 
 
 def survey_table(profile):
@@ -1832,15 +1829,12 @@ def survey_aperture_radius_lod(survey, yip_path=None):
     return float(r) / (1.0 - _obscured_fraction(yip_path))
 
 
-def _mode_assets(profile, detector, diameter_m, n_time_nodes, epoch_jd, law):
-    """The report, observing context and law at one aperture diameter.
-
-    A profile with a ``survey`` table builds one report per observing mode: the
-    imaging detection report and the IFS characterization report, each at its own
-    wavelength, band, throughput and post-processing factor.
-    """
+def _mode_assets(
+    profile, detector, diameter_m, n_time_nodes, epoch_jd, law, mode_table
+):
+    """One report per declared band and the common observing context."""
     entry = load_profile(profile)
-    survey = entry.get("survey")
+    survey = entry["survey"]
     clock = PhysicalClock.from_jd(epoch_jd, entry["time"]["tick_length_s"])
     context = context_from_profile(entry, clock)
     placeholder = SummaryScene(
@@ -1854,22 +1848,12 @@ def _mode_assets(profile, detector, diameter_m, n_time_nodes, epoch_jd, law):
         n_exozodi=PROFILE_N_EXOZODI,
     )
     law = ReportingLaw(*law)
-    if survey is None:
-        report = SummaryReport.from_yip(
-            DetectorSpec(*detector),
-            placeholder,
-            orbit_epoch_jd=epoch_jd,
-            observatory=context.observatory,
-            n_time_nodes=n_time_nodes,
-            diameter_m=diameter_m,
-        )
-        return _ModeAssets(report, context, law, calibration_id(report, law))
     reports = []
-    for mode, spec in (
-        ("detection", DetectorSpec(*detector)),
-        ("characterization", survey_detector(survey, "characterization")),
-    ):
-        m = survey["modes"][mode]
+    for band in mode_table.bands:
+        mode = next(m for m in mode_table.modes if m.band == band)
+        spec = dataclasses.replace(
+            DetectorSpec(*detector), frame_time_s=mode.frame_time_s
+        )
         reports.append(
             SummaryReport.from_yip(
                 spec,
@@ -1878,9 +1862,10 @@ def _mode_assets(profile, detector, diameter_m, n_time_nodes, epoch_jd, law):
                 observatory=context.observatory,
                 n_time_nodes=n_time_nodes,
                 diameter_m=diameter_m,
-                wavelength_nm=m["wavelength_nm"],
-                bin_width_nm=m["bin_width_nm"],
-                optical_throughput=m["optics_throughput"],
+                wavelength_nm=band.center_nm,
+                bin_width_nm=band.width_nm,
+                optical_throughput=mode.optics_throughput,
+                resolving_power=mode.resolving_power,
                 ppfact=survey["post_processing_factor"],
                 aperture_radius_lod=survey_aperture_radius_lod(survey),
                 stellar_exozodi=survey.get("exozodi_model", "stellar_color")
@@ -1891,8 +1876,9 @@ def _mode_assets(profile, detector, diameter_m, n_time_nodes, epoch_jd, law):
     digest = hashlib.blake2b(
         "|".join(map(str, ids)).encode(), digest_size=CALIBRATION_ID_BYTES
     )
+    digest.update(repr(mode_table.modes).encode())
     combined = int.from_bytes(digest.digest(), "big") or 1
-    return _ModeAssets(reports[0], context, law, combined, reports[1])
+    return _ModeAssets(tuple(reports), context, law, combined)
 
 
 @functools.lru_cache(maxsize=8)
@@ -1911,69 +1897,30 @@ def _build_mode_assets(*declarations):
     return _cached_mode_build(key)
 
 
-def _scaled_snr(budget, divisor):
-    """Signal-to-noise with every photon rate divided by `divisor`.
-
-    Planet and background counts and their shot-noise variances scale with the rate;
-    the detector variance is a per-channel property and stays; the systematic floor
-    scales with its square.
-    """
-    planet = budget.planet / divisor
+def spectral_channel_snr(budget):
+    """Signal-to-noise of one spectral channel, with the planet in the noise."""
     variance = (
-        budget.var_planet / divisor
-        + budget.var_background / divisor
+        budget.var_planet
+        + budget.var_background
         + budget.var_detector
-        + budget.var_systematic / divisor**2
+        + budget.var_systematic
     )
     safe = jnp.where(variance > 0, variance, 1.0)
-    return jnp.where(variance > 0, planet / jnp.sqrt(safe), 0.0)
+    return jnp.where(variance > 0, budget.planet / jnp.sqrt(safe), 0.0)
 
 
 class ObservingModeChannel(AbstractChannelModel):
-    """A version-2 channel model whose channels are observing modes of many stars.
+    """Declared observing modes of many hosts, with one report per band.
 
-    Channel `i` is a mode, not a planned visit: detection exposures first
-    (`exposures_s`), then block lengths (`block_days`), then the catalog mode. The
-    star is the record's `subject`, the interval comes from the record's own start
-    and end ticks (`RealizeContext`), and the truth is a `PopulationTruth`, so one
-    star holds `n_slots` planets and a `present` mask.
-
-    - Detection modes write a `visit_report`: per slot, the reporting law's draw
-      (`sample_report`) of that slot's planet over the science interval
-      ``[start + settle, end]``. An absent slot never detects. A null slot reports
-      zero limit counts, because the planet-free limit is evaluated at the true
-      geometry and would otherwise place the planet; the belief recomputes the
-      threshold at the geometry it tests (`detect_probability`).
-    - Block modes write a `block_outcome`: per slot, the signal-to-noise ratio of
-      one spectral channel accumulated over the block while the planet lies inside
-      the response working angles, with every photon rate divided by
-      `block_rate_divisor` and the fraction of the block that was observable.
-      Every block column is scorer-only.
-    - The catalog mode writes the `truth_catalog`: the slots' elements and scale,
-      for the registry's audiences to open or close by group.
-
-    The model keeps plain declarations and per-star arrays; the report is built
-    from the declarations on first use and shared. No keepout is applied: any
-    interval with science time is observable. The true scene and mass are the star's
-    own; the belief side (`detect_probability`, `characterize_time`) uses the
-    catalog mass.
-
-    Attributes:
-        scenes: `SummaryScene` with leaves ``[n_stars]``, the true hosts.
-        leakage: ``[n_stars, n_grid]`` stellar leakage tables at each host's diameter.
-        catalog_mass_kg: ``[n_stars]`` stellar masses the belief uses.
-        profile, detector, law, n_time_nodes: as `JaxedithSummaryChannel`.
-        diameter_m: Aperture diameter; the response and leakage are rebuilt on it.
-        epoch_jd: Orbit epoch and tick 0 of the study.
-        n_slots: Planet slots per star.
-        exposures_s, block_days: The mode tables.
-        block_rate_divisor: The photon-rate divisor of the block signal-to-noise.
-        calibration: Digest of the declarations and the hosts.
+    Imaging channels write visit reports, spectrograph channels write accumulated
+    single-channel signal-to-noise, and the final channel writes the truth catalog.
+    Every observing interval includes the profile's settling overhead. The stored
+    band scenes and leakage tables have one entry per `mode_table.bands`.
     """
 
     version: int = eqx.field(default=2, kw_only=True)
-    scenes: SummaryScene
-    leakage: jax.Array
+    band_scenes: tuple[SummaryScene, ...]
+    band_leakage: tuple[jax.Array, ...]
     catalog_mass_kg: jax.Array
     profile: str = eqx.field(static=True)
     detector: tuple = eqx.field(static=True)
@@ -1982,25 +1929,21 @@ class ObservingModeChannel(AbstractChannelModel):
     diameter_m: float = eqx.field(static=True)
     epoch_jd: float = eqx.field(static=True)
     n_slots: int = eqx.field(static=True)
-    bands: tuple[Band, ...] = eqx.field(static=True)
-    exposures_s: tuple = eqx.field(static=True)
-    block_days: tuple = eqx.field(static=True)
-    block_rate_divisor: float = eqx.field(static=True)
+    mode_table: ModeTable = eqx.field(static=True)
     calibration: int = eqx.field(static=True)
-    survey: bool = eqx.field(default=False, static=True, kw_only=True)
-    char_scenes: SummaryScene | None = eqx.field(default=None, kw_only=True)
-    char_leakage: jax.Array | None = eqx.field(default=None, kw_only=True)
 
     def __check_init__(self):
         """Refuse malformed declarations."""
-        _declared(self.bands)
         DetectorSpec(*self.detector)
-        ReportingLaw(*self.law)
+        law = ReportingLaw(*self.law)
+        imaging = next(m for m in self.mode_table.modes if m.kind == "imaging")
+        if law.threshold != imaging.snr_threshold:
+            raise ValueError(
+                f"reporting law threshold {law.threshold} disagrees with imaging "
+                f"mode {imaging.name!r} threshold {imaging.snr_threshold}"
+            )
         if type(self.n_slots) is not int or self.n_slots < 1:
             raise ValueError("n_slots must be a positive integer")
-        if not self.exposures_s or not self.block_days:
-            raise ValueError("a channel needs detection exposures and block lengths")
-        _finite("block_rate_divisor", self.block_rate_divisor, low=1.0)
         _finite("diameter_m", self.diameter_m, low=0.0, low_open=True)
 
     @classmethod
@@ -2009,133 +1952,64 @@ class ObservingModeChannel(AbstractChannelModel):
         stars,
         *,
         n_slots,
-        bands: tuple[Band, ...],
         epoch_jd,
+        modes,
+        durations_d,
+        profile,
         diameter_m=None,
         catalog_mass_kg=None,
-        profile=FIRST_SUMMARY_V1,
         detector=None,
         law=None,
         n_time_nodes=8,
         n_exozodi=PROFILE_N_EXOZODI,
-        exposures_s=None,
-        block_days=None,
-        block_rate_divisor=None,
-        n_grid=None,
     ):
-        """The channel of `stars` (objects with `StarSpec`'s fields).
+        """Build declared mode reports and each host's flux and leakage per band.
 
-        `diameter_m` defaults to the response header's; `catalog_mass_kg` to the
-        stars' own masses. Each host's leakage table is computed here, once.
-
-        With the default profile the detection exposures are `DETECTION_EXPOSURES_S`
-        and the block modes the fixed `BLOCK_DAYS` lengths. A profile with a
-        ``survey`` table (`JATIS_EAC1_V1`) instead builds two reports, imaging
-        detection and IFS characterization: the detection exposures and the
-        characterization times are the profile's log-spaced grid of `n_grid` values
-        (default the profile's), the detection threshold is the mode's required
-        signal-to-noise ratio, `diameter_m`
-        defaults to the circumscribed aperture of the profile's inscribed diameter,
-        and every star needs the fluxes of both bands (`StarSpec.band_fluxes_jy`).
-
-        Without a survey table the host flux is `StarSpec.flux_density_jy`, the flux
-        in a star's first declared band, so a star that declares bands must declare
-        the report's band first; another first band is refused.
+        `diameter_m` defaults to the profile's circumscribed aperture;
+        `catalog_mass_kg` defaults to the hosts' masses. Each host must explicitly
+        carry the flux of every mode's band. Imaging modes share one reporting
+        threshold; an explicit `law` must agree, and an omitted law uses it.
         """
         stars = tuple(stars)
+        table = ModeTable(tuple(modes), tuple(float(d) for d in durations_d))
         survey = survey_table(profile)
-        if survey is None:
-            exposures_s = DETECTION_EXPOSURES_S if exposures_s is None else exposures_s
-            block_days = BLOCK_DAYS if block_days is None else block_days
-            block_rate_divisor = (
-                BLOCK_RATE_DIVISOR if block_rate_divisor is None else block_rate_divisor
-            )
-            detector = detector or DetectorSpec.fixture()
-            law = law or ReportingLaw()
-            wl_det = wl_char = None
-        else:
-            grid = survey_grid_d(survey, n_grid)
-            exposures_s = (
-                tuple(d * d2s for d in grid) if exposures_s is None else exposures_s
-            )
-            block_days = grid if block_days is None else block_days
-            modes = survey["modes"]
-            wl_det = modes["detection"]["wavelength_nm"]
-            wl_char = modes["characterization"]["wavelength_nm"]
-            block_rate_divisor = (
-                1.0 if block_rate_divisor is None else block_rate_divisor
-            )
-            detector = detector or survey_detector(survey, "detection")
-            law = law or ReportingLaw(threshold=modes["detection"]["snr_required"])
+        imaging = next(m for m in table.modes if m.kind == "imaging")
+        detector = detector or survey_detector(survey, "detection")
+        if law is None:
+            law = ReportingLaw(threshold=imaging.snr_threshold)
         detector = dataclasses.astuple(detector)
         law = (law.threshold, law.kappa, law.corr)
         if diameter_m is None:
             response = load_profile(profile)["response"]
-            diameter_m = (
-                float(response["diameter_m"])
-                if survey is None
-                else circumscribed_diameter_m(
-                    survey["inscribed_diameter_m"], response["obscured_area_fraction"]
-                )
+            diameter_m = circumscribed_diameter_m(
+                survey["inscribed_diameter_m"], response["obscured_area_fraction"]
             )
-        args = (
+        built = _build_mode_assets(
             profile,
             detector,
             float(diameter_m),
             n_time_nodes,
             float(epoch_jd),
             law,
+            table,
         )
-        built = _build_mode_assets(*args)
-        if survey is None:
-            _require_report_band(stars, built.report.wavelength_nm)
-
-        def stacked(wavelength_nm):
-            return SummaryScene(
-                **{
-                    name: jnp.asarray(
-                        [
-                            getattr(_star_scene(st, n_exozodi, wavelength_nm), name)
-                            for st in stars
-                        ],
-                        jnp.float64,
-                    )
-                    for name in SummaryScene.__dataclass_fields__
-                }
-            )
-
-        scenes = stacked(wl_det)
-        tables = jnp.stack(
-            [
-                built.report.leakage_table(_star_scene(st, n_exozodi, wl_det))
-                for st in stars
-            ]
-        )
-        char_scenes = char_tables = None
-        if survey is not None:
-            char_scenes = stacked(wl_char)
-            char_tables = jnp.stack(
-                [
-                    built.char_report.leakage_table(_star_scene(st, n_exozodi, wl_char))
-                    for st in stars
-                ]
+        band_scenes, band_leakage = [], []
+        for band, report in zip(table.bands, built.reports, strict=True):
+            scenes = tuple(_star_scene(st, n_exozodi, band.center_nm) for st in stars)
+            band_scenes.append(jax.tree.map(lambda *x: jnp.asarray(x, F64), *scenes))
+            band_leakage.append(
+                jnp.stack([report.leakage_table(scene) for scene in scenes])
             )
         if catalog_mass_kg is None:
-            catalog_mass_kg = scenes.star_mass_kg
+            catalog_mass_kg = band_scenes[0].star_mass_kg
         digest = hashlib.blake2b(digest_size=CALIBRATION_ID_BYTES)
         digest.update(str(built.calibration_id).encode())
-        digest.update(np.asarray(tables).tobytes())
-        for leaf in jax.tree_util.tree_leaves(scenes):
-            digest.update(np.asarray(leaf).tobytes())
-        digest.update(np.asarray(catalog_mass_kg, np.float64).tobytes())
-        if survey is not None:
-            digest.update(np.asarray(char_tables).tobytes())
-            for leaf in jax.tree_util.tree_leaves(char_scenes):
-                digest.update(np.asarray(leaf).tobytes())
+        for leaf in jax.tree.leaves((band_scenes, band_leakage, catalog_mass_kg)):
+            digest.update(np.asarray(leaf, np.float64).tobytes())
         return cls(
-            scenes=scenes,
-            leakage=tables,
-            catalog_mass_kg=jnp.asarray(catalog_mass_kg, jnp.float64),
+            band_scenes=tuple(band_scenes),
+            band_leakage=tuple(band_leakage),
+            catalog_mass_kg=jnp.asarray(catalog_mass_kg, F64),
             profile=profile,
             detector=detector,
             law=law,
@@ -2143,14 +2017,8 @@ class ObservingModeChannel(AbstractChannelModel):
             diameter_m=float(diameter_m),
             epoch_jd=float(epoch_jd),
             n_slots=n_slots,
-            bands=_declared(bands),
-            exposures_s=tuple(float(x) for x in exposures_s),
-            block_days=tuple(float(x) for x in block_days),
-            block_rate_divisor=float(block_rate_divisor),
+            mode_table=table,
             calibration=int.from_bytes(digest.digest(), "big") or 1,
-            survey=survey is not None,
-            char_scenes=char_scenes,
-            char_leakage=char_tables,
         )
 
     # -- Modes ---------------------------------------------------------------
@@ -2158,12 +2026,12 @@ class ObservingModeChannel(AbstractChannelModel):
     @property
     def n_detect(self):
         """Number of detection modes."""
-        return len(self.exposures_s)
+        return len(self.mode_table.imaging_channels)
 
     @property
     def n_block(self):
         """Number of block modes."""
-        return len(self.block_days)
+        return len(self.mode_table.spectrograph_channels)
 
     @property
     def n_modes(self):
@@ -2173,18 +2041,24 @@ class ObservingModeChannel(AbstractChannelModel):
     @property
     def n_channels(self):
         """Channels the model realizes: detections, blocks, then the catalog."""
-        return self.n_detect + self.n_block + 1
+        return self.mode_table.n_channels
 
     @property
     def catalog_mode(self):
         """Channel index of the catalog mode."""
-        return self.n_detect + self.n_block
+        return self.mode_table.catalog_channel
 
     def mode_kinds(self):
-        """Per channel, ``(MODE_*, index within its group)``."""
-        kinds = [(MODE_DETECT, i) for i in range(self.n_detect)]
-        kinds += [(MODE_BLOCK, i) for i in range(self.n_block)]
-        return (*kinds, (MODE_CATALOG, 0))
+        """Per channel, record kind code and declared mode index."""
+        table = self.mode_table
+        kinds = tuple(
+            (
+                0 if table.modes[table.mode_of(c)].kind == "imaging" else 1,
+                table.mode_of(c),
+            )
+            for c in range(table.catalog_channel)
+        )
+        return (*kinds, (2, 0))
 
     def widths(self):
         """Payload width of each record kind, as `(visit, block, catalog)`."""
@@ -2196,7 +2070,7 @@ class ObservingModeChannel(AbstractChannelModel):
         )
 
     def assets(self):
-        """The report, context and law this model realizes with."""
+        """The band reports, context and law shared by equal declarations."""
         return _build_mode_assets(
             self.profile,
             self.detector,
@@ -2204,44 +2078,48 @@ class ObservingModeChannel(AbstractChannelModel):
             self.n_time_nodes,
             self.epoch_jd,
             self.law,
+            self.mode_table,
         )
 
-    # -- Scenes and planets ----------------------------------------------------
+    @property
+    def bands(self):
+        """Distinct observing bands in declaration order."""
+        return self.mode_table.bands
 
-    def _prepared(self, subject, *, nominal, mass_kg=None, char=False):
-        """The prepared scene of one star: true, or the belief's (catalog mass).
+    @property
+    def imaging_band_index(self):
+        """Band axis index of the single photometric scale."""
+        return self.bands.index(self.mode_table.imaging_band)
 
-        `char` selects the characterization report's scene on a survey channel (the
-        host's flux and leakage in the IFS band); otherwise the detection report's.
-        """
-        built = self.assets()
-        report, scenes, leakage = built.report, self.scenes, self.leakage
-        if char and self.survey:
-            report, scenes = built.char_report, self.char_scenes
-            leakage = self.char_leakage
-        scene = jax.tree_util.tree_map(lambda x: x[subject], scenes)
+    @property
+    def scenes(self):
+        """The imaging hosts, with leaves shaped [n_stars]."""
+        return self.band_scenes[self.imaging_band_index]
+
+    @property
+    def leakage(self):
+        """Imaging leakage tables [n_stars, n_grid]."""
+        return self.band_leakage[self.imaging_band_index]
+
+    def _prepared(self, subject, band_index, *, nominal, mass_kg=None):
+        """Prepared scene of one host and band, with true or catalog mass."""
+        report = self.assets().reports[band_index]
+        scene = jax.tree.map(lambda x: x[subject], self.band_scenes[band_index])
         if nominal:
             scene = eqx.tree_at(
                 lambda s: s.star_mass_kg, scene, self.catalog_mass_kg[subject]
             )
-        prepared = report.prepare(scene, leakage[subject])
+        prepared = report.prepare(scene, self.band_leakage[band_index][subject])
         if mass_kg is not None:
             prepared = eqx.tree_at(
-                lambda p: p.star_mass_kg, prepared, jnp.asarray(mass_kg, jnp.float64)
+                lambda p: p.star_mass_kg, prepared, jnp.asarray(mass_kg, F64)
             )
         return prepared
 
     @property
     def detection_band(self):
-        """The `Band` of the detection report: its wavelength and bin width."""
-        report = self.assets().report
-        return Band(report.wavelength_nm, report.bin_width_nm)
-
-    @property
-    def _block_band(self):
-        """The `Band` a block reads: the characterization report's on a survey."""
-        report = self.assets().char_report if self.survey else self.assets().report
-        return Band(report.wavelength_nm, report.bin_width_nm)
+        """The declared imaging band."""
+        return self.mode_table.imaging_band
 
     def _slot_planets(self, truth, subject, band):
         """The true planets of one star as photomancy dicts, leaves ``[n_slots]``.
@@ -2269,25 +2147,32 @@ class ObservingModeChannel(AbstractChannelModel):
         self, truth, subject, channel_index, fraction, key, design, channels, *, context
     ):
         """The row of the mode `channel_index` for star `subject`; `fraction` unused."""
-        table = jnp.asarray(self.mode_kinds(), I64)
-        code, index = table[channel_index, 0], table[channel_index, 1]
+        table = self.mode_table
         width = max(self.widths())
 
-        def padded(branch):
+        def branch(mode_index):
             def run(_):
-                row = branch(truth, subject, index, key, context)
+                method = (
+                    self._visit_row
+                    if table.modes[mode_index].kind == "imaging"
+                    else self._block_row
+                )
+                row = method(truth, subject, mode_index, key, context)
                 return jnp.pad(row, (0, width - row.shape[0]))
 
             return run
 
+        def catalog(_):
+            row = self._catalog_row(truth, subject, 0, key, context)
+            return jnp.pad(row, (0, width - row.shape[0]))
+
+        mode_indices = (
+            *(table.mode_of(c) for c in range(table.catalog_channel)),
+            len(table.modes),
+        )
+        index = jnp.asarray(mode_indices, I64)[channel_index]
         return jax.lax.switch(
-            code,
-            [
-                padded(self._visit_row),
-                padded(self._block_row),
-                padded(self._catalog_row),
-            ],
-            None,
+            index, [branch(i) for i in range(len(table.modes))] + [catalog], None
         )
 
     def _interval(self, context, *, settle):
@@ -2301,7 +2186,9 @@ class ObservingModeChannel(AbstractChannelModel):
         s1 = jnp.maximum(end, s0)
         valid = s1 > s0
         mid_jd = clock.jd(s0, (s1 - s0).astype(F64) / 2.0)
-        frame_s = jnp.asarray(built.report.detector_spec.frame_time_s, F64)
+        frame_s = jnp.asarray(
+            built.reports[self.imaging_band_index].detector_spec.frame_time_s, F64
+        )
         duration = jnp.where(valid, clock.seconds(s1 - s0), frame_s)
         occupied = clock.seconds(jnp.maximum(end - start, 0))
         return ScienceInterval(mid_jd, duration), valid, occupied
@@ -2309,10 +2196,13 @@ class ObservingModeChannel(AbstractChannelModel):
     def _visit_row(self, truth, subject, index, key, context):
         """A detection mode's row."""
         built = self.assets()
-        report, law = built.report, built.law
+        mode = self.mode_table.modes[index]
+        band_index = self.mode_table.band_index(mode.name)
+        report = built.reports[band_index]
+        law = built.law
         interval, valid, occupied = self._interval(context, settle=True)
-        true_prep = self._prepared(subject, nominal=False)
-        nominal_prep = self._prepared(subject, nominal=True)
+        true_prep = self._prepared(subject, self.imaging_band_index, nominal=False)
+        nominal_prep = self._prepared(subject, self.imaging_band_index, nominal=True)
         band = truth.band_index(self.detection_band.center_nm)
         planets = self._slot_planets(truth, subject, band)
         present = truth.present[subject]
@@ -2364,23 +2254,25 @@ class ObservingModeChannel(AbstractChannelModel):
         return jnp.concatenate([rows.detected, head, rest.reshape(-1)])
 
     def _block_row(self, truth, subject, index, key, context):
-        """A block mode's row: true accumulated signal-to-noise per slot."""
-        interval, valid, _ = self._interval(context, settle=self.survey)
-        prepared = self._prepared(subject, nominal=False, char=True)
-        band = truth.band_index(self._block_band.center_nm)
+        """A spectrograph row: accumulated single-channel signal-to-noise per slot."""
+        mode = self.mode_table.modes[index]
+        band_index = self.mode_table.band_index(mode.name)
+        interval, valid, _ = self._interval(context, settle=True)
+        prepared = self._prepared(subject, band_index, nominal=False)
+        band = truth.band_index(mode.band.center_nm)
         planets = self._slot_planets(truth, subject, band)
         present = truth.present[subject]
         interval = ScienceInterval(
             interval.midpoint_jd, jnp.where(valid, interval.duration_s, 0.0)
         )
-        snr, observable = jax.vmap(lambda p: self._block(prepared, p, interval))(
-            planets
-        )
+        snr, observable = jax.vmap(
+            lambda p: self._block(prepared, p, interval, band_index)
+        )(planets)
         live = present & valid
-        snr = jnp.where(live, snr, 0.0)
-        observable = jnp.where(live, observable, 0.0)
         head = jnp.stack([interval.midpoint_jd, interval.duration_s])
-        body = jnp.stack([snr, observable], -1)
+        body = jnp.stack(
+            [jnp.where(live, snr, 0.0), jnp.where(live, observable, 0.0)], -1
+        )
         return jnp.concatenate([head, body.reshape(-1)])
 
     def _catalog_row(self, truth, subject, index, key, context):
@@ -2401,42 +2293,14 @@ class ObservingModeChannel(AbstractChannelModel):
     @property
     def n_bands(self):
         """Number of declared observing bands."""
-        return len(self.bands)
+        return self.mode_table.n_bands
 
     # -- Block accumulation ----------------------------------------------------
 
-    def _block(self, prepared, planet, interval):
-        """``(scaled signal-to-noise, observable fraction)`` of `planet` over a block.
-
-        Time accumulates only at nodes where the planet lies between the inner and
-        outer working angles of the response; the detector term counts frames over
-        the observable time.
-        """
-        if self.survey:
-            return self._characterize(prepared, planet, interval)
-        report = self.assets().report
-        times = report.node_times_jd(interval)
-        r = report.rates(prepared, planet, times)
-        coronagraph = prepared.optical_path.coronagraph
-        observable = r.in_field & (r.separation_lod >= coronagraph.IWA)
-        duration = jnp.asarray(interval.duration_s, F64)
-        share = jnp.sum(report.weights * observable) / jnp.sum(report.weights)
-        w = report.weights * 0.5 * duration * observable
-        budget = report.budget_from_rates(prepared, r, duration * share, w)
-        snr = _scaled_snr(budget, self.block_rate_divisor)
-        return jnp.where(share > 0, snr, 0.0), share
-
-    def _characterize(self, prepared, planet, interval):
-        """``(signal-to-noise, 1)`` of one IFS spectral channel over `interval`.
-
-        The signal-to-noise ratio is that of the characterization report's band, one
-        channel of width lambda/R, with the planet in the noise. The response applies
-        as it does in detection: no separate cut at the inner working angle, so the
-        observable fraction is 1.
-        """
-        report = self.assets().char_report
-        budget = report.budget(prepared, planet, interval)
-        return _scaled_snr(budget, 1.0), jnp.ones((), F64)
+    def _block(self, prepared, planet, interval, band_index):
+        """Single-channel signal-to-noise and unit observable fraction."""
+        budget = self.assets().reports[band_index].budget(prepared, planet, interval)
+        return spectral_channel_snr(budget), jnp.ones((), F64)
 
     # -- The belief's views of the channel ---------------------------------------
 
@@ -2479,19 +2343,23 @@ class ObservingModeChannel(AbstractChannelModel):
 
         `time_d` is days from the epoch (tick zero).
         """
-        report = self.assets().report
+        report = self.assets().reports[self.imaging_band_index]
         time_jd = self.epoch_jd + jnp.asarray(time_d, F64)
 
         def one(row):
             planet, mass = self._belief_planet(row)
-            prepared = self._prepared(subject, nominal=True, mass_kg=mass)
+            prepared = self._prepared(
+                subject, self.imaging_band_index, nominal=True, mass_kg=mass
+            )
             r = report.rates(prepared, planet, time_jd)
             return jnp.stack([r.ra_arcsec[0], r.dec_arcsec[0]])
 
         return jax.vmap(one)(elements)
 
-    def detect_probability(self, subject, mode, time_d, elements: PlanetParameters):
-        """Probability that a visit of `mode` detects each named parameter draw.
+    def detect_probability(
+        self, subject, channel_index, time_d, params: PlanetParameters
+    ):
+        """Detection probabilities of the named parameter draws for `channel_index`.
 
         `time_d` is the science-interval midpoint in days from the epoch (tick zero).
         The threshold is evaluated at the geometry given, against the catalog scene,
@@ -2499,20 +2367,29 @@ class ObservingModeChannel(AbstractChannelModel):
         elements and the catalog mass equal to the true mass the two agree.
         """
         built = self.assets()
-        duration = jnp.asarray(self.exposures_s, F64)[mode]
+        table = self.mode_table
+        duration = jnp.asarray(
+            tuple(table.duration_s(c) for c in range(table.catalog_channel)), F64
+        )[channel_index]
         interval = ScienceInterval(self.epoch_jd + jnp.asarray(time_d, F64), duration)
 
         def one(row):
             planet, mass = self._belief_planet(row)
-            prepared = self._prepared(subject, nominal=True, mass_kg=mass)
-            expected = built.report.budget(prepared, planet, interval)
-            reference = built.report.budget(prepared, planet_free(planet), interval)
+            prepared = self._prepared(
+                subject, self.imaging_band_index, nominal=True, mass_kg=mass
+            )
+            expected = built.reports[self.imaging_band_index].budget(
+                prepared, planet, interval
+            )
+            reference = built.reports[self.imaging_band_index].budget(
+                prepared, planet_free(planet), interval
+            )
             limit = built.law.limit_counts(reference)
             return ndtr(
                 (expected.planet - built.law.threshold * limit) / _noise(expected)
             )
 
-        return jax.vmap(one)(elements)
+        return jax.vmap(one)(params)
 
     @property
     def overhead_d(self):
@@ -2574,30 +2451,31 @@ class ObservingModeChannel(AbstractChannelModel):
         50 percent point of `detect_probability`; the overhead is not included.
         """
         built = self.assets()
-        prepared = self._prepared(subject, nominal=True)
+        prepared = self._prepared(subject, self.imaging_band_index, nominal=True)
 
         def short(budget, reference):
             return (
                 built.law.threshold * built.law.limit_counts(reference) - budget.planet
             )
 
-        return self._twin_time(subject, built.report, prepared, short)
+        return self._twin_time(
+            subject, built.reports[self.imaging_band_index], prepared, short
+        )
 
-    def characterize_time(self, subject, snr_required):
-        """Days a reference Earth twin at quadrature needs for the IFS requirement.
-
-        The signal-to-noise ratio of one spectral channel (`_characterize`) reaches
-        `snr_required`; the overhead is not included. Survey channels only.
-        """
-        if not self.survey:
-            raise ValueError("characterize_time needs a survey profile")
-        built = self.assets()
-        prepared = self._prepared(subject, nominal=True, char=True)
+    def characterize_time(self, subject, mode_name, snr_required):
+        """Days an Earth twin needs for the named spectrograph's requirement."""
+        table = self.mode_table
+        mode = next(m for m in table.modes if m.name == mode_name)
+        if mode.kind != "spectrograph":
+            raise ValueError("characterize_time requires a spectrograph mode")
+        band_index = table.band_index(mode_name)
+        report = self.assets().reports[band_index]
+        prepared = self._prepared(subject, band_index, nominal=True)
 
         def short(budget, _):
-            return snr_required - _scaled_snr(budget, 1.0)
+            return snr_required - spectral_channel_snr(budget)
 
-        return self._twin_time(subject, built.char_report, prepared, short)
+        return self._twin_time(subject, report, prepared, short)
 
     def report_data(self, subject, rows):
         """`ReportData` of the visit-report rows `rows` (``[R, width]``) of one star."""
@@ -2661,8 +2539,8 @@ class ObservingModeChannel(AbstractChannelModel):
         fixture's 32 lambda/D working angle), and the realized data are the channel's.
         """
         built = self.assets()
-        report, law = built.report, built.law
-        prepared = self._prepared(subject, nominal=True)
+        report, law = built.reports[self.imaging_band_index], built.law
+        prepared = self._prepared(subject, self.imaging_band_index, nominal=True)
         zero = jnp.zeros((), F64)
         probe = {
             "e": zero,
@@ -2724,33 +2602,19 @@ class ObservingModeChannel(AbstractChannelModel):
     def predict_budget(self, subject, elements: PlanetParameters, interval):
         """The belief's `CountBudget` of the planet `elements` over `interval`."""
         planet, mass = self._belief_planet(elements)
-        prepared = self._prepared(subject, nominal=True, mass_kg=mass)
-        return self.assets().report.budget(prepared, planet, interval)
+        prepared = self._prepared(
+            subject, self.imaging_band_index, nominal=True, mass_kg=mass
+        )
+        return (
+            self.assets()
+            .reports[self.imaging_band_index]
+            .budget(prepared, planet, interval)
+        )
 
 
-def _require_report_band(stars, report_nm):
-    """Refuse a host whose first declared band is not the report band `report_nm`."""
-    for star in stars:
-        if not star.band_fluxes_jy:
-            continue
-        first_nm = star.band_fluxes_jy[0][0]
-        if not math.isclose(first_nm, report_nm, rel_tol=1e-9):
-            raise ValueError(
-                f"star {star.name!r} declares the {first_nm:g} nm band first; this "
-                f"channel reads the flux of a star's first declared band, which must "
-                f"be the report band at {report_nm:g} nm"
-            )
-
-
-def _star_scene(star, n_exozodi, wavelength_nm=None):
-    """The `SummaryScene` of a host described by a `StarSpec`.
-
-    `wavelength_nm` selects the band the star's flux is read in
-    (`StarSpec.flux_at`); `None` is the spec's own band-center flux.
-    """
-    flux = (
-        star.flux_density_jy if wavelength_nm is None else star.flux_at(wavelength_nm)
-    )
+def _star_scene(star, n_exozodi, wavelength_nm):
+    """The host scene in the explicitly selected band [nm]."""
+    flux = star.flux_at(wavelength_nm)
     return SummaryScene(
         star_flux_density_jy=float(flux),
         dist_pc=float(star.dist_pc),
