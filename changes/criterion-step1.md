@@ -617,3 +617,21 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   Both physical checks share one short run; the admission control compiles one
   structure. Set the new file's program budget from its measured run with standard
   headroom. No golden histories or pinned hashes change.
+
+## Bracket study document registration
+
+- Add an explicit BRACKET_KINDS mapping for the observer, policy, observing-mode
+  channel, stored world source, verdict objective, transition criterion and their
+  component declarations. Include the bound transition settings needed by the
+  package policy. Keep installed entry points unchanged.
+- Round-trip bracket and criterion-ladder documents with the installed kinds;
+  preserve every grant and distinguish grant, kernel and criterion changes in
+  their content hashes.
+- Add four tests, retire none, and expand no shared parameter matrix. Keep
+  registration and external-criterion state packing as unit checks. Run physical
+  document construction and a one-star, three-band, 30-day external-criterion
+  study in the slow tier. The external radius claim and per-band visit criterion
+  require no library changes; the loaded study rebuilds derived registry paths
+  before execution. Use prepared host fluxes and a three-node runtime forecast.
+- Set the two new file budgets from measured program counts with standard
+  headroom. No golden histories or pinned hashes change.

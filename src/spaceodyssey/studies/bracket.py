@@ -39,13 +39,15 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import d2s, s2d
 from jaxtyping import Float, Int
+from skyscapes.population import OccurrenceTable, PlanetTypes, PopulationConfig
 
+from spaceodyssey.adapters.jaxedith import ObservingModeChannel, SummaryScene
 from spaceodyssey.adapters.measurement import (
     MEASUREMENT_KIND_NAME,
     measurement_kind,
     measurement_template,
 )
-from spaceodyssey.adapters.modes import ModeTable
+from spaceodyssey.adapters.modes import ModeSpec, ModeTable
 from spaceodyssey.adapters.parameters import (
     CATALOG_GROUPS,
     CATALOG_KIND_NAME,
@@ -61,6 +63,14 @@ from spaceodyssey.adapters.photomancy import (
     SUMMARY_LEAVES,
     DecisionSummary,
     ReportRefit,
+)
+from spaceodyssey.adapters.skyscapes import (
+    Band,
+    ExoVistaWorldSource,
+    PopulationModel,
+    PopulationTruth,
+    StarSpec,
+    SupportRange,
 )
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.declarations import Declaration
@@ -95,7 +105,8 @@ from spaceodyssey.core.records import (
 from spaceodyssey.core.refresh import REFRESH_PRODUCT_KIND, RefreshSchedule
 from spaceodyssey.core.snapshot import BeliefLayout
 from spaceodyssey.criteria.base import AbstractCriterion
-from spaceodyssey.criteria.transition import TransitionSettings
+from spaceodyssey.criteria.claims import EarthCandidateClaim
+from spaceodyssey.criteria.transition import TransitionSettings, TransitionTable
 from spaceodyssey.studies import builder, effect_rows
 from spaceodyssey.studies.scoring import CriterionObjective, row_log, verdict
 from spaceodyssey.studies.selection import act, capacity_of, select, trace_scalars
@@ -1173,3 +1184,30 @@ def run_grants(presets, truths, roots, n_steps, *, executor=None) -> ArmsResult:
         activity[name] = activity_table(run, study)
         verdicts[name] = verdict(run, study)
     return ArmsResult(activity=activity, verdict=verdicts)
+
+
+BRACKET_KINDS = {
+    ("observer", "bracket.summary", 1): SummaryObserver,
+    ("policy", "bracket.package", 1): PackagePolicy,
+    ("channel_model", "jaxedith.observing_mode", 2): ObservingModeChannel,
+    ("world_source", "skyscapes.exovista", 1): ExoVistaWorldSource,
+    ("objective", "criterion.verdict", 1): CriterionObjective,
+    ("criterion", "criterion.transition_table", 1): TransitionTable,
+    ("component", "criterion.transition_settings", 1): TransitionSettings,
+    ("component", "skyscapes.band", 1): Band,
+    ("component", "skyscapes.star_spec", 1): StarSpec,
+    ("component", "jaxedith.summary_scene", 1): SummaryScene,
+    ("component", "bracket.mode_spec", 1): ModeSpec,
+    ("component", "bracket.mode_table", 1): ModeTable,
+    ("component", "skyscapes.support_range", 1): SupportRange,
+    ("component", "skyscapes.population_model", 1): PopulationModel,
+    ("component", "skyscapes.population_truth", 1): PopulationTruth,
+    ("component", "bracket.decision_summary", 1): DecisionSummary,
+    ("component", "bracket.policy_state", 1): PolicyState,
+    ("component", "bracket.grants", 1): Grants,
+    ("component", "criterion.earth_candidate", 1): EarthCandidateClaim,
+    ("component", "skyscapes.occurrence_table", 1): OccurrenceTable,
+    ("component", "skyscapes.planet_types", 1): PlanetTypes,
+    ("component", "skyscapes.population_config", 1): PopulationConfig,
+}
+"""Explicit kinds for bracket study documents; merge with `installed_kinds()`."""
