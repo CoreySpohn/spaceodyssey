@@ -863,3 +863,9 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
 - Derive every required measured count-column path from the measurement codec,
   then select the imaging band's columns by axis. Count naming follows the same
   source as the rest of the posterior's permission requirements.
+
+## Stable host count estimates
+
+- Seed the supported-count estimator by host identity and a fixed tag at both
+  initialization and refit. New report-set keys and retry keys still redraw
+  conditional orbit clouds, while the host's population count prior stays fixed.

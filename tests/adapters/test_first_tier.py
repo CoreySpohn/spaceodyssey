@@ -405,3 +405,24 @@ def test_solar_first_tier_and_retry_reach_their_declared_distinct_sizes():
         if original is not None:
             assert not np.isin(periods, original).any()
         original = periods
+
+
+@pytest.mark.slow(
+    reason="two physical first tiers with independently keyed report fits"
+)
+def test_expected_host_count_is_stable_across_refit_keys(boundary_inputs):
+    """Fails if a star's count prior is re-estimated from each report-set key."""
+    population = dataclasses.replace(PopulationModel.exovista(), n_pool_systems=8)
+    first, lane, st = first_tier(boundary_inputs, population)
+    lane = eqx.tree_at(lambda x: x.key, lane, jax.random.fold_in(lane.key, 1))
+    second = ph._first_tier_lane(
+        boundary_inputs[0].channel_model, population, lane, st, 1
+    )
+    assert float(first.expected) == float(second.expected)
+    host_key = jax.random.fold_in(jax.random.PRNGKey(0), lane.subject)
+    expected = population.expected_planets(
+        boundary_inputs[0].world_source.stars[0],
+        jax.random.fold_in(host_key, ph._EXPECTED_TAG),
+        st.n_estimate_systems,
+    )
+    assert float(first.expected) == float(expected)

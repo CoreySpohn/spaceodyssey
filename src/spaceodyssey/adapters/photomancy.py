@@ -1421,7 +1421,9 @@ def _first_tier_lane(channel, population, lane, st, scale):
     cloud, elements = _first_tier_cloud(channel, population, lane, st, scale)
     expected = population.expected_planets(
         _population_star(channel, lane.subject),
-        jax.random.fold_in(lane.key, _EXPECTED_TAG),
+        jax.random.fold_in(
+            jax.random.fold_in(jax.random.PRNGKey(0), lane.subject), _EXPECTED_TAG
+        ),
         st.n_estimate_systems,
     )
     leaves = _first_leaves(
