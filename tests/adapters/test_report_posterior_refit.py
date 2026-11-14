@@ -29,7 +29,6 @@ from tests.studies.bracket_helpers import (
     N_SLOTS,
     build,
     fixture_source,
-    prior_summary,
 )
 
 pytestmark = [
@@ -254,10 +253,10 @@ def test_a_slot_never_fit_has_a_status_of_its_own():
 
 
 def test_a_blind_policy_keeps_its_prior_summary_to_the_horizon():
-    """Mask, not zeros: the prior_planned policy summary stays the initial one."""
+    """Fails if a blind policy changes its declared population prior after a refit."""
     _, study, _, _, _, run = build(arm="prior_planned", **SMALL)
-    channel = study.channel_model
-    prior = prior_summary(channel, len(channel.catalog_mass_kg))
+    prior = study.observer.init_summary(study.caps)
+    assert np.any(np.asarray(prior.p_exist) > 0)
     got = jax.tree_util.tree_map(np.asarray, run.carry.pbelief)
     for name in ("p_exist", "p_det", "n_det", "status", "p_claim"):
         expected = np.asarray(getattr(prior, name))
