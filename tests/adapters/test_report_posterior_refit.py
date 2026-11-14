@@ -419,11 +419,10 @@ def test_the_search_probability_follows_the_posterior_occupancy(world, n_rows):
 
 
 def test_degraded_slots_reach_the_outcome_table(world):
-    """The outcome table counts the kernel's `SLOT_DEGRADED` codes as `low_ess`.
+    """Fails if activity misses degraded slots across stars or mixes worlds.
 
-    No fixture run detects a planet, so no study run reaches a fit; the refit's slot
-    codes at the unreachable size floor are written into a finished run's summary and
-    the table reads them back. A claim never rests on such a slot.
+    Install a real degraded refit's codes beside one additional degraded slot in
+    each world. Other slots are never fit, so none can support a claim.
     """
     study, _, star0, _ = world
     request = visit_request(study, {0: star0}, tick=TICK)
@@ -433,13 +432,13 @@ def test_degraded_slots_reach_the_outcome_table(world):
     assert n_degraded > 0
     _, built, _, _, _, run = build(arm="prior_planned", **SMALL)
     belief = run.carry.belief
-    belief = eqx.tree_at(
-        lambda b: b.status, belief, belief.status.at[0, 0].set(jnp.asarray(status))
-    )
+    controlled = jnp.full_like(belief.status, ph.SLOT_NEVER_FIT)
+    controlled = controlled.at[:, 1, 0].set(ph.SLOT_DEGRADED)
+    controlled = controlled.at[0, 0].set(jnp.asarray(status))
+    belief = eqx.tree_at(lambda b: b.status, belief, controlled)
     run = eqx.tree_at(lambda r: r.carry.belief, run, belief)
     table = br.activity_table(run, built)
-    assert int(table.world["low_ess"][0]) == n_degraded
-    assert int(table.world["low_ess"][1]) == 0
+    np.testing.assert_array_equal(table.world["low_ess"], [n_degraded + 1, 1])
     assert not np.asarray(br.candidate_slots(belief, 1.0)).any()
 
 
