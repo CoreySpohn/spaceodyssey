@@ -186,6 +186,7 @@ require_tier_reason = true
 "tests/studies/test_selection.py" = 116
 "tests/studies/test_attribution.py" = 911
 "tests/studies/test_ladder_documents.py" = 374
+"tests/studies/test_ladder.py" = 1042
 "tests/studies/test_scoring.py" = 1231
 "tests/criteria/test_transition_table.py" = 329
 "tests/adapters/test_forecast_leaves.py" = 1520

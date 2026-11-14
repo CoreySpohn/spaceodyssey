@@ -652,3 +652,19 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   explicitly supplied criterion. Regenerate both touched test-file program
   budgets from measured counts with standard headroom. No goldens or pinned
   hashes change.
+
+## Ladder execution and static truth firewall
+
+- Add three slow integration tests, retire none, and expand no shared parameter
+  matrix. Check that the 5.0/5.0 and 7.0/5.0 requirement ladders reuse backend
+  programs and repeat with bitwise-identical carries and traces.
+- Join completed measurement residuals by world, star, scorer identity, band and
+  recorded ordinal. Require different observation sequences and at least one
+  shared draw across the two-step and single-step criteria.
+- Run the measured replan preset with declared planning and population inputs,
+  no catalog grants, and the posterior kernel. Perturb generating fluxes by 1.1
+  and reverse stored slot order. Require a released payload difference in each
+  world and compare decisions and admissions before the earliest permitted
+  observer or policy difference.
+- Set the new test file's program budget from measured compile and persistent
+  cache-load counts with standard headroom. No goldens or pinned hashes change.
