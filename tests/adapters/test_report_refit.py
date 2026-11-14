@@ -14,6 +14,7 @@ import pytest
 
 pytest.importorskip("photomancy")
 
+from spaceodyssey.adapters import photomancy as ph
 from spaceodyssey.adapters.measurement import measurement_kind, measurement_template
 from spaceodyssey.adapters.modes import ModeTable, profile_modes
 from spaceodyssey.adapters.parameters import (
@@ -34,6 +35,7 @@ from spaceodyssey.core.records import (
     KindRegistry,
     PayloadColumn,
     RecordKind,
+    column_names,
     pack,
     record_none,
     unpack,
@@ -384,3 +386,29 @@ def test_an_entry_without_a_catalog_row_installs_nothing():
             assert np.asarray(piece).all(), name
         elif name != "status":
             assert not np.asarray(piece).any(), name
+
+
+def test_refit_permissions_follow_codec_names_for_count_columns(monkeypatch):
+    """Fails if the required count columns are synthesized outside the codec."""
+    template = measurement_template(2, 3)
+
+    def renamed(t):
+        return tuple("renamed_" + name for name in column_names(t))
+
+    monkeypatch.setattr(ph, "column_names", renamed)
+    paths = renamed(template)
+    caps = types.SimpleNamespace(
+        kind_names=("measurement",),
+        payload_paths=(paths,),
+        payload_audience=((int(EVERYONE),) * len(paths),),
+    )
+    study = types.SimpleNamespace(caps=caps)
+    channel = types.SimpleNamespace(
+        measurement_template=template, n_slots=2, imaging_band_index=1
+    )
+    boundary = ReportRefit(kernel="posterior")
+    assert boundary._readable(study, channel) == (True, True)
+    audience = list(caps.payload_audience[0])
+    audience[paths.index(renamed({"counts": template.counts})[1])] = 0
+    caps.payload_audience = (tuple(audience),)
+    assert boundary._readable(study, channel) == (False, False)

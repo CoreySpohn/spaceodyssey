@@ -857,3 +857,9 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
 - Recognize the library's exact withheld-source sentinel before reusing a decision
   view. An ordinary user source's public `withheld` attribute cannot expose the
   world source or bypass substitution of the planning model and belief population.
+
+## Named count-column permission checks
+
+- Derive every required measured count-column path from the measurement codec,
+  then select the imaging band's columns by axis. Count naming follows the same
+  source as the rest of the posterior's permission requirements.

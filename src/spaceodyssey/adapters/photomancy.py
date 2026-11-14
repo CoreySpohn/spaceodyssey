@@ -2094,9 +2094,10 @@ class ReportRefit(AbstractRefitBoundary):
         required = list(
             column_names({name: getattr(template, name) for name in required_leaves})
         )
-        required.extend(
-            f"counts_{s}_{channel.imaging_band_index}" for s in range(channel.n_slots)
+        count_paths = np.asarray(column_names({"counts": template.counts})).reshape(
+            template.counts.shape
         )
+        required.extend(count_paths[:, channel.imaging_band_index].tolist())
         flags = (int(Audience.OBSERVER), int(Audience.POLICY))
         return tuple(
             all(int(audiences.get(path, 0)) & flag for path in required)
