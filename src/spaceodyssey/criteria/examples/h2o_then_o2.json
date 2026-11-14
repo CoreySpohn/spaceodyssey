@@ -13,7 +13,7 @@
       "repeat": 1,
       "on_pass": "o2",
       "on_fail": null,
-      "achieved_label": "none"
+      "achieved_label": null
     },
     {
       "name": "o2",

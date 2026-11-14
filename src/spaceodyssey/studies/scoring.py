@@ -143,6 +143,18 @@ def _truth_claims(criterion, params, luminosity_lsun):
     ).astype(F64)
 
 
+def _truth_value(criterion, state, claims, tick):
+    """Score the declared answer against truth independently of its utility.
+
+    A transition table's target predicate must hold to certify its achieved
+    answer. Other criteria express their answers through their value method.
+    """
+    values, labels = _value(criterion, state, claims, tick)
+    if isinstance(criterion, TransitionTable) and criterion.target_claim is not None:
+        labels = jnp.where(criterion._target_probability(claims) > 0, labels, -1)
+    return values, labels
+
+
 def _track_join(seen, present):
     """A track must name exactly one present identity across all its rows."""
     n_slots = present.size
@@ -175,7 +187,7 @@ class Verdict:
     using the highest-value consistent track. A mixed or absent identity is
     misassociated; extra consistent tracks are duplicates; an unjoined present
     catalog identity is missed. `wrong` counts mission-labeled tracks with a
-    wrong label, zero truth credit, misassociation or duplication.
+    wrong label, false target predicate, misassociation or duplication.
     Mission labels index the observer criterion's labels; scorer labels index
     the scoring criterion's labels. Wrong-label comparisons use label names.
 
@@ -262,7 +274,7 @@ def verdict(result, study, criterion=None) -> Verdict:
             )
             state = refold(criterion, rows, w, star, modes, columns="true")
             if criterion.labels:
-                values, labels = _value(criterion, state, claims, carry.tick)
+                values, labels = _truth_value(criterion, state, claims, carry.tick)
             else:
                 values, labels = jnp.zeros(n_slots, F64), jnp.full(n_slots, -1, I64)
             if observer_criterion.labels:
@@ -294,7 +306,6 @@ def verdict(result, study, criterion=None) -> Verdict:
                     misassociated
                     | duplicates
                     | (mission_names[mission[w, star]] != scorer_names[scorer[w, star]])
-                    | (np.asarray(values) == 0)
                 )
             )
             support = population.support

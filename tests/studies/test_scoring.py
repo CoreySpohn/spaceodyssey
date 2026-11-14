@@ -1,6 +1,7 @@
 """Scorer joins and host folds on explicit rows, plus activity accounting."""
 
 import dataclasses
+from importlib.resources import files
 from types import SimpleNamespace
 
 import equinox as eqx
@@ -26,8 +27,8 @@ from spaceodyssey.core.kinds import AbstractPolicy
 from spaceodyssey.core.records import pack, record_none, unpack, write_log
 from spaceodyssey.core.snapshot import snapshot_view
 from spaceodyssey.core.transaction import admit, finish_trace, mask_effects
-from spaceodyssey.criteria.claims import AbstractClaim
-from spaceodyssey.criteria.transition import TransitionTable
+from spaceodyssey.criteria.claims import AbstractClaim, EarthCandidateClaim
+from spaceodyssey.criteria.transition import TransitionTable, load_transition_table
 from spaceodyssey.studies import bracket as br
 from spaceodyssey.studies.effect_rows import effects
 from spaceodyssey.studies.scoring import (
@@ -436,6 +437,7 @@ def test_the_objective_uses_true_counts_and_catalog_claims(scored_case):
     altered.carry = dataclasses.replace(altered.carry, log=log)
     got = verdict(altered, study)
     assert got.yield_[0] == pytest.approx(0.7)
+    assert got.wrong[0] == 3
     one = jax.tree.map(lambda x: x[0], altered.carry)
     score = eqx.filter_jit(CriterionObjective().evaluate)(one, study)
     assert float(score) == pytest.approx(got.yield_[0])
@@ -638,3 +640,64 @@ def test_null_imaging_padding_does_not_join_catalog_identities(scored_case):
     assert actual.yield_[0] == 0
     one = jax.tree.map(lambda x: x[0], result.carry)
     assert float(eqx.filter_jit(CriterionObjective().evaluate)(one, study)) == 0
+
+
+def test_a_correct_zero_value_negative_is_not_wrong(scored_case):
+    """Fails if numerical utility substitutes for a negative label's truth predicate."""
+    result, study = scored_case
+    negative = dataclasses.replace(
+        CRITERION,
+        labels=("not_giant",),
+        label_values=jnp.asarray([0.0]),
+        claims=(SmallRadiusClaim(name="not_giant"),),
+        target_claim="not_giant",
+    )
+    study = dataclasses.replace(
+        study, observer=dataclasses.replace(study.observer, criterion=negative)
+    )
+    actual = verdict(result, study)
+    assert actual.counts["not_giant"][0] == 2
+    assert actual.yield_[0] == 0
+    assert actual.wrong[0] == 2
+
+
+def test_the_examples_unstarted_tracks_are_open(scored_case):
+    """Fails if the example issues initial none claims or suppresses unsupported."""
+    result, study = scored_case
+    example = load_transition_table(
+        files("spaceodyssey.criteria") / "examples/h2o_then_o2.json",
+        claims={"earth_candidate": EarthCandidateClaim()},
+    )
+    example = dataclasses.replace(
+        example, mode_names=tuple(m.name for m in MODES.modes)
+    )
+    study = dataclasses.replace(
+        study, observer=dataclasses.replace(study.observer, criterion=example)
+    )
+    initial = jnp.broadcast_to(
+        pack(example.init_state(N_SLOTS, 2)), result.carry.belief.state.shape
+    )
+    payload = result.carry.log.payload
+    catalog = unpack(catalog_template(N_SLOTS, 2), payload[0, 0])
+    catalog = dataclasses.replace(
+        catalog,
+        params=dataclasses.replace(
+            catalog.params,
+            ln_period_d=catalog.params.ln_period_d.at[2].set(jnp.log(1.0)),
+        ),
+    )
+    encoded = pack(catalog)
+    result = SimpleNamespace(
+        carry=dataclasses.replace(
+            result.carry,
+            belief=dataclasses.replace(result.carry.belief, state=initial),
+            log=dataclasses.replace(
+                result.carry.log, payload=payload.at[0, 0, : encoded.size].set(encoded)
+            ),
+        )
+    )
+    actual = verdict(result, study)
+    assert actual.wrong[0] == 0
+    np.testing.assert_array_equal(actual.mission_label, -1)
+    assert actual.counts["none"][0] == 0
+    assert actual.reason[0, 0, 0] == "unsupported"

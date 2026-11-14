@@ -762,3 +762,11 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   finite variance. Writers, host joins and the JAX objective share this rule.
 - A production-shaped all-null image leaves undetected catalog planets missed
   and creates no misassociation or yield credit.
+
+### Label correctness and initial open tracks
+
+- Verdict correctness compares the issued answer with the truth-folded answer
+  and the declared target predicate, independently of numerical label utility.
+  Correct certified negatives may carry zero yield without counting as wrong.
+- The example's initial step has no achieved label; unstarted tracks remain open
+  and can receive the scorer's unsupported reason.
