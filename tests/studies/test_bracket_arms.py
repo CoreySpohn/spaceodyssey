@@ -18,7 +18,7 @@ from spaceodyssey.adapters.photomancy import (
     SLOT_OK,
     DecisionSummary,
 )
-from spaceodyssey.core.enums import RefitStatus
+from spaceodyssey.core.enums import EffectKind, RefitStatus
 from spaceodyssey.studies.bracket import (
     ActivityTable,
     ArmsResult,
@@ -26,6 +26,13 @@ from spaceodyssey.studies.bracket import (
     candidate_slots,
 )
 from tests.criteria import ImagingCriterion
+from tests.studies.bracket_helpers import (
+    build,
+    decide_once,
+    effect_kind,
+    state_with,
+    summary_selecting_node,
+)
 
 A = np.array([3.0, 5.0, 4.0, 8.0, 6.0])
 B = np.array([2.0, 5.0, 1.0, 6.0, 6.0])
@@ -189,3 +196,27 @@ def test_a_failed_detected_slot_keeps_its_leaves_but_the_first_tier_installs():
     assert int(out.status[0, 0]) == SLOT_FAILED
     assert float(out.p_exist[0, 0]) == 0.9
     assert float(out.p_exist[0, 1]) == 0.9
+
+
+@pytest.mark.slow(reason="physical study and package selection take 15 s cold locally")
+def test_package_selection_uses_the_installed_candidate_detections():
+    """Fails if a failed refit can promote a two-detection slot into a spectrum."""
+    study = build(run=False).study
+    summary = summary_selecting_node(study, node=0)
+    channel = study.channel_model.mode_table.spectrograph_channels[1]
+    summary = dataclasses.replace(
+        summary,
+        available=jnp.zeros_like(summary.available).at[0, 0, channel].set(True),
+    )
+    old = dataclasses.replace(summary, n_det=jnp.full_like(summary.n_det, 2))
+    failed = dataclasses.replace(
+        summary, status=jnp.full_like(summary.status, SLOT_FAILED)
+    )
+    state = state_with(study)
+    for refit, expected in ((failed, EffectKind.WAIT), (summary, EffectKind.OBSERVE)):
+        installed = study.observer.install(old, refit, 0)
+        decision = decide_once(study, summary=installed, state=state, balance_d=10.0)
+        assert effect_kind(decision) == expected
+        assert int(decision.state.n_spectra.sum()) == int(
+            expected == EffectKind.OBSERVE
+        )

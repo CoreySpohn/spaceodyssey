@@ -208,11 +208,13 @@ def test_the_slice_3a_capacities_default_to_off():
         caps.refunds,
         caps.n_commitments,
         caps.snapshot_balances,
+        caps.balance_round_down,
         caps.n_key_groups,
     ) == (
         False,
         False,
         0,
+        False,
         False,
         0,
     )
@@ -223,6 +225,7 @@ def test_the_slice_3a_capacities_default_to_off():
         "n_commitments",
         "snapshot_balances",
         "balance_quantum",
+        "balance_round_down",
         "max_bundles",
         "max_bundle_size",
         "max_config_switches",

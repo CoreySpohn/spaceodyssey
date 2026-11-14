@@ -561,7 +561,7 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   leaves from the declared belief population and planning model at zero time.
   Reuse the first tier's population draw count and occurrence estimator.
 - Bind public operational settings during construction. Show balances at clock
-  resolution and reserve half a rounding quantum when selecting. Keep asset and
+  resolution with downward rounding when selecting. Keep asset and
   program budgets nonbinding while fitting the exact snapshot integer range.
   A pending wait cannot start a second exposure on an occupied telescope.
 - Bound the price trace using daily waits, capped observation rows and forecast
@@ -582,3 +582,21 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   the private-measurement fixture's imaging rows. Move three construction-heavy
   adapter checks to appropriate tiers and regenerate measured program budgets.
   No golden histories or pinned hashes change.
+
+## Exact funding and package policy regression guards
+
+- Offer a downward-rounded balance snapshot as an opt-in capacity setting;
+  retain nearest rounding by default. Compare the reconstructed quantum value
+  with the ledger before rounding down so floating-point division cannot hide
+  a deficit. Package selection consumes that conservative balance directly.
+- Express channel charges using the same tick quantum as the balance view.
+  An exactly funded exposure starts, while a quarter-tick deficit still waits.
+- Retain the truth-swap and fork batteries and the arm gap, log-ratio and install
+  guards. Exercise catalog kickoff and named package state across a fork, and
+  verify that a failed refit cannot promote a two-detection slot to a spectrum.
+- Strengthen the existing ledger test and add two test functions; retire none.
+  The new optional field adds one explicit-null rejection case to one existing
+  parameterized test, for three additional cases overall. Regenerate program
+  budgets from the measured file runs. Extend the existing capacity-default and
+  codec round-trip guards for the new setting. No golden histories or pinned
+  hashes change.

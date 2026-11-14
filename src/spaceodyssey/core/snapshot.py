@@ -333,8 +333,9 @@ def balance_view(carry, audience, caps):
 
     Only the policy is shown balances, and only while `caps.snapshot_balances` is on,
     so every other view keeps its pytree and its fingerprint. The integer is the
-    balance over `caps.balance_quantum`, rounded to the nearest unit, and the float is
-    that count times the quantum, so what a policy or a host service reads equals what
+    balance over `caps.balance_quantum`, rounded to the nearest unit (downward when
+    `caps.balance_round_down` is on), and the float is that count times the quantum,
+    so what a policy or a host service reads equals what
     the fingerprint hashes. A study that shows balances refuses a budget the integer
     could not hold (`Study`). The row names are the ledger's layout: assets, then
     programs, then the shared row.
@@ -342,6 +343,11 @@ def balance_view(carry, audience, caps):
     if not caps.snapshot_balances or audience != Audience.POLICY:
         return None, None, None
     quanta = jnp.round(carry.ledger.balance / caps.balance_quantum).astype(I64)
+    if caps.balance_round_down:
+        # Compare reconstructed values so division cannot round a deficit up.
+        quanta -= (
+            quanta.astype(F64) * caps.balance_quantum > carry.ledger.balance
+        ).astype(I64)
     # the float is the integer count in quantum units, so it shows nothing the digest
     # does not hash
     balance = quanta.astype(F64) * caps.balance_quantum

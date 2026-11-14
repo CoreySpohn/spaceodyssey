@@ -235,6 +235,23 @@ def test_the_policy_view_lists_every_balance_row_in_quanta():
     assert program_1 == 3 and int(view.balance_q[program_1, 1]) == 15
 
 
+def test_downward_balances_preserve_exact_funding_and_never_overstate_funds():
+    """Fails if downward rounding loses exact funding or shows unavailable funds."""
+    study = _study(True, 0.5, 2)
+    caps = dataclasses.replace(study.caps, balance_round_down=True)
+    carry = _carry(True, 0.5, 2)
+    for balance in (7.5, 7.375, np.nextafter(7.5, 0.0)):
+        changed = eqx.tree_at(
+            lambda c: c.ledger.balance,
+            carry,
+            carry.ledger.balance.at[3, 1].set(balance),
+        )
+        view = snapshot.snapshot_view(changed, POLICY, caps)
+        assert float(view.balance[3, 1]) == (7.5 if balance == 7.5 else 7.0)
+        assert float(view.balance[3, 1]) <= balance
+        np.testing.assert_array_equal(view.balance, np.asarray(view.balance_q) * 0.5)
+
+
 @pytest.mark.medium(reason="admission compiles twice, 4.9 s cold alone")
 def test_an_admitted_debit_moves_the_fingerprint_only_with_balances_on():
     """Fails if the balance is not in the policy digest: the reason a Query cannot

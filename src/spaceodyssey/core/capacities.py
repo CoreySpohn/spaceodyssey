@@ -83,6 +83,7 @@ class Capacities:
     # The unit the policy's integer balance view counts in; read only while
     # `snapshot_balances` is on.
     balance_quantum: float = dataclasses.field(default=1.0, metadata=OPTIONAL)
+    balance_round_down: bool = dataclasses.field(default=False, metadata=OPTIONAL)
     # Bundles: observations that share one lane, one start and one busy window. Bundle
     # ordinals per decision and members per bundle; both zero (off) at the default.
     max_bundles: int = dataclasses.field(default=0, metadata=OPTIONAL)
@@ -172,6 +173,8 @@ class Capacities:
             raise ValueError("refunds must be a bool")
         if not isinstance(self.snapshot_balances, bool):
             raise ValueError("snapshot_balances must be a bool")
+        if not isinstance(self.balance_round_down, bool):
+            raise ValueError("balance_round_down must be a bool")
         quantum = self.balance_quantum
         if (
             isinstance(quantum, bool)

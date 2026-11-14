@@ -97,6 +97,10 @@ def test_the_policy_reads_the_ledger_balance(fixture):
         available=jnp.zeros_like(summary.available).at[0, 0, channel].set(True),
     )
     cost_d = float(fixture.channels.cost[channel, modes.resource("telescope_days")])
+    exact = decide_once(fixture, summary=only_one, state=state, balance_d=cost_d)
+    assert effect_kind(exact) == EffectKind.OBSERVE
+    assert exact.selected_d == cost_d
+    assert int(exact.effects.channel_index[0]) == channel
     short = decide_once(
         fixture,
         summary=only_one,

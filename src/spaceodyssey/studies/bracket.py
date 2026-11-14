@@ -262,7 +262,7 @@ def channel_table(channel, caps, *, budget_unit_s=None):
     if n != caps.n_channels:
         raise ValueError(f"caps.n_channels is {caps.n_channels}, the channel has {n}")
     occupancy = jnp.asarray(occupancy, I64)
-    days = occupancy.astype(F64) / per_day
+    days = occupancy.astype(F64) * (1.0 / per_day)
     on_telescope = jnp.asarray(lane, I64) == 0
     cost = jnp.zeros((n, caps.n_resources), F64)
     cost = cost.at[:, table.resource("telescope_days")].set(
@@ -361,6 +361,7 @@ def bracket_study(
         n_key_groups=channel.n_bands,
         snapshot_balances=True,
         balance_quantum=1.0 / per_day,
+        balance_round_down=True,
     )
     caps = bracket_registry(
         observer.grants, channel.n_slots, n_bands=channel.n_bands
@@ -648,7 +649,7 @@ class PackagePolicy(AbstractPolicy):
                 gain,
                 options.time,
                 capacity_of(
-                    jnp.maximum(view.balance[-1] - caps.balance_quantum / 2, 0.0),
+                    jnp.maximum(view.balance[-1], 0.0),
                     days_left,
                     resource,
                 ),
