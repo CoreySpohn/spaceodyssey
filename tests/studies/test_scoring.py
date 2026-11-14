@@ -39,6 +39,7 @@ from spaceodyssey.studies.scoring import (
     row_log,
     verdict,
 )
+from tests.criteria.test_criterion_contract import _SumCriterion, _TwoLeafCriterion
 
 from .bracket_helpers import N_SLOTS, build, fixture_modes
 
@@ -282,6 +283,85 @@ def test_the_verdict_reads_the_observer_summary_not_the_policy_summary(scored_ca
     np.testing.assert_array_equal(none.mission_label, -1)
 
 
+class ClaimedSumCriterion(_SumCriterion):
+    """A different state layout with reordered claims and label indices."""
+
+    def value(self, state, p_claim, tick):
+        values, labels = super().value(state, p_claim, tick)
+        probability = p_claim[..., tuple(c.name for c in self.claims).index("small")]
+        met = (labels >= 0) & (probability >= 0.5)
+        return values * probability, jnp.where(
+            met, self.labels.index("met"), -1
+        ).astype(I64)
+
+
+@pytest.mark.parametrize("layout", ["sum", "two_leaf", "claims"])
+def test_a_scoring_override_preserves_the_observers_state_and_claim_schema(
+    scored_case, layout
+):
+    """Fails if an override decodes observer buffers or compares label indices."""
+    result, study = scored_case
+    observer = dataclasses.replace(
+        CRITERION, claims=(SmallRadiusClaim(name="unused"), SmallRadiusClaim())
+    )
+    study = dataclasses.replace(
+        study, observer=dataclasses.replace(study.observer, criterion=observer)
+    )
+    probabilities = jnp.broadcast_to(
+        jnp.asarray([0.0, 1.0]), (*result.carry.belief.p_exist.shape, 2)
+    )
+    result = SimpleNamespace(
+        carry=dataclasses.replace(
+            result.carry,
+            belief=dataclasses.replace(result.carry.belief, p_claim=probabilities),
+        )
+    )
+    if layout in ("two_leaf", "claims"):
+        observer_type = _SumCriterion if layout == "two_leaf" else ClaimedSumCriterion
+        observer = observer_type(
+            mode_names=CRITERION.mode_names, claims=observer.claims
+        )
+        rows = row_log(result, study)
+        state = jnp.stack(
+            [
+                pack(refold(observer, rows, 0, star, MODES))
+                for star in range(study.caps.n_subjects)
+            ]
+        )[None]
+        study = dataclasses.replace(
+            study, observer=dataclasses.replace(study.observer, criterion=observer)
+        )
+        result.carry = dataclasses.replace(
+            result.carry, belief=dataclasses.replace(result.carry.belief, state=state)
+        )
+    alternative = {
+        "sum": _SumCriterion(mode_names=CRITERION.mode_names),
+        "two_leaf": _TwoLeafCriterion(mode_names=CRITERION.mode_names),
+        "claims": ClaimedSumCriterion(
+            mode_names=CRITERION.mode_names,
+            claims=observer.claims[::-1],
+            labels=("other", "met"),
+            label_values=jnp.asarray([0.0, 1.0]),
+        ),
+    }[layout]
+    baseline = verdict(result, study)
+    actual = verdict(result, study, alternative)
+    np.testing.assert_array_equal(actual.mission_label, baseline.mission_label)
+    np.testing.assert_array_equal(
+        actual.scorer_label[0, 0, :3], 1 if layout == "claims" else 0
+    )
+    assert actual.yield_[0] == pytest.approx(2.0)
+    np.testing.assert_array_equal(actual.wrong, baseline.wrong)
+    if layout == "sum":
+        different = verdict(
+            result, study, dataclasses.replace(alternative, labels=("other",))
+        )
+        empty = verdict(result, study, dataclasses.replace(alternative, labels=()))
+        np.testing.assert_array_equal(different.mission_label, baseline.mission_label)
+        np.testing.assert_array_equal(empty.mission_label, baseline.mission_label)
+        assert different.wrong[0] == empty.wrong[0] == 4
+
+
 def test_the_objective_uses_true_counts_and_catalog_claims(scored_case):
     """Fails if JIT scoring uses measured signal, track index, or posterior claims."""
     result, study = scored_case
@@ -317,15 +397,31 @@ def built():
 
 @pytest.mark.slow(reason="compiles the chunked refresh driver once")
 def test_the_activity_table_agrees_with_the_log_and_the_ledger(built):
-    """Fails if charged days disagree with the ledger or rows use the wrong kind."""
+    """Fails if visits or occupied days use the wrong star, kind or ledger total."""
     source, study, _, _, _, run = built
     table = br.activity_table(run, study)
     rows = row_log(run, study)
-    for w in range(rows["world"].max() + 1):
-        for mode, spec in enumerate(study.channel_model.mode_table.modes):
-            mine = (rows["world"] == w) & (rows["mode"] == mode)
-            expected = rows["occupied_s"][mine].sum() / br.SECONDS_PER_DAY
-            assert table.star[f"t_{spec.kind}"][w].sum() == pytest.approx(expected)
+    log = run.carry.log
+    measurements = (
+        np.asarray(log.valid)
+        & (np.asarray(log.kind) == br.KIND_MEASUREMENT)
+        & np.isin(log.status, (RecordStatus.COMPLETED, RecordStatus.PARTIAL))
+    )
+    for w in range(table.n_worlds):
+        for star in range(study.caps.n_subjects):
+            mine = (rows["world"] == w) & (rows["star"] == star)
+            assert table.star["n_visits"][w, star] == np.count_nonzero(
+                measurements[w] & (np.asarray(log.subject)[w] == star)
+            )
+            for kind in ("imaging", "spectrograph"):
+                modes = [
+                    i
+                    for i, spec in enumerate(study.channel_model.mode_table.modes)
+                    if spec.kind == kind
+                ]
+                selected = mine & np.isin(rows["mode"], modes)
+                expected = rows["occupied_s"][selected].sum() / br.SECONDS_PER_DAY
+                assert table.star[f"t_{kind}"][w, star] == pytest.approx(expected)
     np.testing.assert_allclose(
         (table.star["t_imaging"] + table.star["t_spectrograph"]).sum(1),
         table.world["charged"],

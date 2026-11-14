@@ -502,3 +502,14 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   field mutation matrix gains the one new trace leaf. Price-dependent open-slot
   reasons await the final selection snapshot; unsupported remains a scorer-side
   comparison against declared support.
+
+- Keep retained mission state and claim columns paired with the observer's
+  criterion when a scoring criterion is supplied. The override folds true rows
+  and evaluates catalog claims using its own schema; wrong-label comparisons
+  match label names across the two criteria. Mission labels retain observer
+  indices even when the scorer has no labels.
+- Add one three-case override regression on the existing scored-row fixture,
+  reusing the alternate criterion layouts and covering reordered claims, reordered
+  labels, missing labels and an empty scorer label set. Restore per-star visit
+  counts and occupied time by mode kind in the existing accounting test. No
+  tests are retired and no shared parameter matrices expand; net three cases.

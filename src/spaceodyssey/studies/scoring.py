@@ -161,6 +161,8 @@ class Verdict:
     misassociated; extra consistent tracks are duplicates; an unjoined present
     catalog identity is missed. `wrong` counts mission-labeled tracks with a
     wrong label, zero truth credit, misassociation or duplication.
+    Mission labels index the observer criterion's labels; scorer labels index
+    the scoring criterion's labels. Wrong-label comparisons use label names.
 
     `reason` marks unlabeled tracks joined to truth outside the declared belief
     support as `unsupported`. Other open-slot reasons need the final selection
@@ -176,8 +178,15 @@ class Verdict:
 
 
 def verdict(result, study, criterion=None) -> Verdict:
-    """Score retained rows against the catalog, reading only the observer summary."""
-    criterion = study.observer.criterion if criterion is None else criterion
+    """Score true rows with criterion, preserving the observer's mission labels.
+
+    The optional criterion overrides truth scoring only. Retained mission state
+    and claim columns are always evaluated with study.observer.criterion.
+    """
+    observer_criterion = study.observer.criterion
+    criterion = observer_criterion if criterion is None else criterion
+    mission_names = np.asarray((*observer_criterion.labels, ""))
+    scorer_names = np.asarray((*criterion.labels, ""))
     rows = row_log(result, study)
     n_worlds, n_stars = result.carry.belief.p_exist.shape[:2]
     channel, n_slots = study.channel_model, study.channel_model.n_slots
@@ -219,15 +228,16 @@ def verdict(result, study, criterion=None) -> Verdict:
             state = refold(criterion, rows, w, star, modes, columns="true")
             if criterion.labels:
                 values, labels = _value(criterion, state, claims, carry.tick)
+            else:
+                values, labels = jnp.zeros(n_slots, F64), jnp.full(n_slots, -1, I64)
+            if observer_criterion.labels:
                 observed = unpack(
-                    criterion.state_template(n_slots, channel.n_bands),
+                    observer_criterion.state_template(n_slots, channel.n_bands),
                     carry.belief.state[star],
                 )
                 _, mission[w, star] = _value(
-                    criterion, observed, carry.belief.p_claim[star], carry.tick
+                    observer_criterion, observed, carry.belief.p_claim[star], carry.tick
                 )
-            else:
-                values, labels = jnp.zeros(n_slots, F64), jnp.full(n_slots, -1, I64)
             labels = jnp.where(joined, labels, -1)
             scorer[w, star] = np.asarray(labels)
             credit, credited_labels, unique = _credit(
@@ -248,7 +258,7 @@ def verdict(result, study, criterion=None) -> Verdict:
                 & (
                     misassociated
                     | duplicates
-                    | (mission[w, star] != scorer[w, star])
+                    | (mission_names[mission[w, star]] != scorer_names[scorer[w, star]])
                     | (np.asarray(values) == 0)
                 )
             )
