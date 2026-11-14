@@ -22,6 +22,22 @@ def usable_measurement(status, valid_science, variance) -> jax.Array:
     )
 
 
+def participating_entries(valid_science, detected, counts, variance, mode, modes):
+    """Identity evidence per entry: detections in images, valid spectra otherwise.
+
+    Imaging limits and padding retain assignments for the censored likelihood,
+    but do not identify an observed planet. Spectra need a finite count and
+    positive finite variance in at least one exposed band.
+    """
+    imaging = jnp.asarray([m.kind == "imaging" for m in modes.modes])[mode]
+    spectral = jnp.any(
+        jnp.isfinite(counts) & jnp.isfinite(variance) & (variance > 0), axis=-1
+    )
+    return (valid_science[..., None] > 0) & jnp.where(
+        imaging[..., None], detected > 0.5, spectral
+    )
+
+
 class MeasurementRow(eqx.Module):
     """One exposure: scalar header, detection [D] and signal [D, B] leaves.
 

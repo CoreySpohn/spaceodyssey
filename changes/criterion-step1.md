@@ -753,3 +753,12 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   partial, a no-science partial and zero, infinite and NaN variance controls.
   Retire no tests and expand no shared parameter matrix. Regenerate scoring and
   attribution module budgets from measured runs. No goldens or pins change.
+
+### Measurement participation in scorer joins
+
+- Imaging entries identify a planet only when actually detected. Null limits and
+  padding retain their measured assignments for likelihoods but have no identity
+  evidence. Spectral entries participate only with finite counts and positive
+  finite variance. Writers, host joins and the JAX objective share this rule.
+- A production-shaped all-null image leaves undetected catalog planets missed
+  and creates no misassociation or yield credit.

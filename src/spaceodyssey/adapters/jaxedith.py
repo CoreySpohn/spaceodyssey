@@ -139,7 +139,11 @@ from yippy.datasets import CATALOG, DATA_RELEASE_TAG
 from yippy.performance import PROFILE_STEP_PIX
 from zodi import MAG_1ZODI_V_ARCSEC2, MV_SUN, exozodi_flux_ratio_band
 
-from spaceodyssey.adapters.measurement import MeasurementRow, measurement_template
+from spaceodyssey.adapters.measurement import (
+    MeasurementRow,
+    measurement_template,
+    participating_entries,
+)
 from spaceodyssey.adapters.modes import ModeTable
 from spaceodyssey.adapters.parameters import (
     PlanetParameters,
@@ -2201,7 +2205,7 @@ class ObservingModeChannel(AbstractChannelModel):
             detected | jnp.isnan(rows.limit_counts), rows.limit_counts, 0.0
         )
         signal = jnp.zeros((self.n_slots, self.n_bands), F64)
-        return pack(
+        return self._pack_measurement(
             MeasurementRow(
                 time_d=interval.midpoint_jd,
                 science_s=jnp.where(valid, interval.duration_s, 0.0),
@@ -2262,7 +2266,7 @@ class ObservingModeChannel(AbstractChannelModel):
         counts = true_counts + jnp.sqrt(true_variance) * noise
         signal = jnp.zeros((self.n_slots, self.n_bands), F64)
         zeros = jnp.zeros(self.n_slots, F64)
-        return pack(
+        return self._pack_measurement(
             MeasurementRow(
                 time_d=interval.midpoint_jd,
                 science_s=jnp.where(valid, interval.duration_s, 0.0),
@@ -2289,6 +2293,20 @@ class ObservingModeChannel(AbstractChannelModel):
                 true_counts=signal.at[:, band_index].set(true_counts),
                 true_variance=signal.at[:, band_index].set(true_variance),
             )
+        )
+
+    def _pack_measurement(self, row):
+        """Keep identity only for entries that participate in the science row."""
+        participates = participating_entries(
+            row.valid_science,
+            row.detected,
+            row.counts,
+            row.variance,
+            row.mode,
+            self.mode_table,
+        )
+        return pack(
+            dataclasses.replace(row, identity=jnp.where(participates, row.identity, -1))
         )
 
     def _catalog_row(self, truth, subject, index, key, context):

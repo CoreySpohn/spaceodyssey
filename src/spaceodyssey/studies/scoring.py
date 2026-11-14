@@ -10,6 +10,7 @@ import numpy as np
 from spaceodyssey.adapters.measurement import (
     MEASUREMENT_KIND_NAME,
     MeasurementRow,
+    participating_entries,
     usable_measurement,
 )
 from spaceodyssey.adapters.parameters import CATALOG_KIND_NAME, catalog_template
@@ -230,11 +231,26 @@ def verdict(result, study, criterion=None) -> Verdict:
                     )
                 )
             )
-            for assignment, identity in zip(
-                rows["assignment"][mine], rows["identity"][mine], strict=True
+            participates = np.asarray(
+                participating_entries(
+                    rows["valid_science"][mine],
+                    rows["detected"][mine],
+                    rows["counts"][mine],
+                    rows["variance"][mine],
+                    rows["mode"][mine],
+                    modes,
+                )
+            )
+            for assignment, identity, entries in zip(
+                rows["assignment"][mine],
+                rows["identity"][mine],
+                participates,
+                strict=True,
             ):
-                for track, planet in zip(assignment, identity, strict=True):
-                    if 0 <= track < n_slots:
+                for track, planet, entry in zip(
+                    assignment, identity, entries, strict=True
+                ):
+                    if entry and 0 <= track < n_slots:
                         seen[track, planet if 0 <= planet < n_slots else n_slots] = True
             identities, joined = _track_join(jnp.asarray(seen), jnp.asarray(present))
             params = jax.tree.map(
@@ -386,6 +402,14 @@ class CriterionObjective(AbstractObjective):
                 usable = usable_measurement(
                     log.status[index], row.valid_science, row.variance
                 )
+                participates = participating_entries(
+                    row.valid_science,
+                    row.detected,
+                    row.counts,
+                    row.variance,
+                    row.mode,
+                    channel.mode_table,
+                )
                 row = dataclasses.replace(
                     row, counts=row.true_counts, variance=row.true_variance
                 )
@@ -399,7 +423,7 @@ class CriterionObjective(AbstractObjective):
                 assigned = (
                     (jnp.arange(n_slots)[:, None] == row.assignment[None, :])
                     & take
-                    & (row.valid_science > 0)
+                    & participates[None, :]
                 )
                 identity = jnp.where(
                     (row.identity >= 0) & (row.identity < n_slots),

@@ -593,3 +593,48 @@ def test_no_funds_belongs_to_the_requested_star_not_the_waking_star(source_case)
         expected = np.zeros((2, 2))
         expected[:, requested] = 1
         np.testing.assert_array_equal(totals.star["no_funds"], expected)
+
+
+def test_null_imaging_padding_does_not_join_catalog_identities(scored_case):
+    """Fails if production-shaped null imaging entries become association evidence."""
+    result, study = scored_case
+    criterion = dataclasses.replace(CRITERION, start=jnp.asarray(1, I64))
+    study = dataclasses.replace(
+        study, observer=dataclasses.replace(study.observer, criterion=criterion)
+    )
+    payload = result.carry.log.payload
+    for index in (1, 2):
+        row = jax.tree.map(
+            lambda x: jnp.zeros(x.shape, x.dtype), measurement_template(N_SLOTS, 2)
+        )
+        row = dataclasses.replace(
+            row,
+            valid_science=jnp.asarray(1.0),
+            assignment=jnp.arange(N_SLOTS, dtype=I64),
+            identity=jnp.arange(N_SLOTS, dtype=I64),
+        )
+        written = unpack(
+            measurement_template(N_SLOTS, 2), study.channel_model._pack_measurement(row)
+        )
+        np.testing.assert_array_equal(written.identity, -1)
+        np.testing.assert_array_equal(written.assignment, row.assignment)
+        detected = dataclasses.replace(row, detected=row.detected.at[0].set(1.0))
+        written = unpack(
+            measurement_template(N_SLOTS, 2),
+            study.channel_model._pack_measurement(detected),
+        )
+        np.testing.assert_array_equal(written.identity, [0, -1, -1, -1, -1, -1])
+        encoded = pack(row)
+        payload = payload.at[0, index, : encoded.size].set(encoded)
+    result = SimpleNamespace(
+        carry=dataclasses.replace(
+            result.carry, log=dataclasses.replace(result.carry.log, payload=payload)
+        )
+    )
+    actual = verdict(result, study)
+    assert actual.counts[MISASSOCIATED][0] == 0
+    assert actual.counts[MISSED][0] == 3
+    assert actual.counts["met"][0] == 0
+    assert actual.yield_[0] == 0
+    one = jax.tree.map(lambda x: x[0], result.carry)
+    assert float(eqx.filter_jit(CriterionObjective().evaluate)(one, study)) == 0
