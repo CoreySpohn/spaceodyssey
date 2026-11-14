@@ -530,3 +530,20 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   multi-step resets, and missing cross coverage. No tests retire or shared
   parameter matrices expand; net eight functions. Program budgets use measured
   compiles and cache loads with standard headroom. No goldens or pinned hashes move.
+
+## Resource threshold selection
+
+- Select one positive-gain package per star with fixed-shape JAX coordinate
+  pricing and fixed-count bisection. None wins zero-net ties; non-finite costs
+  are excluded, and zero-cost columns do not enter price ratios. Deterministic
+  pruning of the lowest-gain conflicting packages enforces joint feasibility.
+- Dispatch selected packages only at their current node, ranking with an
+  explicitly supplied resource column. Cap telescope capacity by both ledger
+  balance and remaining days. Diagnose late fund refusals from admission evidence
+  and stranded days from the final balance and recorded open opportunity.
+- Declare jaxtyping directly for the public array shape annotations.
+- Add 17 unit cases (11 functions), retire none, and expand no shared test
+  matrices. Cover five refresh streams, enumerated toy value, finishing priority,
+  impossible costs, none ties, resource conflicts, dispatch and diagnostics.
+  Set the file's program budget from measured compiles and cache loads using
+  standard headroom. No goldens or pinned hashes move.
