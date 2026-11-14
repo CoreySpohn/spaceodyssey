@@ -344,6 +344,37 @@ def verdict(result, study, criterion=None) -> Verdict:
     return Verdict(counts, mission, scorer, yield_, wrong, reason)
 
 
+def dropped_claim_counts(study):
+    """Per-world scorer counts of capacity losses satisfying each declared claim.
+
+    Dropped truth never enters the flight catalog or any decision-side input.
+    Sources constructed without retained overflow can report zero losses only.
+    """
+    claims = study.observer.criterion.claims
+    if not claims:
+        return {}
+    source = study.world_source
+    overflow = getattr(source, "overflow", None)
+    if overflow is None:
+        if np.asarray(source.dropped).any():
+            raise ValueError("dropped claim counts require retained overflow truth")
+        values = np.zeros((len(source.dropped), len(claims)), np.int64)
+    else:
+        channel = study.channel_model
+        params = jax.vmap(channel.truth_parameters)(overflow)
+        truth = _truth_claims(
+            study.observer.criterion,
+            params,
+            channel.scenes.luminosity_lsun[None, :, None],
+        )
+        values = np.asarray(
+            (overflow.present[..., None] & (truth > 0)).sum(axis=(1, 2))
+        )
+    return {
+        f"dropped_claim_{claim.name}": values[:, i] for i, claim in enumerate(claims)
+    }
+
+
 def cross_yield(result, study, criterion) -> np.ndarray:
     """Yield F64[W] of a flight's true rows counted under criterion.
 

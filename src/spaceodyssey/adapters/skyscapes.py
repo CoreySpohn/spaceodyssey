@@ -1204,6 +1204,48 @@ def star_spec_from_model(
     return _spec_of_star(star, name, bands, epoch_jd, luminosity_lsun)
 
 
+def _ordered_truth(planets, albedo, present, order, bands):
+    """Gather a host-side capacity slice, filling absent physical parameters."""
+    kept = np.take_along_axis(present, order, axis=-1)
+    leaves = {
+        name: np.where(
+            kept,
+            np.take_along_axis(planets[name], order, axis=-1),
+            _FILLER.get(name, 0.0),
+        )
+        for name in _ORBIT_FIELDS
+    }
+    taken = np.take_along_axis(albedo, order[..., None], axis=-2)
+    return PopulationTruth(
+        **{name: jnp.asarray(value, F64) for name, value in leaves.items()},
+        present=jnp.asarray(kept),
+        albedo=jnp.asarray(np.where(kept[..., None], taken, 0.0), F64),
+        bands=bands,
+    )
+
+
+def _overflow_truth(planets, bands):
+    """Retain dropped file planets in a padded [world, star, planet] tree."""
+    width = max(len(row) for world in planets for row in world)
+    shape = (len(planets), len(planets[0]), width)
+    leaves = {name: np.full(shape, _FILLER.get(name, 0.0)) for name in _ORBIT_FIELDS}
+    albedo = np.zeros((*shape, len(bands)))
+    present = np.zeros(shape, bool)
+    for w, world in enumerate(planets):
+        for s, row in enumerate(world):
+            for k, planet in enumerate(row):
+                present[w, s, k] = True
+                albedo[w, s, k] = planet["albedo"]
+                for name in _ORBIT_FIELDS:
+                    leaves[name][w, s, k] = planet[name]
+    return PopulationTruth(
+        **{name: jnp.asarray(value, F64) for name, value in leaves.items()},
+        present=jnp.asarray(present),
+        albedo=jnp.asarray(albedo, F64),
+        bands=bands,
+    )
+
+
 class ExoVistaWorldSource(AbstractWorldSource):
     """Stored ExoVista universes as a world source: one stored universe per draw.
 
@@ -1217,6 +1259,8 @@ class ExoVistaWorldSource(AbstractWorldSource):
     Attributes:
         population: The stored `PopulationTruth`, world axis first.
         dropped: ``int[n_worlds, n_subjects]`` planets past the capacity.
+        overflow: Scorer-only truth of dropped planets, padded per host. It is
+            excluded from draw/take and is never available in a decision view.
         generator: The `PopulationModel` the worlds are drawn from.
         stars: One `StarSpec` per subject.
         epoch_jd: Julian Date of the files' first epoch (the orbit epoch).
@@ -1227,6 +1271,7 @@ class ExoVistaWorldSource(AbstractWorldSource):
     generator: PopulationModel
     stars: tuple[StarSpec, ...] = eqx.field(static=True)
     epoch_jd: float = eqx.field(static=True)
+    overflow: PopulationTruth | None = None
 
     def declared_population(self):
         """The `PopulationModel` the worlds come from (`generator`)."""
@@ -1268,6 +1313,7 @@ class ExoVistaWorldSource(AbstractWorldSource):
         albedo = np.zeros((*shape, len(bands)))
         present = np.zeros(shape, bool)
         dropped = np.zeros((n_worlds, n_stars), np.int64)
+        overflow = [[[] for _ in range(n_stars)] for _ in range(n_worlds)]
         stars = [None] * n_stars
         epoch = epoch_jd
         for w in range(n_worlds):
@@ -1286,6 +1332,7 @@ class ExoVistaWorldSource(AbstractWorldSource):
                 planets.sort(key=lambda p: -p["peak"])
                 kept = planets[:n_slots]
                 dropped[w, s] = len(planets) - len(kept)
+                overflow[w][s] = planets[n_slots:]
                 for k, p in enumerate(kept):
                     present[w, s, k] = True
                     albedo[w, s, k] = p["albedo"]
@@ -1299,6 +1346,7 @@ class ExoVistaWorldSource(AbstractWorldSource):
         )
         return cls(
             population=population,
+            overflow=_overflow_truth(overflow, bands),
             dropped=jnp.asarray(dropped),
             generator=generator,
             stars=tuple(stars),
@@ -1394,22 +1442,14 @@ class ExoVistaWorldSource(AbstractWorldSource):
             planets = {k: np.pad(v, pad) for k, v in planets.items()}
             albedo = np.pad(albedo, [*pad, (0, 0)])
         order = np.argsort(np.where(present, -peak, np.inf), axis=-1, kind="stable")
-        order = order[..., :n_slots]
-        kept = np.take_along_axis(present, order, axis=-1)
-        leaves = {}
-        for name in _ORBIT_FIELDS:
-            taken = np.take_along_axis(planets[name], order, axis=-1)
-            leaves[name] = np.where(kept, taken, _FILLER.get(name, 0.0))
-        taken = np.take_along_axis(albedo, order[..., None], axis=-2)
-        population_truth = PopulationTruth(
-            **{k: jnp.asarray(v, F64) for k, v in leaves.items()},
-            present=jnp.asarray(kept),
-            albedo=jnp.asarray(np.where(kept[..., None], taken, 0.0), F64),
-            bands=bands,
+        population_truth = _ordered_truth(
+            planets, albedo, present, order[..., :n_slots], bands
         )
+        overflow = _ordered_truth(planets, albedo, present, order[..., n_slots:], bands)
         return cls(
             population=population_truth,
-            dropped=jnp.asarray(present.sum(-1) - kept.sum(-1)),
+            overflow=overflow,
+            dropped=overflow.present.sum(-1),
             generator=generator,
             stars=tuple(stars),
             epoch_jd=float(epoch_jd),

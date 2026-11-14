@@ -15,6 +15,7 @@ from hypothesis.strategies import permutations
 from spaceodyssey.adapters.measurement import MeasurementRow, measurement_template
 from spaceodyssey.adapters.modes import ModeTable
 from spaceodyssey.adapters.parameters import catalog_template, scale_au2
+from spaceodyssey.adapters.skyscapes import ExoVistaWorldSource
 from spaceodyssey.core.carry import empty_trace, init_carry
 from spaceodyssey.core.enums import (
     I64,
@@ -40,6 +41,7 @@ from spaceodyssey.studies.scoring import (
     row_log,
     verdict,
 )
+from tests.adapters.test_truth_albedo import hand_population
 from tests.criteria.test_criterion_contract import _SumCriterion, _TwoLeafCriterion
 
 from .bracket_helpers import (
@@ -818,3 +820,78 @@ def test_unsupported_includes_true_scale_in_the_detection_band(scored_case):
         np.testing.assert_array_equal(
             changed.carry.belief.status, result.carry.belief.status
         )
+
+
+@pytest.mark.medium(
+    reason="loads physical catalog fixtures and reports two capped worlds"
+)
+def test_activity_reports_dropped_planets_per_declared_claim(
+    source_case, base_study, tmp_path
+):
+    """Fails if capacity losses satisfying a declared claim disappear from CSVs."""
+    result, study = source_case
+    population = hand_population(
+        n_planets=8,
+        stars=study.world_source.stars,
+        radii_rearth=[8.0, 7.0, 6.0, 5.0, 4.0, 2.0, 3.0, 1.0],
+        a_AU=np.sqrt(np.asarray([s.luminosity_lsun for s in study.world_source.stars]))[
+            :, None
+        ]
+        * np.asarray([0.1] * 6 + [1.0, 1.0]),
+        type_index=[0] * 8,
+    )
+    population = jax.tree.map(lambda x: jnp.repeat(x, 2, axis=0), population)
+    population = dataclasses.replace(
+        population, radius_Rearth=population.radius_Rearth.at[1, :, -1].set(3.0)
+    )
+    source = ExoVistaWorldSource.from_population(
+        population,
+        study.world_source.stars,
+        n_slots=N_SLOTS,
+        bands=study.channel_model.bands,
+        generator=study.world_source.generator,
+        epoch_jd=study.world_source.epoch_jd,
+    )
+    criterion = dataclasses.replace(
+        CRITERION, claims=(SmallRadiusClaim(), EarthCandidateClaim())
+    )
+    study = dataclasses.replace(
+        study,
+        world_source=source,
+        observer=dataclasses.replace(study.observer, criterion=criterion),
+    )
+    payload = result.carry.log.payload
+    for w in range(2):
+        truth = source.take(w)
+        for star in range(study.caps.n_subjects):
+            encoded = study.channel_model._catalog_row(truth, star, 0, None, None)
+            payload = payload.at[w, star, : encoded.size].set(encoded)
+    result = SimpleNamespace(
+        carry=dataclasses.replace(
+            result.carry, log=dataclasses.replace(result.carry.log, payload=payload)
+        ),
+        trace=result.trace,
+    )
+    table = br.activity_table(result, study)
+    np.testing.assert_array_equal(table.world["dropped_claim_small"], [2, 0])
+    np.testing.assert_array_equal(table.world["dropped_claim_earth_candidate"], [2, 0])
+    np.testing.assert_array_equal(table.star["dropped"], 2)
+    table.to_csv(tmp_path, "capped")
+    exported = np.genfromtxt(tmp_path / "capped_world.csv", delimiter=",", names=True)
+    for name in ("dropped_claim_small", "dropped_claim_earth_candidate"):
+        np.testing.assert_array_equal(exported[name], table.world[name])
+    legacy = dataclasses.replace(
+        study, world_source=dataclasses.replace(source, overflow=None)
+    )
+    with pytest.raises(ValueError, match="retained overflow truth"):
+        br.activity_table(result, legacy)
+    zero_drops = dataclasses.replace(
+        legacy,
+        world_source=dataclasses.replace(
+            legacy.world_source, dropped=jnp.zeros_like(source.dropped)
+        ),
+    )
+    assert not br.activity_table(result, zero_drops).world["dropped_claim_small"].any()
+    assert source.take(0).present.shape[-1] == N_SLOTS
+    stored = base_study.world_source
+    np.testing.assert_array_equal(stored.overflow.present.sum(-1), stored.dropped)

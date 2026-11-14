@@ -110,7 +110,12 @@ from spaceodyssey.criteria.base import AbstractCriterion
 from spaceodyssey.criteria.claims import EarthCandidateClaim
 from spaceodyssey.criteria.transition import TransitionSettings, TransitionTable
 from spaceodyssey.studies import builder, effect_rows
-from spaceodyssey.studies.scoring import CriterionObjective, row_log, verdict
+from spaceodyssey.studies.scoring import (
+    CriterionObjective,
+    dropped_claim_counts,
+    row_log,
+    verdict,
+)
 from spaceodyssey.studies.selection import act, capacity_of, select, trace_scalars
 
 # Candidates need repeated detections, a supported fit and a tight sky position.
@@ -1068,7 +1073,8 @@ class ActivityTable:
     """Per-star activity [W, n] and per-world accounting [W].
 
     Star leaves are n_visits, t_imaging and t_spectrograph (days), dropped and
-    no_funds. World leaves are charged (days) and low_ess (degraded slots).
+    no_funds. World leaves include charged (days), low_ess (degraded slots),
+    and dropped_claim_<name> counts for every declared claim.
     """
 
     star: dict
@@ -1184,6 +1190,7 @@ def activity_table(result, study) -> ActivityTable:
         "early_overspend": np.zeros(n_worlds, np.int64),
         "stranded_d": np.zeros(n_worlds, np.float64),
     }
+    world.update(dropped_claim_counts(study))
     for w, n in enumerate(price_lengths):
         world["early_overspend"][w], world["stranded_d"][w] = trace_scalars(
             jnp.asarray(price_rows[w, :n]),

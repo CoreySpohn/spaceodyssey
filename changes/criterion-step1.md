@@ -787,3 +787,13 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   log photometric scale in the declared detection band lies outside the belief
   population's bounds. The scale uses the named radius/albedo conversion.
   This attribution is scorer-only and does not alter any decision-side status.
+
+### Claim-specific losses at the truth capacity
+
+- World sources retain dropped planets' physical parameters in a separate
+  scorer-only overflow tree. The slot cap, brightest-first fill, flight catalogs
+  and drawn worlds keep their existing rules.
+- Activity/outcome world tables and their CSVs include `dropped_claim_<name>`
+  for every declared claim: the number of planets beyond the cap satisfying
+  that predicate. Counts use the source's checked world order. A source with
+  drops but no retained overflow truth cannot report claim losses silently.
