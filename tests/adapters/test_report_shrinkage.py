@@ -4,6 +4,8 @@ Each test names the property or number it protects. The first tier runs at a sma
 draw count: the tests check structure (independence, sharing, codes), not accuracy.
 """
 
+import dataclasses
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -15,11 +17,11 @@ pytest.importorskip("photomancy.orbit.refit", reason="needs the report refit")
 
 from spaceodyssey.adapters import photomancy as ph
 from spaceodyssey.core.enums import RefitStatus
+from spaceodyssey.core.records import pack, unpack
 from spaceodyssey.studies import bracket as br
 from tests.adapters.posterior_helpers import realize_visits, visit_request
-from tests.adapters.test_report_posterior_refit import COLUMNS, _thin
+from tests.adapters.test_report_posterior_refit import TEMPLATE, _thin
 from tests.studies.bracket_helpers import (
-    N_SLOTS,
     N_STEPS,
     N_WORLDS,
     build,
@@ -189,30 +191,35 @@ def test_the_detected_slots_are_the_summary_of_the_shrinkage_cloud(world):
 
 def _least_detected(visits):
     """The detected slot of `visits` with the fewest detections."""
-    flags = [COLUMNS.index(f"detected_{s}") for s in range(N_SLOTS)]
-    n_det = np.array([sum(row[f] > 0.5 for row, _ in visits) for f in flags])
+    n_det = sum(np.asarray(unpack(TEMPLATE, row).detected) > 0.5 for row, _ in visits)
     return int(np.argmin(np.where(n_det > 0, n_det, np.iinfo(np.int64).max)))
 
 
 def _first_only(visits, slot):
     """`visits` with only the first detection of `slot` kept; later ones read null."""
-    flag = COLUMNS.index(f"detected_{slot}")
-    count = COLUMNS.index(f"counts_{slot}")
     kept = False
     out = []
     for row, end in visits:
-        row = row.copy()
-        if row[flag] > 0.5 and kept:
-            row[flag] = 0.0
-            row[count] = 0.0
-        kept |= row[flag] > 0.5
-        out.append((row, end))
+        measured = unpack(TEMPLATE, row)
+        if measured.detected[slot] > 0.5 and kept:
+            measured = dataclasses.replace(
+                measured,
+                detected=measured.detected.at[slot].set(0.0),
+                counts=measured.counts.at[slot].set(0.0),
+            )
+        kept |= bool(measured.detected[slot] > 0.5)
+        out.append((np.asarray(pack(measured)), end))
     return out
 
 
 def _flags(request, slot):
     """Which rows of star 1's entry detect `slot` (the visits fill the first rows)."""
-    return np.asarray(request.rows.payload)[0, 0, 1, :, slot] > 0.5
+    detected = (
+        np.asarray(unpack(TEMPLATE, request.rows.payload).detected)[0, 0, 1, :, slot]
+        > 0.5
+    )
+    is_measurement = np.asarray(request.rows.kind)[0, 0, 1] == br.KIND_MEASUREMENT
+    return detected & is_measurement & np.asarray(request.rows.valid)[0, 0, 1]
 
 
 def test_an_undetected_slot_takes_the_posterior_first_tier(world):

@@ -4,6 +4,8 @@ Each test names the property or number it protects. The photomancy report refit 
 optional here: the file skips where the installed photomancy lacks it.
 """
 
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -30,6 +32,7 @@ from spaceodyssey.adapters.photomancy import (
     slot_status,
 )
 from spaceodyssey.core.enums import RefitStatus
+from spaceodyssey.core.records import pack
 from tests.studies.bracket_helpers import fixture_channel, fixture_source
 
 STAR, MODE, PROBE_NODE = 0, 1, 80
@@ -49,7 +52,6 @@ def _probe_rows(channel, sep_arcsec, days=(100.0, 140.0)):
     """
     built = channel.assets()
     report, law = built.reports[channel.imaging_band_index], built.law
-    n = channel.n_slots
     prepared = channel._prepared(STAR, channel.imaging_band_index, nominal=True)
     a_au = sep_arcsec * prepared.dist_pc
     planet = jx.nominal_planet(
@@ -63,7 +65,6 @@ def _probe_rows(channel, sep_arcsec, days=(100.0, 140.0)):
         Ag=0.3,
     )
     planet["Mp"] = jnp.zeros(())
-    names = jx.visit_columns(n)
     rows, intervals, limits = [], [], []
     for i, day in enumerate(days):
         duration = channel.mode_table.duration_s(MODE)
@@ -72,18 +73,28 @@ def _probe_rows(channel, sep_arcsec, days=(100.0, 140.0)):
         )
         reference = report.budget(prepared, jx.planet_free(planet), interval)
         limit = float(law.limit_counts(reference))
-        row = np.zeros(len(names))
-        row[names.index("detected_0")] = float(i == 1)
-        row[names.index("time_d")] = float(interval.midpoint_jd)
-        row[names.index("science_s")] = duration
-        row[names.index("occupied_s")] = duration
-        row[names.index("valid_science")] = 1.0
-        row[names.index("limit_counts_0")] = limit
+        row = jax.tree.map(
+            lambda t: jnp.zeros(t.shape, t.dtype), channel.measurement_template
+        )
+        row = dataclasses.replace(
+            row,
+            detected=row.detected.at[0].set(float(i == 1)),
+            time_d=interval.midpoint_jd,
+            science_s=jnp.asarray(duration),
+            occupied_s=jnp.asarray(duration),
+            valid_science=jnp.asarray(1.0),
+            limit_counts=row.limit_counts.at[0].set(limit),
+        )
         if i == 1:
-            row[names.index("counts_0")] = (law.threshold + 1.0) * limit
-            for c in ("ra_err_0", "dec_err_0"):
-                row[names.index(c)] = 1e-3
-        rows.append(row)
+            row = dataclasses.replace(
+                row,
+                counts=row.counts.at[0, channel.imaging_band_index].set(
+                    (law.threshold + 1.0) * limit
+                ),
+                ra_err=row.ra_err.at[0].set(1e-3),
+                dec_err=row.dec_err.at[0].set(1e-3),
+            )
+        rows.append(pack(row))
         intervals.append(interval)
         limits.append(limit)
     return np.stack(rows), intervals, planet, limits
@@ -184,7 +195,6 @@ def _agreement(channel, el_phot, mode, days, detected):
     )
     built = channel.assets()
     report, law_ = built.reports[channel.imaging_band_index], built.law
-    names = jx.visit_columns(channel.n_slots)
     rows, intervals = [], []
     for day, seen in zip(days, detected, strict=True):
         duration = channel.mode_table.duration_s(mode)
@@ -193,20 +203,30 @@ def _agreement(channel, el_phot, mode, days, detected):
         )
         expected = report.budget(prepared, planet, interval)
         free = report.budget(prepared, jx.planet_free(planet), interval)
-        row = np.zeros(len(names))
-        row[names.index("detected_0")] = float(seen)
-        row[names.index("time_d")] = float(interval.midpoint_jd)
-        row[names.index("science_s")] = duration
-        row[names.index("occupied_s")] = duration
-        row[names.index("valid_science")] = 1.0
-        row[names.index("limit_counts_0")] = float(law_.limit_counts(free))
+        row = jax.tree.map(
+            lambda t: jnp.zeros(t.shape, t.dtype), channel.measurement_template
+        )
+        row = dataclasses.replace(
+            row,
+            detected=row.detected.at[0].set(float(seen)),
+            time_d=interval.midpoint_jd,
+            science_s=jnp.asarray(duration),
+            occupied_s=jnp.asarray(duration),
+            valid_science=jnp.asarray(1.0),
+            limit_counts=row.limit_counts.at[0].set(law_.limit_counts(free)),
+        )
         if seen:
-            row[names.index("counts_0")] = float(expected.planet)
-            row[names.index("ra_0")] = float(expected.ra_arcsec)
-            row[names.index("dec_0")] = float(expected.dec_arcsec)
-            for c in ("ra_err_0", "dec_err_0"):
-                row[names.index(c)] = 1e-3
-        rows.append(row)
+            row = dataclasses.replace(
+                row,
+                counts=row.counts.at[0, channel.imaging_band_index].set(
+                    expected.planet
+                ),
+                ra=row.ra.at[0].set(expected.ra_arcsec),
+                dec=row.dec.at[0].set(expected.dec_arcsec),
+                ra_err=row.ra_err.at[0].set(1e-3),
+                dec_err=row.dec_err.at[0].set(1e-3),
+            )
+        rows.append(pack(row))
         intervals.append(interval)
     rows = np.stack(rows)
     data = photomancy_report(channel, STAR, rows, 0)

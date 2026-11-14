@@ -290,3 +290,35 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
 - Regenerate program budgets from measured runs with standard headroom, preserving
   larger existing allowances where only part of a slow file was measured. No golden
   or pinned hash changes.
+
+## One named measurement row (breaking)
+
+- Replace positional visit reports and block outcomes with `MeasurementRow` and
+  the `measurement` record kind. Its template defines scalar exposure metadata,
+  detection leaves and counts/variance on detection and band axes. Every writer
+  constructs named leaves and packs them through the shared codec.
+- Imaging exposes only detected counts in its band, with measured variance from
+  the reported limit and counts. Scorer-only true counts and variance use the
+  generating budget under the same detection mask. Spectrographs expose
+  uncensored noisy counts and observable variance in their band, alongside
+  scorer-only generating counts and model variance. Unexposed bands are zero.
+- Declare `association="truth"` on observing channels: assignment and private
+  identity follow the slot axis; other association settings fail explicitly.
+  The bracket registry is none, product, measurement, catalog. Summaries read
+  imaging measurements only, and posterior permissions check their required
+  named measured columns without requiring scorer-only truth grants.
+- Add five row-contract tests and move the null-row firewall test to the new
+  module (six functions there, net five added). The firewall compares the same
+  slot under absent and present-undetected controls after audience masking.
+  Strengthen the existing refit permission regression to require a computed
+  fit with ordinary measured grants. Migrate dependent test rows and helpers to
+  named leaves and audience masking. No shared parameter matrix expands and no
+  golden or pinned hash changes.
+- Keep cached and freshly fitted summaries at the cloud's stored precision.
+  Reject non-finite summary leaves from both cache admission and fitted output;
+  unsupported or failed slots keep their status and emit finite placeholders.
+- Center the detection-frequency control on the reporting threshold instead of
+  depending on a fixture planet landing near it. Increase the giant-planet
+  control's proposal pool to retain its ESS guard. Check refusal totals against
+  the actual trace and a controlled two-refusal trace rather than assuming that
+  an affordable-mode policy must request an unaffordable observation.

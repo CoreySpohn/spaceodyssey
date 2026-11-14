@@ -41,6 +41,10 @@ from photomancy.orbit.ofti import PARAM_NAMES, ofti
 from photomancy.orbit.priors import ecc_distribution
 from photomancy.orbit.updater import UpdaterStatus
 
+from spaceodyssey.adapters.measurement import (
+    MEASUREMENT_KIND_NAME,
+    measurement_template,
+)
 from spaceodyssey.adapters.parameters import (
     CATALOG_GROUPS,
     CATALOG_KIND_NAME,
@@ -55,8 +59,8 @@ from spaceodyssey.adapters.parameters import (
 from spaceodyssey.adapters.skyscapes import StarSpec
 from spaceodyssey.codec.bindings import BindingKind, Bindings
 from spaceodyssey.core.capacities import require_x64
-from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience, RefitStatus
-from spaceodyssey.core.records import PayloadColumn, RecordKind, unpack
+from spaceodyssey.core.enums import F64, I64, Audience, RefitStatus
+from spaceodyssey.core.records import column_names, unpack
 from spaceodyssey.core.refresh import (
     AbstractRefitBoundary,
     HostLoopRefit,
@@ -419,17 +423,6 @@ _ALBEDO_TAG = 0xA1BED0
 _EXPECTED_TAG = 0xC017
 _RESAMPLE_TAG = 0x5A4D
 
-REPORT_KIND_NAME = "visit_report"
-BLOCK_KIND_NAME = "block_outcome"
-
-
-def report_kind(n_slots, audience=EVERYONE, *, name=REPORT_KIND_NAME):
-    """The visit-report record kind: one detected flag per slot."""
-    return RecordKind(
-        name,
-        tuple(PayloadColumn(f"detected_{s}", int(audience)) for s in range(n_slots)),
-    )
-
 
 class DecisionSummary(eqx.Module):
     """What a policy decides from, per star: leaves `[n_subjects, ...]`.
@@ -562,6 +555,8 @@ def summarize(
     the predicted position is read `position_lag_d` later. Claims are predicates
     evaluated on the same weighted physical draws.
     """
+    # A fused fit must summarize the same cloud precision that a later refit reads.
+    elements, log_w = jax.lax.optimization_barrier((elements, log_w))
     tick_days = channel.tick_days if tick_days is None else tick_days
     w = _normalized(log_w)
     times = _grid_times(channel, ref_tick, tick_days, n_grid, spacing_d)
@@ -604,14 +599,14 @@ def _truth_entry(channel, entry, settings):
     """
     n_slots, cat, rep = settings.n_slots, settings.catalog, settings.report
     is_cat = entry.valid & (entry.kind == cat)
+    measured = unpack(measurement_template(n_slots, channel.n_bands), entry.payload)
+    imaging = jnp.asarray(tuple(m.kind == "imaging" for m in channel.mode_table.modes))
     is_rep = entry.valid & (entry.kind == rep)
+    is_rep &= imaging[jnp.where(is_rep, measured.mode, 0)]
     row = entry.payload[jnp.argmax(is_cat)]
     catalog = unpack(catalog_template(n_slots, channel.n_bands), row)
     present, safe = catalog.present, catalog.params
-    seen = (
-        entry.payload[:, : settings.report_cols[-1] + 1][:, list(settings.report_cols)]
-        > 0.5
-    ) & is_rep[:, None]
+    seen = (measured.detected > 0.5) & is_rep[:, None]
     n_det = seen.sum(axis=0).astype(I64)
     tick_days = channel.tick_days
     last_tick = jnp.max(jnp.where(seen, entry.end_tick[:, None], -1), axis=0)
@@ -667,7 +662,6 @@ class _Settings:
     n_slots: int
     catalog: int
     report: int
-    report_cols: tuple
     n_grid: int
     spacing_d: float
     position_lag_d: float
@@ -1562,8 +1556,7 @@ class ReportRefit(AbstractRefitBoundary):
         n_particles=1024,
         *,
         catalog_kind=CATALOG_KIND_NAME,
-        report_kind=REPORT_KIND_NAME,
-        block_kind=BLOCK_KIND_NAME,
+        report_kind=MEASUREMENT_KIND_NAME,
         n_grid=N_GRID,
         spacing_d=GRID_SPACING_D,
         position_lag_d=POSITION_LAG_D,
@@ -1621,7 +1614,6 @@ class ReportRefit(AbstractRefitBoundary):
         self.n_particles = int(n_particles)
         self.catalog_kind = str(catalog_kind)
         self.report_kind = str(report_kind)
-        self.block_kind = str(block_kind)
         self.n_grid = int(n_grid)
         self.spacing_d = float(spacing_d)
         self.position_lag_d = float(position_lag_d)
@@ -1658,7 +1650,6 @@ class ReportRefit(AbstractRefitBoundary):
             "truth_groups": list(self.truth_groups),
             "catalog_kind": self.catalog_kind,
             "report_kind": self.report_kind,
-            "block_kind": self.block_kind,
             "n_grid": self.n_grid,
             "spacing_d": self.spacing_d,
             "position_lag_d": self.position_lag_d,
@@ -1724,7 +1715,6 @@ class ReportRefit(AbstractRefitBoundary):
             n_slots=n_slots,
             catalog=names.index(self.catalog_kind),
             report=names.index(self.report_kind),
-            report_cols=tuple(range(n_slots)),
             n_grid=self.n_grid,
             spacing_d=self.spacing_d,
             position_lag_d=self.position_lag_d,
@@ -1797,12 +1787,34 @@ class ReportRefit(AbstractRefitBoundary):
     # -- The posterior kernel on the host ----------------------------------------------
 
     def _readable(self, study, channel):
-        """Per audience (observer, policy): every measurement column is readable."""
-        names = study.caps.kind_names
-        row = study.caps.payload_audience[names.index(self.report_kind)]
-        width = channel.widths()[0]
+        """Per audience: the named measured leaves needed by an imaging refit."""
+        index = study.caps.kind_names.index(self.report_kind)
+        paths = study.caps.payload_paths[index]
+        audiences = dict(zip(paths, study.caps.payload_audience[index], strict=False))
+        required_leaves = {
+            "time_d",
+            "science_s",
+            "valid_science",
+            "mode",
+            "detected",
+            "ra",
+            "dec",
+            "ra_err",
+            "dec_err",
+            "corr",
+        }
+        template = channel.measurement_template
+        required = list(
+            column_names({name: getattr(template, name) for name in required_leaves})
+        )
+        required.extend(
+            f"counts_{s}_{channel.imaging_band_index}" for s in range(channel.n_slots)
+        )
         flags = (int(Audience.OBSERVER), int(Audience.POLICY))
-        return tuple(all(int(x) & flag for x in row[:width]) for flag in flags)
+        return tuple(
+            all(int(audiences.get(path, 0)) & flag for path in required)
+            for flag in flags
+        )
 
     def _post_settings(self, study):
         """The posterior program's settings for `study`, read on its decision view.
@@ -1917,7 +1929,9 @@ class ReportRefit(AbstractRefitBoundary):
     def _store(self, digest, out, retried):
         """Keep a fit's cloud for later summaries when it is a sound one."""
         ess, raw, finite, elements = out[5:9]
-        if slot_status(raw, finite) == SLOT_OK:
+        if slot_status(raw, finite) == SLOT_OK and all(
+            np.isfinite(x).all() for x in out[:6]
+        ):
             self._keep(digest, (elements, ess, raw, bool(retried)))
 
     def _keep(self, digest, value):
@@ -1972,7 +1986,9 @@ class ReportRefit(AbstractRefitBoundary):
     def _store_first(self, digest, out, retried):
         """Keep a first-tier cloud for later summaries when it is a sound one."""
         ess, raw, finite, elements, evidence, expected = out[4:10]
-        if slot_status(raw, finite) == SLOT_OK:
+        if slot_status(raw, finite) == SLOT_OK and all(
+            np.isfinite(x).all() for x in out[:5]
+        ):
             self._keep(digest, (elements, evidence, expected, ess, raw, bool(retried)))
 
     def _refit_posterior(self, study, requests):
@@ -2007,6 +2023,11 @@ class ReportRefit(AbstractRefitBoundary):
         entries = []
         for w, a, s in np.argwhere(mine):
             use = req.rows.valid[w, a, s] & (req.rows.kind[w, a, s] == kind_index)
+            measured = unpack(channel.measurement_template, req.rows.payload[w, a, s])
+            imaging = np.asarray(
+                tuple(m.kind == "imaging" for m in channel.mode_table.modes)
+            )
+            use &= imaging[np.where(use, np.asarray(measured.mode), 0)]
             idx = np.flatnonzero(use)
             if len(idx) == 0:
                 continue
@@ -2241,6 +2262,11 @@ class ReportRefit(AbstractRefitBoundary):
             units = []
             for slot, out in item["fits"].items():
                 p_det, scatter, pos, p_claim, q, ess, raw, finite, _ = out
+                valid = bool(finite) and all(np.isfinite(x).all() for x in out[:6])
+                codes[slot] = slot_status(raw, valid)
+                units.append(codes[slot])
+                if codes[slot] in SLOT_KEPT:
+                    continue
                 slices["p_exist"][w, a, s, slot] = 1.0
                 slices["p_det"][w, a, s, slot] = p_det
                 slices["scatter"][w, a, s, slot] = scatter
@@ -2248,12 +2274,14 @@ class ReportRefit(AbstractRefitBoundary):
                 slices["p_claim"][w, a, s, slot] = p_claim
                 slices["ln_period_q"][w, a, s, slot] = q
                 slices["ess"][w, a, s, slot] = ess
-                codes[slot] = slot_status(raw, finite)
-                units.append(codes[slot])
             if item["first"] is not None:
                 p_exist, p_det, p_claim, q, ess, raw, finite, _, _, _ = item["first"]
-                code = slot_status(raw, finite)
-                for slot in e["dark"]:
+                valid = bool(finite) and all(
+                    np.isfinite(x).all() for x in item["first"][:5]
+                )
+                code = slot_status(raw, valid)
+                codes[e["dark"]] = code
+                for slot in e["dark"] if code not in SLOT_KEPT else ():
                     slices["p_exist"][w, a, s, slot] = p_exist
                     slices["p_det"][w, a, s, slot] = p_det
                     slices["p_claim"][w, a, s, slot] = p_claim
@@ -2294,7 +2322,6 @@ class ReportRefit(AbstractRefitBoundary):
 
 
 __all__ = [
-    "BLOCK_KIND_NAME",
     "COLUMN_NAMES",
     "SHRINK_DRAWS",
     "SHRINK_GROUPS",
@@ -2317,7 +2344,6 @@ __all__ = [
     "photomancy_bindings",
     "photomancy_report",
     "posterior_occupancy",
-    "report_kind",
     "search_probability_truth",
     "shrinkage_cloud",
     "shrinkage_width",

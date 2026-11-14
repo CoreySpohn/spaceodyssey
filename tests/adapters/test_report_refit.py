@@ -14,7 +14,7 @@ import pytest
 
 pytest.importorskip("photomancy")
 
-from spaceodyssey.adapters.jaxedith import block_outcome_kind
+from spaceodyssey.adapters.measurement import measurement_kind, measurement_template
 from spaceodyssey.adapters.modes import ModeTable, profile_modes
 from spaceodyssey.adapters.parameters import (
     CATALOG_GROUPS,
@@ -25,7 +25,6 @@ from spaceodyssey.adapters.parameters import (
 from spaceodyssey.adapters.photomancy import (
     DecisionSummary,
     ReportRefit,
-    report_kind,
     search_probability_truth,
 )
 from spaceodyssey.adapters.physical_profile import JATIS_EAC1_V1
@@ -37,6 +36,7 @@ from spaceodyssey.core.records import (
     RecordKind,
     pack,
     record_none,
+    unpack,
 )
 from spaceodyssey.core.refresh import RefitRequest
 from spaceodyssey.criteria.claims import EarthCandidateClaim
@@ -84,8 +84,7 @@ def make_study(open_groups=("existence", "ephemeris", "class")):
     registry = KindRegistry(
         [
             catalog_kind(SLOTS, N_BANDS, audiences),
-            report_kind(SLOTS, EVERYONE),
-            block_outcome_kind(SLOTS),
+            measurement_kind(SLOTS, N_BANDS, EVERYONE),
         ]
     )
     prior = DecisionSummary.zeros(N_SUBJECTS, SLOTS, GRID, MODES, n_an=4, n_claims=1)
@@ -133,13 +132,19 @@ def make_request(study, n_worlds, seed=0, source_shared=False):
             cat = catalog_payload(rng, [1, 1 - (s % 2)], [1, s % 2])
             seen = rng.integers(0, 2, (3, SLOTS)).astype(float)
             for a in range(2):
-                payload[w, a, s, 0] = cat
+                payload[w, a, s, 0, : len(cat)] = cat
                 valid[w, a, s, 0] = True
                 kind[w, a, s, 0] = kinds.index("truth_catalog")
                 for j in range(3):
-                    payload[w, a, s, 1 + j, :SLOTS] = seen[j]
+                    row = jax.tree.map(
+                        lambda t: jnp.zeros(t.shape, t.dtype),
+                        measurement_template(SLOTS, N_BANDS),
+                    )
+                    row = eqx.tree_at(lambda r: r.detected, row, jnp.asarray(seen[j]))
+                    flat = pack(row)
+                    payload[w, a, s, 1 + j, : len(flat)] = flat
                     valid[w, a, s, 1 + j] = True
-                    kind[w, a, s, 1 + j] = kinds.index("visit_report")
+                    kind[w, a, s, 1 + j] = kinds.index("measurement")
                     end[w, a, s, 1 + j] = 10 * (j + 1)
     own = np.arange(2 * N_SUBJECTS).reshape(2, N_SUBJECTS)
     source = np.broadcast_to(own, (n_worlds, 2, N_SUBJECTS)).copy()
@@ -210,14 +215,29 @@ def test_a_shared_entry_copies_the_computing_entry():
 
 
 def test_the_truth_summary_reads_the_catalog_and_the_reports():
-    """The leaves are the true orbit's: detections counted, absent slots empty."""
+    """Fails if truth summaries count spectral rows or fill an absent slot."""
     study = make_study()
     request = make_request(study, 1)
+    template = measurement_template(SLOTS, N_BANDS)
+    spectral = jax.tree.map(lambda t: jnp.zeros(t.shape, t.dtype), template)
+    spectral = eqx.tree_at(
+        lambda r: (r.mode, r.detected),
+        spectral,
+        (jnp.asarray(1), jnp.ones(SLOTS)),
+    )
+    flat = pack(spectral)
+    request.rows.payload[..., 4, : len(flat)] = flat
+    request.rows.kind[..., 4] = study.caps.kind_names.index("measurement")
+    request.rows.valid[..., 4] = True
+    request.n_rows[...] = 5
     out = ReportRefit().refit_batch(study, request)
     names = study.observer.subject_leaves
     leaf = dict(zip(names, out.slices, strict=True))
-    reports = np.asarray(request.rows.payload)[0, 0, :, 1:4, :SLOTS]
+    reports = np.asarray(
+        unpack(measurement_template(SLOTS, N_BANDS), request.rows.payload).detected
+    )[0, 0, :, 1:4]
     assert np.array_equal(leaf["n_det"][0, 0], reports.sum(axis=1).astype(int))
+    np.testing.assert_array_equal(leaf["n_obs"], 3)
     # subject 1 has its second slot absent: nothing of it reaches the summary
     assert leaf["ess"][0, 0, 1, 1] == 0.0
     assert leaf["p_claim"][0, 0, 1, 1] == 0.0
@@ -263,7 +283,10 @@ def test_construction_checks_the_configured_catalog(
     standard catalog is also registered with different permissions.
     """
     alternate = catalog_kind(1, N_BANDS, alternate_groups)
-    kinds = [RecordKind("alternate_catalog", alternate.columns), report_kind(1)]
+    kinds = [
+        RecordKind("alternate_catalog", alternate.columns),
+        measurement_kind(1, N_BANDS),
+    ]
     if standard_groups is not None:
         kinds.insert(0, catalog_kind(1, N_BANDS, standard_groups))
     caps = KindRegistry(kinds).lower()
@@ -308,8 +331,7 @@ def test_a_wider_registered_kind_does_not_add_phantom_slots():
     registry = KindRegistry(
         [
             catalog_kind(1, N_BANDS, audiences),
-            report_kind(1),
-            block_outcome_kind(1),
+            measurement_kind(1, N_BANDS),
             wide,
         ]
     )

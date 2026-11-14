@@ -17,13 +17,15 @@ pytest.importorskip("photomancy.orbit.refit", reason="needs the report refit")
 
 from photomancy.orbit.updater import UpdaterStatus
 
-from spaceodyssey.adapters import jaxedith as jx
 from spaceodyssey.adapters import photomancy as ph
+from spaceodyssey.adapters.measurement import measurement_template
 from spaceodyssey.adapters.parameters import to_photomancy
 from spaceodyssey.core.enums import RefitStatus
+from spaceodyssey.core.records import pack, unpack
 from spaceodyssey.studies import bracket as br
 from tests.adapters.posterior_helpers import realize_visits, visit_request
 from tests.studies.bracket_helpers import (
+    FIXTURE_BANDS,
     N_SLOTS,
     build,
     fixture_source,
@@ -44,24 +46,27 @@ SMALL = dict(
     n_first=256,
 )
 TICK = 250 * 86_400_000
-COLUMNS = jx.visit_columns(N_SLOTS)
+TEMPLATE = measurement_template(N_SLOTS, len(FIXTURE_BANDS))
 
 
 def _thin(visits):
     """Keep only the first detection of the visits; every other row reads as a null."""
-    flags = [COLUMNS.index(f"detected_{s}") for s in range(N_SLOTS)]
-    counts = [COLUMNS.index(f"counts_{s}") for s in range(N_SLOTS)]
     kept = False
     out = []
     for row, end in visits:
-        row = row.copy()
-        for flag, count in zip(flags, counts, strict=True):
-            if row[flag] > 0.5 and not kept:
+        measured = unpack(TEMPLATE, row)
+        detected = np.asarray(measured.detected).copy()
+        counts = np.asarray(measured.counts).copy()
+        for slot in range(N_SLOTS):
+            if detected[slot] > 0.5 and not kept:
                 kept = True
             else:
-                row[flag] = 0.0
-                row[count] = 0.0
-        out.append((row, end))
+                detected[slot] = 0.0
+                counts[slot] = 0.0
+        measured = dataclasses.replace(
+            measured, detected=jnp.asarray(detected), counts=jnp.asarray(counts)
+        )
+        out.append((np.asarray(pack(measured)), end))
     return out
 
 
@@ -86,7 +91,19 @@ def world():
         channel.mode_table.channel("detection", 1),
         [30.0 * i for i in range(1, 5)],
     )
-    star1 = [(np.where(np.arange(len(r)) < N_SLOTS, 0.0, r), e) for r, e in star1]
+    star1 = [
+        (
+            np.asarray(
+                pack(
+                    dataclasses.replace(
+                        unpack(TEMPLATE, r), detected=jnp.zeros(N_SLOTS)
+                    )
+                )
+            ),
+            e,
+        )
+        for r, e in star1
+    ]
     return study, channel, star0, star1
 
 
@@ -180,13 +197,24 @@ def test_an_entry_does_not_depend_on_its_lane_neighbors(world):
 
 
 def test_an_audience_that_cannot_read_the_columns_installs_nothing(world):
-    """A policy blind to the measurements gets NO_SUPPORT and all-zero slices."""
+    """Fails if measured grants cannot refit, or a blind policy installs a fit."""
     _, study, *_ = build(run=False, arm="prior_planned", **SMALL)
     channel, star0 = world[1], world[2]
     boundary = _boundary(study, 2)
+    kind = study.caps.kind_names.index("measurement")
+    for path, audience in zip(
+        study.caps.payload_paths[kind], study.caps.payload_audience[kind], strict=False
+    ):
+        if path.startswith(("identity", "true_")):
+            assert audience == int(ph.Audience.SCORER)
     assert list(boundary._readable(study, channel)) == [True, False]
-    request = visit_request(study, {0: star0}, tick=TICK, mask_policy=True)
+    spectral = dataclasses.replace(unpack(TEMPLATE, star0[0][0]), mode=jnp.asarray(1))
+    mixed = [*star0, (np.asarray(pack(spectral)), star0[-1][1])]
+    request = visit_request(study, {0: mixed}, tick=TICK, mask_policy=True)
     result = boundary.refit_batch(study, request)
+    assert bool(result.computed[0, 0, 0])
+    assert int(_slices(study, result, 0, 0)["n_obs"]) == len(star0)
+    assert int(result.status[0, 0, 0]) != int(RefitStatus.NO_SUPPORT)
     assert int(result.status[0, 1, 0]) == int(RefitStatus.NO_SUPPORT)
     assert int(result.status[0, 0, 0]) in (
         int(RefitStatus.OK),
@@ -284,7 +312,7 @@ def test_a_bright_planet_fits_when_the_scale_prior_holds_the_population(world):
     assert lo < giant < hi
     request = visit_request(study, seen, tick=TICK)
     wide = dataclasses.replace(study, belief_population=population)
-    boundary = _boundary(study, 1, ess_floor=1.0, resummary=True)
+    boundary = _boundary(study, 1, ess_floor=1.0, resummary=True, n_round=2**14)
     got = boundary.refit_batch(wide, request)
     wide_keys = set(boundary._clouds)
     slot = _slices(study, got, 0, 1)
@@ -322,15 +350,17 @@ def test_a_bright_planet_fits_when_the_scale_prior_holds_the_population(world):
 def _null_lane(channel, st, star, n_rows, key=(1, 2)):
     """A first-tier lane of `star` read through `n_rows` null reports."""
     width = channel.widths()[0]
-    columns = jx.visit_columns(N_SLOTS)
     mode = channel.mode_table.channel("detection", 1)
-    rows = np.zeros((n_rows, width))
-    for i in range(n_rows):
-        duration = channel.mode_table.duration_s(mode)
-        rows[i, columns.index("time_d")] = channel.epoch_jd + 30.0 * (i + 1)
-        rows[i, columns.index("science_s")] = duration
-        rows[i, columns.index("occupied_s")] = duration
-        rows[i, columns.index("valid_science")] = 1.0
+    measured = unpack(channel.measurement_template, np.zeros((n_rows, width)))
+    duration = channel.mode_table.duration_s(mode)
+    measured = dataclasses.replace(
+        measured,
+        time_d=channel.epoch_jd + 30.0 * jnp.arange(1, n_rows + 1),
+        science_s=jnp.full(n_rows, duration),
+        occupied_s=jnp.full(n_rows, duration),
+        valid_science=jnp.ones(n_rows),
+    )
+    rows = jax.vmap(pack)(measured)
     entry = ph._RowLane(
         payload=jnp.asarray(rows), use=jnp.ones(n_rows, bool), subject=jnp.asarray(star)
     )

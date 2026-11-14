@@ -1,6 +1,6 @@
 """Shared pieces of the posterior-kernel tests: visit rows realized from the fixture.
 
-A request holds the realized `visit_report` rows of chosen stars, entered for both
+A request holds the realized `measurement` rows of chosen stars, entered for both
 audiences, so a test runs the posterior boundary on rows a study would hold.
 """
 
@@ -8,6 +8,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from spaceodyssey.adapters.measurement import MEASUREMENT_KIND_NAME
+from spaceodyssey.core.enums import Audience
 from spaceodyssey.core.kinds import RealizeContext
 from spaceodyssey.core.records import record_none
 from spaceodyssey.core.refresh import RefitRequest
@@ -45,7 +47,7 @@ def visit_request(study, visits, *, tick, seed=0, mask_policy=False):
     """
     caps = study.caps
     n_subjects = caps.n_subjects
-    kind = caps.kind_names.index("visit_report")
+    kind = caps.kind_names.index(MEASUREMENT_KIND_NAME)
     base = jax.tree_util.tree_map(np.asarray, record_none(caps))
     shape = (1, 2, n_subjects, caps.rows_per_subject)
     rows = jax.tree_util.tree_map(
@@ -54,8 +56,12 @@ def visit_request(study, visits, *, tick, seed=0, mask_policy=False):
     for star, seen in visits.items():
         for j, (row, end) in enumerate(seen):
             for a in range(2):
+                audience = (Audience.OBSERVER, Audience.POLICY)[a]
+                visible = np.asarray(caps.payload_audience[kind][: len(row)]) & int(
+                    audience
+                )
                 rows.payload[0, a, star, j, : len(row)] = (
-                    0.0 if (mask_policy and a == 1) else row
+                    0.0 if (mask_policy and a == 1) else np.where(visible, row, 0.0)
                 )
                 rows.valid[0, a, star, j] = True
                 rows.kind[0, a, star, j] = kind

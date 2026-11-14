@@ -9,8 +9,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from spaceodyssey.adapters.jaxedith import column_index, visit_columns
+from spaceodyssey.adapters.jaxedith import planet_free
 from spaceodyssey.core.kinds import RealizeContext
+from spaceodyssey.core.records import unpack
 from tests.studies.bracket_helpers import (
     N_SLOTS,
     fixture_channel,
@@ -57,11 +58,13 @@ def test_absent_slot_never_detects(source, channel):
     rows = jax.vmap(
         lambda k: channel.realize(truth, 0, mode, 1.0, k, None, None, context=context)
     )(keys)
-    names = visit_columns(N_SLOTS)
     absent = [s for s in range(N_SLOTS) if not bool(truth.present[0, s])]
     assert absent, "the first star fills every slot"
     for slot in absent:
-        assert float(rows[:, column_index(names, f"detected_{slot}")].max()) == 0.0
+        assert (
+            float(unpack(channel.measurement_template, rows).detected[:, slot].max())
+            == 0.0
+        )
 
 
 def test_a_star_row_ignores_the_other_stars_truth(source, channel):
@@ -82,36 +85,37 @@ def test_a_star_row_ignores_the_other_stars_truth(source, channel):
 
 
 def test_realized_detection_matches_the_stated_probability(source, channel):
-    """Detection frequency over 2000 keys is within 3 standard errors of the model."""
+    """Fails if a threshold-centered control detects at the wrong frequency.
+
+    N = 2000 draws resolves a probability error of 0.045 at four sigma near 0.5.
+    """
     mode = channel.mode_table.channel("detection", DETECT_DURATION)
     context = _context(channel, 100.0, channel.mode_table.duration_s(mode))
     interval = channel._interval(context, settle=True)[0]
     time_d = float(interval.midpoint_jd) - float(source.epoch_jd)
-    names = visit_columns(N_SLOTS)
-    checked = 0
-    for world in range(2):
-        truth = _truth(source, world)
-        for star in range(len(source.stars)):
-            params = channel.truth_parameters(truth)
-            for slot in range(N_SLOTS):
-                if not bool(truth.present[star, slot]):
-                    continue
-                elements = jax.tree.map(
-                    lambda x, star=star, slot=slot: x[star, slot][None], params
-                )
-                p = float(channel.detect_probability(star, mode, time_d, elements)[0])
-                if not 0.02 < p < 0.98:
-                    continue
-                keys = jax.random.split(jax.random.key(11 + checked), 2000)
-                rows = jax.vmap(
-                    lambda k, t=truth, s=star: channel.realize(
-                        t, s, mode, 1.0, k, None, None, context=context
-                    )
-                )(keys)
-                got = float(rows[:, column_index(names, f"detected_{slot}")].mean())
-                sigma = np.sqrt(p * (1 - p) / 2000)
-                assert abs(got - p) < 3 * sigma + 1e-3
-                checked += 1
-                if checked == 3:
-                    return
-    assert checked > 0, "no slot had a detection probability inside (0.02, 0.98)"
+    truth = _truth(source, 0)
+    band = channel.imaging_band_index
+    report, law = channel.assets().reports[band], channel.assets().law
+    prepared = channel._prepared(0, band, nominal=False)
+    planets = channel._slot_planets(
+        truth, 0, truth.band_index(channel.detection_band.center_nm)
+    )
+    budgets = jax.vmap(lambda p: report.budget(prepared, p, interval))(planets)
+    slot = int(jnp.argmax(jnp.where(truth.present[0], budgets.planet, 0.0)))
+    planet = jax.tree.map(lambda x: x[slot], planets)
+    limit = law.limit_counts(report.budget(prepared, planet_free(planet), interval))
+    assert float(budgets.planet[slot]) > 0
+    radius = truth.Rp_AU[0, slot] * jnp.sqrt(
+        law.threshold * limit / budgets.planet[slot]
+    )
+    truth = eqx.tree_at(lambda t: t.Rp_AU, truth, truth.Rp_AU.at[0, slot].set(radius))
+    elements = jax.tree.map(lambda x: x[0, slot][None], channel.truth_parameters(truth))
+    p = float(channel.detect_probability(0, mode, time_d, elements)[0])
+    np.testing.assert_allclose(p, 0.5, atol=1e-8)
+    keys = jax.random.split(jax.random.key(0), 2000)
+    rows = jax.vmap(
+        lambda k: channel.realize(truth, 0, mode, 1.0, k, None, None, context=context)
+    )(keys)
+    got = float(unpack(channel.measurement_template, rows).detected[:, slot].mean())
+    sigma = np.sqrt(p * (1 - p) / 2000)
+    assert abs(got - p) < 3 * sigma + 1e-3

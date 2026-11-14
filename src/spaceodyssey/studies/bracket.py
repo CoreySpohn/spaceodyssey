@@ -39,18 +39,14 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import Msun2kg
 
-from spaceodyssey.adapters.jaxedith import (
-    block_outcome_kind,
-    column_index,
-    visit_columns,
-    visit_report_kind,
+from spaceodyssey.adapters.measurement import (
+    MEASUREMENT_KIND_NAME,
+    measurement_kind,
 )
 from spaceodyssey.adapters.parameters import CATALOG_KIND_NAME, catalog_kind
 from spaceodyssey.adapters.photomancy import (
-    BLOCK_KIND_NAME,
     GRID_SPACING_D,
     N_GRID,
-    REPORT_KIND_NAME,
     SLOT_DEGRADED,
     SLOT_KEPT,
     SLOT_OK,
@@ -79,7 +75,7 @@ from spaceodyssey.core.kinds import (
     ObserverCapabilities,
 )
 from spaceodyssey.core.ledger import ChannelTable
-from spaceodyssey.core.records import KindRegistry, RecordKind
+from spaceodyssey.core.records import KindRegistry, RecordKind, unpack
 from spaceodyssey.core.refresh import REFRESH_PRODUCT_KIND, RefreshSchedule
 from spaceodyssey.core.snapshot import BeliefLayout
 from spaceodyssey.criteria.claims import AbstractClaim, claims_on_truth
@@ -88,7 +84,7 @@ from spaceodyssey.studies import builder, effect_rows
 # Candidates need repeated detections, a supported fit and a tight sky position.
 CANDIDATE_DETECTIONS, CANDIDATE_SCATTER_LOD = 3, 1.0
 # Kind indices of `bracket_registry`.
-KIND_NONE, KIND_PRODUCT, KIND_VISIT, KIND_BLOCK, KIND_CATALOG = range(5)
+KIND_NONE, KIND_PRODUCT, KIND_MEASUREMENT, KIND_CATALOG = range(4)
 # The telescope and the catalog lanes, and the shared budget resource column.
 LANE_TELESCOPE, LANE_CATALOG = 0, 1
 SHARED_RESOURCE = 2
@@ -112,7 +108,7 @@ class Arm:
 
     Attributes:
         name: The arm's label.
-        report_audience: Audience flags of every `visit_report` column.
+        report_audience: Audience flags of every measured column.
         groups: Catalog groups open to the observer and the policy.
         kernel: The refit kernel the arm runs: `truth`, `posterior` or `shrinkage`.
     """
@@ -144,15 +140,14 @@ def _arm(arm):
     return ARMS[arm]
 
 
-def bracket_registry(arm, n_slots=4, *, n_bands):
-    """The kind registry of `arm`: none, refresh product, visit, block, catalog."""
+def bracket_registry(arm, n_slots, n_bands):
+    """The kind registry of `arm`: none, refresh product, measurement, catalog."""
     arm = _arm(arm)
     return KindRegistry(
         (
             RecordKind("none", ()),
             REFRESH_PRODUCT_KIND,
-            visit_report_kind(n_slots, arm.report_audience),
-            block_outcome_kind(n_slots),
+            measurement_kind(n_slots, n_bands, arm.report_audience),
             catalog_kind(n_slots, n_bands, arm.groups),
         )
     )
@@ -247,10 +242,9 @@ def channel_table(channel, caps, *, budget_unit_s=None):
     occupancy, lane, kind = [], [], []
     table = channel.mode_table
     for c in range(table.catalog_channel):
-        mode = table.modes[table.mode_of(c)]
         occupancy.append(settle + round(table.duration_s(c) / tick_s))
         lane.append(LANE_TELESCOPE)
-        kind.append(KIND_VISIT if mode.kind == "imaging" else KIND_BLOCK)
+        kind.append(KIND_MEASUREMENT)
     occupancy.append(CATALOG_TICKS)
     lane.append(LANE_CATALOG)
     kind.append(KIND_CATALOG)
@@ -608,16 +602,15 @@ class SummaryObserver(AbstractObserver):
     prior: DecisionSummary
     claims: tuple[AbstractClaim, ...] = eqx.field(static=True, default=())
     catalog_kind: str = eqx.field(default=CATALOG_KIND_NAME, static=True)
-    report_kind: str = eqx.field(default=REPORT_KIND_NAME, static=True)
-    block_kind: str = eqx.field(default=BLOCK_KIND_NAME, static=True)
+    measurement_kind: str = eqx.field(default=MEASUREMENT_KIND_NAME, static=True)
     ticks_per_day: int = eqx.field(default=TICKS_PER_DAY, static=True)
 
     def capabilities(self):
-        """Refit only, from visit reports, the truth catalog and block outcomes."""
+        """Refit from imaging measurements and the truth catalog."""
         return ObserverCapabilities(
             incremental=False,
             refit=True,
-            refit_kinds=(self.report_kind, self.catalog_kind, self.block_kind),
+            refit_kinds=(self.measurement_kind, self.catalog_kind),
         )
 
     def init(self, caps):
@@ -807,9 +800,6 @@ def outcome_table(
             "channel_index",
         )
     }
-    vis = visit_columns(n_slots)
-    det_cols = [column_index(vis, f"detected_{k}") for k in range(n_slots)]
-    time_col = column_index(vis, "time_d")
     n_det = np.zeros((n_w, n, n_slots), np.int64)
     names = ("n_visits", "n_search", "n_followup")
     star = {k: np.zeros((n_w, n)) for k in names}
@@ -824,17 +814,20 @@ def outcome_table(
         if check_detection:
             truth = jax.tree_util.tree_map(lambda x, w=w: x[w], truths)
             true_elements = channel.truth_parameters(truth)
-        for r in _rows_of(log, w, KIND_VISIT):
+        for r in _rows_of(log, w, KIND_MEASUREMENT):
+            row = unpack(channel.measurement_template, log["payload"][w, r])
+            if channel.mode_table.modes[int(row.mode)].kind != "imaging":
+                continue
             s = int(log["subject"][w, r])
             days = (log["end_tick"][w, r] - log["start_tick"][w, r]) / per_day
-            hit = log["payload"][w, r, det_cols] > 0.5
+            hit = np.asarray(row.detected) > 0.5
             star["n_visits"][w, s] += 1
             stage = "followup" if seen[s] else "search"
             star[f"t_{stage}"][w, s] += days
             star[f"n_{stage}"][w, s] += 1
             if check_detection:
                 mode = int(log["channel_index"][w, r])
-                when = log["payload"][w, r, time_col] - float(channel.epoch_jd)
+                when = float(row.time_d) - float(channel.epoch_jd)
                 p = np.asarray(
                     channel.detect_probability(
                         s, mode, when, jax.tree.map(lambda x, s=s: x[s], true_elements)

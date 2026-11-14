@@ -139,6 +139,7 @@ from yippy.datasets import CATALOG, DATA_RELEASE_TAG
 from yippy.performance import PROFILE_STEP_PIX
 from zodi import MAG_1ZODI_V_ARCSEC2, MV_SUN, exozodi_flux_ratio_band
 
+from spaceodyssey.adapters.measurement import MeasurementRow, measurement_template
 from spaceodyssey.adapters.modes import ModeTable
 from spaceodyssey.adapters.parameters import (
     PlanetParameters,
@@ -162,9 +163,15 @@ from spaceodyssey.adapters.physical_profile import (
     load_profile,
     payload_column_names,
 )
-from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience
+from spaceodyssey.core.enums import F64, I64
 from spaceodyssey.core.kinds import AbstractChannelModel
-from spaceodyssey.core.records import PayloadColumn, RecordKind, layout_size, pack
+from spaceodyssey.core.records import (
+    PayloadColumn,
+    RecordKind,
+    layout_size,
+    pack,
+    unpack,
+)
 
 # The public response package, release and digest the summary path is pinned to.
 YIP_NAME = "eac1_aavc_2d"
@@ -1678,70 +1685,7 @@ PILOT_FRACTION, ADAPTIVE_MIX = 4, 0.5
 # squared) in AU squared, only a unit the counts are divided back out of.
 PROBE_LAMBDA = REFERENCE_ALBEDO * Rearth2AU**2
 
-VISIT_KIND_NAME = "visit_report"
-BLOCK_KIND_NAME = "block_outcome"
 CATALOG_KIND_NAME = "truth_catalog"
-VISIT_HEADER = (
-    "time_d",
-    "science_s",
-    "occupied_s",
-    "cadence",
-    "calibration_id",
-    "valid_science",
-)
-VISIT_SLOT = (
-    "detected",
-    "counts",
-    "limit_counts",
-    "snr",
-    "ra",
-    "dec",
-    "ra_err",
-    "dec_err",
-    "corr",
-)
-# Columns after the header, per slot; the detected flags lead the row so a refit that
-# reads them needs only the slot count.
-VISIT_REST = VISIT_SLOT[1:]
-BLOCK_HEADER = ("time_d", "block_s")
-BLOCK_SLOT = ("block_snr", "observable_fraction")
-
-
-def _flat(header, slot, n_slots):
-    """Column names of a row: the header, then each slot's columns in turn."""
-    return header + tuple(f"{n}_{s}" for s in range(n_slots) for n in slot)
-
-
-def visit_columns(n_slots):
-    """Column names of a `visit_report` row: detected flags, header, other columns."""
-    flags = tuple(f"detected_{s}" for s in range(n_slots))
-    return flags + _flat(VISIT_HEADER, VISIT_REST, n_slots)
-
-
-def block_columns(n_slots):
-    """Column names of a `block_outcome` row."""
-    return _flat(BLOCK_HEADER, BLOCK_SLOT, n_slots)
-
-
-def column_index(columns, name):
-    """Position of the column `name` in a layout from `visit_columns` and kin."""
-    return columns.index(name)
-
-
-def visit_report_kind(n_slots, audience=EVERYONE):
-    """The `visit_report` record kind: every column readable by `audience`."""
-    return RecordKind(
-        VISIT_KIND_NAME,
-        tuple(PayloadColumn(n, audience) for n in visit_columns(n_slots)),
-    )
-
-
-def block_outcome_kind(n_slots):
-    """The `block_outcome` kind: every column is scorer-only."""
-    return RecordKind(
-        BLOCK_KIND_NAME,
-        tuple(PayloadColumn(n, Audience.SCORER) for n in block_columns(n_slots)),
-    )
 
 
 class ReportData(eqx.Module):
@@ -1912,8 +1856,8 @@ def spectral_channel_snr(budget):
 class ObservingModeChannel(AbstractChannelModel):
     """Declared observing modes of many hosts, with one report per band.
 
-    Imaging channels write visit reports, spectrograph channels write accumulated
-    single-channel signal-to-noise, and the final channel writes the truth catalog.
+    Imaging and spectrograph channels write measurement rows; the final channel
+    writes the truth catalog.
     Every observing interval includes the profile's settling overhead. The stored
     band scenes and leakage tables have one entry per `mode_table.bands`.
     """
@@ -1931,9 +1875,12 @@ class ObservingModeChannel(AbstractChannelModel):
     n_slots: int = eqx.field(static=True)
     mode_table: ModeTable = eqx.field(static=True)
     calibration: int = eqx.field(static=True)
+    association: str = eqx.field(static=True, default="truth")
 
     def __check_init__(self):
         """Refuse malformed declarations."""
+        if self.association != "truth":
+            raise NotImplementedError("association inference is not built")
         DetectorSpec(*self.detector)
         law = ReportingLaw(*self.law)
         imaging = next(m for m in self.mode_table.modes if m.kind == "imaging")
@@ -1962,6 +1909,7 @@ class ObservingModeChannel(AbstractChannelModel):
         law=None,
         n_time_nodes=8,
         n_exozodi=PROFILE_N_EXOZODI,
+        association="truth",
     ):
         """Build declared mode reports and each host's flux and leakage per band.
 
@@ -2018,6 +1966,7 @@ class ObservingModeChannel(AbstractChannelModel):
             epoch_jd=float(epoch_jd),
             n_slots=n_slots,
             mode_table=table,
+            association=association,
             calibration=int.from_bytes(digest.digest(), "big") or 1,
         )
 
@@ -2053,20 +2002,23 @@ class ObservingModeChannel(AbstractChannelModel):
         table = self.mode_table
         kinds = tuple(
             (
-                0 if table.modes[table.mode_of(c)].kind == "imaging" else 1,
+                0,
                 table.mode_of(c),
             )
             for c in range(table.catalog_channel)
         )
-        return (*kinds, (2, 0))
+        return (*kinds, (1, 0))
+
+    @property
+    def measurement_template(self) -> MeasurementRow:
+        """The named layout shared by every observing channel."""
+        return measurement_template(self.n_slots, self.n_bands)
 
     def widths(self):
-        """Payload width of each record kind, as `(visit, block, catalog)`."""
-        n = self.n_slots
+        """Payload width of each record kind, as `(measurement, catalog)`."""
         return (
-            len(visit_columns(n)),
-            len(block_columns(n)),
-            layout_size(catalog_template(n, self.n_bands)),
+            layout_size(self.measurement_template),
+            layout_size(catalog_template(self.n_slots, self.n_bands)),
         )
 
     def assets(self):
@@ -2153,11 +2105,18 @@ class ObservingModeChannel(AbstractChannelModel):
         def branch(mode_index):
             def run(_):
                 method = (
-                    self._visit_row
+                    self._imaging_row
                     if table.modes[mode_index].kind == "imaging"
-                    else self._block_row
+                    else self._spectrograph_row
                 )
-                row = method(truth, subject, mode_index, key, context)
+                row = method(
+                    truth,
+                    subject,
+                    mode_index,
+                    key,
+                    context,
+                    channel_index % len(table.durations_d),
+                )
                 return jnp.pad(row, (0, width - row.shape[0]))
 
             return run
@@ -2193,17 +2152,17 @@ class ObservingModeChannel(AbstractChannelModel):
         occupied = clock.seconds(jnp.maximum(end - start, 0))
         return ScienceInterval(mid_jd, duration), valid, occupied
 
-    def _visit_row(self, truth, subject, index, key, context):
-        """A detection mode's row."""
+    def _imaging_row(self, truth, subject, index, key, context, duration_index):
+        """A censored imaging measurement, with signal only in its exposed band."""
         built = self.assets()
         mode = self.mode_table.modes[index]
         band_index = self.mode_table.band_index(mode.name)
         report = built.reports[band_index]
         law = built.law
         interval, valid, occupied = self._interval(context, settle=True)
-        true_prep = self._prepared(subject, self.imaging_band_index, nominal=False)
-        nominal_prep = self._prepared(subject, self.imaging_band_index, nominal=True)
-        band = truth.band_index(self.detection_band.center_nm)
+        true_prep = self._prepared(subject, band_index, nominal=False)
+        nominal_prep = self._prepared(subject, band_index, nominal=True)
+        band = truth.band_index(mode.band.center_nm)
         planets = self._slot_planets(truth, subject, band)
         present = truth.present[subject]
         keys = jax.vmap(lambda s: jax.random.fold_in(key, s))(jnp.arange(self.n_slots))
@@ -2211,7 +2170,7 @@ class ObservingModeChannel(AbstractChannelModel):
         def one(planet, here, k):
             expected = report.budget(true_prep, planet, interval)
             reference = report.budget(nominal_prep, planet_free(planet), interval)
-            return sample_report(
+            row = sample_report(
                 k,
                 law,
                 expected,
@@ -2222,58 +2181,99 @@ class ObservingModeChannel(AbstractChannelModel):
                 calibration_id=self.calibration,
                 valid_science=valid & here,
             )
+            return row, expected.planet, expected.variance
 
-        rows = jax.vmap(one)(planets, present, keys)
+        rows, true_counts, true_variance = jax.vmap(one)(planets, present, keys)
         detected = rows.detected > 0.5
         limit = jnp.where(
             detected | jnp.isnan(rows.limit_counts), rows.limit_counts, 0.0
         )
-        head = jnp.stack(
-            [
-                interval.midpoint_jd,
-                jnp.where(valid, interval.duration_s, 0.0),
-                occupied,
-                jnp.asarray(report.detector_spec.cadence_code, F64),
-                jnp.asarray(self.calibration, F64),
-                valid.astype(F64),
-            ]
+        signal = jnp.zeros((self.n_slots, self.n_bands), F64)
+        return pack(
+            MeasurementRow(
+                time_d=interval.midpoint_jd,
+                science_s=jnp.where(valid, interval.duration_s, 0.0),
+                occupied_s=occupied,
+                cadence=jnp.asarray(report.detector_spec.cadence_code, I64),
+                mode=jnp.asarray(index, I64),
+                duration_index=jnp.asarray(duration_index, I64),
+                calibration_id=jnp.asarray(self.calibration, I64),
+                valid_science=valid.astype(F64),
+                detected=rows.detected,
+                assignment=jnp.arange(self.n_slots, dtype=I64),
+                snr=rows.snr,
+                ra=rows.ra,
+                dec=rows.dec,
+                ra_err=rows.ra_err,
+                dec_err=rows.dec_err,
+                corr=rows.corr,
+                limit_counts=limit,
+                counts=signal.at[:, band_index].set(rows.counts),
+                variance=signal.at[:, band_index].set(
+                    jnp.where(detected, limit**2 + jnp.maximum(rows.counts, 0.0), 0.0)
+                ),
+                identity=jnp.arange(self.n_slots, dtype=I64),
+                true_counts=signal.at[:, band_index].set(
+                    jnp.where(detected, true_counts, 0.0)
+                ),
+                true_variance=signal.at[:, band_index].set(
+                    jnp.where(detected, true_variance, 0.0)
+                ),
+            )
         )
-        rest = jnp.stack(
-            [
-                rows.counts,
-                limit,
-                rows.snr,
-                rows.ra,
-                rows.dec,
-                rows.ra_err,
-                rows.dec_err,
-                rows.corr,
-            ],
-            axis=-1,
-        )
-        return jnp.concatenate([rows.detected, head, rest.reshape(-1)])
 
-    def _block_row(self, truth, subject, index, key, context):
-        """A spectrograph row: accumulated single-channel signal-to-noise per slot."""
+    def _spectrograph_row(self, truth, subject, index, key, context, duration_index):
+        """Uncensored counts and observable uncertainties in one spectrograph band."""
         mode = self.mode_table.modes[index]
         band_index = self.mode_table.band_index(mode.name)
-        interval, valid, _ = self._interval(context, settle=True)
+        built = self.assets()
+        report = built.reports[band_index]
+        interval, valid, occupied = self._interval(context, settle=True)
         prepared = self._prepared(subject, band_index, nominal=False)
+        nominal = self._prepared(subject, band_index, nominal=True)
         band = truth.band_index(mode.band.center_nm)
         planets = self._slot_planets(truth, subject, band)
-        present = truth.present[subject]
-        interval = ScienceInterval(
-            interval.midpoint_jd, jnp.where(valid, interval.duration_s, 0.0)
-        )
-        snr, observable = jax.vmap(
-            lambda p: self._block(prepared, p, interval, band_index)
+        planets["Lambda"] = jnp.where(truth.present[subject], planets["Lambda"], 0.0)
+        expected = jax.vmap(lambda p: report.budget(prepared, p, interval))(planets)
+        reference = jax.vmap(
+            lambda p: report.budget(nominal, planet_free(p), interval)
         )(planets)
-        live = present & valid
-        head = jnp.stack([interval.midpoint_jd, interval.duration_s])
-        body = jnp.stack(
-            [jnp.where(live, snr, 0.0), jnp.where(live, observable, 0.0)], -1
+        limit = jnp.where(valid, built.law.limit_counts(reference), 0.0)
+        true_counts = jnp.where(valid & truth.present[subject], expected.planet, 0.0)
+        true_variance = jnp.where(valid, expected.variance, 0.0)
+        counts = true_counts + jnp.sqrt(true_variance) * jax.random.normal(
+            key, (self.n_slots,), dtype=F64
         )
-        return jnp.concatenate([head, body.reshape(-1)])
+        signal = jnp.zeros((self.n_slots, self.n_bands), F64)
+        zeros = jnp.zeros(self.n_slots, F64)
+        return pack(
+            MeasurementRow(
+                time_d=interval.midpoint_jd,
+                science_s=jnp.where(valid, interval.duration_s, 0.0),
+                occupied_s=occupied,
+                cadence=jnp.asarray(report.detector_spec.cadence_code, I64),
+                mode=jnp.asarray(index, I64),
+                duration_index=jnp.asarray(duration_index, I64),
+                calibration_id=jnp.asarray(self.calibration, I64),
+                valid_science=valid.astype(F64),
+                detected=zeros,
+                assignment=jnp.arange(self.n_slots, dtype=I64),
+                snr=zeros,
+                ra=zeros,
+                dec=zeros,
+                ra_err=zeros,
+                dec_err=zeros,
+                corr=zeros,
+                limit_counts=limit,
+                counts=signal.at[:, band_index].set(counts),
+                variance=signal.at[:, band_index].set(
+                    limit**2 + jnp.maximum(counts, 0.0)
+                ),
+                identity=jnp.arange(self.n_slots, dtype=I64),
+                true_counts=signal.at[:, band_index].set(true_counts),
+                true_variance=signal.at[:, band_index].set(true_variance),
+            )
+        )
 
     def _catalog_row(self, truth, subject, index, key, context):
         """Pack the presence and named parameters of every slot of one host."""
@@ -2478,35 +2478,30 @@ class ObservingModeChannel(AbstractChannelModel):
         return self._twin_time(subject, report, prepared, short)
 
     def report_data(self, subject, rows):
-        """`ReportData` of the visit-report rows `rows` (``[R, width]``) of one star."""
-        rows = jnp.asarray(rows, F64)
-        n = self.n_slots
-        head = {n_: rows[:, n + i] for i, n_ in enumerate(VISIT_HEADER)}
-        start = n + len(VISIT_HEADER)
-        rest = rows[:, start : start + n * len(VISIT_REST)]
-        rest = rest.reshape(rows.shape[0], n, len(VISIT_REST))
-        cols = {name: rest[..., j] for j, name in enumerate(VISIT_REST)}
-        cols["detected"] = rows[:, :n]
-        shape = (rows.shape[0], n)
+        """Imaging `ReportData` from named measurement rows `[R, width]`."""
+        measured = unpack(self.measurement_template, rows)
+        shape = measured.detected.shape
+        header = lambda x: jnp.broadcast_to(x[:, None], shape)  # noqa: E731
         row = SummaryRow(
-            time_d=jnp.broadcast_to(head["time_d"][:, None], shape),
-            science_s=jnp.broadcast_to(head["science_s"][:, None], shape),
-            occupied_s=jnp.broadcast_to(head["occupied_s"][:, None], shape),
-            detected=cols["detected"],
-            counts=cols["counts"],
-            limit_counts=cols["limit_counts"],
-            snr=cols["snr"],
-            ra=cols["ra"],
-            dec=cols["dec"],
-            ra_err=cols["ra_err"],
-            dec_err=cols["dec_err"],
-            corr=cols["corr"],
-            cadence=jnp.broadcast_to(head["cadence"][:, None], shape),
-            calibration_id=jnp.broadcast_to(head["calibration_id"][:, None], shape),
-            valid_science=jnp.broadcast_to(head["valid_science"][:, None], shape),
+            time_d=header(measured.time_d),
+            science_s=header(measured.science_s),
+            occupied_s=header(measured.occupied_s),
+            detected=measured.detected,
+            counts=measured.counts[..., self.imaging_band_index],
+            limit_counts=measured.limit_counts,
+            snr=measured.snr,
+            ra=measured.ra,
+            dec=measured.dec,
+            ra_err=measured.ra_err,
+            dec_err=measured.dec_err,
+            corr=measured.corr,
+            cadence=header(measured.cadence),
+            calibration_id=header(measured.calibration_id),
+            valid_science=header(measured.valid_science),
         )
-        valid = row.valid_science > 0.5
-        interval = ScienceInterval(head["time_d"], head["science_s"])
+        imaging = jnp.asarray(tuple(m.kind == "imaging" for m in self.mode_table.modes))
+        valid = (row.valid_science > 0.5) & imaging[measured.mode, None]
+        interval = ScienceInterval(measured.time_d, measured.science_s)
         return ReportData(interval=interval, row=row, valid=valid)
 
     def sensitivity_grid(self, subject, interval, n_points):

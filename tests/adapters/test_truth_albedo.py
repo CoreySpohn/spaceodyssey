@@ -34,6 +34,7 @@ from spaceodyssey.adapters.skyscapes import (
     star_spec_from_model,
 )
 from spaceodyssey.core.kinds import RealizeContext
+from spaceodyssey.core.records import unpack
 from tests.studies.bracket_helpers import SURVEY_BANDS, fixture_files
 
 BANDS = (Band(500.0, 100.0), Band(940.0, 6.7))
@@ -276,8 +277,8 @@ def _one_day(channel):
 def test_the_channel_reads_the_albedo_of_each_report_band(survey_channel, truth):
     """Fails if detection and characterization share one albedo.
 
-    The detection rows read the 500 nm albedo and the block rows the 910 nm one:
-    changing only the 910 nm albedo changes the block row and leaves the visit row.
+    Imaging reads the 500 nm albedo and spectroscopy the 910 nm one:
+    changing only the latter changes spectral counts and leaves imaging unchanged.
     """
     assert truth.bands == SURVEY_BANDS
     twice = eqx.tree_at(
@@ -297,15 +298,28 @@ def test_the_channel_reads_the_albedo_of_each_report_band(survey_channel, truth)
     @eqx.filter_jit
     def rows(t):
         return (
-            survey_channel._visit_row(t, 0, 0, key, context),
-            survey_channel._block_row(
-                t, 0, table.mode_of(table.channel("characterization", 0)), key, context
+            survey_channel._imaging_row(t, 0, 0, key, context, 0),
+            survey_channel._spectrograph_row(
+                t,
+                0,
+                table.mode_of(table.channel("characterization", 0)),
+                key,
+                context,
+                0,
             ),
         )
 
     visit, block_row = (np.asarray(x) for x in rows(truth))
     visit_twice, block_twice = (np.asarray(x) for x in rows(twice))
     np.testing.assert_array_equal(visit, visit_twice)
-    assert not np.array_equal(block_row, block_twice), "the block ignored 910 nm"
+    spectral = unpack(survey_channel.measurement_template, block_row)
+    spectral_twice = unpack(survey_channel.measurement_template, block_twice)
+    ratio = twice.albedo[0, :, 1] / truth.albedo[0, :, 1]
+    np.testing.assert_allclose(
+        spectral_twice.true_counts[:, 1], ratio * spectral.true_counts[:, 1]
+    )
+    assert not np.array_equal(spectral.counts, spectral_twice.counts), (
+        "spectroscopy ignored 910 nm"
+    )
     with pytest.raises(ValueError, match="no declared band at 1000"):
         truth.band_index(1000.0)

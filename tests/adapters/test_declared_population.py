@@ -16,7 +16,6 @@ import pytest
 from hwoutils.constants import Rearth2AU, d2s
 from skyscapes.population import mass_to_radius
 
-from spaceodyssey.adapters import jaxedith as jx
 from spaceodyssey.adapters import photomancy as ph
 from spaceodyssey.adapters.skyscapes import (
     RADIUS_GRID_POINTS,
@@ -25,6 +24,7 @@ from spaceodyssey.adapters.skyscapes import (
     StarSpec,
     SupportRange,
 )
+from spaceodyssey.core.records import unpack
 from tests.adapters.posterior_helpers import realize_visits, visit_request
 from tests.adapters.test_truth_albedo import STARS, hand_population
 from tests.studies.bracket_helpers import (
@@ -255,8 +255,14 @@ def refit_one_planet(period_d, a_quadrature=True):
     names = [name for name, _, _ in ph.slice_spec(study)]
     leaves = {n: x[0, 0] for n, x in zip(names, result.slices, strict=True)}
     summary = ph.DecisionSummary(**leaves, aux=jnp.zeros(0))
-    flag = jx.visit_columns(N_SLOTS).index("detected_0")
-    rows = SimpleNamespace(detected=np.asarray([r[flag] > 0.5 for r, _ in visits]))
+    rows = SimpleNamespace(
+        detected=np.asarray(
+            [
+                unpack(channel.measurement_template, r).detected[0] > 0.5
+                for r, _ in visits
+            ]
+        )
+    )
     return summary, rows
 
 

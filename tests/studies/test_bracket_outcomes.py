@@ -9,12 +9,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from spaceodyssey.core.enums import AdmissionCode
 from spaceodyssey.studies import bracket as br
 
 from .bracket_helpers import N_STEPS, N_WORLDS, build
 
 # Enough telescope days for a second visit to one star in each world, and few
-# enough that each world runs out of budget.
+# enough to keep the admission trace bounded.
 BUDGET_D = 9.0
 pytestmark = pytest.mark.slow(reason="compiles the chunked refresh driver once")
 
@@ -27,15 +28,27 @@ def built():
 
 
 def test_the_table_agrees_with_the_log_and_the_ledger(built):
-    """Visits, telescope days and refusals in the table equal the raw records."""
-    _, _, _, _, run, table = built
+    """Fails if counts, telescope charges or refusal totals disagree with raw data."""
+    study, _, truths, _, run, table = built
     log = run.carry.log
     kind, valid = np.asarray(log.kind), np.asarray(log.valid)
-    visits = ((kind == br.KIND_VISIT) & valid).sum(axis=1)
+    visits = ((kind == br.KIND_MEASUREMENT) & valid).sum(axis=1)
     np.testing.assert_array_equal(table.star["n_visits"].sum(axis=1), visits)
     days = table.star["t_search"] + table.star["t_followup"]
     np.testing.assert_allclose(days.sum(axis=1), table.world["charged"], atol=1e-9)
-    assert np.all(table.world["no_funds"] >= 1)
+    codes = np.asarray(run.trace.admit_code).reshape(N_WORLDS, -1)
+    np.testing.assert_array_equal(
+        table.world["no_funds"], (codes == AdmissionCode.NO_FUNDS).sum(axis=1)
+    )
+    control_codes = jnp.full_like(run.trace.admit_code, int(AdmissionCode.NONE))
+    controlled = (
+        control_codes.reshape(N_WORLDS, -1).at[:, :2].set(int(AdmissionCode.NO_FUNDS))
+    )
+    control = eqx.tree_at(
+        lambda r: r.trace.admit_code, run, controlled.reshape(control_codes.shape)
+    )
+    totals = br.outcome_table(control, truths, study)
+    np.testing.assert_array_equal(totals.world["no_funds"], 2)
     assert np.all(table.slot["detected_again"] <= table.slot["detected"])
     assert np.all(table.slot["detected"] <= table.slot["present"])
 
@@ -49,7 +62,7 @@ def test_a_visit_waits_for_a_refit_that_read_the_previous_one(built):
     released = np.asarray(log.released_tick)
     checked = 0
     for w in range(N_WORLDS):
-        rows = np.flatnonzero((kind[w] == br.KIND_VISIT) & valid[w])
+        rows = np.flatnonzero((kind[w] == br.KIND_MEASUREMENT) & valid[w])
         for s in set(subject[w][rows]):
             mine = rows[subject[w][rows] == s]
             mine = mine[np.argsort(start[w][mine])]
