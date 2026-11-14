@@ -7,7 +7,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from spaceodyssey.adapters.measurement import MEASUREMENT_KIND_NAME, MeasurementRow
+from spaceodyssey.adapters.measurement import (
+    MEASUREMENT_KIND_NAME,
+    MeasurementRow,
+    usable_measurement,
+)
 from spaceodyssey.adapters.parameters import CATALOG_KIND_NAME, catalog_template
 from spaceodyssey.core.enums import F64, I64, RecordStatus
 from spaceodyssey.core.kinds import AbstractObjective
@@ -32,16 +36,18 @@ def _completed(log, kind):
 
 
 def row_log(result, study) -> RowLog:
-    """Unpack completed measurements into NumPy [rows, ...] columns.
+    """Unpack completed and partial measurements into NumPy [rows, ...] columns.
 
     Rows are ordered by world and completion tick, stably for coincident rows.
     Channel is the admission channel index; mode and duration_index are the
     measurement's declared indices. Empty logs preserve every trailing shape.
+    Status is retained so science folds can reject unusable partials while
+    activity accounting retains their occupied time.
     """
     log = result.carry.log
     template = study.channel_model.measurement_template
     fields = dataclasses.fields(MeasurementRow)
-    columns = {name: [] for name in ("world", "star", "end_tick", "channel")}
+    columns = {name: [] for name in ("world", "star", "end_tick", "channel", "status")}
     columns.update({f.name: [] for f in fields})
     valid = np.asarray(
         _completed(log, study.caps.kind_names.index(MEASUREMENT_KIND_NAME))
@@ -58,13 +64,14 @@ def row_log(result, study) -> RowLog:
                 ("star", log.subject[world, r]),
                 ("end_tick", log.end_tick[world, r]),
                 ("channel", log.channel_index[world, r]),
+                ("status", log.status[world, r]),
             ):
                 columns[name].append(value)
             for f in fields:
                 columns[f.name].append(np.asarray(getattr(row, f.name)))
     out = {
         name: np.asarray(columns[name], np.int64)
-        for name in ("world", "star", "end_tick", "channel")
+        for name in ("world", "star", "end_tick", "channel", "status")
     }
     for f in fields:
         leaf = getattr(template, f.name)
@@ -98,6 +105,12 @@ def refold(criterion, rows, world, star, modes, columns="measured"):
             f.name: jnp.asarray(rows[f.name][i])
             for f in dataclasses.fields(MeasurementRow)
         }
+        if not bool(
+            usable_measurement(
+                rows["status"][i], values["valid_science"], values["variance"]
+            )
+        ):
+            continue
         if columns == "true":
             values.update(
                 counts=values["true_counts"], variance=values["true_variance"]
@@ -211,6 +224,11 @@ def verdict(result, study, criterion=None) -> Verdict:
                 (rows["world"] == w)
                 & (rows["star"] == star)
                 & (rows["valid_science"] > 0)
+                & np.asarray(
+                    usable_measurement(
+                        rows["status"], rows["valid_science"], rows["variance"]
+                    )
+                )
             )
             for assignment, identity in zip(
                 rows["assignment"][mine], rows["identity"][mine], strict=True
@@ -291,11 +309,16 @@ def cross_yield(result, study, criterion) -> np.ndarray:
     n_worlds = result.carry.belief.p_exist.shape[0]
     names = tuple(m.name for m in study.channel_model.mode_table.modes)
     observed = np.zeros((n_worlds, len(criterion.mode_names)), bool)
+    usable = np.asarray(
+        usable_measurement(rows["status"], rows["valid_science"], rows["variance"])
+    )
     known = []
     for i, name in enumerate(criterion.mode_names):
         if name in names:
             known.append(i)
-            observed[rows["world"][rows["mode"] == names.index(name)], i] = True
+            observed[rows["world"][(rows["mode"] == names.index(name)) & usable], i] = (
+                True
+            )
     if isinstance(criterion, TransitionTable):
         covered = (
             (np.asarray(criterion.step_modes)[None, :, :] & observed[:, None, :])
@@ -360,10 +383,13 @@ class CriterionObjective(AbstractObjective):
             def fold(acc, index):
                 state, seen = acc
                 row = unpack(channel.measurement_template, log.payload[index])
+                usable = usable_measurement(
+                    log.status[index], row.valid_science, row.variance
+                )
                 row = dataclasses.replace(
                     row, counts=row.true_counts, variance=row.true_variance
                 )
-                take = valid[index] & (log.subject[index] == star)
+                take = valid[index] & (log.subject[index] == star) & usable
                 state = jax.lax.cond(
                     take,
                     lambda s: criterion.update(s, row, channel.mode_table),

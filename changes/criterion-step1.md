@@ -738,3 +738,18 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   study. The external-criterion integration loads with its registry and runs
   without repairing grants after loading. No tests retire or shared matrices
   expand. Regenerate both touched module budgets from measured runs.
+
+## Usable partial measurements share the science fold
+
+- Share one eligibility rule across the observer, policy summary, host scorer and
+  JAX objective: a completed row, or a partial row with valid science and at least
+  one finite positive delivered variance. Scorer substitutions of true columns
+  happen after this common eligibility check.
+- Retain status in the host row log. Unusable partials remain available for
+  occupied-time accounting, but cannot advance criterion state, contribute identity
+  evidence or supply foreign-criterion mode coverage.
+- Extend the existing fold/refold equivalence test through the actual observer and
+  policy folds, both scorer column choices and the objective. Cover a usable
+  partial, a no-science partial and zero, infinite and NaN variance controls.
+  Retire no tests and expand no shared parameter matrix. Regenerate scoring and
+  attribution module budgets from measured runs. No goldens or pins change.

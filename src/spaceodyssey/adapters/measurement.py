@@ -2,11 +2,24 @@
 
 import equinox as eqx
 import jax
+import jax.numpy as jnp
 
-from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience
+from spaceodyssey.core.enums import EVERYONE, F64, I64, Audience, RecordStatus
 from spaceodyssey.core.records import RecordKind
 
 MEASUREMENT_KIND_NAME = "measurement"
+
+
+def usable_measurement(status, valid_science, variance) -> jax.Array:
+    """Completed rows, or partial rows with science and finite positive variance.
+
+    Variance has trailing detection and band axes; the result has the leading
+    row axes. Unexposed bands may be zero. Eligibility uses delivered columns.
+    """
+    valid_variance = jnp.any(jnp.isfinite(variance) & (variance > 0), axis=(-2, -1))
+    return (status == RecordStatus.COMPLETED) | (
+        (status == RecordStatus.PARTIAL) & (valid_science > 0) & valid_variance
+    )
 
 
 class MeasurementRow(eqx.Module):

@@ -194,8 +194,8 @@ def permute_detections(result, order):
     )
 
 
-def test_a_refold_equals_the_incremental_fold(folded_case):
-    """Fails if host and incremental folds disagree, or batching changes a sum."""
+def test_a_refold_equals_the_incremental_fold(folded_case, scored_case):
+    """Fails if partial science is lost, invalid partials fold, or sums differ."""
     inc, rows = folded_case
     np.testing.assert_allclose(
         refold(CRITERION, rows, 0, 0, MODES).sum_counts, inc.sum_counts, rtol=1e-12
@@ -212,6 +212,57 @@ def test_a_refold_equals_the_incremental_fold(folded_case):
     assert rows["end_tick"].tolist() == [2, 3]
     empty = {k: v[:0] for k, v in rows.items()}
     np.testing.assert_array_equal(refold(CRITERION, empty, 0, 0, MODES).node, 0)
+
+    result, study = scored_case
+    carry = init_carry(study, None)
+    template = study.observer.criterion.state_template(N_SLOTS, 2)
+    initial = carry.belief.state
+    catalog = jax.tree.map(
+        lambda x: x[0, 0] if x is not None else None, result.carry.log
+    )
+    carry, _ = write_log(carry, catalog, study.caps)
+    row = unpack(measurement_template(N_SLOTS, 2), result.carry.log.payload[0, 1])
+    cases = ((0.0, 1.0), (1.0, 0.0), (1.0, np.inf), (1.0, np.nan), (1.0, 1.0))
+    for i, (science, variance) in enumerate(cases):
+        partial = dataclasses.replace(
+            row,
+            valid_science=jnp.asarray(science),
+            variance=row.variance.at[:4, 1].set(variance),
+            true_variance=row.true_variance.at[:4, 1].set(variance),
+        )
+        payload = pack(partial)
+        rec = dataclasses.replace(
+            record_none(study.caps),
+            valid=jnp.asarray(True),
+            kind=jnp.asarray(br.KIND_MEASUREMENT, I64),
+            status=jnp.asarray(RecordStatus.PARTIAL, I64),
+            end_tick=jnp.asarray(i + 2, I64),
+            payload=jnp.pad(payload, (0, study.caps.payload_width - payload.size)),
+        )
+        carry, _ = write_log(carry, rec, study.caps)
+        carry = dataclasses.replace(
+            carry,
+            belief=study.observer.fold(carry.belief, rec, study.caps),
+            pbelief=study.observer.fold_summary(carry.pbelief, rec, study.caps),
+        )
+        if i < len(cases) - 1:
+            np.testing.assert_array_equal(carry.belief.state, initial)
+    np.testing.assert_array_equal(unpack(template, carry.belief.state[0]).node[:4], 1)
+    np.testing.assert_array_equal(carry.pbelief.state, carry.belief.state)
+    partial_result = SimpleNamespace(
+        carry=jax.tree.map(lambda x: x[None], carry), trace=None
+    )
+    partial_rows = row_log(partial_result, study)
+    assert partial_rows["end_tick"].tolist() == [2, 3, 4, 5, 6]
+    for columns in ("measured", "true"):
+        np.testing.assert_array_equal(
+            pack(refold(CRITERION, partial_rows, 0, 0, MODES, columns=columns)),
+            carry.belief.state[0],
+        )
+    np.testing.assert_allclose(verdict(partial_result, study).yield_, [2.1], rtol=1e-12)
+    np.testing.assert_allclose(
+        CriterionObjective().evaluate(carry, study), 2.1, rtol=1e-12
+    )
 
 
 @settings(max_examples=25, deadline=None)

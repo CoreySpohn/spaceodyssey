@@ -47,6 +47,7 @@ from spaceodyssey.adapters.measurement import (
     MEASUREMENT_KIND_NAME,
     measurement_kind,
     measurement_template,
+    usable_measurement,
 )
 from spaceodyssey.adapters.modes import ModeSpec, ModeTable
 from spaceodyssey.adapters.parameters import (
@@ -85,7 +86,6 @@ from spaceodyssey.core.enums import (
     Disposition,
     EffectKind,
     Purpose,
-    RecordStatus,
     Scope,
 )
 from spaceodyssey.core.executors.compiled import CompiledExecutor
@@ -881,21 +881,21 @@ class SummaryObserver(AbstractObserver):
             raise ValueError("bind the observer's mode table with bracket_study")
         n_tracks, n_bands = belief.p_exist.shape[1], self.mode_table.n_bands
         template = self.criterion.state_template(n_tracks, n_bands)
+        row = unpack(measurement_template(n_tracks, n_bands), rec.payload)
+        usable = usable_measurement(rec.status, row.valid_science, row.variance)
+        if self.grants.delivery == "true_snr":
+            row = dataclasses.replace(
+                row, counts=row.true_counts, variance=row.true_variance
+            )
 
         def updated(state):
-            row = unpack(measurement_template(n_tracks, n_bands), rec.payload)
-            if self.grants.delivery == "true_snr":
-                row = dataclasses.replace(
-                    row, counts=row.true_counts, variance=row.true_variance
-                )
             value = self.criterion.update(
                 unpack(template, state[rec.subject]), row, self.mode_table
             )
             return state.at[rec.subject].set(pack(value))
 
         take = rec.valid & (rec.kind == caps.kind_names.index(self.measurement_kind))
-        take &= rec.status == RecordStatus.COMPLETED
-        state = jax.lax.cond(take, updated, lambda state: state, belief.state)
+        state = jax.lax.cond(take & usable, updated, lambda state: state, belief.state)
         return dataclasses.replace(belief, state=state)
 
     def fold_summary(self, summary, rec, caps, key=None):
