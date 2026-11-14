@@ -388,3 +388,9 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   reference on both posterior engines using reduced proposal counts. Adapt
   existing private-interface tests; no tests are retired, shared parameter
   matrices expand, or serialized goldens and pinned hashes change.
+- Reduce the executable positional reference to direct fixture row gathering and
+  slice assembly, sharing numerical kernels and the lane runner. Remove copied
+  fit kernels, engine/bucket orchestration, cache, shrinkage and forwarding paths.
+  Require both engines independently in the reference and boundary runs; retain
+  every slice, status, diagnostic and computed-mask comparison. No tests or
+  parameter cases are added or retired, and no serialized golden changes.

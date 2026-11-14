@@ -146,6 +146,8 @@ def test_lane_results_equal_the_previous_slices(posterior_inputs, monkeypatch):
 
     monkeypatch.setattr(ph, "_fit_lanes", tracked)
     expected = golden_slices(boundary, study, request)
+    assert engines == {"single", "multi"}
+    engines.clear()
     actual = boundary.refit_batch(study, request)
     assert engines == {"single", "multi"}
     slices = dict(
