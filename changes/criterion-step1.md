@@ -368,3 +368,11 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   remains in the subject's revision set for later refits.
 - Add one core test with two executor cases, sharing one compiled run, for
   declined marks and retained rows in both audiences. No tests are retired.
+
+## Bracket refit marks follow observing modes
+
+- Bind the summary observer's static mode table from the study's channel model.
+  Spectrograph rows do not mark a refit; imaging rows, including nulls, and the
+  catalog row do. Spectra remain available to later refits.
+- Add one study test covering the declared channels and the same rule under JIT
+  and batching. No tests are retired.

@@ -43,6 +43,7 @@ from spaceodyssey.adapters.measurement import (
     MEASUREMENT_KIND_NAME,
     measurement_kind,
 )
+from spaceodyssey.adapters.modes import ModeTable
 from spaceodyssey.adapters.parameters import CATALOG_KIND_NAME, catalog_kind
 from spaceodyssey.adapters.photomancy import (
     GRID_SPACING_D,
@@ -325,7 +326,9 @@ def bracket_study(
     built = channel.assets()
     if isinstance(observer, SummaryObserver):
         observer = dataclasses.replace(
-            observer, ticks_per_day=built.context.clock.ticks_per_day
+            observer,
+            mode_table=channel.mode_table,
+            ticks_per_day=built.context.clock.ticks_per_day,
         )
     if isinstance(policy, BracketPolicy):
         reaches = bool(arm.report_audience & Audience.POLICY)
@@ -614,11 +617,13 @@ class SummaryObserver(AbstractObserver):
     `prior` is the first-tier summary of each star with no data; it is what the
     observer and the policy hold until the first refit, and it is built from the
     belief's own prior, never from the truth. The study needs `every_ticks > 0` and
-    `rows_per_subject > 0`, as every non-incremental observer does.
+    `rows_per_subject > 0`, as every non-incremental observer does. `bracket_study`
+    binds `mode_table` from its channel before any rows are processed.
     """
 
     subject_leaves = SUMMARY_LEAVES
     prior: DecisionSummary
+    mode_table: ModeTable | None = eqx.field(static=True, default=None, kw_only=True)
     claims: tuple[AbstractClaim, ...] = eqx.field(static=True, default=())
     catalog_kind: str = eqx.field(default=CATALOG_KIND_NAME, static=True)
     measurement_kind: str = eqx.field(default=MEASUREMENT_KIND_NAME, static=True)
@@ -630,6 +635,14 @@ class SummaryObserver(AbstractObserver):
             incremental=False,
             refit=True,
             refit_kinds=(self.measurement_kind, self.catalog_kind),
+        )
+
+    def refits_on(self, rec) -> jax.Array:
+        """Imaging rows, including nulls, and catalog rows mark a refit."""
+        if self.mode_table is None:
+            raise ValueError("bind the observer's mode table with bracket_study")
+        return ~jnp.isin(
+            rec.channel_index, jnp.asarray(self.mode_table.spectrograph_channels, I64)
         )
 
     def init(self, caps):
