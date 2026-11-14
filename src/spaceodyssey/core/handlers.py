@@ -322,7 +322,7 @@ def h_release(c, ev, study, truth, root):
     if caps.refunds:
         c1 = _apply_refund(c1, rec, slot, public & ~seen, study)
     if refresh_enabled(caps):
-        c1 = _mark_refresh(c1, rec, to_observer & ~already, public & ~seen, study)
+        c1 = _mark_refresh(c1, obs, pol, to_observer & ~already, public & ~seen, study)
     return c1, _emit(0, slot), record_none(caps)
 
 
@@ -422,17 +422,17 @@ def _apply_refund(c, rec, slot, first, study):
     )
 
 
-def _mark_refresh(c, rec, accepted, released, study):
+def _mark_refresh(c, obs, pol, accepted, released, study):
     """Mark the subject dirty for each audience that took an eligible row, and queue.
 
     A row is eligible when its kind is one the observer refits and `refits_on`
     allows it; its status is not consulted, so a correction that retracts a value
     also marks the subject. Later marks coalesce into the checkpoint already queued.
     """
-    eligible = jnp.isin(rec.kind, jnp.asarray(study.caps.refit_kinds, I64))
-    eligible &= study.observer.refits_on(rec)
-    mark_obs, mark_pol = accepted & eligible, released & eligible
-    subject = rec.subject
+    eligible = jnp.isin(obs.kind, jnp.asarray(study.caps.refit_kinds, I64))
+    mark_obs = accepted & eligible & study.observer.refits_on(obs)
+    mark_pol = released & eligible & study.observer.refits_on(pol)
+    subject = obs.subject
     dirty = c.refresh_dirty
     dirty = dirty.at[0, subject].set(dirty[0, subject] | mark_obs)
     dirty = dirty.at[1, subject].set(dirty[1, subject] | mark_pol)

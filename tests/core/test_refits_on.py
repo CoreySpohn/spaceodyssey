@@ -1,5 +1,6 @@
 """Row-level refresh eligibility on the compiled run and keyed replay."""
 
+import dataclasses
 import functools
 from types import SimpleNamespace
 
@@ -10,10 +11,14 @@ import numpy as np
 import pytest
 
 from spaceodyssey.core import Audience, CompiledExecutor, index_world, replay_run
-from spaceodyssey.core.enums import I64
-from spaceodyssey.core.records import refit_rows
+from spaceodyssey.core.carry import init_carry
+from spaceodyssey.core.enums import I64, PUBLIC, EventKind, RecordStatus
+from spaceodyssey.core.events import empty_event_row
+from spaceodyssey.core.executors.replay import _numpy_log, _release
+from spaceodyssey.core.handlers import h_release
+from spaceodyssey.core.records import record_none, refit_rows, write_log
 from spaceodyssey.studies import builder, toy
-from tests.core.helpers import worlds
+from tests.core.helpers import one_world, worlds
 from tests.core.refresh_helpers import masked
 
 
@@ -26,6 +31,80 @@ class DecliningObserver(toy.ToyRefitMean):
 
     def refits_on(self, rec):
         return rec.channel_index != self.declined_channel
+
+
+class PayloadObserver(toy.ToyRefitMean):
+    """Refresh only when the last payload column is positive."""
+
+    def refits_on(self, rec):
+        return rec.payload[2] > 0
+
+
+@pytest.mark.parametrize("executor", ["handler", "replay"])
+@pytest.mark.parametrize("audience", [Audience.SCORER, Audience.OBSERVER, PUBLIC])
+def test_refresh_eligibility_uses_each_audiences_visible_payload(executor, audience):
+    """Fails if hidden columns schedule refits or observer grants reach policy."""
+    study = builder.survey_refresh(observer=PayloadObserver())
+    permissions = list(study.caps.payload_audience)
+    permissions[1] = (*permissions[1][:2], int(audience), *permissions[1][3:])
+    study = dataclasses.replace(
+        study, caps=dataclasses.replace(study.caps, payload_audience=tuple(permissions))
+    )
+    truth, root = one_world()
+    initial = init_carry(study, truth)
+    for value in (0.0, 1.0):
+        rec = dataclasses.replace(
+            record_none(study.caps),
+            valid=jnp.asarray(True),
+            accepted_tick=jnp.asarray(-1, I64),
+            released_tick=jnp.asarray(-1, I64),
+            kind=jnp.asarray(1, I64),
+            status=jnp.asarray(RecordStatus.COMPLETED, I64),
+            audience=jnp.asarray(PUBLIC, I64),
+            payload=record_none(study.caps)
+            .payload.at[:3]
+            .set(jnp.asarray([4.0, 0.0, value])),
+        )
+        carry, slot = write_log(initial, rec, study.caps)
+        event = dataclasses.replace(
+            empty_event_row(study.caps),
+            slot=slot,
+            audience=rec.audience,
+            tick=carry.tick,
+        )
+        released, _, _ = h_release(carry, event, study, truth, root)
+        if executor == "handler":
+            dirty = np.asarray(released.refresh_dirty)
+            queued = bool(
+                (released.ev.valid & (released.ev.kind == EventKind.REFRESH)).any()
+            )
+        else:
+            dirty = np.zeros_like(initial.refresh_dirty, dtype=bool)
+            _release(
+                study,
+                released,
+                _numpy_log(released),
+                root,
+                {
+                    "log_slot": int(slot),
+                    "tick": int(carry.tick),
+                    "subject": 0,
+                    "acquisition_index": int(rec.acquisition_index),
+                    "channel": int(rec.channel),
+                    "audience": int(rec.audience),
+                },
+                (initial.belief, initial.pbelief, dirty),
+                (set(), set(), set(), {}),
+                False,
+                set(study.caps.refit_kinds),
+            )
+            queued = dirty.any()
+        expected = [
+            bool(value and audience & a) for a in (Audience.OBSERVER, Audience.POLICY)
+        ]
+        np.testing.assert_array_equal(dirty[:, 0], expected)
+        assert not dirty[:, 1:].any()
+        assert queued == any(expected)
 
 
 @functools.cache

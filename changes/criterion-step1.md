@@ -716,3 +716,14 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   211.29 s, with 4.08 GB peak worker RSS, a 11385.3 MiB sampled process-tree
   footprint, zero skips and zero budget violations. The quick tier remains
   below its 540 s local target.
+
+## Audience-specific refresh eligibility
+
+- Evaluate `refits_on` separately on the observer and policy masked records in
+  execution and replay. Scorer-only columns cannot schedule either audience's
+  refit, and observer-only columns cannot schedule a policy refit.
+- Add one regression function with six cases for both release paths and scorer,
+  observer and public column grants, including zero and positive payload controls.
+  Retain the existing compiled-run and replay checks; retire no tests. Regenerate
+  the module's compile budget from its measured 329 programs with standard headroom.
+  No golden histories, document content or pins change.

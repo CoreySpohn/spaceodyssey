@@ -413,7 +413,7 @@ def _release(study, carry, log, roots, at, state, seen, incremental, refit_kinds
     acquisition = int(log.acquisition_id[i])
     full = _row(carry.log, i)
     key = fold_key(roots, full, study) if incremental else None
-    eligible = kind in refit_kinds and bool(study.observer.refits_on(full))
+    eligible = kind in refit_kinds
     before = _fold_time_row(full, i in accepted, i in released)
     if reach & Audience.OBSERVER and i not in accepted:
         if log.accepted_tick[i] != at["tick"]:
@@ -421,11 +421,11 @@ def _release(study, carry, log, roots, at, state, seen, incremental, refit_kinds
                 f"release at tick {at['tick']} matches no accepted row at slot {i}"
             )
         first = acquisition not in obs_acq
+        row = masked_record(before, caps, Audience.OBSERVER)
         if incremental and first:
-            row = masked_record(before, caps, Audience.OBSERVER)
             belief = _fold(study, belief, row, key)
         accepted_now = True
-        if eligible and dirty.size:
+        if eligible and dirty.size and bool(study.observer.refits_on(row)):
             dirty[0, at["subject"]] = True
     else:
         accepted_now = False
@@ -437,15 +437,13 @@ def _release(study, carry, log, roots, at, state, seen, incremental, refit_kinds
         earlier = pub_acq.setdefault(acquisition, [])
         revision = int(log.revision[i])
         replaced = max([r for r in earlier if r > revision], default=-1)
+        seen_row = dataclasses.replace(before, superseded_by=jnp.asarray(replaced, I64))
+        row = masked_record(seen_row, caps, Audience.POLICY)
         if incremental and not earlier:
-            seen_row = dataclasses.replace(
-                before, superseded_by=jnp.asarray(replaced, I64)
-            )
-            row = masked_record(seen_row, caps, Audience.POLICY)
             pbelief = _fold_summary(study, pbelief, row, key)
         earlier.append(revision)
         released.add(i)
-        if eligible and dirty.size:
+        if eligible and dirty.size and bool(study.observer.refits_on(row)):
             dirty[1, at["subject"]] = True
     if accepted_now:
         accepted.add(i)
