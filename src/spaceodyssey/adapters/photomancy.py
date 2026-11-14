@@ -851,6 +851,105 @@ class _RowLane(eqx.Module):
     subject: jax.Array
 
 
+class StarLane(eqx.Module):
+    """One star's imaging report, with track rows [S, R] and curves [S, R, P].
+
+    Epochs are days from the study epoch; positions and uncertainties are arcsec.
+    Shared row epochs, sensitivity curves and end ticks repeat along the slot axis.
+    """
+
+    subject: jax.Array
+    tick: jax.Array
+    key: jax.Array
+    live: jax.Array
+    epochs: jax.Array
+    sep: jax.Array
+    dmag0: jax.Array
+    limit: jax.Array
+    detected: jax.Array
+    counts: jax.Array
+    valid: jax.Array
+    ra: jax.Array
+    dec: jax.Array
+    ra_err: jax.Array
+    dec_err: jax.Array
+    corr: jax.Array
+    end_tick: jax.Array
+    n_det: jax.Array  # [S]
+
+
+class LaneResult(eqx.Module):
+    """Named fit leaves [S, ...], indexed to one track inside a fit program.
+
+    `updater_status` holds the raw photomancy code, mapped only at the scatter.
+    Draws retain all physical parameters, including the albedo band axis.
+    """
+
+    p_det: jax.Array
+    scatter: jax.Array
+    pos_mean: jax.Array
+    p_claim: jax.Array
+    p_exist: jax.Array
+    ln_period_q: jax.Array
+    ess: jax.Array
+    updater_status: jax.Array
+    finite: jax.Array
+    draws: PlanetParameters
+
+
+class _FirstResult(eqx.Module):
+    """A dark-track result and the evidence needed to summarize its cloud again."""
+
+    result: LaneResult
+    log_evidence: jax.Array
+    expected: jax.Array
+
+
+_RESULT_LEAVES = (
+    "p_det",
+    "scatter",
+    "pos_mean",
+    "p_claim",
+    "p_exist",
+    "ln_period_q",
+    "ess",
+)
+
+
+def retry_mask(result):
+    """Tracks whose raw updater status calls for the one bounded retry."""
+    return result.updater_status == int(UpdaterStatus.LOW_ESS)
+
+
+def _result_finite(result):
+    """Whether one host track has finite summary leaves and a finite cloud."""
+    return bool(result.finite) and all(
+        np.isfinite(getattr(result, name)).all() for name in _RESULT_LEAVES
+    )
+
+
+def scatter_results(summary, results):
+    """Install named track groups [S, ...] on the host summary.
+
+    Keys are (world, audience, subject), optionally followed by a tuple naming
+    the group's slots. Unsupported or failed tracks retain their summary leaves.
+    """
+    leaves = {
+        name: np.array(getattr(summary, name)) for name in (*_RESULT_LEAVES, "status")
+    }
+    for at, result in results.items():
+        slots = range(result.finite.shape[0]) if len(at) == 3 else at[3]
+        for i, slot in enumerate(slots):
+            track = jax.tree.map(lambda x, i=i: x[i], result)
+            index = (*at[:3], slot)
+            code = slot_status(track.updater_status, _result_finite(track))
+            leaves["status"][index] = code
+            if code not in SLOT_KEPT:
+                for name in _RESULT_LEAVES:
+                    leaves[name][index] = getattr(track, name)
+    return dataclasses.replace(summary, **leaves)
+
+
 class _FitLane(eqx.Module):
     """One slot of one entry (or the entry itself, for the first tier)."""
 
@@ -1077,16 +1176,17 @@ def _fit_lane(channel, population, lane, st, engine, scale):
     last = jnp.max(jnp.where(lane.detected & lane.valid, lane.end_tick, -1))
     leaves = _slot_leaves(channel, lane.subject, lane.tick, last, elements, st)
     finite = _parameters_finite(elements)
-    return (
-        leaves.p_det,
-        leaves.scatter,
-        leaves.pos_mean,
-        leaves.p_claim,
-        leaves.ln_period_q,
-        cloud.ess,
-        cloud.status.astype(I64),
-        finite,
-        elements,
+    return LaneResult(
+        p_det=leaves.p_det,
+        scatter=leaves.scatter,
+        pos_mean=leaves.pos_mean,
+        p_claim=leaves.p_claim,
+        p_exist=jnp.asarray(1.0, F64),
+        ln_period_q=leaves.ln_period_q,
+        ess=cloud.ess,
+        updater_status=cloud.status.astype(I64),
+        finite=finite,
+        draws=elements,
     )
 
 
@@ -1120,31 +1220,32 @@ class _SummaryLane(eqx.Module):
     last: jax.Array  # end tick of the last counting detection, negative for none
     elements: PlanetParameters  # [n_particles], including each draw's albedo
     ess: jax.Array
-    raw: jax.Array  # the fit's photomancy status
+    updater_status: jax.Array  # the fit's raw photomancy status
     live: jax.Array
 
 
 def _resummary_lane(channel, lane, st):
-    """A stored cloud's leaves at the lane's tick: the tuple of `_fit_lane`."""
+    """A stored cloud's leaves at the lane's tick: the named result of `_fit_lane`."""
     leaves = _slot_leaves(
         channel, lane.subject, lane.tick, lane.last, lane.elements, st
     )
-    return (
-        leaves.p_det,
-        leaves.scatter,
-        leaves.pos_mean,
-        leaves.p_claim,
-        leaves.ln_period_q,
-        lane.ess,
-        lane.raw,
-        _parameters_finite(lane.elements),
-        lane.elements,
+    return LaneResult(
+        p_det=leaves.p_det,
+        scatter=leaves.scatter,
+        pos_mean=leaves.pos_mean,
+        p_claim=leaves.p_claim,
+        p_exist=jnp.asarray(1.0, F64),
+        ln_period_q=leaves.ln_period_q,
+        ess=lane.ess,
+        updater_status=lane.updater_status,
+        finite=_parameters_finite(lane.elements),
+        draws=lane.elements,
     )
 
 
 @eqx.filter_jit
 def _resummary_lanes(channel, lanes, st):
-    """A batch of stored clouds summarized again, one output tuple per leaf."""
+    """A batch of stored clouds summarized again, one named result per track."""
     return _over_lanes(
         _if_live(lambda lane: _resummary_lane(channel, lane, st)),
         lanes,
@@ -1249,14 +1350,10 @@ def _first_tier_lane(channel, population, lane, st, scale):
         expected,
         st,
     )
-    return (
-        *leaves,
-        cloud.ess,
-        cloud.status.astype(I64),
-        _parameters_finite(elements),
-        elements,
-        cloud.log_evidence,
-        expected,
+    return _FirstResult(
+        result=_dark_result(leaves, cloud.ess, cloud.status.astype(I64), elements),
+        log_evidence=cloud.log_evidence,
+        expected=expected,
     )
 
 
@@ -1281,6 +1378,23 @@ def _first_leaves(
     return p_exist, leaves.p_det, leaves.p_claim, leaves.ln_period_q
 
 
+def _dark_result(leaves, ess, updater_status, elements):
+    """Name the dark-slot leaves, with inert position leaves as before."""
+    p_exist, p_det, p_claim, ln_period_q = leaves
+    return LaneResult(
+        p_exist=p_exist,
+        p_det=p_det,
+        p_claim=p_claim,
+        ln_period_q=ln_period_q,
+        scatter=jnp.asarray(0.0, F64),
+        pos_mean=jnp.zeros(2, F64),
+        ess=ess,
+        updater_status=updater_status,
+        finite=_parameters_finite(elements),
+        draws=elements,
+    )
+
+
 class _FirstSummaryLane(eqx.Module):
     """One stored first-tier cloud to summarize again."""
 
@@ -1291,7 +1405,7 @@ class _FirstSummaryLane(eqx.Module):
     log_evidence: jax.Array
     expected: jax.Array
     ess: jax.Array
-    raw: jax.Array
+    updater_status: jax.Array
     live: jax.Array
 
 
@@ -1307,14 +1421,10 @@ def _first_resummary_lane(channel, lane, st):
         lane.expected,
         st,
     )
-    return (
-        *leaves,
-        lane.ess,
-        lane.raw,
-        _parameters_finite(lane.elements),
-        lane.elements,
-        lane.log_evidence,
-        lane.expected,
+    return _FirstResult(
+        result=_dark_result(leaves, lane.ess, lane.updater_status, lane.elements),
+        log_evidence=lane.log_evidence,
+        expected=lane.expected,
     )
 
 
@@ -1354,7 +1464,7 @@ def shrinkage_cloud(truth: PlanetParameters, key, n, width) -> PlanetParameters:
 def _shrink_lane(channel, population, lane, st, engine, scale):
     """One detected slot under the shrinkage rule: the cloud's summary leaves.
 
-    Returns the tuple of `_fit_lane`; the cloud is never weighted, so its size is
+    Returns the named result of `_fit_lane`; the cloud is never weighted, so its size is
     `st.n_shrink` and the code is always OK.
     """
     n_det = (lane.detected & lane.valid).sum()
@@ -1385,22 +1495,23 @@ def _shrink_lane(channel, population, lane, st, engine, scale):
         spacing_d=st.spacing_d,
         position_lag_d=st.position_lag_d,
     )
-    return (
-        leaves.p_det,
-        leaves.scatter,
-        leaves.pos_mean,
-        leaves.p_claim,
-        leaves.ln_period_q,
-        leaves.ess,
-        jnp.asarray(int(UpdaterStatus.OK), I64),
-        _parameters_finite(elements),
-        elements,
+    return LaneResult(
+        p_det=leaves.p_det,
+        scatter=leaves.scatter,
+        pos_mean=leaves.pos_mean,
+        p_claim=leaves.p_claim,
+        p_exist=jnp.asarray(1.0, F64),
+        ln_period_q=leaves.ln_period_q,
+        ess=leaves.ess,
+        updater_status=jnp.asarray(int(UpdaterStatus.OK), I64),
+        finite=_parameters_finite(elements),
+        draws=elements,
     )
 
 
 @eqx.filter_jit
 def _fit_lanes(channel, population, lanes, st, engine, scale):
-    """A batch of slot fits, one output tuple per leaf."""
+    """A batch of slot fits, one named result per track."""
     fit = _shrink_lane if engine == "shrink" else _fit_lane
     return _over_lanes(
         _if_live(lambda lane: fit(channel, population, lane, st, engine, scale)),
@@ -1860,8 +1971,8 @@ class ReportRefit(AbstractRefitBoundary):
     def _run_groups(self, run, items, lane_cls_fields, lane_cls=_FitLane):
         """Run `items` (a list of `_FitLane` field dicts) in padded groups of lanes.
 
-        `run(lanes)` is a batched call returning a tuple of arrays; the result is one
-        tuple of per-item numpy values for each item, in order. The padding lanes copy
+        `run(lanes)` returns a batched result module; the result is one
+        module of per-item NumPy values for each item, in order. The padding lanes copy
         the first item and are marked dead, so they are skipped.
         """
         out = []
@@ -1886,7 +1997,7 @@ class ReportRefit(AbstractRefitBoundary):
     def _answer_from_store(self, channel, st, indexed_fits, digests):
         """Summarize the stored clouds of the slots whose fit inputs were seen.
 
-        Returns `(answers, retried)`: the output tuple of each answered fit index and
+        Returns `(answers, retried)`: the named result of each answered fit index and
         the indices whose stored fit had needed the retry (the diagnostics count it as
         the refit would). Slots without a stored cloud are left to the caller.
         """
@@ -1909,7 +2020,7 @@ class ReportRefit(AbstractRefitBoundary):
                         "last": np.asarray(last, np.int64),
                         "elements": elements,
                         "ess": ess,
-                        "raw": raw,
+                        "updater_status": raw,
                     },
                 )
             )
@@ -1928,11 +2039,8 @@ class ReportRefit(AbstractRefitBoundary):
 
     def _store(self, digest, out, retried):
         """Keep a fit's cloud for later summaries when it is a sound one."""
-        ess, raw, finite, elements = out[5:9]
-        if slot_status(raw, finite) == SLOT_OK and all(
-            np.isfinite(x).all() for x in out[:6]
-        ):
-            self._keep(digest, (elements, ess, raw, bool(retried)))
+        if slot_status(out.updater_status, _result_finite(out)) == SLOT_OK:
+            self._keep(digest, (out.draws, out.ess, out.updater_status, bool(retried)))
 
     def _keep(self, digest, value):
         """Put a cloud in the store (copies: a view would keep a lane batch alive)."""
@@ -1964,7 +2072,7 @@ class ReportRefit(AbstractRefitBoundary):
                         "log_evidence": evidence,
                         "expected": expected,
                         "ess": ess,
-                        "raw": raw,
+                        "updater_status": raw,
                     },
                 )
             )
@@ -1985,11 +2093,19 @@ class ReportRefit(AbstractRefitBoundary):
 
     def _store_first(self, digest, out, retried):
         """Keep a first-tier cloud for later summaries when it is a sound one."""
-        ess, raw, finite, elements, evidence, expected = out[4:10]
-        if slot_status(raw, finite) == SLOT_OK and all(
-            np.isfinite(x).all() for x in out[:5]
-        ):
-            self._keep(digest, (elements, evidence, expected, ess, raw, bool(retried)))
+        result = out.result
+        if slot_status(result.updater_status, _result_finite(result)) == SLOT_OK:
+            self._keep(
+                digest,
+                (
+                    result.draws,
+                    out.log_evidence,
+                    out.expected,
+                    result.ess,
+                    result.updater_status,
+                    bool(retried),
+                ),
+            )
 
     def _refit_posterior(self, study, requests):
         require_x64()
@@ -2084,57 +2200,65 @@ class ReportRefit(AbstractRefitBoundary):
         fits, firsts = [], []
         for e in entries:
             rep = e["report"]
-            astrometry = (
-                rep["detected"]
-                & rep["valid"]
-                & (rep["ra_err"] > 0)
-                & (rep["dec_err"] > 0)
+            track_fields = (
+                "epochs",
+                "sep",
+                "dmag0",
+                "limit",
+                "detected",
+                "counts",
+                "valid",
+                "ra",
+                "dec",
+                "ra_err",
+                "dec_err",
+                "corr",
+                "end_tick",
             )
-            e["n_det"] = (rep["detected"] & rep["valid"]).sum(axis=1)
-            e["live"] = np.flatnonzero(e["n_det"] > 0)
-            e["dark"] = np.flatnonzero(e["n_det"] == 0)
+            shared = {"epochs", "sep", "dmag0", "limit", "end_tick"}
+            arrays = {**rep, "end_tick": e["end"]}
+            star = StarLane(
+                subject=np.asarray(e["at"][2]),
+                tick=np.asarray(e["tick"]),
+                key=e["key"],
+                live=np.asarray(True),
+                n_det=(rep["detected"] & rep["valid"]).sum(axis=1),
+                **{
+                    name: np.broadcast_to(arrays[name], (n_slots, *arrays[name].shape))
+                    if name in shared
+                    else arrays[name]
+                    for name in track_fields
+                },
+            )
+            astrometry = (
+                star.detected & star.valid & (star.ra_err > 0) & (star.dec_err > 0)
+            )
+            e["n_det"] = star.n_det
+            e["live"] = np.flatnonzero(star.n_det > 0)
+            e["dark"] = np.flatnonzero(star.n_det == 0)
             e["skipped"] = []
-            base = {
-                "subject": np.asarray(e["at"][2]),
-                "tick": np.asarray(e["tick"]),
-                "key": e["key"],
-                "epochs": rep["epochs"],
-                "sep": rep["sep"],
-                "dmag0": rep["dmag0"],
-                "limit": rep["limit"],
-                "end_tick": e["end"],
-                "n_undetected": np.asarray(len(e["dark"])),
-            }
+            base = {name: getattr(star, name) for name in ("subject", "tick", "key")}
+            base["n_undetected"] = np.asarray(len(e["dark"]))
+            tracks = {name: getattr(star, name) for name in track_fields}
             for slot in e["live"]:
                 if shrink and not e["has_cat"]:
                     e["skipped"].append(slot)
                     continue
-                item = dict(base)
+                item = {**base, **jax.tree.map(lambda x, slot=slot: x[slot], tracks)}
                 item["slot"] = np.asarray(slot)
                 if shrink:
                     item["truth"] = jax.tree.map(
                         lambda x, slot=slot: x[slot], e["truth"]
                     )
-                for f in (
-                    "detected",
-                    "valid",
-                    "counts",
-                    "ra",
-                    "dec",
-                    "ra_err",
-                    "dec_err",
-                    "corr",
-                ):
-                    item[f] = rep[f][slot]
                 n_records = int(astrometry[slot].sum())
                 engine = "shrink" if shrink else "single" if n_records <= 1 else "multi"
                 fits.append((e, slot, engine, item))
             if len(e["dark"]):
-                first = dict(base)
+                first = {**base, **jax.tree.map(lambda x: x[0], tracks)}
                 first["slot"] = np.asarray(n_slots)
-                # a row counts for the first tier when every undetected slot read it
-                first["valid"] = rep["valid"][e["dark"]].all(axis=0)
-                for f in (
+                # A row counts only when every dark track read it.
+                first["valid"] = star.valid[e["dark"]].all(axis=0)
+                for name in (
                     "detected",
                     "counts",
                     "ra",
@@ -2143,7 +2267,7 @@ class ReportRefit(AbstractRefitBoundary):
                     "dec_err",
                     "corr",
                 ):
-                    first[f] = np.zeros_like(rep[f][0])
+                    first[name] = np.zeros_like(first[name])
                 firsts.append((e, first))
 
         lane_cls = _ShrinkLane if shrink else _FitLane
@@ -2194,7 +2318,6 @@ class ReportRefit(AbstractRefitBoundary):
         first_fields = [
             f.name for f in dataclasses.fields(_FitLane) if f.name != "live"
         ]
-        low = int(UpdaterStatus.LOW_ESS)
         indexed_fits = list(enumerate(fits))
         fit_out, stored_retries = {}, set()
         digests = {}
@@ -2210,7 +2333,7 @@ class ReportRefit(AbstractRefitBoundary):
             )
         to_fit = [(k, fit) for k, fit in indexed_fits if k not in fit_out]
         fit_out.update(run_fits(to_fit, 1))
-        retried_fits = [(k, fit) for k, fit in to_fit if fit_out[k][6] == low]
+        retried_fits = [(k, fit) for k, fit in to_fit if retry_mask(fit_out[k])]
         fit_out.update(run_fits(retried_fits, RETRY_FACTOR))
         if self.resummary:
             self.resummary_stats["misses"] += len(to_fit)
@@ -2231,7 +2354,9 @@ class ReportRefit(AbstractRefitBoundary):
             )
         first_fit = [(k, f) for k, f in indexed_firsts if k not in first_out]
         first_out.update(run_firsts(first_fit, 1))
-        retried_firsts = [(k, f) for k, f in first_fit if first_out[k][5] == low]
+        retried_firsts = [
+            (k, f) for k, f in first_fit if retry_mask(first_out[k].result)
+        ]
         first_out.update(run_firsts(retried_firsts, RETRY_FACTOR))
         if self.resummary:
             self.resummary_stats["misses"] += len(first_fit)
@@ -2255,40 +2380,32 @@ class ReportRefit(AbstractRefitBoundary):
             per_entry.setdefault(id(e), {"e": e, "fits": {}, "first": None})[
                 "first"
             ] = first_out[k]
+        results = {}
+        for item in per_entry.values():
+            e = item["e"]
+            slots = tuple(item["fits"])
+            if slots:
+                results[(*e["at"], slots)] = jax.tree.map(
+                    lambda *xs: np.stack(xs), *item["fits"].values()
+                )
+            if item["first"] is not None:
+                results[(*e["at"], tuple(e["dark"]))] = jax.tree.map(
+                    lambda x, e=e: np.broadcast_to(x, (len(e["dark"]), *x.shape)),
+                    item["first"].result,
+                )
+        summary = scatter_results(DecisionSummary(**slices, aux=np.zeros(0)), results)
+        slices = {name: getattr(summary, name) for name in names}
         for item in per_entry.values():
             e = item["e"]
             w, a, s = e["at"]
             codes = np.zeros(n_slots, np.int64)
             units = []
-            for slot, out in item["fits"].items():
-                p_det, scatter, pos, p_claim, q, ess, raw, finite, _ = out
-                valid = bool(finite) and all(np.isfinite(x).all() for x in out[:6])
-                codes[slot] = slot_status(raw, valid)
+            for slot in item["fits"]:
+                codes[slot] = slices["status"][w, a, s, slot]
                 units.append(codes[slot])
-                if codes[slot] in SLOT_KEPT:
-                    continue
-                slices["p_exist"][w, a, s, slot] = 1.0
-                slices["p_det"][w, a, s, slot] = p_det
-                slices["scatter"][w, a, s, slot] = scatter
-                slices["pos_mean"][w, a, s, slot] = pos
-                slices["p_claim"][w, a, s, slot] = p_claim
-                slices["ln_period_q"][w, a, s, slot] = q
-                slices["ess"][w, a, s, slot] = ess
             if item["first"] is not None:
-                p_exist, p_det, p_claim, q, ess, raw, finite, _, _, _ = item["first"]
-                valid = bool(finite) and all(
-                    np.isfinite(x).all() for x in item["first"][:5]
-                )
-                code = slot_status(raw, valid)
-                codes[e["dark"]] = code
-                for slot in e["dark"] if code not in SLOT_KEPT else ():
-                    slices["p_exist"][w, a, s, slot] = p_exist
-                    slices["p_det"][w, a, s, slot] = p_det
-                    slices["p_claim"][w, a, s, slot] = p_claim
-                    slices["ln_period_q"][w, a, s, slot] = q
-                    slices["ess"][w, a, s, slot] = ess
-                    codes[slot] = code
-                units.append(code)
+                codes[e["dark"]] = slices["status"][w, a, s, e["dark"]]
+                units.append(codes[e["dark"][0]])
             for slot in e["skipped"]:
                 codes[slot] = SLOT_NO_SUPPORT
                 units.append(SLOT_NO_SUPPORT)

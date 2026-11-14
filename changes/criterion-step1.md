@@ -376,3 +376,15 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
   catalog row do. Spectra remain available to later refits.
 - Add one study test covering the declared channels and the same rule under JIT
   and batching. No tests are retired.
+
+## Named per-star refit lanes
+
+- Gather imaging reports into a private per-star lane and retain track execution
+  groups by engine and row bucket. Detected, dark, shrinkage and stored-cloud
+  paths return named result modules, including physical draws and raw updater
+  status. Retry from the raw updater status and scatter summary leaves by name.
+- Add three tests: distinct-field scatter with failed and unsupported controls,
+  the raw-status retry mask, and bitwise parity with an executable positional
+  reference on both posterior engines using reduced proposal counts. Adapt
+  existing private-interface tests; no tests are retired, shared parameter
+  matrices expand, or serialized goldens and pinned hashes change.

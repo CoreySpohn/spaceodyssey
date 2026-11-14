@@ -92,8 +92,10 @@ def test_the_first_tier_draws_the_belief_population(boundary_inputs):
     population = boundary_inputs[2]
     for p, expected in ((population, 0.25), (population_scaled(population, 2.0), 0.5)):
         out, lane, st = first_tier(boundary_inputs, p)
-        assert float(out[0]) == pytest.approx(expected / int(lane.n_undetected))
-        elements = out[-3]
+        assert float(out.result.p_exist) == pytest.approx(
+            expected / int(lane.n_undetected)
+        )
+        elements = out.result.draws
         draws, _ = p.draw_planets(
             ph._slot_key(lane, 1),
             boundary_inputs[0].world_source.stars[0],
@@ -302,7 +304,7 @@ def test_empty_support_and_exhaustion_are_bounded(boundary_inputs):
         assert not bool(valid.any())
         assert float(empty.expected_planets(star, KEY, 8)) == 0.0
         out, _, _ = first_tier(boundary_inputs, empty)
-        assert float(out[0]) == 0.0
+        assert float(out.result.p_exist) == 0.0
     params, _, _ = hand_cloud()
     st = boundary_inputs[1]._post_settings(study)
     for n_dark, expected, want in ((2, 100.0, 1.0), (0, 100.0, 0.0), (2, 0.0, 0.0)):

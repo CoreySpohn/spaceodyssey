@@ -19,7 +19,7 @@ from photomancy.orbit.updater import UpdaterStatus
 
 from spaceodyssey.adapters import photomancy as ph
 from spaceodyssey.adapters.measurement import measurement_template
-from spaceodyssey.adapters.parameters import to_photomancy
+from spaceodyssey.adapters.parameters import PlanetParameters, to_photomancy
 from spaceodyssey.core.enums import RefitStatus
 from spaceodyssey.core.records import pack, unpack
 from spaceodyssey.studies import bracket as br
@@ -410,7 +410,7 @@ def test_the_search_probability_follows_the_posterior_occupancy(world, n_rows):
     )
     q = min(float(expected_count) / N_SLOTS, 1.0)
     expected = q * like / (1.0 - q + q * like)
-    got = float(ph._first_tier_lane(channel, population, lane, st, 1)[0])
+    got = float(ph._first_tier_lane(channel, population, lane, st, 1).result.p_exist)
     assert got == pytest.approx(expected, rel=1e-10, abs=1e-14)
     assert got < q
 
@@ -513,10 +513,28 @@ def test_the_store_falls_back_to_a_fit_when_it_cannot_answer(world):
     assert kept.resummary_stats["hits"] == stored["hits"]
     assert kept.resummary_stats["misses"] > stored["misses"]
 
-    elements = np.zeros((4, 8))
-    sound = (*(np.zeros(2),) * 5, 400.0, int(UpdaterStatus.OK), True, elements)
-    weak = (*sound[:6], int(UpdaterStatus.LOW_ESS), True, elements)
-    broken = (*sound[:7], False, elements)
+    elements = PlanetParameters(
+        **{
+            f.name: np.zeros((4, channel.n_bands) if f.name == "albedo" else (4,))
+            for f in dataclasses.fields(PlanetParameters)
+        }
+    )
+    sound = ph.LaneResult(
+        p_det=np.zeros(2),
+        scatter=np.asarray(0.0),
+        pos_mean=np.zeros(2),
+        p_claim=np.zeros(2),
+        p_exist=np.asarray(1.0),
+        ln_period_q=np.zeros(3),
+        ess=np.asarray(400.0),
+        updater_status=np.asarray(int(UpdaterStatus.OK)),
+        finite=np.asarray(True),
+        draws=elements,
+    )
+    weak = dataclasses.replace(
+        sound, updater_status=np.asarray(int(UpdaterStatus.LOW_ESS))
+    )
+    broken = dataclasses.replace(sound, finite=np.asarray(False))
     probe = _boundary(study, 1, resummary=True, resummary_capacity=1)
     for name, out in (("weak", weak), ("broken", broken)):
         probe._store(name.encode(), out, False)
