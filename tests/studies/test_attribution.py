@@ -47,6 +47,11 @@ def flight(scored_case, criterion, exposures):
         measured = dataclasses.replace(
             row,
             mode=jnp.asarray(mode, I64),
+            detected=jnp.where(
+                MODES.modes[mode].kind == "imaging",
+                (row.assignment >= 0).astype(row.detected.dtype),
+                jnp.zeros_like(row.detected),
+            ),
             counts=counts,
             variance=variance,
             true_counts=counts,

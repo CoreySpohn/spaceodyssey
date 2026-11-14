@@ -763,6 +763,10 @@ is added (net nineteen fewer test functions). No parameter matrix is expanded.
 - A production-shaped all-null image leaves undetected catalog planets missed
   and creates no misassociation or yield credit.
 
+- Synthetic cross-criterion imaging exposures now declare their actual detected
+  entries. Writer tests require identities on detections and reject identities
+  on null padding, while retaining the band-isolation and count checks.
+
 ### Label correctness and initial open tracks
 
 - Verdict correctness compares the issued answer with the truth-folded answer

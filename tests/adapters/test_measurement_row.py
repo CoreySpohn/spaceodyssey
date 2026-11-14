@@ -46,7 +46,7 @@ def realize_many(channel, source, channel_index, n):
 
 @pytest.mark.medium(reason="builds the fixture and realizes one imaging row")
 def test_an_imaging_row_fills_only_its_band(source, channel):
-    """Fails if a writer reorders leaves or writes an unexposed band."""
+    """Fails if a writer fills another band or assigns identities to null padding."""
     t = channel.mode_table
     row = unpack(
         channel.measurement_template,
@@ -57,10 +57,11 @@ def test_an_imaging_row_fills_only_its_band(source, channel):
     for values in (row.counts, row.variance, row.true_counts, row.true_variance):
         assert not bool(jnp.any(values[:, other]))
     np.testing.assert_array_equal(row.assignment, np.arange(N_SLOTS))
-    np.testing.assert_array_equal(row.identity, row.assignment)
     b = t.band_index("detection")
     detected = np.asarray(row.detected) > 0.5
     assert detected.any(), "the control must expose a signal"
+    np.testing.assert_array_equal(row.identity[detected], row.assignment[detected])
+    np.testing.assert_array_equal(row.identity[~detected], -1)
     for values in (row.counts, row.variance, row.true_counts, row.true_variance):
         np.testing.assert_array_equal(values[~detected], 0)
     np.testing.assert_allclose(
