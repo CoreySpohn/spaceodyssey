@@ -3,6 +3,7 @@
 import dataclasses
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -149,6 +150,37 @@ def test_a_star_at_its_imaging_cap_gets_no_imaging(fixture):
         state=state_with(fixture, n_imaging=br.MAX_VISITS),
     )
     assert effect_kind(d) == EffectKind.WAIT
+
+
+def test_equivalent_tracks_share_options_without_merging_different_inputs(fixture):
+    """Fails if identical tracks repeat searches or unequal inputs share options."""
+    calls = []
+
+    class CountingCriterion(type(fixture.observer.criterion)):
+        """Count actual option execution at the criterion interface."""
+
+        def options(self, state, summary_star, tick, modes, settings):
+            jax.debug.callback(lambda _: calls.append(1), state.node[0], ordered=True)
+            return super().options(state, summary_star, tick, modes, settings)
+
+    original = fixture.observer.criterion
+    criterion = CountingCriterion(
+        **{f.name: getattr(original, f.name) for f in dataclasses.fields(original)}
+    )
+    study = dataclasses.replace(
+        fixture, observer=dataclasses.replace(fixture.observer, criterion=criterion)
+    )
+    summary = summary_selecting_node(study, node=0)
+    different_forecast = dataclasses.replace(
+        summary, fc_variance=summary.fc_variance.at[0, 0].add(1.0)
+    )
+    for supplied, expected in ((summary, 4), (different_forecast, 5)):
+        calls.clear()
+        decision = decide_once(study, summary=supplied, state=state_with(study))
+        jax.effects_barrier()
+        assert effect_kind(decision) == EffectKind.OBSERVE
+        assert np.asarray(decision.state.has_package).all()
+        assert len(calls) == expected
 
 
 def test_a_policy_state_round_trips_through_the_codec(fixture):

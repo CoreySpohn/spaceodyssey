@@ -29,6 +29,7 @@ import dataclasses
 import hashlib
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor
 
 import equinox as eqx
 import jax
@@ -41,6 +42,7 @@ from photomancy.orbit.ofti import PARAM_NAMES, ofti
 from photomancy.orbit.priors import ecc_distribution
 from photomancy.orbit.updater import UpdaterStatus
 
+from spaceodyssey._threads import _in_thread, _thread_config
 from spaceodyssey.adapters.measurement import (
     MEASUREMENT_KIND_NAME,
     measurement_template,
@@ -1699,8 +1701,8 @@ def _fit_digest(item, st, population=None, bands=()):
 
 
 @eqx.filter_jit
-def _population_summary(channel, population, prior, st):
-    """Forecast the declared first-tier population before any reports exist."""
+def _population_leaves(channel, population, subjects, st):
+    """Independent scalar forecasts, retaining the native per-star reduction."""
 
     def star_summary(subject):
         key = jax.random.fold_in(jax.random.PRNGKey(0), subject)
@@ -1728,7 +1730,12 @@ def _population_summary(channel, population, prior, st):
         )
         return _dark_slot_prior(expected, jnp.asarray(st.n_slots), st.n_slots), leaves
 
-    existence, leaves = jax.lax.map(star_summary, jnp.arange(prior.n_subjects))
+    return jax.lax.map(star_summary, subjects)
+
+
+def _install_population(prior, st, result):
+    """Broadcast each host's forecast into its declared dark slots."""
+    existence, leaves = result
 
     def slots(x):
         return jnp.broadcast_to(
@@ -1748,6 +1755,32 @@ def _population_summary(channel, population, prior, st):
         ess=slots(leaves.ess),
         available=leaves.available,
     )
+
+
+@eqx.filter_jit
+def _population_summary(channel, population, prior, st):
+    """Forecast the declared first-tier population before any reports exist."""
+    leaves = _population_leaves(channel, population, jnp.arange(prior.n_subjects), st)
+    return _install_population(prior, st, leaves)
+
+
+def _parallel_population_summary(channel, population, prior, st, workers):
+    """Partition complete scalar maps, keeping keys and output order unchanged."""
+    # A map with one element can compile a different floating-point reduction.
+    size = max(2, math.ceil(prior.n_subjects / workers))
+    subjects = jnp.minimum(jnp.arange(workers * size), prior.n_subjects - 1)
+    parts = subjects.reshape(workers, size)
+    config = _thread_config()
+
+    def one(indices):
+        return jax.block_until_ready(
+            _in_thread(_population_leaves, (channel, population, indices, st), config)
+        )
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        groups = list(pool.map(one, parts))
+    result = jax.tree.map(lambda *xs: jnp.concatenate(xs)[: prior.n_subjects], *groups)
+    return _install_population(prior, st, result)
 
 
 class ReportRefit(AbstractRefitBoundary):
@@ -2114,18 +2147,27 @@ class ReportRefit(AbstractRefitBoundary):
             for flag in flags
         )
 
-    def initial_summary(self, study):
+    def initial_summary(self, study, *, workers=1):
         """Initialize every audience from the belief population and planning model.
 
         This needs no measurement or catalog permissions and uses the same draw
         count, occurrence estimate and forecasts as the declared first tier.
+        `workers` partitions full scalar maps between host threads, preserving
+        the caller's JAX precision and device. One worker remains traceable.
         """
+        if type(workers) is not int or workers < 1:
+            raise ValueError("workers must be a positive integer")
         view = study.decision_view()
+        prior, settings = study.observer.prior, self._post_settings(study)
+        if workers > 1:
+            return _parallel_population_summary(
+                view.channel_model, view.belief_population, prior, settings, workers
+            )
         return _population_summary(
             view.channel_model,
             view.belief_population,
-            study.observer.prior,
-            self._post_settings(study),
+            prior,
+            settings,
         )
 
     def _post_settings(self, study):

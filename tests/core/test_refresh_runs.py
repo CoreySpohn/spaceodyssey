@@ -22,7 +22,7 @@ from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.carry import _tree_set
 from spaceodyssey.core.conformance import refit_beliefs
 from spaceodyssey.core.enums import F64, I64, Capacity, EventKind, RefitStatus, Stage
-from spaceodyssey.core.executors import base
+from spaceodyssey.core.executors import base, compiled
 from spaceodyssey.studies import builder, toy
 from tests.core.corpus import LEAK_PLAN, LEAK_SCENARIOS
 from tests.core.helpers import worlds
@@ -739,3 +739,35 @@ def test_each_audience_installs_its_own_slice():
         assert (policy_mean == 0).all()  # the policy copy of it is masked
     r = histories_equal(h.history(0), c.history(0))
     assert r.ok and r.go, r
+
+
+def test_single_world_chunk_skips_unspent_and_terminal_steps():
+    """Fails if padded scan rows execute the transaction's expensive branches."""
+    calls = []
+
+    class Counted(CompiledExecutor):
+        def transition(self, carry, *args, **kwargs):
+            jax.debug.callback(lambda: calls.append(1), ordered=True)
+            return super().transition(carry, *args, **kwargs)
+
+    study = builder.survey_1()
+    truths, roots = worlds(1)
+    carry = compiled._init_worlds(study, truths)
+    for budget, terminal, expected in ((2, False, 2), (8, True, 0)):
+        calls.clear()
+        initial = dataclasses.replace(carry, done=jnp.asarray([terminal]))
+        out, left, trace = compiled._scan_chunk(
+            Counted(),
+            study,
+            initial,
+            truths,
+            roots,
+            jnp.asarray([budget], I64),
+            compiled.wake_by_audience,
+            8,
+        )
+        jax.block_until_ready((out, left, trace))
+        jax.effects_barrier()
+        assert len(calls) == expected
+        assert int(left[0]) == budget - expected
+        assert int(trace.handled.sum()) == expected

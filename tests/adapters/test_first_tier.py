@@ -425,3 +425,16 @@ def test_expected_host_count_is_stable_across_refit_keys(boundary_inputs):
         st.n_estimate_systems,
     )
     assert float(first.expected) == float(expected)
+
+
+@pytest.mark.slow(reason="compares serial and threaded population forecast programs")
+def test_parallel_population_prior_preserves_all_leaves_and_host_order(boundary_inputs):
+    """Fails if partitioning changes keys, reductions, order or caller precision."""
+    study, boundary, population = boundary_inputs
+    study = dataclasses.replace(study, belief_population=population)
+    serial = jax.block_until_ready(boundary.initial_summary(study))
+    parallel = jax.block_until_ready(boundary.initial_summary(study, workers=2))
+    for a, b in zip(jax.tree.leaves(serial), jax.tree.leaves(parallel), strict=True):
+        assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+    assert parallel.fc_counts.dtype == jnp.float64
+    assert not np.array_equal(parallel.fc_counts[0], parallel.fc_counts[1])

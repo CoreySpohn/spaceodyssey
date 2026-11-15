@@ -108,7 +108,7 @@ from spaceodyssey.core.records import (
 from spaceodyssey.core.refresh import REFRESH_PRODUCT_KIND, RefreshSchedule
 from spaceodyssey.core.snapshot import BeliefLayout
 from spaceodyssey.core.study import Study
-from spaceodyssey.criteria.base import AbstractCriterion
+from spaceodyssey.criteria.base import AbstractCriterion, _same_adjacent
 from spaceodyssey.criteria.claims import EarthCandidateClaim
 from spaceodyssey.criteria.transition import TransitionSettings, TransitionTable
 from spaceodyssey.studies import builder, effect_rows
@@ -441,7 +441,9 @@ def bracket_study(
     )
 
     if isinstance(observer, SummaryObserver):
-        prior = ReportRefit(kernel="posterior").initial_summary(study)
+        prior = ReportRefit(kernel="posterior").initial_summary(
+            study, workers=4 if caps.n_subjects >= 8 else 1
+        )
         study = dataclasses.replace(
             study, observer=dataclasses.replace(observer, prior=prior)
         )
@@ -720,6 +722,19 @@ class PackagePolicy(AbstractPolicy):
                     ),
                 )
                 criterion_state = unpack(template, one.state)
+                track_fields = (
+                    "p_exist",
+                    "n_det",
+                    "p_det",
+                    "fc_counts",
+                    "fc_variance",
+                    "scatter",
+                    "pos_mean",
+                    "p_claim",
+                    "ln_period_q",
+                    "ess",
+                    "status",
+                )
 
                 def track_options(track):
                     track_state = jax.tree.map(
@@ -729,19 +744,7 @@ class PackagePolicy(AbstractPolicy):
                         one,
                         **{
                             name: getattr(one, name)[track][None]
-                            for name in (
-                                "p_exist",
-                                "n_det",
-                                "p_det",
-                                "fc_counts",
-                                "fc_variance",
-                                "scatter",
-                                "pos_mean",
-                                "p_claim",
-                                "ln_period_q",
-                                "ess",
-                                "status",
-                            )
+                            for name in track_fields
                         },
                         state=pack(track_state),
                     )
@@ -749,9 +752,27 @@ class PackagePolicy(AbstractPolicy):
                         track_state, track_summary, tick, modes, star_settings
                     )
 
+                same = _same_adjacent(
+                    (
+                        criterion_state,
+                        tuple(getattr(one, name) for name in track_fields),
+                    )
+                )
+                first = track_options(jnp.asarray(0, I64))
+
+                def next_track(previous, track):
+                    value = jax.lax.cond(
+                        same[track], lambda _: previous, track_options, track
+                    )
+                    return value, value
+
+                _, later = jax.lax.scan(next_track, first, jnp.arange(1, self.n_tracks))
+                individual = jax.tree.map(
+                    lambda head, tail: jnp.concatenate((head[None], tail)), first, later
+                )
                 return (
                     criterion.options(criterion_state, one, tick, modes, star_settings),
-                    jax.lax.map(track_options, jnp.arange(self.n_tracks)),
+                    individual,
                 )
 
             options, track_options = jax.lax.map(options, jnp.arange(n))

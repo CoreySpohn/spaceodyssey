@@ -903,3 +903,27 @@ def test_pinned_package_digest_matches_yippy_catalog(monkeypatch):
         patch.setattr(adapter, "DATA_RELEASE_TAG", "changed")
         with pytest.raises(ValueError, match="release"):
             adapter._pinned_response(None)
+
+
+def test_leakage_program_reuses_different_stellar_diameters(observatory):
+    """Fails if each host retraces the same finite-star leakage computation."""
+    calls = []
+
+    class Counted(ToyCoronagraph):
+        def core_mean_intensity(
+            self, separation_lod, wavelength_nm, *, time_s=0.0, stellar_diam_lod=0.0
+        ):
+            calls.append(1)
+            base = super().core_mean_intensity(separation_lod, wavelength_nm)
+            return base * (1.0 + stellar_diam_lod)
+
+    report = toy_report(observatory, coronagraph=Counted())
+    previous = None
+    for diameter in (0.0, 0.03, 0.06):
+        result = jax.block_until_ready(
+            report.leakage_table(toy_scene(star_diameter_mas=diameter))
+        )
+        if previous is not None:
+            assert np.all(np.asarray(result) > previous)
+        previous = np.asarray(result)
+        assert len(calls) == 1

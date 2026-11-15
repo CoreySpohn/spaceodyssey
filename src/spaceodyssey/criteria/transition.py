@@ -11,7 +11,7 @@ from jax.scipy.special import ndtr
 
 from spaceodyssey.adapters.photomancy import SLOT_OK
 from spaceodyssey.core.enums import F64, I64
-from spaceodyssey.criteria.base import AbstractCriterion, StarOptions
+from spaceodyssey.criteria.base import AbstractCriterion, StarOptions, _same_adjacent
 from spaceodyssey.criteria.claims import AbstractClaim
 
 
@@ -311,6 +311,31 @@ class TransitionTable(AbstractCriterion):
         passes; failure ends that proposed package, retaining any achieved label.
         Later exposures use available nodes at or after the preceding node.
         """
+        n_grid, n_variants = summary_star.available.shape
+        possible = (state.node < self.n_steps) & (
+            self._target_probability(summary_star.p_claim) > 0
+        )
+
+        def zero_gain():
+            gain = jnp.zeros((n_grid, n_variants), F64)
+            return StarOptions(
+                gain,
+                jnp.broadcast_to(
+                    settings.channel_cost[:n_variants],
+                    (n_grid, n_variants, settings.channel_cost.shape[-1]),
+                ),
+                jnp.broadcast_to(jnp.arange(n_variants, dtype=I64), gain.shape),
+                jnp.zeros((*gain.shape, state.node.size), F64),
+            )
+
+        return jax.lax.cond(
+            jnp.any(possible) & jnp.any(summary_star.available),
+            lambda: self._package_options(state, summary_star, tick, modes, settings),
+            zero_gain,
+        )
+
+    def _package_options(self, state, summary_star, tick, modes, settings):
+        """Continuation search for a star with attainable incremental credit."""
         allowed, mode_bands = self._mode_layout(modes)
         n_grid, n_variants = summary_star.available.shape
         duration_count = len(modes.durations_d)
@@ -503,41 +528,88 @@ class TransitionTable(AbstractCriterion):
                     remaining_rows,
                 ),
             )
-            return target[slot] * result[6], result[2], result[9]
+            return result[6], result[2], result[9]
 
-        def option(g, v):
-            def track(slot, carry):
-                gain, later_time, left, track_gain = carry
-                credit, time, left = slot_package(slot, g, v, left)
-                return (
-                    gain + credit,
-                    later_time + time,
-                    left,
-                    track_gain.at[slot].set(credit),
-                )
-
-            # The first exposure serves every track; later rows share one allowance.
-            gain, later_time, _, track_gain = jax.lax.fori_loop(
-                0,
-                state.node.size,
-                track,
-                (
-                    jnp.asarray(0.0, F64),
-                    jnp.zeros(costs.shape[-1], F64),
-                    rows - (imaging == imaging[v]),
-                    jnp.zeros(state.node.size, F64),
-                ),
+        same = _same_adjacent(
+            (
+                state,
+                summary_star.n_det,
+                summary_star.status,
+                summary_star.scatter,
+                summary_star.p_exist,
+                summary_star.p_det,
+                summary_star.fc_counts,
+                summary_star.fc_variance,
+                target,
             )
-            return gain, costs[v] + later_time, track_gain
+        )
+        indices = jnp.arange(n_grid * n_variants)
+        first_v = indices % n_variants
+        left = jnp.broadcast_to(rows, (indices.size, n_variants)) - (
+            imaging[None, :] == imaging[first_v, None]
+        )
+        zero_gain = jnp.zeros(indices.size, F64)
+        zero_time = jnp.zeros((indices.size, costs.shape[-1]), F64)
 
-        gain, time, track_gain = jax.vmap(
-            jax.vmap(option, in_axes=(None, 0)), in_axes=(0, None)
-        )(jnp.arange(n_grid), jnp.arange(n_variants))
+        def track(slot, carry):
+            gain, later, left, credit_by_track, before, after, raw_gain, time = carry
+            consumed = before - after
+            unchanged = jnp.all(left == before)
+            # Remaining rows affect choices only through positivity. Reuse an
+            # uncapped path only when every intermediate allowance stays positive.
+            uncapped = (
+                jnp.all(before > 0)
+                & jnp.all(after > 0)
+                & jnp.all(left > 0)
+                & jnp.all(left - consumed > 0)
+            )
+
+            def calculate(remaining):
+                return jax.vmap(
+                    lambda index, allowance: slot_package(
+                        slot, index // n_variants, index % n_variants, allowance
+                    )
+                )(indices, remaining)
+
+            raw_gain, time, next_left = jax.lax.cond(
+                same[slot] & (unchanged | uncapped),
+                lambda remaining: (raw_gain, time, remaining - consumed),
+                calculate,
+                left,
+            )
+            credit = target[slot] * raw_gain
+            return (
+                gain + credit,
+                later + time,
+                next_left,
+                credit_by_track.at[:, slot].set(credit),
+                left,
+                next_left,
+                raw_gain,
+                time,
+            )
+
+        # Keep the original track order and add the shared first cost only once.
+        result = jax.lax.fori_loop(
+            0,
+            state.node.size,
+            track,
+            (
+                zero_gain,
+                zero_time,
+                left,
+                jnp.zeros((indices.size, state.node.size), F64),
+                left,
+                left,
+                zero_gain,
+                zero_time,
+            ),
+        )
         return StarOptions(
-            gain,
-            time,
+            result[0].reshape(n_grid, n_variants),
+            (costs[first_v] + result[1]).reshape(n_grid, n_variants, -1),
             jnp.broadcast_to(jnp.arange(n_variants, dtype=I64), (n_grid, n_variants)),
-            track_gain,
+            result[3].reshape(n_grid, n_variants, state.node.size),
         )
 
 

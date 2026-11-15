@@ -19,6 +19,7 @@ from spaceodyssey.adapters.photomancy import SLOT_OK, DecisionSummary
 from spaceodyssey.adapters.skyscapes import Band
 from spaceodyssey.core.enums import I64
 from spaceodyssey.core.records import pack, unpack
+from spaceodyssey.criteria import transition
 from spaceodyssey.criteria.claims import EarthCandidateClaim
 from spaceodyssey.criteria.transition import (
     TransitionSettings,
@@ -521,6 +522,7 @@ def test_tracks_share_the_star_packages_remaining_rows_in_order():
     opts = _options(table, state, summary, limited)
     assert float(opts.gain[0, 0]) == 1.0
     assert float(opts.time[0, 0, TELESCOPE]) == 12.0
+
     image = dataclasses.replace(
         spectral_row(mode=0, counts=50.0),
         assignment=jnp.asarray([0, 1], I64),
@@ -548,3 +550,60 @@ def test_tracks_share_the_star_packages_remaining_rows_in_order():
     # The first track gains 0.75; the second retains only its 0.25 imaging credit.
     assert float(opts.gain[0, 0]) == 1.0
     assert float(opts.time[0, 0, TELESCOPE]) == 12.0
+
+
+def test_equivalent_continuations_reuse_work_until_row_constraints_bind(monkeypatch):
+    """Fails if repeated continuations run again or reuse crosses a row limit."""
+    calls = []
+    probability = transition.pass_probability
+
+    def counted(*args):
+        jax.debug.callback(lambda _: calls.append(1), args[0].sum(), ordered=True)
+        return probability(*args)
+
+    monkeypatch.setattr(transition, "pass_probability", counted)
+    table = one_step_table()
+    summary, settings = package_inputs(n_slots=6)
+    summary = dataclasses.replace(
+        summary,
+        n_det=jnp.zeros_like(summary.n_det),
+        p_det=jnp.ones_like(summary.p_det),
+        fc_counts=jnp.full_like(summary.fc_counts, 1000.0),
+    )
+    state = table.init_state(6, 3)
+    for rows, gain, time_d in ((24, 6.0, 86.0), (3, 1.0, 16.0), (2, 0.0, 4.0)):
+        calls.clear()
+        limited = dataclasses.replace(
+            settings, remaining_rows=jnp.asarray([rows, 12, 12], I64)
+        )
+        options = _options(table, state, summary, limited)
+        jax.effects_barrier()
+        assert float(options.gain[0, 0]) == gain
+        assert float(options.time[0, 0, TELESCOPE]) == time_d
+        if rows == 24:
+            assert len(calls) == 6
+
+
+def test_no_credit_star_skips_continuation_search(monkeypatch):
+    """Fails if a terminal star still evaluates its package continuations."""
+    calls = []
+    probability = transition.pass_probability
+
+    def counted(*args):
+        jax.debug.callback(lambda _: calls.append(1), args[0].sum(), ordered=True)
+        return probability(*args)
+
+    monkeypatch.setattr(transition, "pass_probability", counted)
+    table = dataclasses.replace(
+        one_step_table(),
+        claims=(EarthCandidateClaim(),),
+        target_claim="earth_candidate",
+    )
+    summary, settings = package_inputs(n_slots=2)
+    summary = dataclasses.replace(summary, p_claim=jnp.zeros((2, 1)))
+    state = table.init_state(2, 3)
+    options = _options(table, state, summary, settings)
+    jax.effects_barrier()
+    assert not calls
+    np.testing.assert_array_equal(options.gain, 0.0)
+    np.testing.assert_array_equal(options.track_gain, 0.0)

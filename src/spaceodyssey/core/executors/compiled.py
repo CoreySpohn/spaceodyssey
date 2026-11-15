@@ -72,18 +72,33 @@ def _scan_chunk(executor, study, carries, truths, roots, left, wake_fn, n_steps)
     request or an uninstalled refresh checkpoint; a step not taken leaves the carry
     alone and emits an empty trace row, so waiting for the host costs no budget.
     """
+    scalar = roots.shape[0] == 1
 
     def one(c0, truth, root, left0):
         def body(state, i):
             c, budget = state
             go = (budget > 0) & ~c.request.valid & ~c.refresh.valid
-            c2, tr = executor.transition(c, i, root, study, truth, wake_fn=wake_fn)
+            if scalar:
+                go &= ~(c.done | c.idle | c.stalled | c.overflow)
+                c2, tr = lax.cond(
+                    go,
+                    lambda c: executor.transition(
+                        c, i, root, study, truth, wake_fn=wake_fn
+                    ),
+                    lambda c: (c, empty_trace(study.caps)),
+                    c,
+                )
+            else:
+                c2, tr = executor.transition(c, i, root, study, truth, wake_fn=wake_fn)
             tr = where_tree(go, tr, empty_trace(study.caps))
             return (where_tree(go, c2, c), budget - go.astype(I64)), tr
 
         (c, budget), trace = lax.scan(body, (c0, left0), jnp.arange(n_steps))
         return c, budget, trace
 
+    if scalar:
+        result = one(index_world(carries, 0), index_world(truths, 0), roots[0], left[0])
+        return jax.tree.map(lambda x: x[None], result)
     return jax.vmap(one)(carries, truths, roots, left)
 
 

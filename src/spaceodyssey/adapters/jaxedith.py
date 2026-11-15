@@ -78,7 +78,6 @@ outside its certified window is a no-science row.
 """
 
 import concurrent.futures
-import contextlib
 import dataclasses
 import functools
 import hashlib
@@ -140,6 +139,7 @@ from yippy.datasets import CATALOG, DATA_RELEASE_TAG
 from yippy.performance import PROFILE_STEP_PIX
 from zodi import MAG_1ZODI_V_ARCSEC2, MV_SUN, exozodi_flux_ratio_band
 
+from spaceodyssey._threads import _in_thread, _thread_config
 from spaceodyssey.adapters.measurement import (
     MeasurementRow,
     measurement_template,
@@ -500,6 +500,14 @@ class PreparedScene(eqx.Module):
         return self.optical_path.coronagraph.leakage_curve
 
 
+@eqx.filter_jit
+def _stellar_leakage(response, grid, wavelength_nm, diameter_lod):
+    """Reuse the finite-star response program across host diameters."""
+    return response.core_mean_intensity(
+        grid, wavelength_nm, stellar_diam_lod=diameter_lod
+    )
+
+
 class SummaryReport(eqx.Module):
     """Expected and predicted summary counts of one companion over an exposure.
 
@@ -684,8 +692,8 @@ class SummaryReport(eqx.Module):
         """
         diam_lod = jnp.asarray(scene.star_diameter_mas) / (1000.0 * self.lod_arcsec)
         response = self.optical_path.coronagraph
-        return response.core_mean_intensity(
-            self.leakage_grid, self.wavelength_nm, stellar_diam_lod=diam_lod
+        return _stellar_leakage(
+            response, self.leakage_grid, self.wavelength_nm, diam_lod
         )
 
     def prepare(self, scene, leakage=None):
@@ -1427,15 +1435,6 @@ def _channel_assets(profile, target, detector, n_time_nodes, n_exozodi, law):
     )
 
 
-def _thread_config():
-    """The caller's thread-local JAX settings that change what a build computes."""
-    return (
-        bool(jax.config.jax_enable_x64),
-        jax.config.jax_default_device,
-        jax.config.jax_default_matmul_precision,
-    )
-
-
 def _profile_digest(profile):
     """Digest of the profile file text and the pinned response, for the cache key."""
     raw = json.dumps(load_profile(profile), sort_keys=True).encode()
@@ -1446,18 +1445,6 @@ def _profile_digest(profile):
 def _build_in_thread(declarations, config):
     """Run the cached build under the caller's JAX settings, on this thread."""
     return _in_thread(_channel_assets, declarations, config)
-
-
-def _in_thread(builder, declarations, config):
-    """`builder(*declarations)` under the JAX settings in `config`."""
-    x64, device, precision = config
-    with contextlib.ExitStack() as stack:
-        stack.enter_context(jax.enable_x64(x64))
-        if device is not None:
-            stack.enter_context(jax.default_device(device))
-        if precision is not None:
-            stack.enter_context(jax.default_matmul_precision(precision))
-        return builder(*declarations)
 
 
 _RESPONSE_BUILD_LOCK = threading.Lock()

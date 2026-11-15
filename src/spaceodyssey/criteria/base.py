@@ -8,6 +8,24 @@ from abc import abstractmethod
 
 import equinox as eqx
 import jax
+import jax.numpy as jnp
+
+
+def _same_adjacent(tree):
+    """Bitwise equality of neighboring entries of a track-shaped array tree."""
+    leaves = jax.tree.leaves(tree)
+    count = leaves[0].shape[0]
+    if count == 0:
+        return jnp.zeros(0, bool)
+    same = jnp.ones(count - 1, bool)
+    for leaf in leaves:
+        bits = (
+            jax.lax.bitcast_convert_type(leaf, jnp.uint8)
+            if jnp.issubdtype(leaf.dtype, jnp.floating)
+            else leaf
+        )
+        same &= jnp.all(bits[1:] == bits[:-1], axis=tuple(range(1, bits.ndim)))
+    return jnp.concatenate((jnp.zeros(1, bool), same))
 
 
 class StarOptions(eqx.Module):

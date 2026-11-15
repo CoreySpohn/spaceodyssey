@@ -99,3 +99,40 @@ def test_status_priority_and_idle():
     assert int(run_status(stalled)) == RunStatus.STALLED
     over = dataclasses.replace(stalled, overflow=jnp.asarray(True))
     assert int(run_status(over)) == RunStatus.OVERFLOW
+
+
+def test_host_stops_advancing_terminal_worlds(monkeypatch):
+    """Fails if the host spends the remaining allowance on completed worlds."""
+    calls = []
+    advance = HostExecutor.advance
+
+    def counted(self, carry, *args, **kwargs):
+        calls.append(bool(carry.done | carry.idle | carry.stalled | carry.overflow))
+        return advance(self, carry, *args, **kwargs)
+
+    monkeypatch.setattr(HostExecutor, "advance", counted)
+    study = builder.survey_1()
+    result = run_status_case(HostExecutor, study, study.caps, n_steps=120)
+    assert result.complete.all()
+    assert not any(calls)
+    assert len(calls) < 240
+    assert result.trace.handled.shape[1] == 120
+
+
+def test_host_batch_pads_worlds_that_stop_at_different_lengths(monkeypatch):
+    """Fails if early stopping breaks batching or writes events into padding."""
+    study = builder.survey_1()
+    truths, roots = worlds(2)
+    executor = HostExecutor()
+    run = HostExecutor.run
+    budgets = iter((5, 120))
+
+    def limited(self, study, truth, root, n_steps, **kwargs):
+        return run(self, study, truth, root, next(budgets), **kwargs)
+
+    monkeypatch.setattr(HostExecutor, "run", limited)
+    result = executor.run_worlds(study, truths, roots, 120)
+    assert result.status.tolist() == [RunStatus.TRUNCATED, RunStatus.COMPLETE]
+    assert not result.trace.handled[0, 5:].any()
+    assert not result.trace.wake[0, 5:].any()
+    assert result.history(1).n_records == 5

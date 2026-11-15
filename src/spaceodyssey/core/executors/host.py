@@ -1,5 +1,6 @@
 """Executors host."""
 
+import dataclasses
 import typing
 
 import equinox as eqx
@@ -36,6 +37,22 @@ _adm = eqx.filter_jit(admit)
 _close = eqx.filter_jit(close_decision)
 _fin = eqx.filter_jit(finish_trace)
 _fp = eqx.filter_jit(decision_fingerprint)
+
+
+@eqx.filter_jit
+def _trace_rows(traces, padding, padded_rows):
+    """Stack real rows and bulk-pad a terminal suffix in one program."""
+    trace = jax.tree.map(lambda *xs: jnp.stack(xs), *traces) if traces else None
+    if padded_rows:
+        suffix = jax.tree.map(
+            lambda x: jnp.broadcast_to(x, (padded_rows, *x.shape)), padding
+        )
+        return (
+            suffix
+            if trace is None
+            else jax.tree.map(lambda x, y: jnp.concatenate((x, y)), trace, suffix)
+        )
+    return trace
 
 
 class _Saved(typing.NamedTuple):
@@ -87,7 +104,9 @@ class HostExecutor(AbstractExecutor):
         (a handled `DONE` that wrote a record), after each refit it installs, and at
         its end. `resume` continues from what the sink holds: the held refresh
         checkpoint or request is answered first, the saved trace rows come back in
-        front of the new ones, and `n_steps` is a fresh budget for this call. A budget
+        front of the new ones, and `n_steps` is a fresh budget for this call.
+        Terminal worlds stop early; repeated terminal trace rows are padded in bulk.
+        A budget
         that ends with a refresh checkpoint held keeps the hold (no `drop_hold`) and
         the result reports `RunStatus.TRUNCATED_AT_HOLD`. With `resume` false a sink
         that already holds a checkpoint is refused.
@@ -122,8 +141,29 @@ class HostExecutor(AbstractExecutor):
             )
             return RunResult(carry, trace, layout, roots)
         traces = []
+        padding, padded_rows = None, 0
         saved = _Saved(0, len(view_log or ()), len(effects_log or ()))
         for step in range(n_steps):
+            if bool(carry.done | carry.idle | carry.stalled | carry.overflow):
+                padding = dataclasses.replace(
+                    empty_trace(caps),
+                    pending_wake=carry.pending_wake,
+                    release_version=carry.release_version,
+                )
+                padding = fin(
+                    padding,
+                    effects_none(caps),
+                    padding.admit_code,
+                    jnp.asarray(0.0),
+                    jnp.asarray(False),
+                    carry,
+                    study,
+                )
+                padded_rows = n_steps - step
+                if checkpoint is not None:
+                    traces.extend([padding] * padded_rows)
+                    padded_rows = 0
+                break
             carry, trace, wake = adv(carry, roots, study, truths)
             if bool(wake):
                 if view_log is not None:
@@ -199,11 +239,7 @@ class HostExecutor(AbstractExecutor):
                 self._save(
                     checkpoint, end, carry, traces, saved, view_log, effects_log, base
                 )
-        trace = (
-            jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces)
-            if traces
-            else None
-        )
+        trace = _trace_rows(traces, padding, padded_rows)
         if prefix is not None:
             trace = jax.tree_util.tree_map(
                 jnp.asarray, ckpt.concat_rows(prefix, trace, 0)
@@ -283,9 +319,25 @@ class HostExecutor(AbstractExecutor):
             self.run(study, index_world(truths, w), roots[w], n_steps, **kw)
             for w in range(roots.shape[0])
         ]
+        rows = max(r.trace.handled.shape[0] for r in runs)
+        empty = empty_trace(study.caps)
+        traces = [
+            jax.tree_util.tree_map(
+                lambda x, fill: (
+                    jnp.concatenate(
+                        (x, jnp.broadcast_to(fill, (rows - x.shape[0], *fill.shape)))
+                    )
+                    if x.shape[0] < rows
+                    else x
+                ),
+                r.trace,
+                empty,
+            )
+            for r in runs
+        ]
         return RunResult(
             jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[r.carry for r in runs]),
-            jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[r.trace for r in runs]),
+            jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *traces),
             study.observer.layout(study.caps),
             roots,
         )
