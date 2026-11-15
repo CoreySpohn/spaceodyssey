@@ -470,3 +470,41 @@ def test_a_refused_imaging_start_does_not_wait_for_a_nonexistent_row(fixture):
     )
     assert effect_kind(decision) == EffectKind.OBSERVE
     assert int(decision.state.n_imaging.sum()) == 3
+
+
+def test_zero_credit_stars_skip_track_comparisons(fixture, monkeypatch):
+    """Fails if stars with no credit still scan their individual track forecasts."""
+    calls = []
+    same_adjacent = br._same_adjacent
+
+    def counted(tree):
+        jax.debug.callback(lambda: calls.append(1), ordered=True)
+        return same_adjacent(tree)
+
+    monkeypatch.setattr(br, "_same_adjacent", counted)
+
+    class CountedPolicy(br.PackagePolicy):
+        """Give the callback its own trace without clearing shared programs."""
+
+    original = fixture.agenda.policies[0]
+    policy = CountedPolicy(
+        **{f.name: getattr(original, f.name) for f in dataclasses.fields(original)}
+    )
+    study = dataclasses.replace(
+        fixture, agenda=dataclasses.replace(fixture.agenda, policies=(policy,))
+    )
+    summary = summary_selecting_node(study, node=0)
+    control = decide_once(study, summary=summary, state=state_with(study))
+    jax.effects_barrier()
+    assert effect_kind(control) == EffectKind.OBSERVE
+    assert len(calls) == study.caps.n_subjects
+    for zero in (
+        dataclasses.replace(summary, p_claim=jnp.zeros_like(summary.p_claim)),
+        dataclasses.replace(summary, available=jnp.zeros_like(summary.available)),
+    ):
+        calls.clear()
+        decision = decide_once(study, summary=zero, state=state_with(study))
+        jax.effects_barrier()
+        assert effect_kind(decision) == EffectKind.WAIT
+        assert not np.asarray(decision.state.has_package).any()
+        assert not calls

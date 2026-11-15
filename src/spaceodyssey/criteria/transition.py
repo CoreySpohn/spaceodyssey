@@ -93,6 +93,29 @@ class TransitionSettings(eqx.Module):
                 raise ValueError(f"{name} must be finite and positive")
 
 
+def _detection_starts(probability, available, imaging):
+    """Earliest row-major maximizer at or after each forecast node."""
+    score = jnp.where(
+        available & imaging[None, :] & (probability > 0), probability, -1.0
+    )
+    variant = jnp.argmax(score, axis=1)
+    value = jnp.take_along_axis(score, variant[:, None], axis=1)[:, 0]
+    index = jnp.arange(score.shape[0], dtype=I64) * score.shape[1] + variant
+
+    def earlier(later, row):
+        choose = row[0] >= later[0]
+        best = tuple(jnp.where(choose, a, b) for a, b in zip(row, later, strict=True))
+        return best, jnp.where(best[0] > 0, best[1], 0)
+
+    _, starts = jax.lax.scan(
+        earlier,
+        (jnp.asarray(-1.0, F64), jnp.asarray(0, I64)),
+        (value, index),
+        reverse=True,
+    )
+    return starts
+
+
 class TransitionTable(AbstractCriterion):
     """A DAG of repeated SNR requirements ending at valued labels.
 
@@ -311,27 +334,31 @@ class TransitionTable(AbstractCriterion):
         passes; failure ends that proposed package, retaining any achieved label.
         Later exposures use available nodes at or after the preceding node.
         """
-        n_grid, n_variants = summary_star.available.shape
+        return jax.lax.cond(
+            self._can_gain(state, summary_star),
+            lambda: self._package_options(state, summary_star, tick, modes, settings),
+            lambda: self._zero_options(state.node.size, summary_star, settings),
+        )
+
+    def _can_gain(self, state, summary_star):
+        """Whether any active track has target credit and a declared start."""
         possible = (state.node < self.n_steps) & (
             self._target_probability(summary_star.p_claim) > 0
         )
+        return jnp.any(possible) & jnp.any(summary_star.available)
 
-        def zero_gain():
-            gain = jnp.zeros((n_grid, n_variants), F64)
-            return StarOptions(
-                gain,
-                jnp.broadcast_to(
-                    settings.channel_cost[:n_variants],
-                    (n_grid, n_variants, settings.channel_cost.shape[-1]),
-                ),
-                jnp.broadcast_to(jnp.arange(n_variants, dtype=I64), gain.shape),
-                jnp.zeros((*gain.shape, state.node.size), F64),
-            )
-
-        return jax.lax.cond(
-            jnp.any(possible) & jnp.any(summary_star.available),
-            lambda: self._package_options(state, summary_star, tick, modes, settings),
-            zero_gain,
+    def _zero_options(self, n_tracks, summary_star, settings):
+        """The same zero-credit table for a joint or individual track view."""
+        n_grid, n_variants = summary_star.available.shape
+        gain = jnp.zeros((n_grid, n_variants), F64)
+        return StarOptions(
+            gain,
+            jnp.broadcast_to(
+                settings.channel_cost[:n_variants],
+                (n_grid, n_variants, settings.channel_cost.shape[-1]),
+            ),
+            jnp.broadcast_to(jnp.arange(n_variants, dtype=I64), gain.shape),
+            jnp.zeros((*gain.shape, n_tracks), F64),
         )
 
     def _package_options(self, state, summary_star, tick, modes, settings):
@@ -366,23 +393,48 @@ class TransitionTable(AbstractCriterion):
             else settings.remaining_rows
         )
 
-        def best(probability, node, variants, remaining_rows, *, detection=False):
-            valid = (
-                available
-                & variants[None, :]
-                & (nodes >= node)
-                & (probability > 0)
-                & (remaining_rows > 0)[None, :]
-            )
-            score = (
-                probability
-                if detection
-                else probability
-                / jnp.where(chargeable, costs[:, telescope], 1.0)[None, :]
-            )
-            index = jnp.argmax(jnp.where(valid, score, -1.0))
+        candidate = (summary_star.status == SLOT_OK) & (
+            summary_star.scatter
+            < settings.candidate_scatter_lod * settings.imaging_lod_arcsec
+        )
+        needed_images = jnp.maximum(
+            0, settings.candidate_detections - summary_star.n_det
+        )
+        needed_images = jnp.maximum(needed_images, (~candidate).astype(I64))
+        row_max = jnp.iinfo(I64).max
+        repeat_max = jnp.max(self.repeat)
+        repeat_limit = row_max // self.n_steps
+        repeat_bound = jnp.clip(repeat_max, 0, repeat_limit) * self.n_steps
+        safe_repeat = (repeat_max >= 0) & (repeat_max <= repeat_limit)
+
+        def best(
+            probability, node, variants, remaining_rows, *, detection=False, starts=None
+        ):
+            if starts is None:
+                valid = (
+                    available
+                    & variants[None, :]
+                    & (nodes >= node)
+                    & (probability > 0)
+                    & (remaining_rows > 0)[None, :]
+                )
+                score = (
+                    probability
+                    if detection
+                    else probability
+                    / jnp.where(chargeable, costs[:, telescope], 1.0)[None, :]
+                )
+                index = jnp.argmax(jnp.where(valid, score, -1.0))
+            else:
+                index = jnp.where(node < n_grid, starts[jnp.maximum(node, 0)], 0)
             g, v = index // n_variants, index % n_variants
-            ok = valid[g, v]
+            ok = (
+                available[g, v]
+                & variants[v]
+                & (g >= node)
+                & (probability[g, v] > 0)
+                & (remaining_rows[v] > 0)
+            )
             return (
                 jnp.where(ok, probability[g, v], 0.0),
                 jnp.where(ok, costs[v], 0.0),
@@ -390,17 +442,10 @@ class TransitionTable(AbstractCriterion):
                 v,
             )
 
-        def slot_package(slot, first_g, first_v, remaining_rows):
+        def slot_package(slot, first_g, first_v, remaining_rows, detection_starts=None):
             node = state.node[slot]
             step = jnp.minimum(node, self.n_steps - 1)
-            candidate = (summary_star.status[slot] == SLOT_OK) & (
-                summary_star.scatter[slot]
-                < settings.candidate_scatter_lod * settings.imaging_lod_arcsec
-            )
-            images = jnp.maximum(
-                0, settings.candidate_detections - summary_star.n_det[slot]
-            )
-            images = jnp.maximum(images, (~candidate).astype(I64))
+            images = needed_images[slot]
             imaging_step = jnp.any(step_variants[step] & imaging)
             needs_images = (images > 0) & ~imaging_step
             compatible = jnp.where(
@@ -431,7 +476,12 @@ class TransitionTable(AbstractCriterion):
                     def image_attempt(j, attempt):
                         reach, time, g, started, left = attempt
                         p, cost, next_g, v = best(
-                            p_det, g, imaging, left, detection=True
+                            p_det,
+                            g,
+                            imaging,
+                            left,
+                            detection=True,
+                            starts=detection_starts,
                         )
                         p = jnp.where(~started, p_det[first_g, first_v], p)
                         cost = jnp.where(~started, zero_cost, cost)
@@ -565,11 +615,40 @@ class TransitionTable(AbstractCriterion):
             )
 
             def calculate(remaining):
-                return jax.vmap(
-                    lambda index, allowance: slot_package(
-                        slot, index // n_variants, index % n_variants, allowance
-                    )
-                )(indices, remaining)
+                def evaluate(starts):
+                    return jax.vmap(
+                        lambda index, allowance: slot_package(
+                            slot,
+                            index // n_variants,
+                            index % n_variants,
+                            allowance,
+                            starts,
+                        )
+                    )(indices, remaining)
+
+                if not imaging_channels:
+                    return evaluate(None)
+                # While allowances stay positive, their magnitudes cannot change
+                # the best detection. Saturate the bound to avoid integer overflow.
+                image_bound = (
+                    jnp.minimum(needed_images[slot], row_max - repeat_bound)
+                    + repeat_bound
+                )
+                bound = jnp.where(imaging, image_bound, repeat_bound)
+                uncapped_search = (
+                    safe_repeat & (state.passes[slot] >= 0) & jnp.all(remaining > bound)
+                )
+                return jax.lax.cond(
+                    uncapped_search,
+                    lambda: evaluate(
+                        _detection_starts(
+                            summary_star.p_det[slot][:, imaging_index],
+                            available,
+                            imaging,
+                        )
+                    ),
+                    lambda: evaluate(None),
+                )
 
             raw_gain, time, next_left = jax.lax.cond(
                 same[slot] & (unchanged | uncapped),

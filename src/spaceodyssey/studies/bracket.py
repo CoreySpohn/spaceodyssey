@@ -722,57 +722,83 @@ class PackagePolicy(AbstractPolicy):
                     ),
                 )
                 criterion_state = unpack(template, one.state)
-                track_fields = (
-                    "p_exist",
-                    "n_det",
-                    "p_det",
-                    "fc_counts",
-                    "fc_variance",
-                    "scatter",
-                    "pos_mean",
-                    "p_claim",
-                    "ln_period_q",
-                    "ess",
-                    "status",
-                )
 
-                def track_options(track):
-                    track_state = jax.tree.map(
-                        lambda x: x[track][None], criterion_state
-                    )
-                    track_summary = dataclasses.replace(
-                        one,
-                        **{
-                            name: getattr(one, name)[track][None]
-                            for name in track_fields
-                        },
-                        state=pack(track_state),
-                    )
-                    return criterion.options(
-                        track_state, track_summary, tick, modes, star_settings
+                def calculate():
+                    track_fields = (
+                        "p_exist",
+                        "n_det",
+                        "p_det",
+                        "fc_counts",
+                        "fc_variance",
+                        "scatter",
+                        "pos_mean",
+                        "p_claim",
+                        "ln_period_q",
+                        "ess",
+                        "status",
                     )
 
-                same = _same_adjacent(
-                    (
-                        criterion_state,
-                        tuple(getattr(one, name) for name in track_fields),
-                    )
-                )
-                first = track_options(jnp.asarray(0, I64))
+                    def track_options(track):
+                        track_state = jax.tree.map(
+                            lambda x: x[track][None], criterion_state
+                        )
+                        track_summary = dataclasses.replace(
+                            one,
+                            **{
+                                name: getattr(one, name)[track][None]
+                                for name in track_fields
+                            },
+                            state=pack(track_state),
+                        )
+                        return criterion.options(
+                            track_state, track_summary, tick, modes, star_settings
+                        )
 
-                def next_track(previous, track):
-                    value = jax.lax.cond(
-                        same[track], lambda _: previous, track_options, track
+                    same = _same_adjacent(
+                        (
+                            criterion_state,
+                            tuple(getattr(one, name) for name in track_fields),
+                        )
                     )
-                    return value, value
+                    first = track_options(jnp.asarray(0, I64))
 
-                _, later = jax.lax.scan(next_track, first, jnp.arange(1, self.n_tracks))
-                individual = jax.tree.map(
-                    lambda head, tail: jnp.concatenate((head[None], tail)), first, later
-                )
-                return (
-                    criterion.options(criterion_state, one, tick, modes, star_settings),
-                    individual,
+                    def next_track(previous, track):
+                        value = jax.lax.cond(
+                            same[track], lambda _: previous, track_options, track
+                        )
+                        return value, value
+
+                    _, later = jax.lax.scan(
+                        next_track, first, jnp.arange(1, self.n_tracks)
+                    )
+                    individual = jax.tree.map(
+                        lambda head, tail: jnp.concatenate((head[None], tail)),
+                        first,
+                        later,
+                    )
+                    return (
+                        criterion.options(
+                            criterion_state, one, tick, modes, star_settings
+                        ),
+                        individual,
+                    )
+
+                if type(criterion) is not TransitionTable:
+                    return calculate()
+
+                def zero_gain():
+                    joint = criterion._zero_options(
+                        criterion_state.node.size, one, star_settings
+                    )
+                    single = criterion._zero_options(1, one, star_settings)
+                    individual = jax.tree.map(
+                        lambda x: jnp.broadcast_to(x, (self.n_tracks, *x.shape)),
+                        single,
+                    )
+                    return joint, individual
+
+                return jax.lax.cond(
+                    criterion._can_gain(criterion_state, one), calculate, zero_gain
                 )
 
             options, track_options = jax.lax.map(options, jnp.arange(n))

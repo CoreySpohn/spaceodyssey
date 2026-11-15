@@ -555,6 +555,17 @@ def test_tracks_share_the_star_packages_remaining_rows_in_order():
 def test_equivalent_continuations_reuse_work_until_row_constraints_bind(monkeypatch):
     """Fails if repeated continuations run again or reuse crosses a row limit."""
     calls = []
+    dense_searches = []
+    argmax = jnp.argmax
+
+    def counted_argmax(values, axis=None, **kwargs):
+        if values.ndim == 2 and axis is None:
+            jax.debug.callback(
+                lambda _: dense_searches.append(1), values.sum(), ordered=True
+            )
+        return argmax(values, axis=axis, **kwargs)
+
+    monkeypatch.setattr(jnp, "argmax", counted_argmax)
     probability = transition.pass_probability
 
     def counted(*args):
@@ -573,6 +584,7 @@ def test_equivalent_continuations_reuse_work_until_row_constraints_bind(monkeypa
     state = table.init_state(6, 3)
     for rows, gain, time_d in ((24, 6.0, 86.0), (3, 1.0, 16.0), (2, 0.0, 4.0)):
         calls.clear()
+        dense_searches.clear()
         limited = dataclasses.replace(
             settings, remaining_rows=jnp.asarray([rows, 12, 12], I64)
         )
@@ -582,6 +594,19 @@ def test_equivalent_continuations_reuse_work_until_row_constraints_bind(monkeypa
         assert float(options.time[0, 0, TELESCOPE]) == time_d
         if rows == 24:
             assert len(calls) == 6
+            assert len(dense_searches) == 6
+
+    future = dataclasses.replace(summary, p_det=summary.p_det.at[:, 0, :].set(0.25))
+    enough = dataclasses.replace(
+        settings, remaining_rows=jnp.asarray([24, 12, 12], I64)
+    )
+    for allowed, gain, time_d in ((True, 1.5, 23.0), (False, 0.09375, 6.6875)):
+        supplied = dataclasses.replace(
+            future, available=future.available.at[1].set(allowed)
+        )
+        options = _options(table, state, supplied, enough)
+        assert float(options.gain[0, 0]) == gain
+        assert float(options.time[0, 0, TELESCOPE]) == time_d
 
 
 def test_no_credit_star_skips_continuation_search(monkeypatch):
