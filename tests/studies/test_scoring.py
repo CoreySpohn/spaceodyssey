@@ -569,6 +569,31 @@ def test_activity_refuses_a_subset_or_permuted_source_batch(source_case):
             br.activity_table(altered, study)
 
 
+def test_activity_accepts_catalogs_a_few_ulp_from_the_recomputed_row(source_case):
+    """Fails if last-bit drift between compiled and eager math refuses a correct run."""
+    result, study = source_case
+    payload = np.asarray(result.carry.log.payload)
+    for steps, accepted in ((1, True), (br.CATALOG_MAX_ULP + 4, False)):
+        drifted = payload.copy()
+        for _ in range(steps):
+            drifted = np.nextafter(drifted, np.inf)
+        altered = SimpleNamespace(
+            carry=dataclasses.replace(
+                result.carry,
+                log=dataclasses.replace(result.carry.log, payload=jnp.asarray(drifted)),
+            ),
+            trace=result.trace,
+        )
+        if accepted:
+            table = br.activity_table(altered, study)
+            np.testing.assert_array_equal(
+                table.star["dropped"], study.world_source.dropped
+            )
+        else:
+            with pytest.raises(ValueError, match="source order"):
+                br.activity_table(altered, study)
+
+
 class RequestStar(AbstractPolicy):
     """Request an imaging observation of the declared star."""
 

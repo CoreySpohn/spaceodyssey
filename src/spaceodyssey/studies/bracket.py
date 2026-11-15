@@ -1178,6 +1178,24 @@ def _rows_of(log, w, kind):
     return rows[np.argsort(log["end_tick"][w][rows], kind="stable")]
 
 
+CATALOG_MAX_ULP = 4
+
+
+def _same_catalog(logged, expected):
+    """Whether a logged catalog row is the recomputed one, within `CATALOG_MAX_ULP`.
+
+    The logged row was computed inside the compiled run and `expected` outside
+    it. Accelerators do not promise identical last bits between the two, so an
+    exact comparison would refuse a correct run there; a different world's
+    catalog differs by far more than a few units in the last place.
+    """
+    try:
+        np.testing.assert_array_max_ulp(logged, expected, maxulp=CATALOG_MAX_ULP)
+    except AssertionError:
+        return False
+    return True
+
+
 def activity_table(result, study) -> ActivityTable:
     """Activity and ledger accounting for all source worlds in source order.
 
@@ -1211,7 +1229,7 @@ def activity_table(result, study) -> ActivityTable:
             indices = _rows_of(log, w, KIND_CATALOG)
             indices = indices[log["subject"][w, indices] == star]
             expected = np.asarray(channel._catalog_row(truth, star, 0, None, None))
-            if not indices.size or not np.array_equal(
+            if not indices.size or not _same_catalog(
                 log["payload"][w, indices[-1], : expected.size], expected
             ):
                 raise ValueError(restriction)
