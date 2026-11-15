@@ -73,7 +73,7 @@ Documentation = "https://spaceodyssey.readthedocs.io"
 physical = [
     # jaxedith's fixed-frame variance and QE handling (2.1.0), optixstuff's dQE default
     # (4.1.0) and skyscapes' FlatStar diameter and zodi delegation (2.2.0).
-    "skyscapes>=2.2.0",
+    "skyscapes>=3.0.0",
     "orbix>=4.0.0",
     "numpyro>=0.21.0",
     "jaxedith>=2.1.0",
