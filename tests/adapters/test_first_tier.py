@@ -255,6 +255,8 @@ def test_first_tier_padding_has_no_prior_weight(boundary_inputs, monkeypatch, pa
     valid = jnp.asarray([True, True, True, not padded])
     n_valid = int(valid.sum())
     monkeypatch.setattr(PopulationModel, "draw_planets", lambda *args: (params, valid))
+    # The forecast cache keys code by class name; a patched method needs its own.
+    monkeypatch.setattr(ph, "_POPULATION_CACHE", {})
     channel = study.channel_model
     ph._photomancy_refit()
     lane = _null_lane(channel, st, 0, 1, key=KEY)
@@ -523,6 +525,16 @@ def test_parallel_population_prior_preserves_all_leaves_and_host_order(
         )
     assert calls == 8
     assert not np.array_equal(changed.p_exist, parallel.p_exist)
+
+
+def test_population_cache_key_separates_weak_and_strong_arrays():
+    """Fails if a weakly typed leaf shares a forecast with its strong twin."""
+    weak, strong = jnp.asarray(1.0), jnp.asarray(1.0, jnp.float64)
+    assert weak.weak_type and not strong.weak_type
+    key = ph._population_signature((), weak, None, 1, 1)
+    assert key is not None
+    assert key == ph._population_signature((), jnp.asarray(1.0), None, 1, 1)
+    assert key != ph._population_signature((), strong, None, 1, 1)
 
 
 def test_population_worker_inherits_prng_configuration(monkeypatch):

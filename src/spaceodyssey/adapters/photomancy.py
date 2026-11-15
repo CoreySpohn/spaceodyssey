@@ -1781,7 +1781,8 @@ def _population_signature(channel, population, st, n_subjects, workers):
         digest.update(repr(type(value)).encode())
         if eqx.is_array(value):
             array = np.ascontiguousarray(value)
-            digest.update(repr((value.shape, array.dtype.str)).encode())
+            weak = getattr(value, "weak_type", None)
+            digest.update(repr((value.shape, array.dtype.str, weak)).encode())
             digest.update(repr(getattr(value, "sharding", None)).encode())
             digest.update(array.data)
         elif dataclasses.is_dataclass(value) and not isinstance(value, type):
