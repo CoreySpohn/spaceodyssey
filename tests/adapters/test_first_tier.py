@@ -434,7 +434,11 @@ def test_expected_host_count_is_stable_across_refit_keys(boundary_inputs):
 def test_parallel_population_prior_preserves_all_leaves_and_host_order(
     boundary_inputs, monkeypatch
 ):
-    """Fails if partitioning changes keys, reductions, order or caller precision."""
+    """Fails if partitioning changes bytes or identical forecasts are recomputed.
+
+    Changing the population must miss the cache; a hit must keep every leaf and
+    the caller's prior state, as well as the existing host-order/precision guards.
+    """
     study, boundary, population = boundary_inputs
     # Ten keyed subjects put one real host and two pads in the fourth partition.
     indices = jnp.arange(10) % study.caps.n_subjects
@@ -455,14 +459,15 @@ def test_parallel_population_prior_preserves_all_leaves_and_host_order(
     with jax.default_device(None), jax.default_matmul_precision(None):
         serial = jax.block_until_ready(boundary.initial_summary(study))
         config = _thread_config()
-    lock, active, peak = Lock(), 0, 0
+    lock, active, peak, calls = Lock(), 0, 0, 0
     leaves = ph._population_leaves
 
     def counted(*args):
-        nonlocal active, peak
+        nonlocal active, peak, calls
         assert _thread_config() == config
         with lock:
             active += 1
+            calls += 1
             peak = max(peak, active)
         try:
             return jax.block_until_ready(leaves(*args))
@@ -491,9 +496,37 @@ def test_parallel_population_prior_preserves_all_leaves_and_host_order(
     assert parallel.fc_counts.dtype == jnp.float64
     assert not np.array_equal(parallel.fc_counts[0], parallel.fc_counts[1])
 
+    assert calls == 4
+    changed_prior = dataclasses.replace(prior, state=prior.state + 1.0)
+    repeated_study = eqx.tree_at(lambda s: s.observer.prior, study, changed_prior)
+    with jax.default_device(None), jax.default_matmul_precision(None):
+        repeated = jax.block_until_ready(
+            boundary.initial_summary(repeated_study, workers=4)
+        )
+    assert calls == 4
+    for name in ph.SUMMARY_LEAVES:
+        assert (
+            np.asarray(getattr(repeated, name)).tobytes()
+            == np.asarray(getattr(parallel, name)).tobytes()
+        )
+    assert (
+        np.asarray(repeated.state).tobytes()
+        == np.asarray(changed_prior.state).tobytes()
+    )
+
+    changed_study = eqx.tree_at(
+        lambda s: s.belief_population, study, population_scaled(population, 2.0)
+    )
+    with jax.default_device(None), jax.default_matmul_precision(None):
+        changed = jax.block_until_ready(
+            boundary.initial_summary(changed_study, workers=4)
+        )
+    assert calls == 8
+    assert not np.array_equal(changed.p_exist, parallel.p_exist)
+
 
 def test_population_worker_inherits_prng_configuration(monkeypatch):
-    """Fails if build workers silently use global rather than caller PRNG settings."""
+    """Fails if workers lose caller settings or the cache aliases array ranks."""
 
     def draw():
         key = jax.random.PRNGKey(0)
@@ -513,13 +546,34 @@ def test_population_worker_inherits_prng_configuration(monkeypatch):
             assert np.asarray(actual).tobytes() == np.asarray(expected).tobytes()
 
     def execution_mode(_channel, _population, subjects, _summary):
+        if _summary is not None:
+            return jnp.full(subjects.shape, _summary.weights[500])
+        if _channel is not None:
+            return jnp.full(subjects.shape, _channel.ndim, dtype=int)
         return jnp.full(subjects.shape, jax.config.jax_disable_jit, dtype=bool)
 
     monkeypatch.setattr(ph, "_population_leaves", execution_mode)
     monkeypatch.setattr(ph, "_install_population", lambda _prior, _st, result: result)
-    mode = not bool(jax.config.jax_disable_jit)
-    with jax.disable_jit(mode):
+    for mode in (True, False):
+        with jax.disable_jit(mode):
+            actual = ph._parallel_population_summary(
+                None, None, SimpleNamespace(n_subjects=2), None, 4
+            )
+        assert np.asarray(actual).tolist() == [mode, mode]
+
+    for value in (jnp.asarray(0.0), jnp.asarray([0.0])):
         actual = ph._parallel_population_summary(
-            None, None, SimpleNamespace(n_subjects=2), None, 4
+            value, None, SimpleNamespace(n_subjects=2), None, 4
         )
-    assert np.asarray(actual).tolist() == [mode, mode]
+        assert np.asarray(actual).tolist() == [value.ndim, value.ndim]
+
+    @dataclasses.dataclass(frozen=True)
+    class Settings:
+        weights: jax.Array
+
+    for value in (0.0, 1.0):
+        settings = Settings(jnp.zeros(1024).at[500].set(value))
+        actual = ph._parallel_population_summary(
+            None, None, SimpleNamespace(n_subjects=2), settings, 4
+        )
+        assert np.asarray(actual).tolist() == [value, value]

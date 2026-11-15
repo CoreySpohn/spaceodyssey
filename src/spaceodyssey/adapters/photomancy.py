@@ -30,6 +30,7 @@ import hashlib
 import json
 import math
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 import equinox as eqx
 import jax
@@ -1764,11 +1765,85 @@ def _population_summary(channel, population, prior, st):
     return _install_population(prior, st, leaves)
 
 
+_POPULATION_CACHE = {}
+_POPULATION_CACHE_LOCK = Lock()
+
+
+def _population_signature(channel, population, st, n_subjects, workers):
+    """Exact content key for a host forecast, including its numerical context."""
+    context = (_thread_config(), bool(jax.config.jax_disable_jit))
+    digest = hashlib.blake2b(digest_size=32)
+    digest.update(repr((context, n_subjects, workers)).encode())
+    types = set()
+
+    def visit(value):
+        types.add(type(value))
+        digest.update(repr(type(value)).encode())
+        if eqx.is_array(value):
+            array = np.ascontiguousarray(value)
+            digest.update(repr((value.shape, array.dtype.str)).encode())
+            digest.update(repr(getattr(value, "sharding", None)).encode())
+            digest.update(array.data)
+        elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+            for field in dataclasses.fields(value):
+                digest.update(field.name.encode())
+                if not visit(getattr(value, field.name)):
+                    return False
+        elif isinstance(value, dict):
+            digest.update(str(len(value)).encode())
+            for key, item in value.items():
+                if not visit(key) or not visit(item):
+                    return False
+        elif isinstance(value, (tuple, list)):
+            digest.update(str(len(value)).encode())
+            for item in value:
+                if not visit(item):
+                    return False
+        elif isinstance(value, (float, complex, np.generic)):
+            array = np.asarray(value)
+            digest.update(array.dtype.str.encode())
+            digest.update(array.tobytes())
+        elif value is None or isinstance(value, (str, bytes, int, bool)):
+            digest.update(repr(value).encode())
+        else:
+            # An opaque declaration may hide state in its repr; recompute it.
+            return False
+        digest.update(b"\0")
+        return True
+
+    if not visit((channel, population, st)):
+        return None
+    return digest.digest(), frozenset(types)
+
+
 def _parallel_population_summary(channel, population, prior, st, workers):
+    """Reuse one equal host forecast; preserve the caller's other prior leaves."""
+    key = _population_signature(channel, population, st, prior.n_subjects, workers)
+    if key is None:
+        result = _parallel_population_leaves(
+            channel, population, prior.n_subjects, st, workers
+        )
+        return _install_population(prior, st, result)
+    with _POPULATION_CACHE_LOCK:
+        cached = _POPULATION_CACHE.get(key)
+        if cached is not None and cached[0] is _population_leaves:
+            result = cached[1]
+        else:
+            result = _parallel_population_leaves(
+                channel, population, prior.n_subjects, st, workers
+            )
+            # Retain only one catalog's unbroadcast forecasts, never its study or
+            # channel. Keep the kernel identity so replaced kernels cannot hit.
+            _POPULATION_CACHE.clear()
+            _POPULATION_CACHE[key] = (_population_leaves, result)
+    return _install_population(prior, st, result)
+
+
+def _parallel_population_leaves(channel, population, n_subjects, st, workers):
     """Partition complete scalar maps, keeping keys and output order unchanged."""
     # A map with one element can compile a different floating-point reduction.
-    size = max(2, math.ceil(prior.n_subjects / workers))
-    subjects = jnp.minimum(jnp.arange(workers * size), prior.n_subjects - 1)
+    size = max(2, math.ceil(n_subjects / workers))
+    subjects = jnp.minimum(jnp.arange(workers * size), n_subjects - 1)
     parts = subjects.reshape(workers, size)
     config = _thread_config()
     device, precision = config[1:3]
@@ -1792,8 +1867,7 @@ def _parallel_population_summary(channel, population, prior, st, workers):
     # simultaneous maps independently of the partition count.
     with ThreadPoolExecutor(max_workers=min(workers, 2)) as pool:
         groups = list(pool.map(one, parts))
-    result = jax.tree.map(lambda *xs: jnp.concatenate(xs)[: prior.n_subjects], *groups)
-    return _install_population(prior, st, result)
+    return jax.tree.map(lambda *xs: jnp.concatenate(xs)[:n_subjects], *groups)
 
 
 class ReportRefit(AbstractRefitBoundary):
@@ -2167,7 +2241,9 @@ class ReportRefit(AbstractRefitBoundary):
         count, occurrence estimate and forecasts as the declared first tier.
         `workers` partitions full scalar maps between host threads, preserving
         the caller's JAX precision and device. At most two maps execute at once
-        to bound forecast memory. One worker remains traceable.
+        to bound forecast memory. Equal host forecasts reuse one process-local
+        result, keyed by their complete inputs and numerical settings, while the
+        caller's other prior leaves stay current. One worker remains traceable.
         """
         if type(workers) is not int or workers < 1:
             raise ValueError("workers must be a positive integer")
