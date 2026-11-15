@@ -20,6 +20,7 @@ from spaceodyssey.core import (
 from spaceodyssey.core import refresh as refresh_module
 from spaceodyssey.core.capacities import Capacities
 from spaceodyssey.core.carry import _tree_set
+from spaceodyssey.core.checkpoint import tree_digest
 from spaceodyssey.core.conformance import refit_beliefs
 from spaceodyssey.core.enums import F64, I64, Capacity, EventKind, RefitStatus, Stage
 from spaceodyssey.core.executors import base, compiled
@@ -741,33 +742,55 @@ def test_each_audience_installs_its_own_slice():
     assert r.ok and r.go, r
 
 
-def test_single_world_chunk_skips_unspent_and_terminal_steps():
-    """Fails if padded scan rows execute the transaction's expensive branches."""
-    calls = []
-
-    class Counted(CompiledExecutor):
-        def transition(self, carry, *args, **kwargs):
-            jax.debug.callback(lambda: calls.append(1), ordered=True)
-            return super().transition(carry, *args, **kwargs)
-
+def test_single_world_chunk_skips_only_unspent_steps():
+    """Fails if terminal rows lose carry diagnostics or stop spending chunk budget."""
     study = builder.survey_1()
-    truths, roots = worlds(1)
+    truths, roots = worlds(2)
     carry = compiled._init_worlds(study, truths)
-    for budget, terminal, expected in ((2, False, 2), (8, True, 0)):
-        calls.clear()
-        initial = dataclasses.replace(carry, done=jnp.asarray([terminal]))
-        out, left, trace = compiled._scan_chunk(
-            Counted(),
+    ex = CompiledExecutor()
+    # Forty rows finish this survey mid-chunk, with nonzero decision/log counts.
+    reference_carry, reference_trace = compiled._scan_worlds(
+        ex, study, truths, roots, compiled.wake_by_audience, 40
+    )
+    for budget in (2, 40):
+        batch = compiled._scan_chunk(
+            ex,
             study,
-            initial,
+            carry,
             truths,
             roots,
+            jnp.full(2, budget, I64),
+            compiled.wake_by_audience,
+            40,
+        )
+        single = compiled._scan_chunk(
+            ex,
+            study,
+            jax.tree.map(lambda x: x[:1], carry),
+            jax.tree.map(lambda x: x[:1], truths),
+            roots[:1],
             jnp.asarray([budget], I64),
             compiled.wake_by_audience,
-            8,
+            40,
         )
-        jax.block_until_ready((out, left, trace))
-        jax.effects_barrier()
-        assert len(calls) == expected
-        assert int(left[0]) == budget - expected
-        assert int(trace.handled.sum()) == expected
+        for actual, expected in zip(
+            jax.tree.leaves(single), jax.tree.leaves(batch), strict=True
+        ):
+            assert np.asarray(actual[0]).tobytes() == np.asarray(expected[0]).tobytes()
+        assert int(single[1][0]) == 0
+        if budget == 40:
+            assert bool(single[0].done[0])
+            assert 0 < int(single[2].handled.sum()) < 40
+            for actual, expected in (
+                (single[0], reference_carry),
+                (single[2], reference_trace),
+            ):
+                actual, expected = (
+                    base.index_world(actual, 0),
+                    base.index_world(expected, 0),
+                )
+                for a, b in zip(
+                    jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+                ):
+                    assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+                assert tree_digest(actual) == tree_digest(expected)

@@ -40,6 +40,8 @@ STAR, MODE, PROBE_NODE = 0, 1, 80
 
 @pytest.fixture(scope="module")
 def channel(bracket_channel):
+    """Build host assets before counting the report grid's programs."""
+    bracket_channel.assets()
     return bracket_channel
 
 

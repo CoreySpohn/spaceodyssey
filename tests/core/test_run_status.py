@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.testbudget.compiles import cache_hit_count, compile_count
 
 from spaceodyssey.core import (
     Capacities,
@@ -15,6 +16,11 @@ from spaceodyssey.core import (
     empty_carry,
     run_status,
 )
+from spaceodyssey.core.executors import host
+from spaceodyssey.core.executors.base import index_world
+from spaceodyssey.core.lift import lift_traced
+from spaceodyssey.core.snapshot import effects_none
+from spaceodyssey.core.transaction import mask_effects
 from spaceodyssey.studies import builder
 from tests.core.corpus import CORPUS_BY_NAME
 from tests.core.helpers import worlds
@@ -125,7 +131,7 @@ def test_host_batch_pads_worlds_that_stop_at_different_lengths(monkeypatch):
     truths, roots = worlds(2)
     executor = HostExecutor()
     run = HostExecutor.run
-    budgets = iter((5, 120))
+    budgets = iter((5, 120, 40, 120))
 
     def limited(self, study, truth, root, n_steps, **kwargs):
         return run(self, study, truth, root, next(budgets), **kwargs)
@@ -136,3 +142,66 @@ def test_host_batch_pads_worlds_that_stop_at_different_lengths(monkeypatch):
     assert not result.trace.handled[0, 5:].any()
     assert not result.trace.wake[0, 5:].any()
     assert result.history(1).n_records == 5
+    terminal_batch = executor.run_worlds(study, truths, roots, 120)
+    assert terminal_batch.complete.all()
+    for world in range(2):
+        expected = run(executor, study, index_world(truths, world), roots[world], 120)
+        actual = index_world(terminal_batch.trace, world)
+        for a, b in zip(
+            jax.tree.leaves(actual), jax.tree.leaves(expected.trace), strict=True
+        ):
+            assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+
+
+def _stepped_host(study, truth, root, n_steps):
+    """The host transaction without the early terminal shortcut."""
+    study = lift_traced(study)
+    carry = host._init(study, truth)
+    executor, rows = HostExecutor(), []
+    for _ in range(n_steps):
+        carry, trace, wake = executor.advance(carry, root, study, truth)
+        eff, pstate, u = (
+            executor.decide(carry, root, study)
+            if bool(wake)
+            else (effects_none(study.caps), carry.pstate, jnp.asarray(0.0))
+        )
+        eff = mask_effects(eff, wake)
+        fp = host._fp(carry, study) if bool(wake) else jnp.asarray(0, jnp.int64)
+        carry, codes = host._adm(carry, eff, study, fp)
+        carry = host._close(carry, eff, pstate, wake, study)
+        rows.append(host._fin(trace, eff, codes, u, wake, carry, study, fp))
+    return carry, jax.tree.map(lambda *xs: np.stack(xs), *rows)
+
+
+def test_host_terminal_padding_matches_every_stepped_leaf():
+    """Fails if early stopping changes diagnostics, padding bytes or final carry."""
+    study = builder.survey_1()
+    truths, roots = worlds(1)
+    truth = jax.tree.map(lambda x: x[0], truths)
+    result = HostExecutor().run(study, truth, roots[0], 40)
+    expected = _stepped_host(study, truth, roots[0], 40)
+    assert bool(result.carry.done) and int(result.trace.handled.sum()) < 40
+    for a, b in zip(
+        jax.tree.leaves((result.carry, result.trace)),
+        jax.tree.leaves(expected),
+        strict=True,
+    ):
+        assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+
+
+def test_trace_row_stacking_has_bounded_program_count():
+    """Fails if repeated host trace layouts compile again or alter padding bytes."""
+    row = host.empty_trace(Capacities())
+    layouts = (([row], row, 4), ([row, row, row], row, 2))
+    before = compile_count() + cache_hit_count()
+    for _ in range(2):
+        for traces, padding, size in layouts:
+            result = host._trace_rows(traces, padding, size)
+            expected = jax.tree.map(
+                lambda *xs: np.stack(xs), *traces, *([padding] * size)
+            )
+            for a, b in zip(
+                jax.tree.leaves(result), jax.tree.leaves(expected), strict=True
+            ):
+                assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+    assert compile_count() + cache_hit_count() - before <= 2

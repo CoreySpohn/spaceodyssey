@@ -11,14 +11,18 @@ def _thread_config():
         bool(jax.config.jax_enable_x64),
         jax.config.jax_default_device,
         jax.config.jax_default_matmul_precision,
+        bool(jax.config.jax_threefry_partitionable),
+        jax.config.jax_default_prng_impl,
     )
 
 
 def _in_thread(builder, declarations, config):
     """`builder(*declarations)` under the JAX settings in `config`."""
-    x64, device, precision = config
+    x64, device, precision, partitionable, prng = config
     with contextlib.ExitStack() as stack:
         stack.enter_context(jax.enable_x64(x64))
+        stack.enter_context(jax.threefry_partitionable(partitionable))
+        stack.enter_context(jax.default_prng_impl(prng))
         if device is not None:
             stack.enter_context(jax.default_device(device))
         if precision is not None:

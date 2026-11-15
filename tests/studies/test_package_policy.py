@@ -19,7 +19,9 @@ from spaceodyssey.core.enums import (
 )
 from spaceodyssey.core.records import pack, refit_rows, unpack
 from spaceodyssey.core.snapshot import snapshot_view
+from spaceodyssey.criteria.transition import TransitionTable
 from spaceodyssey.studies import bracket as br
+from tests.criteria.options_reference import reference_options
 from tests.studies.bracket_helpers import (
     _decide,
     assert_trees_equal,
@@ -486,6 +488,15 @@ def test_zero_credit_stars_skip_track_comparisons(fixture, monkeypatch):
     class CountedPolicy(br.PackagePolicy):
         """Give the callback its own trace without clearing shared programs."""
 
+    class ReferenceTable(TransitionTable):
+        """Evaluate all packages, bypassing the policy's zero-credit shortcut."""
+
+        options = reference_options
+
+    criterion = fixture.observer.criterion
+    reference = ReferenceTable(
+        **{f.name: getattr(criterion, f.name) for f in dataclasses.fields(criterion)}
+    )
     original = fixture.agenda.policies[0]
     policy = CountedPolicy(
         **{f.name: getattr(original, f.name) for f in dataclasses.fields(original)}
@@ -508,3 +519,13 @@ def test_zero_credit_stars_skip_track_comparisons(fixture, monkeypatch):
         assert effect_kind(decision) == EffectKind.WAIT
         assert not np.asarray(decision.state.has_package).any()
         assert not calls
+        reference_study = dataclasses.replace(
+            study, observer=dataclasses.replace(study.observer, criterion=reference)
+        )
+        expected = decide_once(
+            reference_study, summary=zero, state=state_with(reference_study)
+        )
+        for a, b in zip(
+            jax.tree.leaves(decision), jax.tree.leaves(expected), strict=True
+        ):
+            assert np.asarray(a).tobytes() == np.asarray(b).tobytes()

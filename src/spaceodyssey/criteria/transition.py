@@ -335,26 +335,38 @@ class TransitionTable(AbstractCriterion):
         Later exposures use available nodes at or after the preceding node.
         """
         return jax.lax.cond(
-            self._can_gain(state, summary_star),
+            self._needs_accounting(state, summary_star),
             lambda: self._package_options(state, summary_star, tick, modes, settings),
             lambda: self._zero_options(state.node.size, summary_star, settings),
         )
 
     def _can_gain(self, state, summary_star):
-        """Whether any active track has target credit and a declared start."""
+        """Whether the policy can use any active track's nonzero credit."""
         possible = (state.node < self.n_steps) & (
-            self._target_probability(summary_star.p_claim) > 0
+            self._target_probability(summary_star.p_claim) != 0
         )
         return jnp.any(possible) & jnp.any(summary_star.available)
+
+    def _needs_accounting(self, state, summary_star):
+        """Whether continuations can affect costs or signed/nonfinite credit.
+
+        Active tracks still consume resources when their target probability is zero.
+        """
+        target = self._target_probability(summary_star.p_claim)
+        return jnp.any(state.node < self.n_steps) | jnp.any(
+            ~jnp.isfinite(target) | jnp.signbit(target)
+        )
 
     def _zero_options(self, n_tracks, summary_star, settings):
         """The same zero-credit table for a joint or individual track view."""
         n_grid, n_variants = summary_star.available.shape
         gain = jnp.zeros((n_grid, n_variants), F64)
+        # Preserve the serial accumulator's normalization of signed-zero costs.
+        zero = jax.lax.optimization_barrier(jnp.asarray(0.0, F64))
         return StarOptions(
             gain,
             jnp.broadcast_to(
-                settings.channel_cost[:n_variants],
+                settings.channel_cost[:n_variants] + zero,
                 (n_grid, n_variants, settings.channel_cost.shape[-1]),
             ),
             jnp.broadcast_to(jnp.arange(n_variants, dtype=I64), gain.shape),
@@ -362,7 +374,7 @@ class TransitionTable(AbstractCriterion):
         )
 
     def _package_options(self, state, summary_star, tick, modes, settings):
-        """Continuation search for a star with attainable incremental credit."""
+        """Continuation search, including resource costs for zero-credit tracks."""
         allowed, mode_bands = self._mode_layout(modes)
         n_grid, n_variants = summary_star.available.shape
         duration_count = len(modes.durations_d)

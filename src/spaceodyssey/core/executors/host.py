@@ -55,6 +55,24 @@ def _trace_rows(traces, padding, padded_rows):
     return trace
 
 
+def _terminal_row(carry, study):
+    """The diagnostic row a transition emits after a world has stopped."""
+    trace = dataclasses.replace(
+        empty_trace(study.caps),
+        pending_wake=carry.pending_wake,
+        release_version=carry.release_version,
+    )
+    return _fin(
+        trace,
+        effects_none(study.caps),
+        trace.admit_code,
+        jnp.asarray(0.0),
+        jnp.asarray(False),
+        carry,
+        study,
+    )
+
+
 class _Saved(typing.NamedTuple):
     """How much of the run the last checkpoint already holds."""
 
@@ -145,20 +163,7 @@ class HostExecutor(AbstractExecutor):
         saved = _Saved(0, len(view_log or ()), len(effects_log or ()))
         for step in range(n_steps):
             if bool(carry.done | carry.idle | carry.stalled | carry.overflow):
-                padding = dataclasses.replace(
-                    empty_trace(caps),
-                    pending_wake=carry.pending_wake,
-                    release_version=carry.release_version,
-                )
-                padding = fin(
-                    padding,
-                    effects_none(caps),
-                    padding.admit_code,
-                    jnp.asarray(0.0),
-                    jnp.asarray(False),
-                    carry,
-                    study,
-                )
+                padding = _terminal_row(carry, study)
                 padded_rows = n_steps - step
                 if checkpoint is not None:
                     traces.extend([padding] * padded_rows)
@@ -320,7 +325,6 @@ class HostExecutor(AbstractExecutor):
             for w in range(roots.shape[0])
         ]
         rows = max(r.trace.handled.shape[0] for r in runs)
-        empty = empty_trace(study.caps)
         traces = [
             jax.tree_util.tree_map(
                 lambda x, fill: (
@@ -331,7 +335,7 @@ class HostExecutor(AbstractExecutor):
                     else x
                 ),
                 r.trace,
-                empty,
+                _terminal_row(r.carry, lift_traced(study)),
             )
             for r in runs
         ]

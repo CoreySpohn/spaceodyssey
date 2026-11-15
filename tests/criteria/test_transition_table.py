@@ -28,6 +28,7 @@ from spaceodyssey.criteria.transition import (
     pass_probability,
 )
 from spaceodyssey.studies.selection import select
+from tests.criteria.options_reference import reference_options
 from tests.studies.bracket_helpers import assert_trees_equal, random_state
 
 TELESCOPE = 2
@@ -609,8 +610,8 @@ def test_equivalent_continuations_reuse_work_until_row_constraints_bind(monkeypa
         assert float(options.time[0, 0, TELESCOPE]) == time_d
 
 
-def test_no_credit_star_skips_continuation_search(monkeypatch):
-    """Fails if a terminal star still evaluates its package continuations."""
+def test_no_credit_star_preserves_costs_and_terminal_search_is_skipped(monkeypatch):
+    """Fails if zero target credit erases active costs or terminal tracks search."""
     calls = []
     probability = transition.pass_probability
 
@@ -628,7 +629,85 @@ def test_no_credit_star_skips_continuation_search(monkeypatch):
     summary = dataclasses.replace(summary, p_claim=jnp.zeros((2, 1)))
     state = table.init_state(2, 3)
     options = _options(table, state, summary, settings)
+    expected = _reference_options(table, state, summary, 0, MODES, settings)
+    for a, b in zip(jax.tree.leaves(options), jax.tree.leaves(expected), strict=True):
+        assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+    jax.effects_barrier()
+    calls.clear()
+    terminal = dataclasses.replace(state, node=jnp.full_like(state.node, table.n_steps))
+    _options(table, terminal, summary, settings).gain.block_until_ready()
     jax.effects_barrier()
     assert not calls
     np.testing.assert_array_equal(options.gain, 0.0)
     np.testing.assert_array_equal(options.track_gain, 0.0)
+
+
+_reference_options = eqx.filter_jit(reference_options)
+
+
+@pytest.mark.medium(
+    reason="two independent multi-step package programs and fixed-shape cases"
+)
+def test_optimized_options_match_reference_bytes():
+    """Fails if row bounds, zero-gain pruning or track reuse alter any option byte."""
+    table = dataclasses.replace(
+        two_step_table(),
+        repeat=jnp.asarray([2, 3], I64),
+        margin=jnp.asarray([0.25, 0.75]),
+        label_values=jnp.asarray([0.0, 0.4, 1.0]),
+        claims=(EarthCandidateClaim(),),
+        target_claim="earth_candidate",
+    )
+    summary, settings = package_inputs(n_slots=3, n_grid=3)
+    state = table.init_state(3, 3)
+    rng = np.random.default_rng(0)
+    for case in range(14):
+        # Both sides of repeat + missing-image bound, including equal/zero tracks.
+        rows = (9, 9, 9, 7, 1, 0, 8, 100, 100, 100, 100, 100, 100, 100)[case]
+        current = dataclasses.replace(
+            state,
+            node=jnp.asarray([0, 0, case % 2], I64),
+            passes=jnp.asarray([1, 1, case % 3], I64),
+            sum_counts=jnp.full((3, 3), 0.5 * (case % 2)),
+            sum_variance=jnp.full((3, 3), 0.25 * (case % 2)),
+        )
+        target = 0.0 if case == 6 else 0.75
+        if case >= 8:
+            current = dataclasses.replace(current, node=jnp.full(3, table.n_steps, I64))
+            target = (0.75, -0.0, np.nan, np.inf, 0.75, 0.0)[case - 8]
+        forecast = dataclasses.replace(
+            summary,
+            n_det=jnp.full(3, case % 4, I64),
+            p_claim=jnp.full((3, 1), target),
+            p_det=jnp.asarray(rng.uniform(0.1, 0.9, (3, 3, 1))),
+            fc_counts=jnp.asarray(rng.uniform(3, 9, (3, 3, 3, 3))),
+            available=jnp.asarray(rng.uniform(size=(3, 3)) > 0.2),
+        )
+        if case >= 12:
+            forecast = dataclasses.replace(
+                forecast,
+                n_det=jnp.zeros(3, I64),
+                p_exist=jnp.full(3, np.nan if case == 12 else np.inf),
+            )
+        # Adjacent identical tracks exercise reuse; zero forecasts exercise pruning.
+        for name in ("p_det", "fc_counts"):
+            value = getattr(forecast, name)
+            forecast = dataclasses.replace(
+                forecast, **{name: value.at[1].set(value[0])}
+            )
+        if case == 4:
+            forecast = dataclasses.replace(
+                forecast, fc_counts=jnp.zeros_like(forecast.fc_counts)
+            )
+        costs = settings.channel_cost
+        if case == 8:
+            costs = costs.at[:, 0].set(-0.0)
+        limited = dataclasses.replace(
+            settings, remaining_rows=jnp.full(3, rows, I64), channel_cost=costs
+        )
+        actual = _options_with_modes(table, current, forecast, 0, MODES, limited)
+        expected = _reference_options(table, current, forecast, 0, MODES, limited)
+        for a, b in zip(
+            jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+        ):
+            assert np.asarray(a).tobytes() == np.asarray(b).tobytes(), case

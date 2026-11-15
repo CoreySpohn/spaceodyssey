@@ -927,3 +927,18 @@ def test_leakage_program_reuses_different_stellar_diameters(observatory):
             assert np.all(np.asarray(result) > previous)
         previous = np.asarray(result)
         assert len(calls) == 1
+
+
+@pytest.mark.slow(reason="finite-star maps on the pinned response in two bands")
+def test_finite_star_leakage_preserves_eager_bytes(yip_report):
+    """Fails if compilation changes leakage bytes used in calibration identities."""
+    response = yip_report.optical_path.coronagraph
+    grid = yip_report.leakage_grid
+    for wavelength in (500.0, 910.0):
+        for diameter in (0.03, 0.12):
+            diameter = jnp.asarray(diameter)
+            eager = response.core_mean_intensity(
+                grid, wavelength, stellar_diam_lod=diameter
+            )
+            actual = adapter._stellar_leakage(response, grid, wavelength, diameter)
+            assert np.asarray(actual).tobytes() == np.asarray(eager).tobytes()

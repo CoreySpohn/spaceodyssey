@@ -1,6 +1,8 @@
 """Population first tiers and claims at the decision/scoring boundary."""
 
 import dataclasses
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from types import SimpleNamespace
 
 import equinox as eqx
@@ -16,6 +18,7 @@ from skyscapes.population import (
     occurrence_table_from_grid,
 )
 
+from spaceodyssey._threads import _in_thread, _thread_config
 from spaceodyssey.adapters import photomancy as ph
 from spaceodyssey.adapters.parameters import (
     PlanetParameters,
@@ -428,13 +431,95 @@ def test_expected_host_count_is_stable_across_refit_keys(boundary_inputs):
 
 
 @pytest.mark.slow(reason="compares serial and threaded population forecast programs")
-def test_parallel_population_prior_preserves_all_leaves_and_host_order(boundary_inputs):
+def test_parallel_population_prior_preserves_all_leaves_and_host_order(
+    boundary_inputs, monkeypatch
+):
     """Fails if partitioning changes keys, reductions, order or caller precision."""
     study, boundary, population = boundary_inputs
-    study = dataclasses.replace(study, belief_population=population)
-    serial = jax.block_until_ready(boundary.initial_summary(study))
-    parallel = jax.block_until_ready(boundary.initial_summary(study, workers=2))
+    # Ten keyed subjects put one real host and two pads in the fourth partition.
+    indices = jnp.arange(10) % study.caps.n_subjects
+    channel = dataclasses.replace(
+        study.channel_model,
+        band_scenes=jax.tree.map(lambda x: x[indices], study.channel_model.band_scenes),
+        band_leakage=tuple(x[indices] for x in study.channel_model.band_leakage),
+        catalog_mass_kg=study.channel_model.catalog_mass_kg[indices],
+    )
+    prior = jax.tree.map(lambda x: x[indices], study.observer.prior)
+    # Repeated physical hosts retain subject-specific draw keys.
+    study = eqx.tree_at(
+        lambda s: (s.channel_model, s.observer.prior),
+        study.decision_view(),
+        (channel, prior),
+    )
+    study = eqx.tree_at(lambda s: s.belief_population, study, population)
+    with jax.default_device(None), jax.default_matmul_precision(None):
+        serial = jax.block_until_ready(boundary.initial_summary(study))
+        config = _thread_config()
+    lock, active, peak = Lock(), 0, 0
+    leaves = ph._population_leaves
+
+    def counted(*args):
+        nonlocal active, peak
+        assert _thread_config() == config
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            return jax.block_until_ready(leaves(*args))
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(ph, "_population_leaves", counted)
+    device, precision = (
+        jax.config.jax_default_device,
+        jax.config.jax_default_matmul_precision,
+    )
+    try:
+        jax.config.update("jax_default_device", jax.devices("cpu")[0])
+        jax.config.update("jax_default_matmul_precision", "highest")
+        with jax.default_device(None), jax.default_matmul_precision(None):
+            assert _thread_config() == config
+            parallel = jax.block_until_ready(boundary.initial_summary(study, workers=4))
+    finally:
+        jax.config.update("jax_default_device", device)
+        jax.config.update("jax_default_matmul_precision", precision)
+    assert peak <= 2  # default-size forecasts need several GiB per live map
+
     for a, b in zip(jax.tree.leaves(serial), jax.tree.leaves(parallel), strict=True):
         assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
     assert parallel.fc_counts.dtype == jnp.float64
     assert not np.array_equal(parallel.fc_counts[0], parallel.fc_counts[1])
+
+
+def test_population_worker_inherits_prng_configuration(monkeypatch):
+    """Fails if build workers silently use global rather than caller PRNG settings."""
+
+    def draw():
+        key = jax.random.PRNGKey(0)
+        return _thread_config(), jax.random.uniform(jax.random.split(key)[0], (4,))
+
+    for partitionable, implementation in ((False, "threefry2x32"), (True, "rbg")):
+        with (
+            jax.threefry_partitionable(partitionable),
+            jax.default_prng_impl(implementation),
+        ):
+            config, expected = draw()
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                actual_config, actual = pool.submit(
+                    _in_thread, draw, (), config
+                ).result()
+            assert actual_config == config
+            assert np.asarray(actual).tobytes() == np.asarray(expected).tobytes()
+
+    def execution_mode(_channel, _population, subjects, _summary):
+        return jnp.full(subjects.shape, jax.config.jax_disable_jit, dtype=bool)
+
+    monkeypatch.setattr(ph, "_population_leaves", execution_mode)
+    monkeypatch.setattr(ph, "_install_population", lambda _prior, _st, result: result)
+    mode = not bool(jax.config.jax_disable_jit)
+    with jax.disable_jit(mode):
+        actual = ph._parallel_population_summary(
+            None, None, SimpleNamespace(n_subjects=2), None, 4
+        )
+    assert np.asarray(actual).tolist() == [mode, mode]

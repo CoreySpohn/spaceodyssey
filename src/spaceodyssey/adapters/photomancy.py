@@ -1771,13 +1771,26 @@ def _parallel_population_summary(channel, population, prior, st, workers):
     subjects = jnp.minimum(jnp.arange(workers * size), prior.n_subjects - 1)
     parts = subjects.reshape(workers, size)
     config = _thread_config()
+    device, precision = config[1:3]
+    disable_jit = jax.config.jax_disable_jit
 
     def one(indices):
-        return jax.block_until_ready(
-            _in_thread(_population_leaves, (channel, population, indices, st), config)
-        )
+        # Cleared caller choices must override a worker's process defaults too.
+        with (
+            jax.default_device(device),
+            jax.default_matmul_precision(precision),
+            jax.disable_jit(disable_jit),
+        ):
+            return jax.block_until_ready(
+                _in_thread(
+                    _population_leaves, (channel, population, indices, st), config
+                )
+            )
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    # A full forecast can need several GiB of temporary arrays per scalar map.
+    # Keep the requested partitions (and their numerical programs), but bound
+    # simultaneous maps independently of the partition count.
+    with ThreadPoolExecutor(max_workers=min(workers, 2)) as pool:
         groups = list(pool.map(one, parts))
     result = jax.tree.map(lambda *xs: jnp.concatenate(xs)[: prior.n_subjects], *groups)
     return _install_population(prior, st, result)
@@ -2153,7 +2166,8 @@ class ReportRefit(AbstractRefitBoundary):
         This needs no measurement or catalog permissions and uses the same draw
         count, occurrence estimate and forecasts as the declared first tier.
         `workers` partitions full scalar maps between host threads, preserving
-        the caller's JAX precision and device. One worker remains traceable.
+        the caller's JAX precision and device. At most two maps execute at once
+        to bound forecast memory. One worker remains traceable.
         """
         if type(workers) is not int or workers < 1:
             raise ValueError("workers must be a positive integer")
