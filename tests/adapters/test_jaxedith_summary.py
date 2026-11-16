@@ -16,8 +16,9 @@ import numpy as np
 import pytest
 from astropy.io import fits
 from coronalyze import PPConfig
-from hwoutils.constants import Jy, Rearth2AU, h
+from hwoutils.constants import Jy, Mearth2kg, Msun2kg, Rearth2AU, h
 from hwoutils.conversions import AB_ZERO_POINT_JY, Msun_to_kg
+from hwoutils.epoch import Epoch
 from jaxedith import (
     ETCScene,
     count_rates_ayo,
@@ -33,8 +34,6 @@ from optixstuff import (
     OpticalPath,
     SimplePrimary,
 )
-from orbix.kepler.shortcuts.grid import get_grid_solver
-from orbix.orbit import KeplerianOrbit
 from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
 from scipy.ndimage import map_coordinates
 from skyscapes.physical_model import GridPhysicalModel
@@ -162,7 +161,12 @@ def hand_rates(report, scene, a_au, Lambda, times_jd, *, ppfact=math.inf):
     aperture = lod_arcsec() ** 2 * coro.area_lod2 * coro.sky
     fzodi = np.array(
         [
-            zodi_fn_leinert(report.observatory, report._exposure(t), scene)
+            zodi_fn_leinert(
+                report.observatory,
+                report._exposure(t),
+                scene,
+                epoch=Epoch(report.orbit_epoch_jd),
+            )
             for t in times_jd
         ]
     )
@@ -505,7 +509,10 @@ def etc_scene(report, rates, i, epoch_jd):
         Fs_over_F0=prepared.star_ratio,
         Fp_over_Fs=rates.contrast[i],
         Fzodi=zodi_fn_leinert(
-            report.observatory, report._exposure(epoch_jd), prepared.scene
+            report.observatory,
+            report._exposure(epoch_jd),
+            prepared.scene,
+            epoch=Epoch(report.orbit_epoch_jd),
         ),
         Fexozodi=prepared.exozodi_1au,
         dist_pc=prepared.dist_pc,
@@ -526,7 +533,10 @@ def full_call_rates(report, theta, times_jd):
             Fs_over_F0=prepared.star_ratio,
             Fp_over_Fs=contrast,
             Fzodi=zodi_fn_leinert(
-                report.observatory, report._exposure(t), prepared.scene
+                report.observatory,
+                report._exposure(t),
+                prepared.scene,
+                epoch=Epoch(report.orbit_epoch_jd),
             ),
             Fexozodi=prepared.exozodi_1au,
             dist_pc=prepared.dist_pc,
@@ -697,42 +707,39 @@ def test_variance_agrees_with_jaxedith_and_the_system_wrapper(yip_report, observ
             assert float(above.snr) >= 10.0 * (1 - 1e-9) > float(below.snr)
 
     star = Star(
-        Ms_kg=Msun_to_kg(1.03),
-        dist_pc=13.8,
         ra_deg=164.867,
         dec_deg=40.430,
         diameter_arcsec=0.79e-3,
         luminosity_Lsun=1.54,
         wavelengths_nm=jnp.array([900.0, WAVELENGTH_NM, 1100.0]),
-        times_jd=jnp.array([start - 10.0, start + 10.0]),
+        times_d=jnp.array([-10.0, 10.0]),
         flux_density_jy=jnp.full((3, 2), 42.0),
-    )
-    orbit = KeplerianOrbit(
-        a_AU=jnp.array([a_au]),
-        e=jnp.zeros(1),
-        W_rad=jnp.zeros(1),
-        i_rad=jnp.zeros(1),
-        w_rad=jnp.zeros(1),
-        M0_rad=jnp.zeros(1),
-        t0_d=jnp.zeros(1),
     )
     planet = Planet(
         Rp_Rearth=jnp.ones(1),
-        Mp_Mearth=jnp.ones(1),
-        orbit=orbit,
         physical_model=GridPhysicalModel(
             wavelengths_nm=jnp.array([900.0, 1100.0]),
             phase_angle_deg=jnp.array([0.0, 180.0]),
             contrast_grid=jnp.full((1, 2, 2), Lambda / math.pi / a_au**2),
         ),
     )
-    system = System(
-        star=star,
-        planets=(planet,),
-        trig_solver=get_grid_solver(level="scalar", E=False, trig=True, jit=True),
+    system = System.from_classical(
+        star,
+        (planet,),
+        star_mass_Msun=1.03,
+        planet_mass_Msun=Mearth2kg / Msun2kg,
+        dist_pc=13.8,
+        a_AU=a_au,
+        e=0.0,
+        i_rad=0.0,
+        W_rad=0.0,
+        w_rad=0.0,
+        M0_rad=0.0,
+        epoch_d=-start,
+        epoch=Epoch(start),
     )
     exposure = ExposureConfig(
-        start_time_jd=jnp.array([start]),
+        start_time_d=jnp.array([0.0]),
         exposure_time_s=jnp.asarray(3600.0),
         central_wavelength_nm=jnp.asarray(WAVELENGTH_NM),
         bin_width_nm=jnp.asarray(BAND_NM),
@@ -750,7 +757,7 @@ def test_variance_agrees_with_jaxedith_and_the_system_wrapper(yip_report, observ
     )
     rates = yip_report.rates(yip_report.nominal, theta, start)
     background = rates.leakage + rates.zodi + rates.exozodi + rates.detector
-    # skyscapes' grid Kepler solver places the planet within 1e-6 of a / d.
+    # The scene and element predictors agree on the circular separation.
     np.testing.assert_allclose(rates.planet[0], cp[0, 0], rtol=1e-5)
     np.testing.assert_allclose(background[0], cb[0, 0], rtol=1e-5)
 
@@ -853,7 +860,10 @@ def test_survey_snr_and_exposure_time_over_one_orbit(yip_report, observatory):
             Fs_over_F0=yip_report.nominal.star_ratio,
             Fp_over_Fs=rates.contrast[0],
             Fzodi=zodi_fn_leinert(
-                observatory, yip_report._exposure(start), uma_scene()
+                observatory,
+                yip_report._exposure(start),
+                uma_scene(),
+                epoch=Epoch(yip_report.orbit_epoch_jd),
             ),
             Fexozodi=yip_report.nominal.exozodi_1au,
             dist_pc=13.8,

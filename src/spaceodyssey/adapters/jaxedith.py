@@ -106,6 +106,7 @@ from hwoutils.conversions import (
     mag_to_flux_jy,
     photons_per_nm_per_m2_to_jy,
 )
+from hwoutils.epoch import Epoch
 from jax.scipy.special import log_ndtr, ndtr
 from jax.scipy.stats import norm
 from jaxedith import (
@@ -722,7 +723,9 @@ class SummaryReport(eqx.Module):
                 mv_sun=SUN_ABSOLUTE_V_MAG,
             )
         else:
-            one_zodi = zodi_fn_ayo(self.observatory, exposure, scene)
+            one_zodi = zodi_fn_ayo(
+                self.observatory, exposure, scene, epoch=Epoch(self.orbit_epoch_jd)
+            )
             exozodi_1au = (
                 jnp.asarray(scene.n_exozodi)
                 * one_zodi
@@ -759,7 +762,7 @@ class SummaryReport(eqx.Module):
     def _exposure(self, start_jd):
         """An exposure record for the zodi callables at one epoch."""
         return ExposureConfig(
-            start_time_jd=start_jd,
+            start_time_d=start_jd - self.orbit_epoch_jd,
             exposure_time_s=jnp.asarray(0.0),
             central_wavelength_nm=jnp.asarray(self.wavelength_nm),
             bin_width_nm=jnp.asarray(self.bin_width_nm),
@@ -809,7 +812,10 @@ class SummaryReport(eqx.Module):
         diam = prepared.stellar_diam_lod
         fzodi = jax.vmap(
             lambda t: zodi_fn_leinert(
-                self.observatory, self._exposure(t), prepared.scene
+                self.observatory,
+                self._exposure(t),
+                prepared.scene,
+                epoch=Epoch(self.orbit_epoch_jd),
             )
         )(times_jd)
         planet_e = planet_signal(path, wl, sep, dl, f0, fs, contrast, n_channels=n_ch)
@@ -1391,7 +1397,7 @@ def _channel_assets(profile, target, detector, n_time_nodes, n_exozodi, law):
     spec = SceneSpec.from_profile(entry, target)
     context = context_from_profile(entry)
     epoch = entry["time"]["study_epoch_jd"]
-    photons = build_star(spec).spec_flux_density(spec.wavelength_nm, epoch)
+    photons = build_star(spec).spec_flux_density(spec.wavelength_nm, 0.0)
     scene = SummaryScene(
         star_flux_density_jy=float(
             photons_per_nm_per_m2_to_jy(photons, spec.wavelength_nm)

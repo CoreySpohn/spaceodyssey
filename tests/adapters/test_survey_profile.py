@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import Rearth2AU
 from hwoutils.conversions import jy_to_photons_per_nm_per_m2, mag_to_flux_jy
+from hwoutils.epoch import Epoch
 from jaxedith import zodi_fn_ayo
 from optixstuff import ExposureConfig
 
@@ -153,7 +154,7 @@ def test_lambda_over_d_zodi_and_exozodi_follow_the_report_wavelength(channel, st
             zero = jy_to_photons_per_nm_per_m2(mag_to_flux_jy(0.0), wl)
             assert float(prepared.zero_point) == pytest.approx(float(zero), rel=1e-12)
             exposure = ExposureConfig(
-                start_time_jd=jnp.asarray(0.0),
+                start_time_d=jnp.asarray(0.0),
                 exposure_time_s=jnp.asarray(0.0),
                 central_wavelength_nm=jnp.asarray(wl),
                 bin_width_nm=jnp.asarray(report.bin_width_nm),
@@ -177,7 +178,12 @@ def test_lambda_over_d_zodi_and_exozodi_follow_the_report_wavelength(channel, st
             # the same quantity in the zodi (scattered sunlight) color
             zodi_form = float(
                 scene.n_exozodi
-                * zodi_fn_ayo(report.observatory, exposure, scene)
+                * zodi_fn_ayo(
+                    report.observatory,
+                    exposure,
+                    scene,
+                    epoch=Epoch(report.orbit_epoch_jd),
+                )
                 * lum_v
             )
             ratios[name, wl] = float(prepared.exozodi_1au) / zodi_form
@@ -522,7 +528,7 @@ def test_the_baseline_exozodi_takes_the_host_color():
     assert report.stellar_exozodi
     wl = report.wavelength_nm
     exposure = ExposureConfig(
-        start_time_jd=jnp.asarray(0.0),
+        start_time_d=jnp.asarray(0.0),
         exposure_time_s=jnp.asarray(0.0),
         central_wavelength_nm=jnp.asarray(wl),
         bin_width_nm=jnp.asarray(report.bin_width_nm),
@@ -536,7 +542,11 @@ def test_the_baseline_exozodi_takes_the_host_color():
         abs_v = v_mag - 5.0 * math.log10(float(scene.dist_pc) / 10.0)
         lum_v = 10.0 ** (-0.4 * (abs_v - 4.83))
         solar_color = float(
-            scene.n_exozodi * zodi_fn_ayo(report.observatory, exposure, scene) * lum_v
+            scene.n_exozodi
+            * zodi_fn_ayo(
+                report.observatory, exposure, scene, epoch=Epoch(report.orbit_epoch_jd)
+            )
+            * lum_v
         )
         ratio.append(float(prepared.exozodi_1au) / solar_color)
     assert 0.7 < ratio[0] < 1.0

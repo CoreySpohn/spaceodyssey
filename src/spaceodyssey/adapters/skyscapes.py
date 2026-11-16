@@ -6,7 +6,8 @@ diameter) and one planet (period, eccentricity, the radial-velocity argument of
 periastron, periastron epoch, inclination, node, mass, radius, geometric albedo).
 `build_scene` turns it into a skyscapes `System`: a tabulated `Star` whose
 single-epoch flux table is a skyscapes `BlackbodyStar` spectrum over the band, and
-one `Planet` with an orbix `KeplerianOrbit` and a gray `LambertianPhysicalModel`.
+one photometric `Planet` with a gray `LambertianPhysicalModel` and shared orbix
+dynamics.
 
 Conventions are the libraries' own: positions in the right-handed (east, north,
 away) frame, the east offset already multiplied by cos(declination), the node
@@ -75,10 +76,9 @@ from hwoutils.constants import (
     rad2arcsec,
 )
 from hwoutils.conversions import photons_per_nm_per_m2_to_jy
+from hwoutils.epoch import Epoch
 from numpyro import handlers
-from orbix.equations.orbit import mean_motion, period_a
-from orbix.kepler import markley_solve_trig
-from orbix.orbit import KeplerianOrbit
+from orbix.equations.orbit import mean_motion, period_a, period_to_sma
 from photomancy.orbit.data import OrbitData
 from photomancy.orbit.forward import predict_photometry
 from photomancy.orbit.model import build_model
@@ -215,22 +215,17 @@ class PriorSpec:
 
 def build_star(spec):
     """A skyscapes `Star` for the host: blackbody flux table over the band."""
-    ms_kg = spec.mass_msun * Msun2kg
     blackbody = BlackbodyStar(
-        Ms_kg=ms_kg,
-        dist_pc=spec.dist_pc,
         teff_K=spec.teff_k,
         radius_m=spec.radius_rsun * Rsun2m,
     )
     wavelengths = jnp.linspace(spec.band_nm[0], spec.band_nm[1], FLUX_TABLE_POINTS)
-    times = jnp.asarray([spec.tp_jd], F64)
-    photons = blackbody.spec_flux_density(wavelengths, times[0])
+    times = jnp.zeros(1, F64)
+    photons = blackbody.spec_flux_density(wavelengths, times[0], dist_pc=spec.dist_pc)
     flux_jy = photons_per_nm_per_m2_to_jy(photons, wavelengths)[:, None]
     return Star(
-        Ms_kg=ms_kg,
-        dist_pc=spec.dist_pc,
         wavelengths_nm=wavelengths,
-        times_jd=times,
+        times_d=times,
         flux_density_jy=flux_jy,
         ra_deg=spec.ra_deg,
         dec_deg=spec.dec_deg,
@@ -242,24 +237,45 @@ def build_star(spec):
 
 
 def _planet(
-    star, period_d, ecc, cos_i, node_rad, cos_w, sin_w, tp_jd, mass_kg, r_au, ag
+    star,
+    star_mass_kg,
+    dist_pc,
+    epoch,
+    period_d,
+    ecc,
+    cos_i,
+    node_rad,
+    cos_w,
+    sin_w,
+    tp_jd,
+    mass_kg,
+    r_au,
+    ag,
 ):
-    """A one-planet skyscapes `Planet` from period-parameterized elements."""
-    orbit = KeplerianOrbit.from_period(
-        period_d,
-        ecc,
-        cos_i,
-        node_rad,
-        cos_w,
-        sin_w,
-        tp_jd,
-        Ms_kg=star.Ms_kg + mass_kg,
-    )
-    return Planet(
+    """A one-planet scene from period-parameterized elements and absolute periastron."""
+    planet = Planet(
         Rp_Rearth=jnp.atleast_1d(jnp.asarray(r_au / Rearth2AU, F64)),
-        Mp_Mearth=jnp.atleast_1d(jnp.asarray(mass_kg / Mearth2kg, F64)),
-        orbit=orbit,
         physical_model=LambertianPhysicalModel(Ag=jnp.atleast_1d(jnp.asarray(ag, F64))),
+    )
+    if isinstance(tp_jd, jax.core.Tracer):
+        tp_d = (tp_jd - epoch.jd1) - epoch.jd2
+    else:
+        tp_d = epoch.days(tp_jd)
+    return System.from_classical(
+        star,
+        (planet,),
+        star_mass_Msun=star_mass_kg / Msun2kg,
+        planet_mass_Msun=mass_kg / Msun2kg,
+        dist_pc=dist_pc,
+        a_AU=period_to_sma(period_d, star_mass_kg + mass_kg),
+        e=ecc,
+        i_rad=jnp.arccos(cos_i),
+        W_rad=node_rad,
+        w_rad=jnp.arctan2(sin_w, cos_w),
+        M0_rad=0.0,
+        epoch_d=tp_d,
+        epoch=epoch,
+        order=(0,),
     )
 
 
@@ -267,8 +283,11 @@ def build_scene(spec):
     """The skyscapes `System` of a `SceneSpec`: its star and its one planet."""
     star = build_star(spec)
     w = spec.omega_planet_deg * deg2rad
-    planet = _planet(
+    return _planet(
         star,
+        spec.mass_msun * Msun2kg,
+        spec.dist_pc,
+        Epoch(J2000_JD),
         spec.period_d,
         spec.ecc,
         jnp.cos(spec.inclination_deg * deg2rad),
@@ -280,7 +299,6 @@ def build_scene(spec):
         spec.planet_radius_m / Rearth2m * Rearth2AU,
         spec.geometric_albedo,
     )
-    return System(star=star, planets=(planet,), trig_solver=markley_solve_trig)
 
 
 class PhysicalTruth(eqx.Module):
@@ -394,8 +412,11 @@ class PhysicalWorldSource(AbstractWorldSource):
 def truth_scene(source, truth, subject):
     """The skyscapes `System` of one subject of a drawn world (truth side)."""
     star = build_star(source.scenes[subject])
-    planet = _planet(
+    return _planet(
         star,
+        source.scenes[subject].mass_msun * Msun2kg,
+        source.scenes[subject].dist_pc,
+        Epoch(source.epoch_jd),
         truth.period_d[subject],
         truth.e[subject],
         truth.cos_i[subject],
@@ -407,7 +428,6 @@ def truth_scene(source, truth, subject):
         truth.Rp_AU[subject],
         truth.Ag[subject],
     )
-    return System(star=star, planets=(planet,), trig_solver=markley_solve_trig)
 
 
 class Geometry(eqx.Module):
@@ -435,11 +455,18 @@ class Geometry(eqx.Module):
 def geometry(system, epoch_jd, wavelength_nm):
     """`Geometry` of a one-planet `System` at `epoch_jd` (shape ``(T,)``)."""
     t = jnp.atleast_1d(jnp.asarray(epoch_jd, F64))
-    planet = system.planets[0]
-    _, phase, distance = planet.propagate(system.trig_solver, t, star=system.star)
-    position = system.positions(t)
+    if isinstance(t, jax.core.Tracer):
+        time_d = (t - system.epoch.jd1) - system.epoch.jd2
+    else:
+        time_d = jnp.atleast_1d(jnp.asarray(system.epoch.days(epoch_jd), F64))
+    eph = system.ephemeris(time_d)
+    phase = eph.phase_angle_rad(eph.scene_planet_indices, 0)
+    distance = eph.distance_AU(eph.scene_planet_indices, 0)
+    position = system.positions(time_d, ephemeris=eph)
     east, north = position[0, 0], position[1, 0]
-    contrast = system.contrasts(jnp.asarray(wavelength_nm, F64), t)[0]
+    contrast = system.contrasts(jnp.asarray(wavelength_nm, F64), time_d, ephemeris=eph)[
+        0
+    ]
     return Geometry(
         epoch_jd=t,
         east_arcsec=east,
@@ -472,11 +499,11 @@ class SeparationSupport(eqx.Module):
     def separation_rate_bound(self, target):
         """Upper bound on ``|d separation / dt|`` of `target`'s planet, arcsec/d."""
         system = self.systems[target]
-        planet = system.planets[0]
-        a_au, e = planet.orbit.a_AU[0], planet.orbit.e[0]
-        mu = G * planet.central_mass_kg(star=system.star)[0]
+        orbit = system.dynamics.orbits
+        a_au, e = orbit.a_AU[0], orbit.e[0]
+        mu = orbit.mu_AU3_per_d2[0]
         speed_au_per_d = mean_motion(a_au, mu) * a_au * jnp.sqrt((1 + e) / (1 - e))
-        return speed_au_per_d * rad2arcsec / (system.star.dist_pc * pc2AU)
+        return speed_au_per_d * rad2arcsec / (system.dist_pc * pc2AU)
 
     def __call__(self, target, jd, margin_d=0.0):
         """Whether target `target`'s nominal planet stays in the support near `jd`."""
@@ -1064,7 +1091,7 @@ PHOENIX_LOGG_MAX = 5.0  # the model grid ends here; compact dwarfs are read at i
 G_CGS = 6.6743e-8  # cm^3 g^-1 s^-2, for the surface gravity handed to PHOENIX
 
 
-def _lambert_albedo(system, planet, wavelength_nm):
+def _lambert_albedo(system, index, wavelength_nm):
     """Geometric albedo that gives the file's contrast at `wavelength_nm`, first epoch.
 
     Photomancy's Lambert phase curve with the planet's own radius, read at the
@@ -1073,28 +1100,39 @@ def _lambert_albedo(system, planet, wavelength_nm):
     a Lambert phase too small to divide by, or an albedo that comes out non-finite
     or under 1e-3.
     """
-    one = eqx.tree_at(lambda s: s.planets, system, (planet,))
-    t0 = jnp.atleast_1d(planet.orbit.t0_d[:1])
-    measured = float(geometry(one, t0, wavelength_nm).contrast[0])
-    orbit = planet.orbit
-    mass_kg = float(planet.Mp_Mearth[0]) * Mearth2kg
-    star_kg = float(system.star.Ms_kg)
-    a_au = float(orbit.a_AU[0])
+    planet = system.planets[index]
+    chain = system.body_index[index]
+    orbit = system.dynamics.orbits.to_classical()
+    t0 = jnp.atleast_1d(system.dynamics.orbits.epoch_d[chain])
+    mass_kg = float(system.planet_mass_Msun[index]) * Msun2kg
+    star_kg = float(system.star_mass_Msun) * Msun2kg
+    one = System.from_classical(
+        system.star,
+        (planet,),
+        star_mass_Msun=system.star_mass_Msun,
+        planet_mass_Msun=system.planet_mass_Msun[index],
+        dist_pc=system.dist_pc,
+        epoch=system.epoch,
+        epoch_d=t0,
+        **{name: value[chain : chain + 1] for name, value in orbit.items()},
+    )
+    measured = float(one.contrasts(wavelength_nm, t0)[0, 0])
+    a_au = float(orbit["a_AU"][chain])
     n = mean_motion(a_au, G * (star_kg + mass_kg))
     rp_au = float(planet.Rp_Rearth[0]) * Rearth2AU
 
     _, dmag = predict_photometry(
         jnp.zeros(1),
         a_au,
-        float(orbit.e[0]),
-        math.cos(float(orbit.i_rad[0])),
-        float(orbit.W_rad[0]),
-        math.cos(float(orbit.w_rad[0])),
-        math.sin(float(orbit.w_rad[0])),
-        -float(orbit.M0_rad[0]) / float(n),
+        float(orbit["e"][chain]),
+        math.cos(float(orbit["i_rad"][chain])),
+        float(orbit["W_rad"][chain]),
+        math.cos(float(orbit["w_rad"][chain])),
+        math.sin(float(orbit["w_rad"][chain])),
+        -float(orbit["M0_rad"][chain]) / float(n),
         star_kg,
         rp_au**2,
-        float(system.star.dist_pc),
+        float(system.dist_pc),
         Mp=mass_kg,
     )
     unit = float(10.0 ** (-0.4 * dmag[0]))
@@ -1132,26 +1170,28 @@ def _stored_planets(path, system, bands):
 
     `peak`, the ranking key, uses the first declared band.
     """
-    star_kg = float(system.star.Ms_kg)
+    star_kg = float(system.star_mass_Msun) * Msun2kg
     out = []
-    for planet in system.planets:
-        orbit = planet.orbit
-        a_au, e = float(orbit.a_AU[0]), float(orbit.e[0])
-        mass_kg = float(planet.Mp_Mearth[0]) * Mearth2kg
+    for index, planet in enumerate(system.planets):
+        chain = system.body_index[index]
+        orbit = system.dynamics.orbits.to_classical()
+        a_au, e = float(orbit["a_AU"][chain]), float(orbit["e"][chain])
+        mass_kg = float(system.planet_mass_Msun[index]) * Msun2kg
         mu = G * (star_kg + mass_kg)
         n = float(mean_motion(a_au, mu))
         rp_au = float(planet.Rp_Rearth[0]) * Rearth2AU
-        albedo = [_lambert_albedo(system, planet, b.center_nm) for b in bands]
-        w = float(orbit.w_rad[0])
+        albedo = [_lambert_albedo(system, index, b.center_nm) for b in bands]
+        w = float(orbit["w_rad"][chain])
         out.append(
             {
                 "period_d": float(period_a(a_au, mu)),
                 "e": e,
-                "cos_i": math.cos(float(orbit.i_rad[0])),
-                "W_rad": float(orbit.W_rad[0]),
+                "cos_i": math.cos(float(orbit["i_rad"][chain])),
+                "W_rad": float(orbit["W_rad"][chain]),
                 "cos_w": math.cos(w),
                 "sin_w": math.sin(w),
-                "tp_jd": float(orbit.t0_d[0]) - float(orbit.M0_rad[0]) / n,
+                "tp_jd": float(system.epoch.jd(system.dynamics.orbits.epoch_d[chain]))
+                - float(orbit["M0_rad"][chain]) / n,
                 "Mp_kg": mass_kg,
                 "Rp_AU": rp_au,
                 "albedo": albedo,
@@ -1165,7 +1205,7 @@ def _stored_planets(path, system, bands):
 BAND_POINTS = 9  # wavelengths averaged across a band
 
 
-def _band_flux_jy(star, epoch_jd, center_nm, width_nm):
+def _band_flux_jy(star, time_d, center_nm, width_nm):
     """Flux density [Jy] of `star` in a band: its mean photon flux, read at the center.
 
     The photon flux density per nm is averaged over `BAND_POINTS` wavelengths across
@@ -1174,7 +1214,7 @@ def _band_flux_jy(star, epoch_jd, center_nm, width_nm):
     points = jnp.linspace(
         center_nm - width_nm / 2, center_nm + width_nm / 2, BAND_POINTS
     )
-    photons = jnp.ravel(star.spec_flux_density(points, epoch_jd))
+    photons = jnp.ravel(star.spec_flux_density(points, time_d))
     n = points.shape[0]
     photons = photons.reshape(n, -1)[:, 0]
     if not bool(jnp.all(jnp.isfinite(photons))):
@@ -1185,16 +1225,18 @@ def _band_flux_jy(star, epoch_jd, center_nm, width_nm):
     return float(photons_per_nm_per_m2_to_jy(jnp.mean(photons), center_nm))
 
 
-def _spec_of_star(star, hip_name, bands, epoch_jd, luminosity_lsun=None):
+def _spec_of_star(
+    star, hip_name, bands, time_d, mass_msun, dist_pc, luminosity_lsun=None
+):
     """The `StarSpec` of a skyscapes `Star` with its mean flux in each of `bands`."""
     band_fluxes = tuple(
-        (b.center_nm, _band_flux_jy(star, epoch_jd, b.center_nm, b.width_nm))
+        (b.center_nm, _band_flux_jy(star, time_d, b.center_nm, b.width_nm))
         for b in bands
     )
     return StarSpec(
         name=hip_name,
-        mass_msun=float(star.Ms_kg) / Msun2kg,
-        dist_pc=float(star.dist_pc),
+        mass_msun=float(mass_msun),
+        dist_pc=float(dist_pc),
         ra_deg=float(star.ra_deg),
         dec_deg=float(star.dec_deg),
         luminosity_lsun=float(
@@ -1234,13 +1276,12 @@ def star_spec_from_model(
     star = from_phoenix(
         teff_k,
         logg,
-        Ms_kg=mass_msun * Msun2kg,
         dist_pc=dist_pc,
         radius_m=radius_m,
         ra_deg=ra_deg,
         dec_deg=dec_deg,
     )
-    return _spec_of_star(star, name, bands, epoch_jd, luminosity_lsun)
+    return _spec_of_star(star, name, bands, 0.0, mass_msun, dist_pc, luminosity_lsun)
 
 
 def _ordered_truth(planets, albedo, present, order, bands):
@@ -1358,11 +1399,20 @@ class ExoVistaWorldSource(AbstractWorldSource):
         for w in range(n_worlds):
             for s in range(n_stars):
                 path = str(files[w][s])
-                system = from_exovista(path, load_disk=False)
+                system = from_exovista(
+                    path, load_disk=False, epoch=None if epoch is None else Epoch(epoch)
+                )
                 _require_covered(path, system, bands)
-                t0 = float(system.planets[0].orbit.t0_d[0]) if system.planets else 0.0
+                t0 = float(system.epoch.jd(0.0))
                 epoch = t0 if epoch is None else epoch
-                spec = _spec_of_star(system.star, _hip_name(path), bands, epoch)
+                spec = _spec_of_star(
+                    system.star,
+                    _hip_name(path),
+                    bands,
+                    system.epoch.days(epoch),
+                    system.star_mass_Msun,
+                    system.dist_pc,
+                )
                 if stars[s] is None:
                     stars[s] = spec
                 elif stars[s] != spec:

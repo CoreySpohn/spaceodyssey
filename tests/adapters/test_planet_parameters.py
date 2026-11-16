@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import G, Msun2kg, Rearth2AU
 from orbix.equations.orbit import period_a
-from orbix.kepler import markley_solve_trig
+from orbix.kepler import Grid, Markley
 from skyscapes.io import from_exovista
 from skyscapes.population import (
     PlanetTypes,
@@ -18,6 +18,7 @@ from skyscapes.population import (
     mass_to_radius,
     occurrence_table_from_grid,
 )
+from skyscapes.scene import System
 
 from spaceodyssey.adapters import photomancy as ph
 from spaceodyssey.adapters.parameters import (
@@ -33,7 +34,6 @@ from spaceodyssey.adapters.skyscapes import (
     ExoVistaWorldSource,
     PopulationModel,
     SupportRange,
-    geometry,
 )
 from spaceodyssey.core.records import layout_size, pack, unpack
 from spaceodyssey.criteria.claims import EarthCandidateClaim
@@ -133,13 +133,25 @@ def test_truth_parameters_place_each_planet_where_the_channel_does(source, chann
         )
 
     stored = from_exovista(str(fixture_files()[0]), load_disk=False)
-    exact = dataclasses.replace(stored, trig_solver=markley_solve_trig)
     times_d = jnp.asarray([0.0, 91.3, 400.7, 20000.0])
 
-    def separation(system, slot):
-        one = eqx.tree_at(lambda s: s.planets, system, (system.planets[slot],))
+    def separation(system, slot, solver):
+        chain = system.body_index[slot]
+        elements = system.dynamics.orbits.to_classical()
+        one = System.from_classical(
+            system.star,
+            (system.planets[slot],),
+            star_mass_Msun=system.star_mass_Msun,
+            planet_mass_Msun=system.planet_mass_Msun[slot],
+            dist_pc=system.dist_pc,
+            epoch=system.epoch,
+            epoch_d=system.dynamics.orbits.epoch_d[chain : chain + 1],
+            **{name: value[chain : chain + 1] for name, value in elements.items()},
+        )
         return np.asarray(
-            geometry(one, source.epoch_jd + times_d, 1000.0).separation_arcsec
+            one.ephemeris(
+                one.epoch.days(source.epoch_jd + times_d), solver=solver
+            ).separation_arcsec(1, 0)
         )
 
     for slot in np.flatnonzero(np.asarray(source.take(0).present[0])):
@@ -148,10 +160,10 @@ def test_truth_parameters_place_each_planet_where_the_channel_does(source, chann
             times_d
         )
         ours = np.asarray(jnp.linalg.norm(xy[:, 0], axis=-1))
-        for system, tolerance in ((exact, 1e-9), (stored, 1e-6)):
+        for solver, tolerance in ((Markley(), 1e-9), (Grid(), 1e-6)):
             assert (
                 min(
-                    np.max(np.abs(ours - separation(system, j)))
+                    np.max(np.abs(ours - separation(stored, j, solver)))
                     for j in range(len(stored.planets))
                 )
                 < tolerance

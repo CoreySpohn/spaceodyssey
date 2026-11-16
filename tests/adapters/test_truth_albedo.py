@@ -5,7 +5,6 @@ geometric albedo per band, and the observing-mode channel reads the albedo of th
 each report is taken in.
 """
 
-import dataclasses
 import math
 
 import equinox as eqx
@@ -14,9 +13,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import G, Mearth2kg, Msun2kg, two_pi
-from orbix.kepler import markley_solve_trig
 from skyscapes.io import from_exovista
 from skyscapes.population import PlanetPopulation
+from skyscapes.scene import System
 
 from spaceodyssey.adapters.jaxedith import (
     ObservingModeChannel,
@@ -30,7 +29,6 @@ from spaceodyssey.adapters.skyscapes import (
     ExoVistaWorldSource,
     PopulationModel,
     StarSpec,
-    geometry,
     star_spec_from_model,
 )
 from spaceodyssey.core.kinds import RealizeContext
@@ -138,23 +136,34 @@ def file_contrast(source, bands):
     distance = np.ones((n_stars, n_slots))
     for s, path in enumerate(fixture_files()):
         system = from_exovista(str(path), load_disk=False)
-        system = dataclasses.replace(system, trig_solver=markley_solve_trig)
+        elements = system.dynamics.orbits.to_classical()
         for k in range(n_slots):
             if not bool(truth.present[s, k]):
                 continue
             (j,) = [
                 j
                 for j, p in enumerate(system.planets)
-                if float(p.orbit.W_rad[0]) == float(truth.W_rad[s, k])
-                and float(p.orbit.e[0]) == float(truth.e[s, k])
+                if float(elements["W_rad"][system.body_index[j]])
+                == float(truth.W_rad[s, k])
+                and float(elements["e"][system.body_index[j]]) == float(truth.e[s, k])
             ]
-            one = eqx.tree_at(lambda x: x.planets, system, (system.planets[j],))
-            t0 = jnp.atleast_1d(system.planets[j].orbit.t0_d[:1])
+            chain = system.body_index[j]
+            t0 = jnp.atleast_1d(system.dynamics.orbits.epoch_d[chain])
+            one = System.from_classical(
+                system.star,
+                (system.planets[j],),
+                star_mass_Msun=system.star_mass_Msun,
+                planet_mass_Msun=system.planet_mass_Msun[j],
+                dist_pc=system.dist_pc,
+                epoch=system.epoch,
+                epoch_d=t0,
+                **{name: value[chain : chain + 1] for name, value in elements.items()},
+            )
+            eph = one.ephemeris(t0)
             for b, band in enumerate(bands):
-                g = geometry(one, t0, band.center_nm)
-                contrast[s, k, b] = float(g.contrast[0])
-            phase[s, k] = _lambert_phase(float(g.phase_angle_rad[0]))
-            distance[s, k] = float(g.distance_au[0])
+                contrast[s, k, b] = float(one.contrasts(band.center_nm, t0)[0, 0])
+            phase[s, k] = _lambert_phase(float(eph.phase_angle_rad(1, 0)[0]))
+            distance[s, k] = float(eph.distance_AU(1, 0)[0])
     return contrast, phase, distance
 
 

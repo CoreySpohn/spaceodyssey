@@ -72,10 +72,8 @@ def reference_scene(spec, time_jd):
 
 def away_au(spec, time_jd):
     system = build_scene(spec)
-    r_au, _, _ = system.planets[0].propagate(
-        system.trig_solver, jnp.asarray(time_jd), star=system.star
-    )
-    return np.asarray(r_au[0, 2])
+    eph = system.ephemeris(system.epoch.days(time_jd))
+    return np.asarray((eph.position_AU[1] - eph.position_AU[0])[:, 2])
 
 
 @pytest.mark.medium(reason="over 3 s cold here, about 5 s on the runner")
@@ -288,7 +286,7 @@ def test_world_draws_are_keyed_by_subject(world):
 
 
 def test_truth_scene_matches_photomancy_forward_model(world):
-    """Fails if the world source misplaces photomancy's time origin, mass or angles.
+    """Fails if the world source misplaces time, mass or angles, or cannot trace.
 
     Subject 0 draws photomancy's prior model with ``fold_in(key, 0)``. The scene
     built from the truth gives the same sky offsets as photomancy's own forward
@@ -313,7 +311,11 @@ def test_truth_scene_matches_photomancy_forward_model(world):
     )
     site = {name: jnp.squeeze(v["value"]) for name, v in trace.items()}
     t = source.epoch_jd + np.linspace(0.0, 1500.0, 7)
-    g = geometry(truth_scene(source, truth, 0), t, scene.wavelength_nm)
+    g = jax.jit(
+        lambda draw, dates: geometry(
+            truth_scene(source, draw, 0), dates, scene.wavelength_nm
+        )
+    )(truth, jnp.asarray(t))
     ra, dec = predict_relative_astrometry(
         jnp.asarray(t - source.epoch_jd),
         site["a"],

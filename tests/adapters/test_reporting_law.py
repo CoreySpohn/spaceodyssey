@@ -654,6 +654,7 @@ def run_survey(n_worlds=N_WORLDS, kappas=(1.0, 2.0)):
     """
     from hwoutils.constants import AU2m, Mearth2kg, Msun2kg, d2s
     from hwoutils.conversions import photons_per_nm_per_m2_to_jy
+    from hwoutils.epoch import Epoch
     from jaxedith import ETCScene, exptime_ayo, zodi_fn_leinert
     from orbix.equations.orbit import period_to_sma
 
@@ -730,7 +731,12 @@ def run_survey(n_worlds=N_WORLDS, kappas=(1.0, 2.0)):
             F0=report.nominal.zero_point,
             Fs_over_F0=report.nominal.star_ratio,
             Fp_over_Fs=r.contrast[0],
-            Fzodi=zodi_fn_leinert(observatory, report._exposure(start), scene),
+            Fzodi=zodi_fn_leinert(
+                observatory,
+                report._exposure(start),
+                scene,
+                epoch=Epoch(report.orbit_epoch_jd),
+            ),
             Fexozodi=report.nominal.exozodi_1au,
             dist_pc=scene.dist_pc,
             sep_arcsec=float(r.separation_lod[0]) * lod,
