@@ -6,6 +6,17 @@
 
 * add a JAX/Equinox transaction core for discrete-event observing campaigns, with shared event ordering, atomic admission, resource accounting and semantic random keys; host and compiled executors; typed records with audiences, release times and revisions; a snapshot-bound host request/result protocol; structural pre-flight checks; a generated validation battery; and a conformance corpus with hand histories. Run the acceptance gate with `pytest tests/test_slice1_gate.py`.
 
+## [0.3.0](https://github.com/CoreySpohn/spaceodyssey/compare/v0.2.0...v0.3.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **adapters:** build scenes on the scene dynamics and days from the scene epoch
+
+### Code Refactoring
+
+* **adapters:** build scenes on the scene dynamics and days from the scene epoch ([558097d](https://github.com/CoreySpohn/spaceodyssey/commit/558097d526765f49a449cfa294bb014614fddde8))
+
 ## [0.2.0](https://github.com/CoreySpohn/spaceodyssey/compare/v0.1.0...v0.2.0) (2026-11-15)
 
 
