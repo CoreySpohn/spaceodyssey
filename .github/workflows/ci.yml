@@ -139,12 +139,16 @@ jobs:
 
       # The quick tier, medium tests included, stays under 540 s and within 60 s of
       # the pinned baseline summary (the baseline file records its source and state).
+      # Both wall-time checks hold on a warm compile cache only: a run that spends
+      # over 300 s compiling (a sibling release recompiles the suite once) reports
+      # its wall time without failing. Per-file program budgets hold on every run.
       - name: Job summary
         if: always()
         run: |
           python .github/scripts/ci_summary.py junit-quick.xml --title "Quick tier" \
             --budget-seconds 540 --require-tier medium \
-            --baseline .github/budget/quick_baseline.json --max-increase-seconds 60
+            --baseline .github/budget/quick_baseline.json --max-increase-seconds 60 \
+            --budget-json budget-quick.json --cold-compile-seconds 300
 
       - name: Save the JAX compile cache
         if: always() && steps.jax-cache.outputs.cache-hit != 'true'

@@ -3,6 +3,7 @@
 Usage: python ci_summary.py junit.xml [--title TITLE] [--budget-seconds N]
        [--baseline SUMMARY.json --max-increase-seconds N [--advisory-baseline]]
        [--require-tier TIER]
+       [--budget-json BUDGET.json --cold-compile-seconds N]
        [--write-summary OUT.json [--commit SHA]] [--allow-skips]
 
 Appends markdown to $GITHUB_STEP_SUMMARY (stdout when unset). Exits non-zero when:
@@ -14,6 +15,13 @@ Appends markdown to $GITHUB_STEP_SUMMARY (stdout when unset). Exits non-zero whe
 - a tier named by ``--require-tier`` has no test in the file (so a selection that
   drops the medium tests cannot pass the budget unnoticed);
 - any test was skipped (a skip hides a missing dependency), unless allowed.
+
+The two wall-time checks hold only on a warm compile cache. With ``--budget-json``
+(the testbudget plugin's session file) and ``--cold-compile-seconds``, a run whose
+backend compile time exceeds that threshold is reported as a cold-cache run, and
+its wall-time checks become print-only. A new release of a sibling library changes
+the compiled programs and recompiles the whole suite once; that run measures the
+cache, not the suite. The per-file program budgets still hold on every run.
 
 The wall time is the junit testsuite time, which pytest measures over the whole
 session (collection included) and which stays correct under pytest-xdist; the summed
@@ -85,9 +93,13 @@ def main():
     parser.add_argument("--write-summary", default="")
     parser.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""))
     parser.add_argument("--allow-skips", action="store_true")
+    parser.add_argument("--budget-json", default="")
+    parser.add_argument("--cold-compile-seconds", type=float, default=None)
     args = parser.parse_args()
     if bool(args.baseline) != (args.max_increase_seconds is not None):
         parser.error("--baseline and --max-increase-seconds go together")
+    if bool(args.budget_json) != (args.cold_compile_seconds is not None):
+        parser.error("--budget-json and --cold-compile-seconds go together")
     if args.advisory_baseline and not args.baseline:
         parser.error("--advisory-baseline needs --baseline")
 
@@ -99,6 +111,11 @@ def main():
     totals = tier_totals(cases)
     baseline = load_baseline(args.baseline) if args.baseline else None
     ranked = sorted(cases, reverse=True)
+    compile_s = None
+    if args.budget_json and os.path.exists(args.budget_json):
+        with open(args.budget_json, encoding="utf-8") as handle:
+            compile_s = float(json.load(handle).get("compile_s", 0.0))
+    cold = compile_s is not None and compile_s > args.cold_compile_seconds
 
     lines = [
         f"### {args.title}",
@@ -108,6 +125,16 @@ def main():
         + (f" (budget {args.budget_seconds:.0f} s)" if args.budget_seconds else ""),
         f"- summed test time: {total:.1f} s",
     ]
+    if compile_s is not None:
+        lines.append(
+            f"- backend compile time: {compile_s:.1f} s"
+            + (
+                f" (cold cache above {args.cold_compile_seconds:.0f} s:"
+                " wall-time checks are print-only)"
+                if cold
+                else " (warm cache)"
+            )
+        )
     lines += [
         f"- {tier} tests: {count}, summed {seconds:.1f} s"
         for tier, (count, seconds) in sorted(totals.items())
@@ -155,20 +182,29 @@ def main():
         print(json.dumps(summary, sort_keys=True))
 
     failed = False
+    cold_note = (
+        f" (cold compile cache, {compile_s:.0f} s compiling: not a failure)"
+        if cold
+        else ""
+    )
     if args.budget_seconds and wall > args.budget_seconds:
-        print(f"wall time {wall:.1f} s exceeds budget {args.budget_seconds:.0f} s")
-        failed = True
+        print(
+            f"wall time {wall:.1f} s exceeds budget {args.budget_seconds:.0f} s"
+            + cold_note
+        )
+        failed = failed or not cold
     if (
         baseline is not None
         and wall - float(baseline["wall_s"]) > args.max_increase_seconds
     ):
+        advisory = args.advisory_baseline or cold
         print(
             f"wall time {wall:.1f} s is {wall - float(baseline['wall_s']):.1f} s above "
             f"the baseline {float(baseline['wall_s']):.1f} s; the limit is "
             f"{args.max_increase_seconds:.0f} s"
-            + (" (advisory: not a failure)" if args.advisory_baseline else "")
+            + (cold_note or (" (advisory: not a failure)" if advisory else ""))
         )
-        failed = failed or not args.advisory_baseline
+        failed = failed or not advisory
     for tier in args.require_tier:
         if tier not in totals:
             print(f"no {tier} test in {args.junit}: the selection dropped that tier")
