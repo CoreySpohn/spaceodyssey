@@ -8,10 +8,18 @@ import jax
 import jax.numpy as jnp
 import pytest
 from hypothesis import settings
+from jaxtyping import install_import_hook
 
-from spaceodyssey.belief import Belief
-from spaceodyssey.claim import AbstractConjunct
-from spaceodyssey.types import Atoms, Pool, WeightedCloud
+# The jaxtyping annotations are checked in tests only, and on by default; the hook must
+# be installed before the package is first imported. SPACEODYSSEY_TYPECHECK=0 turns it
+# off.
+TYPECHECK = os.environ.get("SPACEODYSSEY_TYPECHECK", "1") == "1"
+if TYPECHECK:
+    install_import_hook("spaceodyssey", "beartype.beartype")
+
+from spaceodyssey.belief import Belief  # noqa: E402
+from spaceodyssey.claim import AbstractConjunct  # noqa: E402
+from spaceodyssey.types import Atoms, Pool, WeightedCloud  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 
@@ -132,3 +140,9 @@ class _Toy:
 @pytest.fixture(scope="session")
 def toy():
     return _Toy
+
+
+@pytest.fixture(scope="session")
+def typecheck():
+    """Whether the jaxtyping import hook is on."""
+    return TYPECHECK

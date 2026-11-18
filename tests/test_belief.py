@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax.test_util import check_grads
+from jaxtyping import TypeCheckError
 from numpy.testing import assert_allclose, assert_array_max_ulp
 
 from spaceodyssey.belief import Belief, chain, count_pmf, pool_rate, q, weights
@@ -282,6 +283,30 @@ def test_a_conjunct_without_prob_cannot_be_built():
 
     with pytest.raises(TypeError, match="abstract"):
         Bare()
+
+
+def test_annotations_are_checked_and_boolean_conjuncts_count(toy, typecheck):
+    """The jaxtyping hook is on in the tests, and a conjunct that returns booleans is
+    counted as 0 and 1.
+
+    A float count passed to `log_score` (annotated as an integer) raises. A boolean
+    `hz` conjunct over one claim-true planet gives the count distribution (0, 1).
+
+    Fails if the hook is not installed (so annotations go unchecked), or a boolean
+    conjunct breaks the count's scan with a dtype error.
+    """
+    if typecheck:
+        with pytest.raises(TypeCheckError):
+            log_score(jnp.ones(3) / 3, jnp.asarray(1.5))
+
+    class HzBit(AbstractConjunct):
+        def prob(self, atoms, star):
+            return atoms.cloud.samples["hz"] > 0.5
+
+    atoms = toy.atoms([[1.0]], [[1.0]], [1.0])
+    pmf = count_pmf(toy.belief(atoms), Claim((HzBit(),)), toy.star, 1)
+    assert pmf.dtype == atoms.x_mean.dtype
+    assert_allclose(pmf, [[0.0, 1.0]], atol=0.0)
 
 
 def test_count_pmf_rejects_a_conditional_claim(toy):
