@@ -12,15 +12,17 @@ PACKAGE = "spaceodyssey"
 SRC = Path(__file__).parent.parent / "src" / PACKAGE
 
 # Rank order of the core; a module may import only modules earlier in this order.
-# Extended each layer as modules arrive.
+# Extended each layer as modules arrive. `_standin` holds local stand-ins for library
+# functions rank 0 may import; it comes first, so it imports nothing in the package.
 ORDER = [
+    "_standin",
     "types", "claim", "roles", "design", "belief", "information", "value",  # rank 0
     "price", "policy",  # rank 1
     "world", "log", "toy",  # rank 2
     "score", "study",  # rank 3
 ]  # fmt: skip
 RANK = {name: i for i, name in enumerate(ORDER)}
-RANK_0 = 7  # the first seven modules of ORDER are rank 0
+RANK_0 = ORDER.index("price")  # everything before `price` is rank 0
 FORBIDDEN = {"hwo", "hwopaths", "viz"}
 # Layer 1 may import JAX, Equinox, jaxtyping and NumPy only (plus the standard library).
 EXTERNAL = {"jax", "jaxlib", "equinox", "jaxtyping", "numpy"}
@@ -47,13 +49,23 @@ def _imports(source: str):
                 yield ".".join(base if len(base) > 1 else [*base, alias.name]), node
 
 
+def _module(path: str) -> str:
+    """The rank-table name of a source path: its top-level module or subpackage."""
+    return path.split("/")[0].removesuffix(".py")
+
+
 def violations(sources: dict[str, str]) -> list[str]:
-    """Return one message per import that breaks the layer rule."""
+    """Return one message per import that breaks the layer rule.
+
+    ``sources`` maps a path relative to the package (or a bare module name) to the
+    source; a file in a subpackage ranks as the subpackage.
+    """
     found = []
-    for module, source in sources.items():
+    for path, source in sources.items():
+        module = _module(path)
         for target, node in _imports(source):
             top, _, rest = target.partition(".")
-            where = f"{module}:{node.lineno} imports {target}"
+            where = f"{path}:{node.lineno} imports {target}"
             if top == PACKAGE:
                 name = rest.split(".")[0]
                 if name in FORBIDDEN:
@@ -78,12 +90,15 @@ def test_the_core_imports_nothing_upward():
 
     Fails if a module imports a later module, `hwo`, `hwopaths`, `viz`, or a package
     outside JAX, Equinox, jaxtyping and NumPy, including under `if TYPE_CHECKING` or
-    inside a function.
+    inside a function; if a stand-in imports from the package; or if `roles` or the
+    stand-ins are missing from the scan.
     """
     sources = {
-        path.stem: path.read_text() for path in SRC.glob("*.py") if path.stem in RANK
+        str(path.relative_to(SRC)): path.read_text()
+        for path in SRC.rglob("*.py")
+        if _module(str(path.relative_to(SRC))) in RANK
     }
-    assert sources, "no core modules found"
+    assert {"roles.py", "_standin/diagnostics.py"} <= set(sources)
     assert violations(sources) == []
 
 
@@ -115,6 +130,11 @@ def test_the_core_imports_nothing_upward():
             "not earlier in the order",
         ),
         ("score", "from spaceodyssey import nowhere", "unknown module"),
+        (
+            "_standin/diagnostics.py",
+            "from spaceodyssey.types import Atoms",
+            "not earlier in the order",
+        ),
     ],
 )
 def test_the_checker_catches_each_kind_of_bad_import(module, source, message):

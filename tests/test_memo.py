@@ -10,9 +10,9 @@ import pytest
 from jax.scipy.special import ndtri
 from numpy.testing import assert_allclose
 
-from spaceodyssey.belief import chain, count_pmf, q
+from spaceodyssey.belief import Belief, chain, count_pmf, q
 from spaceodyssey.claim import Claim, GasAbove
-from spaceodyssey.information import chain_gain, information
+from spaceodyssey.information import chain_gain, diagnose, information
 
 PLANET = jnp.asarray(0)
 
@@ -140,3 +140,26 @@ def test_two_planet_count(toy):
     # Test-only comparisons.
     assert_allclose(2 * np.log(0.5), -1.386, atol=1e-3)
     assert_allclose(np.log(0.5), -0.693, atol=1e-3)
+
+
+def test_members_by_ratio_on_a_resample(toy):
+    """Three verdict members multiply the look-alike weight by w = 0.6, 1 and 1.6 on a
+    resample of 2,000 equal draws. The memo quotes psi = 0.80, 0.70, 0.60 and Kish
+    sizes 1,917, 2,000, 1,897. A split of 1,405 Earth-box draws and 595 look-alikes
+    reproduces all six (only 1,404 to 1,406 Earth-box draws do): psi = 1405 / (1405 +
+    595 w) and Kish = (1405 + 595 w)^2 / (1405 + 595 w^2).
+
+    Fails if a member's ratio reaches the Earth-box draws, or Kish is computed on the
+    wrong role's weights.
+    """
+    n_earth, n_look = 1405, 595
+    size = jnp.concatenate([jnp.ones(n_earth), jnp.zeros(n_look)])[:, None]
+    atoms = toy.atoms(jnp.ones_like(size), size, jnp.ones(n_earth + n_look))
+    w = jnp.array([1.0, 0.6, 1.0, 1.6])  # forecast, then the three members
+    log_prior = jnp.where(size[:, 0] == 0.0, jnp.log(w)[:, None], 0.0)
+    flat = toy.belief(atoms, n_roles=4)
+    b = Belief(atoms, log_prior, flat.log_like, flat.pool)
+    claim = Claim((toy.InHz(), toy.InSize()))
+    d = diagnose(b, claim, toy.star, PLANET, jnp.zeros(4))
+    assert_allclose(np.round(d.q[1:], 2), [0.80, 0.70, 0.60])
+    assert_allclose(np.round(d.n_eff[1:]), [1917.0, 2000.0, 1897.0])
