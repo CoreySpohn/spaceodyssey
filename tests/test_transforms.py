@@ -10,7 +10,15 @@ import pytest
 from jax.test_util import check_grads
 from numpy.testing import assert_allclose
 
-from spaceodyssey.belief import Belief, chain, count_pmf, q, role_log_weights, weights
+from spaceodyssey.belief import (
+    Belief,
+    chain,
+    count_pmf,
+    pool_rate,
+    q,
+    role_log_weights,
+    weights,
+)
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.information import (
     certify,
@@ -111,6 +119,12 @@ def _cases(toy):
             lambda a: a[0].pool.log_mass,
             uneven,
         ),
+        "pool_rate": (
+            lambda p: pool_rate(p, plain, star) + pool_rate(p, plain, star, True),
+            [(b0.pool,), (b1.pool,)],
+            lambda a: a[0].log_like,
+            uneven,
+        ),
         "role_log_weights": (
             reweight,
             [(roles, b0), (roles1, b1)],
@@ -162,6 +176,7 @@ CASES = [
     "q",
     "chain",
     "count_pmf",
+    "pool_rate",
     "role_log_weights",
     "log_score",
     "information",

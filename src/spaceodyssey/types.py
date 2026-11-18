@@ -79,7 +79,16 @@ class Pool(eqx.Module):
 
     Each mark is one planet (``K = 1`` in ``marks``); the marks carry the conditional
     distribution of an undetected planet and the pool carries how many there are in
-    expectation.
+    expectation. A mark's weight under role ``r`` is formed like a draw's,
+    ``log_weight + log_prior[r] - log_ref_density + log_like[r]``, normalized over the
+    marks.
+
+    The pool keeps its state at time zero beside the current one. A null observation
+    thins the pool: it lowers ``log_mass`` and adds the log probability of not being
+    detected to ``log_like``. ``log_mass0`` and ``log_like0`` stay, so the claim-true
+    rate at time zero, ``exp(log_mass0) * pbar0`` with ``pbar0`` under the time-zero
+    mark weights, can be set against the current one. A grant enters at time zero, so
+    its rows are already in ``log_like0``.
 
     Attributes:
         marks: the marks, leading axis ``Am``.
@@ -87,6 +96,7 @@ class Pool(eqx.Module):
         log_like: log likelihood of each mark under each role, shape ``(R, Am)``.
         log_mass: log expected number of planets, per role, shape ``(R,)``.
         log_mass0: the same at time zero, shape ``(R,)``.
+        log_like0: ``log_like`` at time zero, shape ``(R, Am)``.
     """
 
     marks: Atoms
@@ -94,6 +104,7 @@ class Pool(eqx.Module):
     log_like: Float[Array, "R Am"] = eqx.field(converter=jnp.asarray)
     log_mass: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
     log_mass0: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
+    log_like0: Float[Array, "R Am"] = eqx.field(converter=jnp.asarray)
 
 
 class Row(eqx.Module):

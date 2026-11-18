@@ -219,6 +219,39 @@ def _poisson(lam: Float[Array, ""], n_bins: int) -> Float[Array, " N"]:
     return jnp.append(head, tail)
 
 
+def pool_rate(
+    pool: Pool, claim: Claim, star, time_zero: bool = False
+) -> Float[Array, " R"]:
+    """Expected number of claim-true planets in the pool, per role.
+
+    The rate of role ``r`` is ``exp(log_mass[r]) * pbar[r]``, where ``pbar[r]`` is the
+    claim probability of a mark averaged with role ``r``'s own mark weights. With
+    ``time_zero`` it is the same at time zero, from ``log_mass0`` and ``log_like0``.
+
+    Args:
+        pool: the undetected planets.
+        claim: an unconditional claim.
+        star: a pytree of scalar leaves describing the star.
+        time_zero: read the pool's state at time zero, static.
+
+    Returns:
+        The rate per role, shape ``(R,)``.
+
+    Raises:
+        ValueError: if the claim is conditional.
+    """
+    if claim.given != 0:
+        raise ValueError("pool_rate needs an unconditional claim (claim.given == 0)")
+    log_mass, log_like = (
+        (pool.log_mass0, pool.log_like0)
+        if time_zero
+        else (pool.log_mass, pool.log_like)
+    )
+    p_mark = jnp.prod(_conjunct_probs(pool.marks, claim, star), axis=0)[:, 0]  # (Am,)
+    mark_weights = _role_weights(pool.marks, pool.log_prior, log_like)  # (R, Am)
+    return jnp.exp(log_mass) * (mark_weights @ p_mark)
+
+
 def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
     """Distribution of the number of claim-true planets at a star, per role.
 
@@ -253,10 +286,7 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
     per_draw = _poisson_binomial(p_draw, n_bins)  # (A, N)
     from_draws = weights(b) @ per_draw  # (R, N)
 
-    marks = b.pool.marks
-    p_mark = jnp.prod(_conjunct_probs(marks, claim, star), axis=0)[:, 0]  # (Am,)
-    mark_weights = _role_weights(marks, b.pool.log_prior, b.pool.log_like)  # (R, Am)
-    lam = jnp.exp(b.pool.log_mass) * (mark_weights @ p_mark)  # (R,)
+    lam = pool_rate(b.pool, claim, star)  # (R,)
     from_pool = jax.vmap(_poisson, in_axes=(0, None))(lam, n_bins)  # (R, N)
 
     full = jax.vmap(jnp.convolve)(from_draws, from_pool)  # (R, 2N - 1)

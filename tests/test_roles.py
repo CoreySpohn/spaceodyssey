@@ -86,7 +86,8 @@ def _empty_pool(n_roles):
     """A pool with no expected planets."""
     marks = _atoms(jnp.zeros(1), jnp.zeros(1), jnp.zeros(1), "x")
     flat = jnp.zeros((n_roles, 1))
-    return Pool(marks, flat, flat, jnp.full(n_roles, -jnp.inf), jnp.zeros(n_roles))
+    no_mass = jnp.full(n_roles, -jnp.inf)
+    return Pool(marks, flat, flat, no_mass, no_mass, flat)
 
 
 def _cloud(key, n, measure="x"):

@@ -8,7 +8,7 @@ import pytest
 from jax.test_util import check_grads
 from numpy.testing import assert_allclose, assert_array_max_ulp
 
-from spaceodyssey.belief import Belief, chain, count_pmf, q, weights
+from spaceodyssey.belief import Belief, chain, count_pmf, pool_rate, q, weights
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.information import log_score
 
@@ -128,6 +128,38 @@ def test_pool_count_pmf_by_hand(toy):
     e04 = np.exp(-0.4)
     assert_allclose(pmf[1], [e04, 0.4 * e04, 0.08 * e04, 1 - 1.48 * e04], rtol=1e-12)
     assert_allclose(pmf.sum(axis=1), 1.0, atol=1e-12)
+
+
+def test_pool_rate_now_and_at_time_zero(toy):
+    """The pool keeps its time-zero mass and mark weights through a null observation.
+
+    Mass 2, two marks of weights (0.5, 0.5) and claim probabilities (1, 0), detection
+    probabilities (0.8, 0.2). Expected claim-true planets found by the observation: 2 *
+    (0.5 * 1 * 0.8 + 0.5 * 0 * 0.2) = 0.8. After a null the mass is 2 * (1 - 0.5) = 1.0
+    and the marks reweight by (0.2, 0.8), to weights (0.2, 0.8), so the claim-true rate
+    is 0.2, against 2 * 0.5 = 1.0 at time zero; the difference is the 0.8 found. The
+    count after the null is Poisson(0.2).
+
+    Fails if the time-zero rate reads the current mass or the current mark likelihood,
+    or the current rate reads either at time zero.
+    """
+    atoms = toy.atoms(np.zeros((1, 0)), np.zeros((1, 0)), [1.0])
+    thinned = toy.pool(
+        [1.0, 0.0],
+        [[0.5, 0.5]],
+        np.log(1.0),
+        like=[[0.2, 0.8]],
+        log_mass0=np.log(2.0),
+        like0=1.0,
+    )
+    claim = Claim((toy.InHz(),))
+    now = pool_rate(thinned, claim, toy.star)
+    then = pool_rate(thinned, claim, toy.star, time_zero=True)
+    assert_allclose(now, [0.2], rtol=1e-12)
+    assert_allclose(then, [1.0], rtol=1e-12)
+    assert_allclose(then - now, [0.8], rtol=1e-12)
+    pmf = count_pmf(toy.belief(atoms, thinned), claim, toy.star, 1)
+    assert_allclose(pmf, [[np.exp(-0.2), 1 - np.exp(-0.2)]], rtol=1e-12)
 
 
 def test_count_pmf_convolves_draws_and_pool(toy):
