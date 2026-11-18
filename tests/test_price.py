@@ -132,13 +132,13 @@ def _brute_force(reward, cost_d, capacity_d):
 def test_the_dual_bounds_every_schedule(reward, cost, capacity_d):
     """Three stars with two options each: the bound is at least the best of all 27
     schedules found by brute force, the dual at every price on a grid is too (weak
-    duality), no grid price beats the breakpoint minimum, and the dispatched schedule
-    fits the budget.
+    duality), the bound is the least dual over every breakpoint (found here by NumPy
+    enumeration, with the null option), and the dispatched schedule fits the budget.
 
     Fails if lam B enters with the wrong sign (the bound drops below the brute-force
-    optimum), if a breakpoint is missing from the candidates (a grid price beats the
-    minimum), or if the tie rule overspends, including when roundoff on a flat dual
-    lands the price where the untied choices alone exceed the budget.
+    optimum), if a breakpoint is missing from the candidates or the search over them
+    stops short of the minimum, or if the tie rule overspends, including when roundoff
+    on a flat dual lands the price where the untied choices alone exceed the budget.
     """
     reward = np.reshape(reward, (3, 2))
     cost_d = np.reshape(cost, (3, 2))
@@ -146,10 +146,15 @@ def test_the_dual_bounds_every_schedule(reward, cost, capacity_d):
     lam, bound, bought = plan(f, jnp.asarray(capacity_d))
     best = _brute_force(reward, cost_d, capacity_d)
     grid = duals(jnp.linspace(0.0, 25.0, 501), f, jnp.asarray(capacity_d))
+    r, c = (np.pad(x, ((0, 0), (1, 0))) for x in (reward, cost_d))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kinks = (r[:, :, None] - r[:, None, :]) / (c[:, :, None] - c[:, None, :])
+    kinks = np.append(np.maximum(kinks[np.isfinite(kinks)], 0.0), 0.0)
     assert lam >= 0.0
     assert best <= bound + 1e-12
     assert np.all(best <= np.asarray(grid) + 1e-12)
-    assert bound <= np.min(grid) + 1e-12
+    least = np.min(duals(jnp.asarray(kinks), f, jnp.asarray(capacity_d)))
+    assert_allclose(bound, least, atol=1e-12)
     bought = np.asarray(bought)
     assert np.all(bought.sum(axis=1) <= 1)
     assert cost_d[bought].sum() <= capacity_d * (1 + 1e-12)
@@ -209,10 +214,12 @@ def test_a_discrete_exposure_menu_reaches_the_ayo_limit():
 
 def test_a_second_frontier_of_the_same_shape_adds_no_traces():
     """Pricing and dispatch trace once per padded shape: a second frontier with other
-    rewards, costs and mask and another budget reuses the program.
+    rewards, costs and mask and another budget reuses the program, and the two run as
+    two worlds under one vmap with the same results.
 
     Fails if the budget, rewards or mask become static (a Python scalar or a static
-    field), or if the menu or star count is passed as a Python value.
+    field), if the menu or star count is passed as a Python value, or if the solver
+    branches in Python on a traced value (it then cannot be mapped over worlds).
     """
     traces = []
 
@@ -222,10 +229,13 @@ def test_a_second_frontier_of_the_same_shape_adds_no_traces():
         return _plan(f, capacity_d)
 
     first = _frontier([[1.0, 2.0], [0.5, 0.2]], [[1.0, 3.0], [0.5, 0.1]])
-    counted(first, jnp.asarray(2.0))
+    one = counted(first, jnp.asarray(2.0))
     before = len(traces)
     mask = [[True, False], [True, True]]
     second = _frontier([[0.3, -1.0], [2.0, 0.7]], [[0.2, 1.0], [4.0, 0.3]], mask)
-    lam, bound, _ = counted(second, jnp.asarray(5.0))
+    two = counted(second, jnp.asarray(5.0))
     assert len(traces) - before == 0
-    assert_allclose([lam, bound], plan(second, jnp.asarray(5.0))[:2], rtol=1e-12)
+    worlds = jax.tree.map(lambda *x: jnp.stack(x), first, second)
+    mapped = jax.vmap(_plan)(worlds, jnp.asarray([2.0, 5.0]))
+    for got, want in zip(mapped, zip(one, two, strict=True), strict=True):
+        assert_allclose(got, np.stack(want), rtol=1e-12)
