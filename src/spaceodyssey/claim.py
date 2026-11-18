@@ -32,7 +32,8 @@ class GasAbove(AbstractConjunct):
 
     The abundance of each draw and planet is Gaussian, so the probability is
     ``Phi((x_mean - floor) / sqrt(x_var))``. A point state (``x_var = 0``) gives the
-    indicator ``x_mean > floor``.
+    strict indicator ``x_mean > floor``: 0 at ``x_mean == floor``, where the limit
+    ``x_var -> 0`` is 0.5.
 
     Attributes:
         gas: index of the gas in the gas block, static.

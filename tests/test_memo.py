@@ -12,7 +12,7 @@ from numpy.testing import assert_allclose
 
 from spaceodyssey.belief import Belief, chain, count_pmf, q
 from spaceodyssey.claim import Claim, GasAbove
-from spaceodyssey.information import chain_gain, diagnose, information
+from spaceodyssey.information import chain_gain, diagnose, information, log_score
 
 PLANET = jnp.asarray(0)
 FLOOR = 0.3  # a nonzero gas floor, so its sign and its place in the indicator show
@@ -63,8 +63,11 @@ def test_e_and_l_information(stages, claim, toy):
     E is the claim-true test planet (count 1, score ln q); L is the look-alike (count 0,
     score ln(1 - q)); both are scored on the count distribution of one planet.
 
-    Fails if the count distribution of one planet is not [1 - q, q] or the score or its
-    sign is wrong.
+    A count outside the bins is scored in the nearest one: -1 in the first, 5 in the
+    last.
+
+    Fails if the count distribution of one planet is not [1 - q, q], the score or its
+    sign is wrong, or a negative count wraps around to the tail bin.
     """
     pmf = [count_pmf(b, claim, toy.star, 1)[0] for b in stages]
     assert_allclose(pmf[0], [0.9375, 0.0625], rtol=1e-12)
@@ -73,6 +76,8 @@ def test_e_and_l_information(stages, claim, toy):
     assert_allclose(gain_e, np.log(0.70 / 0.0625), rtol=1e-12)
     assert_allclose(gain_l, np.log(0.30 / 0.9375), rtol=1e-12)
     assert round(float(gain_e), 2) == 2.42
+    assert_allclose(log_score(pmf[0], jnp.asarray(-1)), np.log(0.9375), rtol=1e-12)
+    assert_allclose(log_score(pmf[0], jnp.asarray(5)), np.log(0.0625), rtol=1e-12)
     assert round(float(gain_l), 2) == -1.14
 
 

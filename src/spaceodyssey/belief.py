@@ -123,7 +123,9 @@ def weights(b: Belief) -> Float[Array, "R A"]:
 
     The unnormalized log weight of role ``r`` is
     ``log_weight + log_prior[r] - log_ref_density + log_like[r]``, and each row is
-    normalized to sum to one.
+    normalized to sum to one. A role under which every draw has log weight ``-inf``
+    cannot be normalized: its row is NaN, on purpose, and so is everything read from
+    that role (its ``q``, and its pool rate when the same holds for the marks).
 
     Args:
         b: the belief.
@@ -176,13 +178,16 @@ def q(b: Belief, claim: Claim, star, planet: Int[Array, ""]) -> Float[Array, " R
 
     This is the weighted share of draws in which the claim holds; a draw whose slot
     ``planet`` does not exist counts as claim-false. For a conditional claim it is
-    ``P(claim and given) / P(given)``.
+    ``P(claim and given) / P(given)``, and 0 where ``P(given)`` is 0. That 0 is a
+    convention, not a confident negative: read ``q`` of a conditional claim only
+    beside its condition mass (``Diagnostics.cond_mass``).
 
     Args:
         b: the belief.
         claim: the claim.
         star: a pytree of scalar leaves describing the star.
-        planet: index of the planet along the ``K`` axis.
+        planet: index of the planet along the ``K`` axis; a negative index counts
+            from the end, and one past the end gives NaN.
 
     Returns:
         ``q`` per role, shape ``(R,)``.
@@ -196,7 +201,7 @@ def chain(b: Belief, claim: Claim, star, planet: Int[Array, ""]) -> Float[Array,
 
     For an unconditional claim the product over the conjuncts is ``q``. For a
     conditional claim the first ``given`` entries multiply to ``P(given)`` and the rest
-    to ``q``.
+    to ``q``. An entry whose preceding conjuncts have zero mass is 0, as in ``q``.
 
     Args:
         b: the belief.

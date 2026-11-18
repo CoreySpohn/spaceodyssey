@@ -24,7 +24,8 @@ UNRESOLVED = 3
 def log_score(pmf: Float[Array, " N"], count: Int[Array, ""]) -> Float[Array, ""]:
     """Log of the probability a count distribution gives to the realized count.
 
-    A count beyond the last bin is scored in the last bin, which holds the lumped tail.
+    A count beyond the last bin is scored in the last bin, which holds the lumped tail;
+    a negative count is scored in the first.
 
     Args:
         pmf: the count distribution.
@@ -33,7 +34,7 @@ def log_score(pmf: Float[Array, " N"], count: Int[Array, ""]) -> Float[Array, ""
     Returns:
         The log score in nats.
     """
-    return jnp.log(pmf[jnp.minimum(count, pmf.shape[0] - 1)])
+    return jnp.log(pmf[jnp.clip(count, 0, pmf.shape[0] - 1)])
 
 
 def information(
@@ -71,7 +72,8 @@ def chain_gain(
         role: row of the role whose chain is read, static.
 
     Returns:
-        ``ln chain_after - ln chain_before`` per conjunct, in nats.
+        ``ln chain_after - ln chain_before`` per conjunct, in nats. An entry that is 0
+        before and after (a conjunct behind a condition of zero mass) is NaN.
     """
     after = chain(b_after, claim, star, planet)[role]
     before = chain(b_before, claim, star, planet)[role]
