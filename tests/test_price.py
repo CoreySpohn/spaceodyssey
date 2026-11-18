@@ -172,8 +172,8 @@ def test_a_discrete_exposure_menu_reaches_the_ayo_limit():
     V'(t_{k+1}) <= lam <= V'(t_{k-1}) at the solved price, and the continuous price
     lies in the same bracket.
 
-    Fails if the solver misses the clearing breakpoint, if the tie rule overspends the
-    budget, or if lam B enters with the wrong sign.
+    Fails if the solver misses the clearing breakpoint, if a stop-gradient cuts the
+    spend it bisects on, or if the tie rule overspends the budget.
     """
     n_bar = np.array([1.0, 0.8, 0.5])
     tau = np.array([1.0, 2.0, 1.0])
