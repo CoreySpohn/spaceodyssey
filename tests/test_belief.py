@@ -126,6 +126,21 @@ def test_count_pmf_convolves_draws_and_pool(toy):
     assert_allclose(pmf[0], [0.0, e1, e1, 1 - 2 * e1], atol=1e-12)
 
 
+@pytest.mark.parametrize(("n_conjuncts", "given"), [(0, 0), (2, 2), (2, 3), (2, -1)])
+def test_claim_rejects_a_malformed_condition(toy, n_conjuncts, given):
+    """A claim needs a conjunct, and a condition that leaves one conjunct outside it.
+
+    With two conjuncts, `given` = 2, 3 and -1 each index the last column of the joint
+    mass (by equality, by the clamp of a static index, by wrap-around), which makes q
+    exactly 1.
+
+    Fails if an empty claim or a `given` outside [0, C) is accepted.
+    """
+    conjuncts = (toy.InHz(), toy.InSize())[:n_conjuncts]
+    with pytest.raises(ValueError, match="conjunct"):
+        Claim(conjuncts, given=given)
+
+
 def test_count_pmf_rejects_a_conditional_claim(toy):
     """A conditional claim has no count distribution.
 

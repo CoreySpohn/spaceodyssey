@@ -55,9 +55,24 @@ class Claim(eqx.Module):
     """A conjunction of conjuncts, optionally conditioned on its leading conjuncts.
 
     Attributes:
-        conjuncts: the conjuncts, in the order used by ``chain``.
-        given: how many leading conjuncts form the condition; 0 means none, static.
+        conjuncts: the conjuncts, in the order used by ``chain``; at least one.
+        given: how many leading conjuncts form the condition; 0 means none, static. At
+            least one conjunct stays outside the condition, so ``0 <= given <
+            len(conjuncts)``.
+
+    Raises:
+        ValueError: if there are no conjuncts or ``given`` is out of range.
     """
 
     conjuncts: tuple[AbstractConjunct, ...]
     given: int = eqx.field(static=True, default=0)
+
+    def __check_init__(self):
+        """Reject an empty claim and a condition that covers every conjunct."""
+        n = len(self.conjuncts)
+        if n == 0:
+            raise ValueError("a claim needs at least one conjunct")
+        if not 0 <= self.given < n:
+            raise ValueError(
+                f"given must be in [0, {n}) for {n} conjuncts, not {self.given}"
+            )
