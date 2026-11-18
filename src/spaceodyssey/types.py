@@ -1,4 +1,4 @@
-"""Leaf types shared by every layer: cloud, atoms, pool, row, action and grant.
+"""Leaf types shared by every layer: cloud, atoms, pool, row, action, grant, law.
 
 This module imports nothing from the package. Axis names used in the annotations:
 ``A`` draws, ``K`` planets one draw can hold, ``G`` gases, ``R`` roles (forecast is
@@ -9,7 +9,7 @@ the atoms of a pool.
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float, Int, PyTree
+from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
 
 
 def _asarrays(tree):
@@ -139,3 +139,72 @@ class Grant(eqx.Module):
     """
 
     rows: Row
+
+
+CELL_SAMPLES = 4096
+"""Samples per draw in the binned-``sample`` default of ``AbstractLaw.cells``."""
+
+
+class AbstractLaw(eqx.Module):
+    """The contract of an observation law.
+
+    A law holds configuration only, never an observed datum: ``log_like`` is rebuilt
+    from a row payload each time it is called.
+    """
+
+    def log_like(self, payload: Array, atoms: Atoms, star) -> Float[Array, " A"]:
+        """Log likelihood of a row payload under each draw.
+
+        Args:
+            payload: the payload of one row.
+            atoms: the draws.
+            star: a pytree of scalar leaves describing the star.
+
+        Returns:
+            Log likelihood per draw, shape ``(A,)``.
+        """
+        raise NotImplementedError
+
+    def sample(self, atoms: Atoms, action: Action, key: PRNGKeyArray) -> Array:
+        """Draw the payload an action would return, independently for each draw.
+
+        Args:
+            atoms: the draws.
+            action: the action.
+            key: the key of the row.
+
+        Returns:
+            Payloads with leading axis ``A``.
+        """
+        raise NotImplementedError
+
+    def cell(self, payload: Array) -> Int[Array, ""]:
+        """Index of the outcome cell one payload falls in."""
+        raise NotImplementedError
+
+    def n_cells(self, atoms: Atoms) -> int:
+        """Number of outcome cells, ``Y``, fixed by the static shapes of ``atoms``."""
+        raise NotImplementedError
+
+    def cells(self, atoms: Atoms, action: Action) -> Float[Array, "A Y"]:
+        """Probability of each outcome cell under each draw.
+
+        The default bins ``CELL_SAMPLES`` draws of ``sample`` per draw (a Monte Carlo
+        estimate with a fixed key). A law with a closed form overrides it, and the
+        override is tested against this default.
+
+        Args:
+            atoms: the draws.
+            action: the action.
+
+        Returns:
+            Cell probabilities of shape ``(A, Y)``; each row sums to one.
+        """
+        base = jax.random.key(0)
+        keys = jax.vmap(jax.random.fold_in, in_axes=(None, 0))(
+            base, jnp.arange(CELL_SAMPLES)
+        )
+        payloads = jax.vmap(self.sample, in_axes=(None, None, 0))(atoms, action, keys)
+        index = jax.vmap(jax.vmap(self.cell))(payloads)  # (n, A)
+        counts = jax.nn.one_hot(index, self.n_cells(atoms)).sum(axis=0)
+        return counts / CELL_SAMPLES
