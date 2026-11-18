@@ -111,11 +111,11 @@ def test_the_core_imports_nothing_upward():
     Every `.py` file under the package is scanned, the package and subpackage
     `__init__.py` files included.
 
-    Fails if a module imports a later module, `hwo`, `hwopaths`, `viz`, or a package
-    outside JAX, Equinox, jaxtyping and NumPy, including under `if TYPE_CHECKING` or
-    inside a function; if a stand-in imports from the package; if a source file is
-    missing from the rank table; or if the scan misses the package `__init__`, `roles`
-    or the stand-ins.
+    Fails if a module imports a later module, `world` imports above rank 0, a module
+    imports `hwo`, `hwopaths`, `viz`, or a package outside JAX, Equinox, jaxtyping and
+    NumPy, including under `if TYPE_CHECKING` or inside a function; if a stand-in
+    imports from the package; if a source file is missing from the rank table; or if
+    the scan misses the package `__init__`, `roles`, `world`, `toy` or the stand-ins.
     """
     sources = {
         path.relative_to(SRC).as_posix(): path.read_text() for path in SRC.rglob("*.py")
@@ -123,6 +123,8 @@ def test_the_core_imports_nothing_upward():
     assert {
         "__init__.py",
         "roles.py",
+        "world.py",
+        "toy.py",
         "_standin/__init__.py",
         "_standin/diagnostics.py",
     } <= set(sources)
@@ -167,6 +169,12 @@ def test_the_core_imports_nothing_upward():
         ("__init__.py", "from spaceodyssey.hwo import preset", "never imports it"),
         ("cells.py", "import jax", "unranked module"),
         ("viz/plots.py", "import jax", "unranked module"),
+        ("world.py", "from spaceodyssey.toy import GaussianGasLaw", "not earlier"),
+        ("world.py", "from .toy import GaussianGasLaw", "not earlier"),
+        ("world.py", "from spaceodyssey.policy import X", "world imports rank 0 only"),
+        ("world.py", "from spaceodyssey import price", "world imports rank 0 only"),
+        ("world.py", "from . import price", "world imports rank 0 only"),
+        ("toy.py", "from spaceodyssey.score import X", "not earlier"),
     ],
 )
 def test_the_checker_catches_each_kind_of_bad_import(module, source, message):
