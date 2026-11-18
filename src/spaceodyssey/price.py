@@ -8,11 +8,13 @@ time at ``lam >= 0``. The dual function
 bounds the value of every schedule that fits the budget, for every ``lam >= 0`` (weak
 duality), and is convex and piecewise linear. Its kinks sit where two options of one
 star (the null option among them) have equal net reward, so its minimum over
-``lam >= 0`` is attained at zero or at one of those breakpoints. ``solve_price``
-evaluates ``D`` on all of them and takes the ``argmin`` (of near-ties within
-roundoff, the largest price): exact, with static shapes, and vmappable over worlds.
-``dispatch`` turns a price into the options bought. Reference: Boyd and Vandenberghe,
-Convex Optimization, ch. 5.
+``lam >= 0`` is attained at zero or at one of those breakpoints. Between two
+neighboring breakpoints every ``V_i`` is linear, so the slope of ``D`` there is the
+budget less the spend at any interior price, and that slope never decreases.
+``solve_price`` sorts the breakpoints and bisects on its sign: exact, with static
+shapes, vmappable over worlds, and ``O(log)`` spend evaluations. ``dispatch`` turns a
+price into the options bought. Reference: Boyd and Vandenberghe, Convex Optimization,
+ch. 5.
 """
 
 import jax
@@ -23,8 +25,6 @@ from spaceodyssey.value import Frontier, value_and_spend
 
 # Net rewards within this many units of roundoff of the best are a tie.
 _TIE_ULPS = 64
-# Candidate prices are evaluated in batches of this size to bound memory.
-_BATCH = 256
 
 
 def dual(
@@ -73,11 +73,15 @@ def solve_price(
 ) -> tuple[Float[Array, ""], Float[Array, ""]]:
     """Minimize the dual over ``lam >= 0``.
 
-    The dual can be flat over an interval of prices, and roundoff then decides which
-    end an ``argmin`` lands on. Of the candidates whose dual is within roundoff of the
-    least, the largest price is taken: there the dual rises to the right, so the
-    options each star takes without a tie, plus the cheapest of its tied ones, fit the
-    budget, and ``dispatch`` returns a schedule within it.
+    The sorted breakpoints ``p_0 = 0 <= p_1 <= ...`` split the prices into intervals
+    on which ``D`` is linear with slope ``capacity_d - spend``, the spend read at a
+    probe inside the interval (past the last breakpoint for the last one). The slope
+    never decreases, so bisection finds the first breakpoint whose interval to the right
+    spends less than the budget. That breakpoint minimizes ``D``: the dual falls (or is
+    flat) up to it and rises after it. On a flat stretch it is the right end, where the
+    options each star takes just above the price fit the budget, so ``dispatch`` returns
+    a schedule within it. A probe that lands on a repeated breakpoint reads an averaged
+    spend inside the subdifferential, so the spend at the probes still never increases.
 
     Args:
         f: the frontier.
@@ -88,17 +92,23 @@ def solve_price(
         schedule within the budget earns more. When the budget cannot all be used
         profitably the price is zero.
     """
-    candidates = _candidates(f)
-    duals = jax.lax.map(
-        lambda lam: dual(lam, f, capacity_d), candidates, batch_size=_BATCH
-    )
-    least = jnp.min(duals)
-    # Roundoff in D is at most a few ulps of lam B + sum_i |r_i|, and both are bounded
-    # by |D| plus the largest reward magnitude of each star.
-    reward_scale = jnp.sum(jnp.max(jnp.where(f.mask, jnp.abs(f.reward), 0.0), axis=-1))
-    tol = _TIE_ULPS * jnp.finfo(duals.dtype).eps * (jnp.abs(least) + reward_scale)
-    best = jnp.argmax(jnp.where(duals <= least + tol, candidates, -jnp.inf))
-    return candidates[best], duals[best]
+    prices = jnp.sort(_candidates(f))
+    after = jnp.concatenate([prices[1:], 2.0 * prices[-1:] + 1.0])
+    probe = 0.5 * (prices + after)
+    capacity_d = jnp.asarray(capacity_d, prices.dtype)
+
+    def halve(_, bracket):
+        low, high = bracket
+        mid = (low + high) // 2
+        under = jnp.sum(value_and_spend(probe[mid], f)[1]) < capacity_d
+        low = jnp.where(under, low, jnp.minimum(mid + 1, high))
+        high = jnp.where(under, mid, high)
+        return low, high
+
+    n_price = prices.shape[0]
+    first, _ = jax.lax.fori_loop(0, n_price.bit_length(), halve, (0, n_price - 1))
+    lam = prices[first]
+    return lam, dual(lam, f, capacity_d)
 
 
 def dispatch(
