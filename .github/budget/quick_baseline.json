@@ -1,9 +1,0 @@
-{
- "cache": "warm: the CI run's quick tier with the JAX compile cache restored from the previous commit and seeded into both workers, the same condition the gated quick tier runs under",
- "commit": "555dfc30912769cb5e8122009e546a9037728cfa",
- "run_id": "43654097070",
- "source": "CI run 43654097070 (Quick tier at 555dfc3, py3.12, ubuntu-latest), after the quick-tier program reuse; quick summary wall (pytest: 1906 passed in 400.66 s; 118 compiles, 233.3 compile s)",
- "status": "replaces the warm pin at 58d5eff (478.11 s, 2057 tests); the criterion merge had raised the tier to 721 s",
- "tests": 1906,
- "wall_s": 400.66
-}

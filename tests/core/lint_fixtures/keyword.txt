@@ -1,1 +1,0 @@
-configure(band=0)

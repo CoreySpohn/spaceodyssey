@@ -1,3 +1,0 @@
-def dispatch(study):
-    target = 'survey_1'
-    return 123 if getattr(study, 'name', None) == target else 0
