@@ -1,5 +1,7 @@
 """Belief: weighted draws, a weight vector per role, and the probabilities read off."""
 
+from functools import partial
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -112,6 +114,11 @@ def weights(b: Belief) -> Float[Array, "R A"]:
     return _role_weights(b.atoms, b.log_prior, b.log_like)
 
 
+# Full float32 precision for every product of weights: on a GPU the default precision
+# of a float32 dot or convolution can drop to TF32, about three digits.
+_EXACT = lax.Precision.HIGHEST
+
+
 def _ratio(num, den):
     """``num / den``, defined as zero where ``den`` is zero, with finite gradients."""
     safe = jnp.where(den > 0, den, 1.0)
@@ -139,7 +146,9 @@ def _draw_joint(b: Belief, claim: Claim, star, planet) -> Float[Array, "C1 A"]:
 
 def _joint_mass(b: Belief, claim: Claim, star, planet) -> Float[Array, "R C1"]:
     """Probability that the first ``c`` conjuncts hold, ``c = 0 .. C``, per role."""
-    return weights(b) @ _draw_joint(b, claim, star, planet).T
+    return jnp.matmul(
+        weights(b), _draw_joint(b, claim, star, planet).T, precision=_EXACT
+    )
 
 
 def q(b: Belief, claim: Claim, star, planet: Int[Array, ""]) -> Float[Array, " R"]:
@@ -249,7 +258,7 @@ def pool_rate(
     )
     p_mark = jnp.prod(_conjunct_probs(pool.marks, claim, star), axis=0)[:, 0]  # (Am,)
     mark_weights = _role_weights(pool.marks, pool.log_prior, log_like)  # (R, Am)
-    return jnp.exp(log_mass) * (mark_weights @ p_mark)
+    return jnp.exp(log_mass) * jnp.matmul(mark_weights, p_mark, precision=_EXACT)
 
 
 def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
@@ -284,12 +293,12 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
 
     p_draw = jnp.prod(_conjunct_probs(b.atoms, claim, star), axis=0)  # (A, K)
     per_draw = _poisson_binomial(p_draw, n_bins)  # (A, N)
-    from_draws = weights(b) @ per_draw  # (R, N)
+    from_draws = jnp.matmul(weights(b), per_draw, precision=_EXACT)  # (R, N)
 
     lam = pool_rate(b.pool, claim, star)  # (R,)
     from_pool = jax.vmap(_poisson, in_axes=(0, None))(lam, n_bins)  # (R, N)
 
-    full = jax.vmap(jnp.convolve)(from_draws, from_pool)  # (R, 2N - 1)
+    full = jax.vmap(partial(jnp.convolve, precision=_EXACT))(from_draws, from_pool)
     return jnp.concatenate(
         [full[:, : n_bins - 1], full[:, n_bins - 1 :].sum(1, keepdims=True)], 1
     )

@@ -130,7 +130,11 @@ def diagnose(
     joint = _draw_joint(b, claim, star, planet)  # (C + 1, A)
     h, g = joint[-1], joint[claim.given]
     weights = jax.nn.softmax(log_w, axis=-1)
-    cond_mass = jnp.ones(log_w.shape[0]) if claim.given == 0 else weights @ g
+    cond_mass = (
+        jnp.ones(log_w.shape[0])
+        if claim.given == 0
+        else jnp.matmul(weights, g, precision=jax.lax.Precision.HIGHEST)
+    )
     return Diagnostics(
         q=q(b, claim, star, planet),
         mc_se=jax.vmap(mc_se, in_axes=(0, None, None))(log_w, h, g),
