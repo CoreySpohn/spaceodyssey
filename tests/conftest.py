@@ -47,12 +47,13 @@ class _Toy:
             return atoms.cloud.samples["size"]
 
     @staticmethod
-    def atoms(hz, size, w, mean=0.0, var=1.0, n_gas=2):
+    def atoms(hz, size, w, mean=0.0, var=1.0, n_gas=2, exists=True):
         """Atoms over draws; `hz` and `size` have shape (A, K), `w` is the weight over
         draws.
 
         `mean` and `var` are the gas block, a scalar, a (G,) vector or an (A, G) array
-        shared by the K planets of a draw.
+        shared by the K planets of a draw. `exists` broadcasts to (A, K); every slot
+        exists by default.
         """
         hz, size = jnp.asarray(hz, float), jnp.asarray(size, float)
         n_draw, n_planet = hz.shape
@@ -72,6 +73,7 @@ class _Toy:
             block(mean),
             block(var),
             jnp.zeros((n_draw, 1), bool),
+            jnp.broadcast_to(jnp.asarray(exists, bool), (n_draw, n_planet)),
         )
 
     @classmethod

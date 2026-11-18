@@ -118,9 +118,20 @@ def _ratio(num, den):
     return jnp.where(den > 0, num / safe, 0.0)
 
 
+def _conjunct_probs(atoms: Atoms, claim: Claim, star) -> Float[Array, "C A K"]:
+    """Probability of each conjunct per draw and planet; zero where no planet exists.
+
+    The ``jnp.where`` keeps a padded slot's state out of the values. The result has the
+    gas block's float dtype (or a wider one a conjunct returns), so a conjunct that
+    returns booleans is counted as 0 and 1.
+    """
+    probs = jnp.stack([c.prob(atoms, star) for c in claim.conjuncts])
+    return jnp.where(atoms.exists, probs, jnp.zeros((), atoms.x_mean.dtype))
+
+
 def _draw_joint(b: Belief, claim: Claim, star, planet) -> Float[Array, "C1 A"]:
     """Per draw, the probability that the first ``c`` conjuncts hold, ``c = 0 .. C``."""
-    probs = jnp.stack([c.prob(b.atoms, star) for c in claim.conjuncts])  # (C, A, K)
+    probs = _conjunct_probs(b.atoms, claim, star)  # (C, A, K)
     one_planet = jnp.take(probs, planet, axis=2)  # (C, A)
     joint = jnp.cumprod(one_planet, axis=0)  # (C, A)
     return jnp.concatenate([jnp.ones_like(joint[:1]), joint], axis=0)
@@ -134,8 +145,9 @@ def _joint_mass(b: Belief, claim: Claim, star, planet) -> Float[Array, "R C1"]:
 def q(b: Belief, claim: Claim, star, planet: Int[Array, ""]) -> Float[Array, " R"]:
     """Probability that the claim holds on one planet, per role.
 
-    This is the weighted share of draws in which the claim holds. For a conditional
-    claim it is ``P(claim and given) / P(given)``.
+    This is the weighted share of draws in which the claim holds; a draw whose slot
+    ``planet`` does not exist counts as claim-false. For a conditional claim it is
+    ``P(claim and given) / P(given)``.
 
     Args:
         b: the belief.
@@ -213,7 +225,8 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
     The count is the sum of two independent parts: the draws' planets (a
     Poisson-binomial per draw, mixed with the role weights) and the pool (a Poisson
     count with mean ``exp(log_mass) * pbar``, where ``pbar`` is the claim probability
-    averaged over the marks with the role's own mark weights). Mass at or beyond
+    averaged over the marks with the role's own mark weights). Only slots that exist
+    are counted, among the draws' planets and the marks. Mass at or beyond
     ``n_max`` is lumped into the last bin, so each row has ``n_max + 1`` bins and sums
     to one.
 
@@ -236,16 +249,12 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
         raise ValueError("count_pmf needs an unconditional claim (claim.given == 0)")
     n_bins = n_max + 1
 
-    p_draw = jnp.prod(
-        jnp.stack([c.prob(b.atoms, star) for c in claim.conjuncts]), axis=0
-    )
+    p_draw = jnp.prod(_conjunct_probs(b.atoms, claim, star), axis=0)  # (A, K)
     per_draw = _poisson_binomial(p_draw, n_bins)  # (A, N)
     from_draws = weights(b) @ per_draw  # (R, N)
 
     marks = b.pool.marks
-    p_mark = jnp.prod(
-        jnp.stack([c.prob(marks, star) for c in claim.conjuncts]), axis=0
-    )[:, 0]
+    p_mark = jnp.prod(_conjunct_probs(marks, claim, star), axis=0)[:, 0]  # (Am,)
     mark_weights = _role_weights(marks, b.pool.log_prior, b.pool.log_like)  # (R, Am)
     lam = jnp.exp(b.pool.log_mass) * (mark_weights @ p_mark)  # (R,)
     from_pool = jax.vmap(_poisson, in_axes=(0, None))(lam, n_bins)  # (R, N)

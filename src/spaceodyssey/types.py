@@ -49,6 +49,13 @@ class Atoms[StateT](eqx.Module):
     draw, planet and gas, a Gaussian over the abundance: ``x_mean`` and ``x_var`` (zero
     variance is a point state).
 
+    ``K`` is the number of planets one draw can hold; a draw with fewer is padded, and
+    ``exists`` marks its real slots. A slot that does not exist is claim-false whatever
+    its state, so padding a draw changes no probability. Its state is masked, not
+    read, in the values; keep it finite all the same (zeros, say), because a NaN in a
+    masked branch still turns a derivative into NaN. A draw padded only to give every
+    star one shape carries zero weight (``log_weight = -inf``).
+
     Attributes:
         cloud: the weighted draws.
         component: gas label into the shared Gaussian dictionary; unused until a role
@@ -56,6 +63,7 @@ class Atoms[StateT](eqx.Module):
         x_mean: mean abundance, shape ``(A, K, G)``.
         x_var: abundance variance, shape ``(A, K, G)``, zero for a point state.
         row_mask: rows this draw already represents, shape ``(A, W)``; all false here.
+        exists: whether each planet slot of each draw holds a planet, shape ``(A, K)``.
     """
 
     cloud: WeightedCloud
@@ -63,6 +71,7 @@ class Atoms[StateT](eqx.Module):
     x_mean: Float[Array, "A K G"] = eqx.field(converter=jnp.asarray)
     x_var: Float[Array, "A K G"] = eqx.field(converter=jnp.asarray)
     row_mask: Bool[Array, "A W"] = eqx.field(converter=jnp.asarray)
+    exists: Bool[Array, "A K"] = eqx.field(converter=jnp.asarray)
 
 
 class Pool(eqx.Module):

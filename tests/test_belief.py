@@ -167,6 +167,58 @@ def test_claim_rejects_a_malformed_condition(toy, n_conjuncts, given):
         Claim(conjuncts, given=given)
 
 
+def test_a_nonexistent_slot_changes_nothing(toy):
+    """Padding draws with planet slots that do not exist, and adding a zero-weight
+    draw that holds no planet, leaves q, chain and count_pmf unchanged.
+
+    The padded slot (planet 1) is claim-true by its bits, so counting it would show;
+    its gas state and the padding draw's whole state are NaN, which the values must
+    never read. The padded slot's own q is 0.
+
+    Fails if a slot that does not exist is counted or read, in the draws' planets or
+    in the marks, or a zero-weight padding draw passes a NaN into a probability.
+    """
+    b, _ = _random_belief(toy)
+    pool = toy.pool([1.0, 0.0], [[0.5, 0.5]], np.log(2.0))
+    b = toy.belief(b.atoms, pool)
+    claim = Claim((toy.InHz(), toy.InSize(), GasAbove(0, 0.0)))
+    plain = Claim((toy.InHz(), toy.InSize()))
+    given = Claim((toy.InHz(), GasAbove(0, 0.0)), given=1)
+
+    a = b.atoms
+    n = a.cloud.log_weight.shape[0]
+
+    def pad(x, fill):
+        x = jnp.concatenate([x, jnp.full_like(x, fill)], axis=1)  # a second slot
+        return jnp.concatenate([x, jnp.full_like(x[:1], jnp.nan)], axis=0)  # a draw
+
+    samples = {k: pad(v, 1.0) for k, v in a.cloud.samples.items()}
+    exists = jnp.concatenate([jnp.ones((n, 1), bool), jnp.zeros((n, 1), bool)], 1)
+    exists = jnp.concatenate([exists, jnp.zeros((1, 2), bool)], 0)
+    padded = toy.atoms(samples["hz"], samples["size"], [*np.exp(a.cloud.log_weight), 0])
+    padded = eqx.tree_at(
+        lambda p: (p.x_mean, p.x_var, p.exists),
+        padded,
+        (pad(a.x_mean, jnp.nan), pad(a.x_var, 1.0), exists),
+    )
+    marks = eqx.tree_at(
+        lambda m: (m.cloud.samples["hz"], m.exists),
+        pool.marks,
+        (jnp.ones((2, 1)), jnp.array([[True], [False]])),
+    )
+    b_pad = toy.belief(padded, eqx.tree_at(lambda p: p.marks, pool, marks))
+
+    for c in (claim, given):
+        assert_allclose(q(b_pad, c, toy.star, PLANET), q(b, c, toy.star, PLANET))
+        assert_allclose(
+            chain(b_pad, c, toy.star, PLANET), chain(b, c, toy.star, PLANET)
+        )
+        assert_allclose(q(b_pad, c, toy.star, jnp.asarray(1)), [0.0], atol=0.0)
+    assert_allclose(
+        count_pmf(b_pad, plain, toy.star, 3), count_pmf(b, plain, toy.star, 3)
+    )
+
+
 def test_count_pmf_rejects_a_conditional_claim(toy):
     """A conditional claim has no count distribution.
 
