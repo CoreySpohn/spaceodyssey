@@ -102,6 +102,11 @@ class GaussianGasLaw(AbstractLaw):
         For a draw with mean ``m`` and variance ``v`` the reading is
         ``N(y | m, v + sigma**2)``; a point state (``v = 0``) gives ``N(y | x,
         sigma**2)``. Uncovered gases contribute zero.
+
+        This is the marginal of one row. Two rows of one gas on a draw with ``v > 0``
+        share the draw's abundance, so the sum of their marginals is not their joint
+        likelihood; a sum over rows is exact for point states, or for at most one row
+        per gas. ``update`` folds rows into the block one at a time.
         """
         snr, y = payload[..., 0], payload[..., 1]  # (K, G)
         var = atoms.x_var + self._noise_var(snr)
@@ -168,8 +173,14 @@ class StepReportLaw(AbstractLaw):
 
     Below the gate nothing is reported; at or above it, whether the gas is above its
     floor. The report is exact: at or above the gate the bit is ``x > GAS_FLOOR`` for
-    the true abundance ``x``. A draw with a Gaussian gas reports bit 1 with probability
-    ``Phi((m - floor) / sqrt(v))``.
+    the true abundance ``x``.
+
+    The law applies only to point gas blocks (``x_var = 0``). On a Gaussian block two
+    rows of one gas report the same bit, so their likelihoods are not independent and
+    their sum would count the bit twice; the block after a bit is a truncated Gaussian,
+    which ``Atoms`` cannot hold. Every method raises ``ValueError`` when the gas
+    variance is a concrete nonzero value; a traced variance cannot be checked, and the
+    restriction holds all the same.
 
     Each gas has three outcome cells: 0 no report, 1 bit 0, 2 bit 1; a row's cells are
     the joint over planets and gases.
@@ -180,6 +191,15 @@ class StepReportLaw(AbstractLaw):
 
     snr_one_day: Float[Array, " G"] = eqx.field(converter=jnp.asarray)
 
+    def _check_point(self, atoms: Atoms) -> None:
+        """Raise if the gas block is concretely not a point state."""
+        try:
+            spread = bool(jnp.any(atoms.x_var != 0))
+        except jax.errors.ConcretizationTypeError:
+            return  # traced: the docstring states the restriction
+        if spread:
+            raise ValueError("StepReportLaw needs point gas draws (x_var = 0)")
+
     def _p_above(self, atoms, star) -> Float[Array, "A K G"]:
         """Probability of each draw's gas being above the floor."""
         n_gas = atoms.x_mean.shape[-1]
@@ -188,6 +208,7 @@ class StepReportLaw(AbstractLaw):
 
     def log_like(self, payload, atoms, star):
         """Log probability of the reported bits; a gas below the gate adds zero."""
+        self._check_point(atoms)
         snr, bit = payload[..., 0], payload[..., 1]
         p_above = self._p_above(atoms, star)
         p = jnp.where(bit > 0.5, p_above, 1.0 - p_above)
@@ -195,6 +216,7 @@ class StepReportLaw(AbstractLaw):
 
     def sample(self, atoms, action, key):
         """Bits of every planet and gas, per draw; shape ``(A, K, G, 2)``."""
+        self._check_point(atoms)
         snr = jnp.broadcast_to(_snr(self.snr_one_day, action), atoms.x_mean.shape)
         x = atoms.x_mean + jnp.sqrt(atoms.x_var) * jax.random.normal(
             key, atoms.x_mean.shape
@@ -215,6 +237,7 @@ class StepReportLaw(AbstractLaw):
 
     def cells(self, atoms, action):
         """Closed form: the bit follows the probability of the gas above its floor."""
+        self._check_point(atoms)
         snr = jnp.broadcast_to(_snr(self.snr_one_day, action), atoms.x_mean.shape)
         p = self._p_above(atoms, ())
         reported = jnp.stack([jnp.zeros_like(p), 1.0 - p, p], axis=-1)
