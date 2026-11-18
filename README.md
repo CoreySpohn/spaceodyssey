@@ -6,3 +6,22 @@ the change of a log score on the count of claim-true planets.
 
 This is a from-scratch rewrite and is built layer by layer. The current layers are the types, the
 claim, the belief and the information.
+
+A gas abundance with mean 0 and variance 1 above a floor of 0 holds with probability one half:
+
+```python
+import jax.numpy as jnp
+
+from spaceodyssey.claim import GasAbove
+from spaceodyssey.types import Atoms, WeightedCloud
+
+cloud = WeightedCloud({}, jnp.zeros(1), jnp.zeros(1), "toy")
+atoms = Atoms(
+    cloud,
+    component=jnp.zeros((1, 1, 1), dtype=int),
+    x_mean=jnp.zeros((1, 1, 1)),
+    x_var=jnp.ones((1, 1, 1)),
+    row_mask=jnp.zeros((1, 0), dtype=bool),
+)
+assert float(GasAbove(0, 0.0).prob(atoms, ())[0, 0]) == 0.5
+```
