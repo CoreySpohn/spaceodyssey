@@ -72,12 +72,12 @@ class SealedWorld(eqx.Module):
     def observe(self, law: AbstractLaw, action: Action, key: PRNGKeyArray) -> Row:
         """The row an action returns: the law's payload drawn from the true star.
 
-        The host passes the law module and the row's key, from
-        ``row_key``. The row is written in its own law's frame: ``law`` is 0 and
-        ``payload`` has one entry. Timing is the host's: ``start_d`` and ``release_d``
-        are 0 and ``charged_d`` is the exposure. The host stamps the times and moves the
-        payload into its law's slot when it writes the log. A stack of worlds is
-        observed under ``eqx.filter_vmap``.
+        The host passes the law module and the row's key, from ``row_key``. The row is
+        written in its own law's frame: ``law`` is 0 and ``payload`` has one entry.
+        Its times are placeholders: ``start_d`` and ``release_d`` are 0 and
+        ``charged_d`` is the exposure. The host's ``step`` sets the times and the law
+        slot (moving the payload into that slot) when it writes the row to the log. A
+        stack of worlds is observed under ``eqx.filter_vmap``.
 
         Args:
             law: the law of the action's mode.
@@ -103,22 +103,65 @@ class SealedWorld(eqx.Module):
             payload=(payload,),
         )
 
-    def reveal(self, grant: Grant, key: PRNGKeyArray) -> Row:
-        """The rows of a grant, released at time zero and charged nothing.
+    def reveal(
+        self, grant: Grant, laws: tuple[AbstractLaw, ...], key: PRNGKeyArray
+    ) -> Row:
+        """The rows of a grant, drawn from the truth, released at time zero.
 
-        The toy grant carries its rows, so no noise is drawn and ``key`` is unused; it
-        is kept for grants whose data the world draws.
+        Granted row ``i`` is drawn exactly as ``observe`` draws it, with the law in
+        its slot and the key ``row_key(key, star, i)``: granted row ``i`` is row ``i``
+        of the log, so the host numbers its observed rows after the grant. Each row is
+        released at time zero and charged nothing, keeps the exposure of its action,
+        and carries its law slot, with its payload in that slot and the other slots
+        zero. The rows of each law are drawn together under ``jax.vmap``.
 
         Args:
             grant: the grant.
-            key: unused by the toy grant.
+            laws: the law table of the run, static; ``grant.law`` indexes it.
+            key: the run key.
 
         Returns:
             The granted rows, stacked along a leading axis.
+
+        Raises:
+            ValueError: if a law slot of the grant is not in ``laws``.
         """
-        rows = grant.rows
-        zero = jnp.zeros_like(rows.release_d)
-        return eqx.tree_at(lambda r: (r.release_d, r.charged_d), rows, (zero, zero))
+        if any(not 0 <= s < len(laws) for s in grant.law):
+            raise ValueError("a grant's law slot is not in the law table")
+        actions = grant.actions
+        n_row = len(grant.law)
+        keys = jax.vmap(row_key, in_axes=(None, 0, 0))(
+            key, actions.star, jnp.arange(n_row)
+        )
+        # One unbatched action, to read each law's payload shape (also for no rows).
+        probe = jax.tree.map(lambda x: jnp.zeros(x.shape[1:], x.dtype), actions)
+
+        def draw(law, action, k):
+            return self.observe(law, action, k).payload[0]
+
+        payload = []
+        for slot, law in enumerate(laws):
+            shape = jax.eval_shape(draw, law, probe, key)
+            buffer = jnp.zeros((n_row, *shape.shape), shape.dtype)
+            rows = jnp.asarray([i for i, s in enumerate(grant.law) if s == slot], int)
+            if rows.size:
+                these = jax.tree.map(lambda leaf, rows=rows: leaf[rows], actions)
+                drawn = jax.vmap(draw, in_axes=(None, 0, 0))(law, these, keys[rows])
+                buffer = buffer.at[rows].set(drawn)
+            payload.append(buffer)
+        zero_d = jnp.zeros_like(actions.exposure_d)
+        zero_i = jnp.zeros_like(actions.star)
+        return Row(
+            star=actions.star,
+            mode=actions.mode,
+            start_d=zero_d,
+            exposure_d=actions.exposure_d,
+            charged_d=zero_d,
+            release_d=zero_d,
+            refusal=zero_i,
+            law=jnp.asarray(grant.law, dtype=zero_i.dtype).reshape(n_row),
+            payload=tuple(payload),
+        )
 
     def unseal(self) -> Belief:
         """The truth as a belief with one role: one draw of weight one, an empty pool.

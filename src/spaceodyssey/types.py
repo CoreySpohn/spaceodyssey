@@ -132,13 +132,27 @@ class Action(eqx.Module):
 
 
 class Grant(eqx.Module):
-    """Rows delivered at time zero, stacked along a leading axis.
+    """The actions a grant reveals at time zero, stacked along a leading axis.
+
+    A grant holds no data: the world draws each granted row from its truth, as for an
+    observation, and releases it at time zero, charged nothing. Granted row ``i`` is
+    row ``i`` of the log.
 
     Attributes:
-        rows: a ``Row`` whose leaves have a leading axis over the granted rows.
+        actions: an ``Action`` whose leaves have a leading axis over the granted rows;
+            each gives the star, the mode and the exposure that sets the S/N.
+        law: the law slot of each granted row, static, one entry per row.
     """
 
-    rows: Row
+    actions: Action
+    law: tuple[int, ...] = eqx.field(
+        static=True, converter=lambda s: tuple(int(i) for i in s)
+    )
+
+    def __check_init__(self):
+        """Check that every granted row has one law slot."""
+        if jnp.shape(self.actions.star) != (len(self.law),):
+            raise ValueError("a grant has one law slot per granted action")
 
 
 CELL_SAMPLES = 4096
