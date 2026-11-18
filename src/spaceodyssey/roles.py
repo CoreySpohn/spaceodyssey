@@ -5,6 +5,8 @@ guides the planner; the verdict members judge. Every role reads the same cloud, 
 role is carried by its prior density alone, taken on the cloud's measure.
 """
 
+import abc
+
 import equinox as eqx
 from jaxtyping import Array, Float
 
@@ -24,6 +26,7 @@ class AbstractPrior(eqx.Module):
 
     measure: str = eqx.field(static=True)
 
+    @abc.abstractmethod
     def log_density(self, atoms: Atoms, star) -> Float[Array, " A"]:
         """Log prior density of each draw on ``measure``.
 
@@ -37,7 +40,6 @@ class AbstractPrior(eqx.Module):
         Returns:
             Log densities of shape ``(A,)``.
         """
-        raise NotImplementedError
 
 
 class Roles(eqx.Module):

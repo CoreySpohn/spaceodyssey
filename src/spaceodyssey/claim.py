@@ -1,5 +1,7 @@
 """Claims: predicates on one planet, built from conjuncts with a probability each."""
 
+import abc
+
 import equinox as eqx
 import jax.numpy as jnp
 from jax.scipy.special import ndtr
@@ -11,6 +13,7 @@ from spaceodyssey.types import Atoms
 class AbstractConjunct(eqx.Module):
     """One factor of a claim: the probability that it holds for each draw and planet."""
 
+    @abc.abstractmethod
     def prob(self, atoms: Atoms, star) -> Float[Array, "A K"]:
         """Probability that the conjunct holds, per draw and planet.
 
@@ -22,7 +25,6 @@ class AbstractConjunct(eqx.Module):
         Returns:
             Probabilities in ``[0, 1]``, shape ``(A, K)``.
         """
-        raise NotImplementedError
 
 
 class GasAbove(AbstractConjunct):

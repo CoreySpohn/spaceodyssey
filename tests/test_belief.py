@@ -9,7 +9,7 @@ from jax.test_util import check_grads
 from numpy.testing import assert_allclose, assert_array_max_ulp
 
 from spaceodyssey.belief import Belief, chain, count_pmf, pool_rate, q, weights
-from spaceodyssey.claim import Claim, GasAbove
+from spaceodyssey.claim import AbstractConjunct, Claim, GasAbove
 from spaceodyssey.information import log_score
 from spaceodyssey.types import Pool
 
@@ -269,6 +269,19 @@ def test_pool_and_belief_reject_mismatched_shapes(toy):
     atoms = toy.atoms([[1.0]], [[1.0]], [1.0])
     with pytest.raises(ValueError, match="disagree"):
         Belief(atoms, jnp.zeros((2, 1)), jnp.zeros((2, 1)), pool)
+
+
+def test_a_conjunct_without_prob_cannot_be_built():
+    """`prob` is abstract, so a conjunct that does not define it fails when built.
+
+    Fails if such a conjunct instantiates and fails only at its first use.
+    """
+
+    class Bare(AbstractConjunct):
+        pass
+
+    with pytest.raises(TypeError, match="abstract"):
+        Bare()
 
 
 def test_count_pmf_rejects_a_conditional_claim(toy):
