@@ -4,7 +4,13 @@ import importlib.util
 import os
 
 import jax
+import jax.numpy as jnp
+import pytest
 from hypothesis import settings
+
+from spaceodyssey.belief import Belief
+from spaceodyssey.claim import AbstractConjunct
+from spaceodyssey.types import Atoms, Pool, WeightedCloud
 
 jax.config.update("jax_enable_x64", True)
 
@@ -18,3 +24,80 @@ if importlib.util.find_spec("hwoutils.internal_refs") is not None:
 settings.register_profile("quick", max_examples=25, deadline=None)
 settings.register_profile("nightly", max_examples=200, deadline=None)
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "quick"))
+
+
+# Toy state for the layer tests: per-draw, per-planet `hz` and `size` bits plus a gas
+# block. Builders and conjuncts are exposed through the `toy` fixture, not imported.
+class _Toy:
+    """Constructed fixtures: conjuncts on the toy state and belief builders."""
+
+    star = ()  # the toy's star is an empty pytree, never None
+
+    class InHz(AbstractConjunct):
+        """The `hz` bit of the toy state."""
+
+        def prob(self, atoms, star):
+            return atoms.cloud.samples["hz"]
+
+    class InSize(AbstractConjunct):
+        """The `size` bit of the toy state."""
+
+        def prob(self, atoms, star):
+            return atoms.cloud.samples["size"]
+
+    @staticmethod
+    def atoms(hz, size, w, mean=0.0, var=1.0, n_gas=2):
+        """Atoms over draws; `hz` and `size` have shape (A, K), `w` is the weight over
+        draws.
+
+        `mean` and `var` are the gas block, a scalar, a (G,) vector or an (A, G) array
+        shared by the K planets of a draw.
+        """
+        hz, size = jnp.asarray(hz, float), jnp.asarray(size, float)
+        n_draw, n_planet = hz.shape
+        block = lambda x: jnp.broadcast_to(  # noqa: E731
+            jnp.broadcast_to(jnp.asarray(x, float), (n_draw, n_gas))[:, None, :],
+            (n_draw, n_planet, n_gas),
+        )
+        cloud = WeightedCloud(
+            {"hz": hz, "size": size},
+            jnp.log(jnp.asarray(w, float)),
+            jnp.zeros(n_draw),
+            "toy",
+        )
+        return Atoms(
+            cloud,
+            jnp.zeros((n_draw, n_planet, n_gas), int),
+            block(mean),
+            block(var),
+            jnp.zeros((n_draw, 1), bool),
+        )
+
+    @classmethod
+    def pool(cls, mark_hz, mark_weights, log_mass, n_roles=1):
+        """A pool whose marks have the given claim bit and per-role weights (R, Am)."""
+        mark_hz = jnp.asarray(mark_hz, float)[:, None]
+        n_mark = mark_hz.shape[0]
+        marks = cls.atoms(mark_hz, jnp.zeros_like(mark_hz), jnp.ones(n_mark))
+        log_mass = jnp.broadcast_to(jnp.asarray(log_mass, float), (n_roles,))
+        log_prior = jnp.log(jnp.asarray(mark_weights, float))
+        return Pool(marks, log_prior, jnp.zeros((n_roles, n_mark)), log_mass, log_mass)
+
+    @classmethod
+    def empty_pool(cls, n_roles=1):
+        """A pool with no expected planets."""
+        return cls.pool([0.0], jnp.ones((n_roles, 1)), -jnp.inf, n_roles)
+
+    @classmethod
+    def belief(cls, atoms, pool=None, n_roles=1):
+        """A belief with flat priors and no likelihood."""
+        n_draw = atoms.cloud.log_weight.shape[0]
+        flat = jnp.zeros((n_roles, n_draw))
+        return Belief(
+            atoms, flat, flat, cls.empty_pool(n_roles) if pool is None else pool
+        )
+
+
+@pytest.fixture(scope="session")
+def toy():
+    return _Toy
