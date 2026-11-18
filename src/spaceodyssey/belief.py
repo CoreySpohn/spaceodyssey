@@ -4,7 +4,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax import lax
-from jax.scipy.special import gammaln, xlogy
+from jax.scipy.special import gammainc
 from jaxtyping import Array, Float, Int
 
 from spaceodyssey.claim import Claim
@@ -183,11 +183,28 @@ def _poisson_binomial(p: Float[Array, "A K"], n_bins: int) -> Float[Array, "A N"
     return pmf
 
 
-def _poisson(lam, n_bins: int) -> Float[Array, " N"]:
-    """Poisson pmf on ``0 .. n_bins - 2`` with the remaining mass in the last bin."""
-    n = jnp.arange(n_bins - 1)
-    head = jnp.exp(xlogy(n, lam) - lam - gammaln(n + 1.0))
-    return jnp.append(head, jnp.maximum(1.0 - head.sum(), 0.0))
+def _poisson(lam: Float[Array, ""], n_bins: int) -> Float[Array, " N"]:
+    """Poisson pmf on ``0 .. n_bins - 2`` with the remaining mass in the last bin.
+
+    The head is ``exp(-lam) lam^n / n!`` built by the running product of ``lam / n``,
+    which has a finite derivative at ``lam = 0``. The tail ``P(N >= n_bins - 1)`` is the
+    regularized lower incomplete gamma function ``P(n_bins - 1, lam)``, not one minus
+    the head, which cancels to rounding error for a small ``lam`` (in float32, one
+    minus the head is about 360 times the tail at ``lam = 1e-3``). For one tail count
+    the tail is ``-expm1(-lam)``, whose derivative is finite at ``lam = 0`` where the
+    incomplete gamma function's is not.
+    """
+    if n_bins == 1:
+        return jnp.ones(1, lam.dtype)
+    k = jnp.arange(1, n_bins - 1, dtype=lam.dtype)
+    head = jnp.exp(-lam) * jnp.concatenate(
+        [jnp.ones(1, lam.dtype), jnp.cumprod(lam / k)]
+    )
+    if n_bins == 2:
+        tail = -jnp.expm1(-lam)
+    else:
+        tail = gammainc(jnp.asarray(n_bins - 1, lam.dtype), lam)
+    return jnp.append(head, tail)
 
 
 def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
