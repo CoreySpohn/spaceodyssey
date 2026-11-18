@@ -149,8 +149,8 @@ def test_members_by_ratio_on_a_resample(toy):
     reproduces all six (only 1,404 to 1,406 Earth-box draws do): psi = 1405 / (1405 +
     595 w) and Kish = (1405 + 595 w)^2 / (1405 + 595 w^2).
 
-    Fails if a member's ratio reaches the Earth-box draws, or Kish is computed on the
-    wrong role's weights.
+    Fails if q or Kish is read off the wrong row of the role axis, or Kish is
+    inverted.
     """
     n_earth, n_look = 1405, 595
     size = jnp.concatenate([jnp.ones(n_earth), jnp.zeros(n_look)])[:, None]

@@ -2,6 +2,7 @@
 tail fit.
 """
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -85,6 +86,7 @@ ALPHA = 0.05
         pytest.param(_diag([0.0], 5000), NEGATIVE, id="none-n5000"),
         pytest.param(_diag([1.0], 5000, khat=jnp.nan), UNRESOLVED, id="nan-khat"),
         pytest.param(_diag([1.0], 5000, cond_mass=5e-5), INAPPLICABLE, id="no-cond"),
+        pytest.param(_diag([1.0], 5000, cond_mass=2e-3), UNRESOLVED, id="few-cond"),
         pytest.param(_diag([1.0], 5000, outside=0.06), UNRESOLVED, id="outside"),
         pytest.param(_diag([0.97], 5000), POSITIVE, id="one-member-097"),
         pytest.param(_diag([0.97, 0.92], 5000), UNRESOLVED, id="members-disagree"),
@@ -94,13 +96,16 @@ def test_certify_at_the_boundary(diag, status):
     """Unanimous draws (mc_se = 0) at alpha = 0.05 and z = 2: only n_eff = 5000
     certifies (bounds in the next test), and the negative side is symmetric. A NaN
     khat is unresolved; a condition mass of 5e-5, below 1 / (2 * 5000), is
-    inapplicable; a prior mass 0.06 outside the support lowers the bound below 0.95.
-    Members at 0.97 and 0.92 are unresolved though 0.97 alone certifies. The forecast
-    (row 0, q = 0.5) never blocks a certificate.
+    inapplicable; a condition mass of 2e-3 leaves 10 effective draws, whose Wilson
+    bound 10 / 14 = 0.714 is unresolved; a prior mass 0.06 outside the support
+    lowers the bound below 0.95. Members at 0.97 and 0.92 are unresolved though 0.97
+    alone certifies. The forecast (row 0, q = 0.5) never blocks a certificate.
 
     Fails if the interval is the delta-method one alone (it certifies at n_eff = 5
     once every draw agrees), if a NaN khat passes the tail gate, if the condition or
-    the outside mass is ignored, if one member suffices, or if row 0 is a member.
+    the outside mass is ignored, if the Wilson n of a conditional claim is n_eff and
+    not the draws that meet the condition, if one member suffices, or if row 0 is a
+    member.
     """
     assert int(certify(diag, ALPHA).status) == status
 
@@ -127,16 +132,14 @@ def test_certify_bounds_at_unanimity():
 
 def test_pareto_khat_recovers_a_known_tail():
     """Weights w = U^-k with U uniform have a Pareto tail of shape k. One estimate at
-    S = 5000 (a 213-draw tail) scatters by about 0.14, so the test averages 64
-    replicates: N = (4 * 0.14 / 0.1)^2 = 31 replicates puts 0.1 at 4 sigma; 64 gives
-    the mean a spread of 0.018. Both k = 0.5 and k = 1.0 (above the 0.7 gate) are
-    recovered within 0.1. Constant weights give NaN, and through diagnose and certify
-    the refit trigger is true. Below about 2,200 draws the threshold drops: 0.5 at
-    S = 100.
+    S = 5000 (a 213-draw tail) scatters by about 0.09 at k = 0.5 and 0.13 at k = 1,
+    so the test averages 64 replicates: N = (4 * 0.13 / 0.1)^2 = 27 replicates puts
+    0.1 at 4 sigma; 64 gives the mean a spread of at most 0.016. Both k = 0.5 and
+    k = 1.0 (above the 0.7 gate) are recovered within 0.1. Below about 2,200 draws
+    the threshold drops: 0.5 at S = 100.
 
     Fails if the fit's sign convention is flipped, the tail is taken from the wrong
-    end, the exceedances are not over the next-largest weight, or constant weights
-    pass the tail gate.
+    end, or the exceedances are not over the next-largest weight.
     """
     keys = jax.random.split(jax.random.PRNGKey(0), 64)
     for k in (0.5, 1.0):
@@ -146,30 +149,109 @@ def test_pareto_khat_recovers_a_known_tail():
         khat = jax.vmap(pareto_khat)(log_w)
         assert abs(float(jnp.mean(khat)) - k) < 0.1, (k, jnp.mean(khat))
 
-    assert jnp.isnan(pareto_khat(jnp.zeros(5000)))
     assert khat_threshold(100) == pytest.approx(0.5)
     assert khat_threshold(5000) == pytest.approx(0.7)
 
 
-def test_constant_weights_trigger_a_refit(toy):
-    """A unanimous claim on 5000 draws of equal weight: khat is NaN, so the
-    certificate is unresolved and the refit trigger is true; the same diagnostics
-    with a finite khat certify and do not trigger.
+def test_pareto_khat_without_a_tail():
+    """Weights with no tail give -inf: 5000 equal weights, the same with a quarter
+    of the draws at zero weight, equal weights off by one ulp in three draws, and two
+    weight levels (1,405 and 595 draws, ratio 0.6). Fifty draws at twice the weight of
+    the rest fit a bounded tail (khat below zero). A fit that cannot be made is NaN:
+    three draws above an otherwise flat cloud (fewer than five exceedances), or no
+    finite weight.
 
-    Fails if a NaN khat reaches a certificate or does not trigger a refit.
+    Fails if constant or two-level weights give NaN (a cloud of exact posterior draws
+    could then never be certified), if draws tied with the cutoff enter the fit, if
+    float noise counts as a tail, or if an impossible fit returns a number.
+    """
+    flat = jnp.zeros(5000)
+    two_level = jnp.concatenate([jnp.zeros(1405), jnp.full(595, jnp.log(0.6))])
+    plateau = jnp.concatenate([jnp.full(50, jnp.log(2.0)), jnp.zeros(1950)])
+    for log_w in (
+        flat,
+        flat.at[:1250].set(-jnp.inf),
+        flat.at[:3].set(jnp.finfo(flat.dtype).eps),
+        two_level,
+    ):
+        assert jnp.isneginf(pareto_khat(log_w))
+    assert float(pareto_khat(plateau)) < 0.0
+    assert jnp.isnan(pareto_khat(flat.at[:3].set(jnp.log(2.0))))
+    assert jnp.isnan(pareto_khat(jnp.full(100, -jnp.inf)))
+
+
+def test_constant_weights_certify(toy):
+    """A unanimous claim on 5000 draws of equal weight: khat is -inf (no tail), so
+    the tail gate passes, the certificate is positive and no refit is triggered.
+
+    Fails if a cloud of equal weights (exact posterior draws) cannot be certified.
     """
     b = toy.belief(
         toy.atoms(jnp.ones((5000, 1)), jnp.ones((5000, 1)), jnp.ones(5000)), n_roles=2
     )
     d = diagnose(b, Claim((toy.InHz(),)), toy.star, PLANET, jnp.zeros(2))
-    assert jnp.all(jnp.isnan(d.khat))
+    assert jnp.all(jnp.isneginf(d.khat))
+    assert int(certify(d, ALPHA).status) == POSITIVE
+    assert not bool(refit_trigger(d, ALPHA))
+
+
+def test_a_failed_fit_is_unresolved(toy):
+    """The diagnostics of the previous test with a NaN khat on one member (a failed
+    fit, set directly) are unresolved and trigger a refit.
+
+    Fails if a NaN khat passes the tail gate or does not trigger a refit.
+    """
+    b = toy.belief(
+        toy.atoms(jnp.ones((5000, 1)), jnp.ones((5000, 1)), jnp.ones(5000)), n_roles=3
+    )
+    d = diagnose(b, Claim((toy.InHz(),)), toy.star, PLANET, jnp.zeros(3))
+    failed = eqx.tree_at(lambda x: x.khat, d, d.khat.at[2].set(jnp.nan))
+    assert int(certify(failed, ALPHA).status) == UNRESOLVED
+    assert bool(refit_trigger(failed, ALPHA))
+
+
+def test_conditional_error_and_bound(toy):
+    """Unit weights, claim (size, hz) given size. 1000 draws, 200 Earth-sized, 150 of
+    them in the HZ: q = 0.75, cond_mass = 0.2 and mc_se is the binomial error on the
+    200 conditioning draws, sqrt(0.75 * 0.25 / 200) = 0.0306. With 10 Earth-sized
+    draws out of 5000, all in the HZ, q = 1 but the Wilson bound at n = 10 is
+    10 / 14 = 0.714: unresolved, and the interval straddles 0.95 so a refit triggers.
+
+    Fails if the conditional mc_se is not centered on q g or not divided by
+    P(given), or if the Wilson n of a conditional claim is n_eff (5000 would certify
+    on 10 draws).
+    """
+    claim = Claim((toy.InSize(), toy.InHz()), given=1)
+
+    def belief(n, n_size, n_both):
+        draw = jnp.arange(n)
+        size = (draw < n_size).astype(float)[:, None]
+        hz = (draw < n_both).astype(float)[:, None]
+        return toy.belief(toy.atoms(hz, size, jnp.ones(n)), n_roles=2)
+
+    d = diagnose(belief(1000, 200, 150), claim, toy.star, PLANET, jnp.zeros(2))
+    assert_allclose(d.q, 0.75, rtol=1e-12)
+    assert_allclose(d.cond_mass, 0.2, rtol=1e-12)
+    assert_allclose(d.mc_se, np.sqrt(0.75 * 0.25 / 200), rtol=1e-10)
+
+    d = diagnose(belief(5000, 10, 10), claim, toy.star, PLANET, jnp.zeros(2))
     cert = certify(d, ALPHA)
     assert int(cert.status) == UNRESOLVED
-    assert bool(refit_trigger(d, cert, ALPHA))
+    assert_allclose(cert.q_lo, 10.0 / 14.0, rtol=1e-12)
+    assert bool(refit_trigger(d, ALPHA))
 
-    finite = Diagnostics(
-        d.q, d.mc_se, jnp.zeros(2), d.n_eff, d.cond_mass, d.prior_mass_outside
-    )
-    cert = certify(finite, ALPHA)
-    assert int(cert.status) == POSITIVE
-    assert not bool(refit_trigger(finite, cert, ALPHA))
+
+def test_refit_trigger_reads_each_member():
+    """Members at 0.97 and 0.92 on 5000 draws are unresolved, but each member's own
+    interval sits on one side of 0.95, so no refit is triggered: more draws cannot
+    settle a disagreement between priors. A member at 0.95 on 400 draws straddles
+    0.95 and triggers; an inapplicable claim never does.
+
+    Fails if the trigger reads the span over members instead of each member's
+    interval, or fires on an inapplicable claim.
+    """
+    disagree = _diag([0.97, 0.92], 5000)
+    assert int(certify(disagree, ALPHA).status) == UNRESOLVED
+    assert not bool(refit_trigger(disagree, ALPHA))
+    assert bool(refit_trigger(_diag([0.95], 400), ALPHA))
+    assert not bool(refit_trigger(_diag([0.95], 400, cond_mass=1e-4), ALPHA))
