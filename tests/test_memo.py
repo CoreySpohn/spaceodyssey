@@ -140,9 +140,9 @@ def test_joint_versus_product(toy):
     p_water = 0.7 * 0.5 + 0.3 * 0.8
     assert_allclose(chain(b, given, toy.star, PLANET)[0, 0], p_water, rtol=1e-12)
     assert_allclose(q(b, given, toy.star, PLANET), [0.35 / p_water], rtol=1e-12)
-    assert (
-        abs(0.70 * p_water - 0.35 / p_water) > 0.1
-    )  # the product of marginals is 0.413
+    size_alone = q(b, Claim((toy.InSize(),)), toy.star, PLANET)
+    water_alone = q(b, Claim((GasAbove(0, FLOOR),)), toy.star, PLANET)
+    assert_allclose(size_alone * water_alone, [0.70 * 0.59], rtol=1e-12)  # 0.413
 
 
 def test_two_planet_count(toy):
@@ -150,8 +150,9 @@ def test_two_planet_count(toy):
     other.
 
     Each draw holds exactly one claim-true planet, so P(N = 1) = 1 and the log score is
-    0. Two independent track bits would score 2 ln 0.5 = -1.39 and the count from
-    independent bits ln 0.5 = -0.69.
+    0. Against it, four equal draws in which the two planets' bits are independent at
+    0.5 each: the count scores ln 0.5 = -0.69 at N = 1, and the two tracks' q values
+    together score 2 ln 0.5 = -1.39.
 
     Fails if the count is taken per track, or the draws' planets are treated as
     independent across draws.
@@ -161,9 +162,12 @@ def test_two_planet_count(toy):
     pmf = count_pmf(toy.belief(atoms), claim, toy.star, 2)[0]
     assert_allclose(pmf, [0.0, 1.0, 0.0], atol=1e-12)
     assert_allclose(jnp.log(pmf[1]), 0.0, atol=1e-12)
-    # Test-only comparisons.
-    assert_allclose(2 * np.log(0.5), -1.386, atol=1e-3)
-    assert_allclose(np.log(0.5), -0.693, atol=1e-3)
+    bits = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
+    independent = toy.belief(toy.atoms(bits, [[1.0, 1.0]] * 4, [0.25] * 4))
+    pmf = count_pmf(independent, claim, toy.star, 2)[0]
+    assert_allclose(log_score(pmf, jnp.asarray(1)), -0.693, atol=1e-3)
+    tracks = [q(independent, claim, toy.star, jnp.asarray(k))[0] for k in (0, 1)]
+    assert_allclose(sum(np.log(tracks)), -1.386, atol=1e-3)
 
 
 def test_members_by_ratio_on_a_resample(toy):
