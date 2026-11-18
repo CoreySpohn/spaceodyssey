@@ -222,8 +222,8 @@ def test_requirement_table(toy):
     0.898, 0.892; exact 0.9030, 0.8976, 0.8925). At S/N 5 and u = 1 the pass rate is
     0.266 (exact 0.2654), and about 0.80 at S_f = 3 (S/N 7.5, exact 0.786).
 
-    Fails if the noise of the two gases is shared, the posterior is mis-scaled, or the
-    pass rule is read per gas instead of jointly.
+    Fails if the posterior gain or width is mis-scaled, which moves the S/N at which the
+    expected row passes and the share of noise draws that pass.
     """
     for u, snr, both in [(1.0, 5.4, 0.9506), (0.5, 10.1, 0.9507), (0.2, 24.6, 0.9504)]:
         assert_allclose(_p_gas(toy, snr, u) ** 2, both, atol=1e-4)

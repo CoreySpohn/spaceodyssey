@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax.scipy.special import ndtr, ndtri
+from jax.scipy.special import ndtri
 from numpy.testing import assert_allclose, assert_array_max_ulp
 
 from spaceodyssey.claim import GasAbove
@@ -33,27 +33,32 @@ def _prior(toy, n_gas=2):
 
 
 @pytest.mark.parametrize(
-    ("law", "edges_b"),
+    ("law", "edges_b", "var"),
     [
-        (GaussianGasLaw(snr_one_day=[0.0, 2.5], edges=[-0.5, 0.0, 0.8]), 4),
-        (StepReportLaw(snr_one_day=[4.0, 6.0]), 3),
+        (
+            GaussianGasLaw(snr_one_day=[0.0, 2.5], edges=[-0.5, 0.0, 0.8]),
+            4,
+            [[0.0, 0.0], [1.0, 0.5], [0.2, 0.0], [0.0, 2.0]],
+        ),
+        (StepReportLaw(snr_one_day=[4.0, 6.0]), 3, 0.0),
     ],
     ids=["gaussian", "step"],
 )
-def test_cells_normalize_and_match_the_binned_default(law, edges_b, toy):
+def test_cells_normalize_and_match_the_binned_default(law, edges_b, var, toy):
     """The analytic cells sum to one and match the binned-sample default.
 
-    Grid: four draws (point and Gaussian gases, below, at and above the floor) and two
+    Grid: four draws (below, at and above the floor; point and Gaussian gases for the
+    Gaussian law, point gases for the step law, which applies to those only) and two
     exposures (1 and 4 days, so S/N doubles). The Gaussian law has one uncovered gas
-    (S/N 0); the step law has one gas below its gate at 1 day and above it at 4. Each
-    analytic cell is within 3 Monte Carlo standard errors, sqrt(p (1 - p) / n) with n =
-    CELL_SAMPLES, of the default; a cell of probability 0 must match exactly.
+    (S/N 0); the step law has one gas below its gate at 1 day and above it at 4, and
+    its four draws report four different bit pairs. Each analytic cell is within 3
+    Monte Carlo standard errors, sqrt(p (1 - p) / n) with n = CELL_SAMPLES, of the
+    default; a cell of probability 0 must match exactly.
 
     Fails if a cell is dropped or double counted (normalization), the joint index of the
     analytic form and of `cell` disagree, or the closed form misreads a variance.
     """
     mean = [[-0.4, 1.0], [0.0, 0.0], [0.3, -0.2], [1.5, 0.1]]
-    var = [[0.0, 0.0], [1.0, 0.5], [0.2, 0.0], [0.0, 2.0]]
     atoms = toy.atoms([[1.0]] * 4, [[1.0]] * 4, [0.25] * 4, mean, var)
     assert law.n_cells(atoms) == edges_b**2
     for exposure in (1.0, 4.0):
@@ -70,11 +75,13 @@ def test_step_report(toy):
 
     Draw 0 has one gas above its floor (0.3) and one below (-0.3); draw 1 has two
     positive abundances (0.2, 1.5). At S/N 4.9 no bit is reported and the log likelihood
-    is zero for every draw; at S/N 5 the bits are (1, 0) and (1, 1). A Gaussian gas
-    N(0.4, 1) reports bit 1 with likelihood Phi(0.4).
+    is zero for every draw; at S/N 5 the bits are (1, 0) and (1, 1). A gas block with a
+    concrete nonzero variance is refused by every method, since two bits of one
+    Gaussian gas are not independent.
 
     Fails if the gate is applied on the wrong side of 5, a bit ignores its floor or
-    reads magnitude, or a gas below the gate still informs the likelihood.
+    reads magnitude, a gas below the gate still informs the likelihood, or the law
+    accepts a Gaussian gas block.
     """
     atoms = toy.atoms([[1.0]] * 2, [[1.0]] * 2, [0.5] * 2, [[0.3, -0.3], [0.2, 1.5]], 0)
     key = jax.random.key(0)
@@ -93,8 +100,12 @@ def test_step_report(toy):
     assert_allclose(at.log_like(payload, atoms, toy.star), [0.0, -np.inf])
 
     fuzzy = toy.atoms([[1.0]], [[1.0]], [1.0], 0.4, 1.0, n_gas=1)
-    one = _expected_row([5.0], 1.0)
-    assert_allclose(at.log_like(one, fuzzy, toy.star), np.log(ndtr(0.4)), rtol=1e-12)
+    with pytest.raises(ValueError, match="point gas"):
+        at.log_like(_expected_row([5.0], 1.0), fuzzy, toy.star)
+    with pytest.raises(ValueError, match="point gas"):
+        at.sample(fuzzy, _action(), key)
+    with pytest.raises(ValueError, match="point gas"):
+        at.cells(fuzzy, _action())
 
 
 def test_gas_law_tends_to_the_step_rule(toy):

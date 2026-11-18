@@ -9,8 +9,8 @@ from numpy.testing import assert_allclose, assert_array_max_ulp
 
 from spaceodyssey.belief import count_pmf, q
 from spaceodyssey.claim import Claim, GasAbove
-from spaceodyssey.toy import GAS_FLOOR, GaussianGasLaw
-from spaceodyssey.types import Action, Grant, Row
+from spaceodyssey.toy import GAS_FLOOR, GaussianGasLaw, StepReportLaw
+from spaceodyssey.types import Action, Grant
 from spaceodyssey.world import SealedWorld, draw_worlds, row_key
 
 KEY = jax.random.key(0)
@@ -20,7 +20,7 @@ def _stack(trees):
     return jax.tree.map(lambda *leaves: jnp.stack(leaves), *trees)
 
 
-def _truth(toy, abundances):
+def _point_truth(toy, abundances):
     """A truth of one planet per star; `abundances` has shape (S, G)."""
     stars = [
         toy.atoms([[1.0]], [[1.0]], [1.0], jnp.asarray(x)[None], 0.0, len(x))
@@ -45,7 +45,7 @@ def test_row_noise_depends_only_on_star_index_and_key(toy):
     Fails if a row's key comes from call order or a running counter, or if the star or
     the row index is not folded into it.
     """
-    world = SealedWorld(_truth(toy, [[0.5, 1.0], [0.5, 1.0]]))
+    world = SealedWorld(_point_truth(toy, [[0.5, 1.0], [0.5, 1.0]]))
     law = GaussianGasLaw(snr_one_day=[5.0, 5.0])
     rows = [(0, 0), (1, 1), (0, 2), (1, 3)]
     first = {r: _observe(world, law, *r) for r in rows}
@@ -59,7 +59,7 @@ def test_row_noise_depends_only_on_star_index_and_key(toy):
     assert not np.allclose(first[(0, 0)], first[(0, 2)])
 
     def prior(key):
-        return _truth(toy, jax.random.normal(key, (2, 2)))
+        return _point_truth(toy, jax.random.normal(key, (2, 2)))
 
     two = draw_worlds(prior, KEY, 2).unseal().atoms.x_mean
     three = draw_worlds(prior, KEY, 3).unseal().atoms.x_mean
@@ -78,7 +78,7 @@ def test_observe_reads_the_right_star_and_unseal_gives_a_point_belief(toy):
     Fails if `observe` reads the wrong star, `unseal` keeps a weight or a variance, or
     the pool of an unsealed world adds expected planets.
     """
-    truth = _truth(toy, [[0.3, -0.4], [-0.3, 0.4]])
+    truth = _point_truth(toy, [[0.3, -0.4], [-0.3, 0.4]])
     truth = eqx.tree_at(lambda a: a.cloud.log_weight, truth, jnp.full((2, 1), -jnp.inf))
     world = SealedWorld(truth)
     law = GaussianGasLaw(snr_one_day=[1.0e4, 1.0e4])
@@ -100,18 +100,65 @@ def test_observe_reads_the_right_star_and_unseal_gives_a_point_belief(toy):
         SealedWorld(fuzzy)
 
 
-def test_reveal_releases_grant_rows_at_time_zero(toy):
-    """A grant's rows enter at time zero, charged nothing, with their payloads intact.
+def _grant():
+    """Three granted rows: star 1 under law slot 1, then stars 0 and 1 under slot 0."""
+    actions = Action(kind=[0, 0, 0], star=[1, 0, 1], mode=[2, 0, 0], exposure_d=1.0)
+    actions = eqx.tree_at(lambda a: a.exposure_d, actions, jnp.array([4.0, 1.0, 2.0]))
+    return Grant(actions, law=(1, 0, 0))
 
-    Fails if a granted row is released late, charged against the budget, or altered.
+
+LAWS = (GaussianGasLaw(snr_one_day=[5.0, 5.0]), StepReportLaw(snr_one_day=[3.0, 3.0]))
+
+
+def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
+    """Granted rows are drawn as `observe` draws them, released at time zero, free.
+
+    Granted row i equals `observe` under the law in its slot with key row_key(key,
+    star, i), to ULPs; it is released at 0 and charged 0, keeps its action's star, mode
+    and exposure, carries its law slot, and its other law slot is zero. The step row
+    (S/N 3 x 2 = 6) reports the true bits of star 1, (0, 1).
+
+    Fails if a granted row is released late or charged, its noise is keyed by anything
+    but (star, row index, key), its payload lands in the wrong law slot, or the grant
+    reads a star other than its action's.
     """
-    payload = jnp.arange(4.0).reshape(1, 2, 2)
-    rows = _stack(
-        [Row(i, 0, 3.0, 2.0, 2.0, 5.0, 0, 0, (payload + i,)) for i in range(2)]
-    )
-    world = SealedWorld(_truth(toy, [[0.0, 0.0]]))
-    revealed = world.reveal(Grant(rows), KEY)
-    assert_allclose(revealed.release_d, [0.0, 0.0])
-    assert_allclose(revealed.charged_d, [0.0, 0.0])
-    assert_allclose(revealed.payload[0], rows.payload[0])
-    assert_allclose(revealed.star, [0, 1])
+    world = SealedWorld(_point_truth(toy, [[0.5, 1.0], [-0.5, 1.0]]))
+    grant = _grant()
+    revealed = world.reveal(grant, LAWS, KEY)
+    assert_allclose(revealed.release_d, 0.0)
+    assert_allclose(revealed.charged_d, 0.0)
+    assert_allclose(revealed.start_d, 0.0)
+    assert_allclose(revealed.exposure_d, [4.0, 1.0, 2.0])
+    assert_allclose(revealed.star, [1, 0, 1])
+    assert_allclose(revealed.mode, [2, 0, 0])
+    assert_allclose(revealed.law, [1, 0, 0])
+    for i, slot in enumerate(grant.law):
+        action = jax.tree.map(lambda leaf, i=i: leaf[i], grant.actions)
+        key = row_key(KEY, action.star, i)
+        expected = world.observe(LAWS[slot], action, key).payload[0]
+        assert_array_max_ulp(revealed.payload[slot][i], expected, maxulp=4)
+        assert_allclose(revealed.payload[1 - slot][i], 0.0)
+    assert_allclose(revealed.payload[1][0, 0], [[6.0, 0.0], [6.0, 1.0]])
+
+
+def test_reveal_differs_between_worlds(toy):
+    """Two worlds with different truths reveal different rows from one grant and key.
+
+    An empty grant reveals no rows, and a grant whose law slot is not in the law table
+    is refused.
+
+    Fails if the grant's rows do not depend on the truth (rows carried by the grant, or
+    drawn from a fixed state), or a row of a missing law is silently dropped.
+    """
+    grant = _grant()
+    a = SealedWorld(_point_truth(toy, [[0.5, 1.0], [-0.5, 1.0]]))
+    b = SealedWorld(_point_truth(toy, [[0.5, 1.0], [0.5, -1.0]]))
+    rows_a, rows_b = a.reveal(grant, LAWS, KEY), b.reveal(grant, LAWS, KEY)
+    for slot in (0, 1):
+        assert not np.allclose(rows_a.payload[slot], rows_b.payload[slot])
+    no_int = jnp.zeros(0, int)
+    empty = Grant(Action(no_int, no_int, no_int, jnp.zeros(0)), law=())
+    none = a.reveal(empty, LAWS, KEY)
+    assert none.star.shape == (0,) and none.payload[0].shape == (0, 1, 2, 2)
+    with pytest.raises(ValueError, match="law table"):
+        a.reveal(grant, LAWS[:1], KEY)
