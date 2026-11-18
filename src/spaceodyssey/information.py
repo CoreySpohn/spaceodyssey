@@ -85,7 +85,8 @@ class Diagnostics(eqx.Module):
         q: the claim probability.
         mc_se: delta-method Monte Carlo standard error of ``q``; for a conditional
             claim, the error of the ratio ``P(claim and given) / P(given)``.
-        khat: Pareto shape of the weight tail; NaN when the weights are constant.
+        khat: Pareto shape of the weight tail; ``-inf`` when the weights have no
+            tail (constant weights), NaN when the fit failed.
         n_eff: Kish size of the role weights; a warning, and the cap ``n`` in the
             boundary bound of ``certify``.
         cond_mass: ``P(given)``; 1 for an unconditional claim.
@@ -177,12 +178,14 @@ class Certificate(eqx.Module):
 def _bounds(d: Diagnostics, z: float):
     """Per-row interval: the wider of the delta-method and Wilson (1927) intervals.
 
-    The Wilson interval at ``n = n_eff`` stays inside ``(0, 1)`` when every draw
-    agrees, which is where the delta-method error is exactly zero. The prior mass
-    ``m`` outside the support then widens it to its conservative ends,
+    The Wilson interval stays inside ``(0, 1)`` when every draw agrees, which is where
+    the delta-method error is exactly zero. Its ``n`` is the effective number of
+    draws that meet the condition, ``n_eff * cond_mass`` (``n_eff`` for an
+    unconditional claim), floored at the inapplicable limit of one half. The prior
+    mass ``m`` outside the support then widens the interval to its conservative ends,
     ``(1 - m) lo`` and ``(1 - m) hi + m``.
     """
-    n = d.n_eff
+    n = jnp.maximum(d.n_eff * d.cond_mass, 0.5)
     p = jnp.clip(d.q, 0.0, 1.0)
     z2n = z**2 / n
     center = (p + z2n / 2.0) / (1.0 + z2n)
@@ -191,6 +194,16 @@ def _bounds(d: Diagnostics, z: float):
     hi = jnp.maximum(d.q + z * d.mc_se, center + half)
     m = d.prior_mass_outside
     return (1.0 - m) * lo, (1.0 - m) * hi + m
+
+
+def _members(d: Diagnostics, z: float):
+    """The verdict rows of ``d``, their bounds and whether any is inapplicable."""
+    if d.q.shape[0] < 2:
+        raise ValueError("a certificate needs at least one verdict member (R >= 2)")
+    members = jax.tree.map(lambda x: x[1:], d)
+    lo, hi = _bounds(members, z)
+    inapplicable = jnp.any(members.cond_mass < 0.5 / members.n_eff)
+    return members, lo, hi, inapplicable
 
 
 def certify(
@@ -208,8 +221,8 @@ def certify(
     - unresolved otherwise.
 
     Each member's interval is the wider of ``q -+ z mc_se`` and the Wilson score
-    interval at ``n = n_eff``, then widened by the member's prior mass outside the
-    support. The forecast (row 0) is not a member.
+    interval at ``n = n_eff * cond_mass``, then widened by the member's prior mass
+    outside the support. The forecast (row 0) is not a member.
 
     Args:
         d: the diagnostics of every role.
@@ -224,12 +237,8 @@ def certify(
     Raises:
         ValueError: if there are no verdict members.
     """
-    if d.q.shape[0] < 2:
-        raise ValueError("certify needs at least one verdict member (R >= 2)")
-    members = jax.tree.map(lambda x: x[1:], d)
-    lo, hi = _bounds(members, z)
+    members, lo, hi, inapplicable = _members(d, z)
     q_lo, q_hi = jnp.min(lo), jnp.max(hi)
-    inapplicable = jnp.any(members.cond_mass < 0.5 / members.n_eff)
     tail_ok = jnp.all(members.khat <= khat_max)
     status = jnp.select(
         [inapplicable, tail_ok & (q_lo >= 1.0 - alpha), tail_ok & (q_hi <= alpha)],
@@ -240,26 +249,33 @@ def certify(
 
 
 def refit_trigger(
-    d: Diagnostics, cert: Certificate, alpha: float, khat_max: float = KHAT_MAX
+    d: Diagnostics, alpha: float, z: float = 2.0, khat_max: float = KHAT_MAX
 ) -> Bool[Array, ""]:
-    """Whether a refit could resolve the certificate.
+    """Whether a refit could resolve the certificate ``certify(d, alpha, z)``.
 
-    True when a member's ``khat`` fails ``khat <= khat_max`` (NaN included) or the
-    certificate's interval straddles ``alpha`` or ``1 - alpha``; false for an
-    inapplicable claim. The caller states a cap on refit rounds and marks a capped
-    result unresolved.
+    True when a member's ``khat`` fails ``khat <= khat_max`` (NaN included) or a
+    member's own interval straddles ``alpha`` or ``1 - alpha``; false for an
+    inapplicable claim. Members whose intervals sit on opposite sides of a threshold
+    disagree on the prior, which more draws cannot settle, so that alone does not
+    trigger. The caller states a cap on refit rounds and marks a capped result
+    unresolved.
 
     Args:
-        d: the diagnostics the certificate was issued from.
-        cert: the certificate.
+        d: the diagnostics of every role.
         alpha: the risk of the certificate.
-        khat_max: the largest acceptable Pareto shape.
+        z: the width of the interval in standard errors.
+        khat_max: the largest acceptable Pareto shape; pass ``khat_threshold(S)`` for
+            a cloud of fewer than about 2,200 draws.
 
     Returns:
         The trigger.
+
+    Raises:
+        ValueError: if there are no verdict members.
     """
-    heavy = ~jnp.all(d.khat[1:] <= khat_max)
-    straddles = ((cert.q_lo < 1.0 - alpha) & (cert.q_hi >= 1.0 - alpha)) | (
-        (cert.q_lo <= alpha) & (cert.q_hi > alpha)
+    members, lo, hi, inapplicable = _members(d, z)
+    heavy = ~jnp.all(members.khat <= khat_max)
+    straddles = ((lo < 1.0 - alpha) & (hi >= 1.0 - alpha)) | (
+        (lo <= alpha) & (hi > alpha)
     )
-    return (cert.status != INAPPLICABLE) & (heavy | straddles)
+    return ~inapplicable & (heavy | jnp.any(straddles))
