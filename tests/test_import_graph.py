@@ -76,14 +76,15 @@ def violations(sources: dict[str, str]) -> list[str]:
 def test_the_core_imports_nothing_upward():
     """Every core module imports only earlier modules and allowed packages.
 
-    Fails if a module imports a later module, `hwo`, `hwopaths`, `viz`, or a package
-    outside JAX, Equinox, jaxtyping and NumPy, including under `if TYPE_CHECKING` or
-    inside a function.
+    Fails if a module imports a later module, `world` imports above rank 0, a module
+    imports `hwo`, `hwopaths`, `viz`, or a package outside JAX, Equinox, jaxtyping and
+    NumPy, including under `if TYPE_CHECKING` or inside a function, or a module of the
+    layers built so far is missing from the check.
     """
     sources = {
         path.stem: path.read_text() for path in SRC.glob("*.py") if path.stem in RANK
     }
-    assert sources, "no core modules found"
+    assert {"types", "claim", "belief", "information", "world", "toy"} <= set(sources)
     assert violations(sources) == []
 
 
@@ -115,6 +116,9 @@ def test_the_core_imports_nothing_upward():
             "not earlier in the order",
         ),
         ("score", "from spaceodyssey import nowhere", "unknown module"),
+        ("world", "from spaceodyssey.toy import GaussianGasLaw", "not earlier"),
+        ("world", "from spaceodyssey.policy import X", "world imports rank 0 only"),
+        ("world", "from spaceodyssey import price", "world imports rank 0 only"),
     ],
 )
 def test_the_checker_catches_each_kind_of_bad_import(module, source, message):
