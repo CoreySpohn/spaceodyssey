@@ -8,6 +8,7 @@ from jax.scipy.special import gammaln, xlogy
 from jaxtyping import Array, Float, Int
 
 from spaceodyssey.claim import Claim
+from spaceodyssey.roles import Roles
 from spaceodyssey.types import Atoms, Pool
 
 
@@ -27,11 +28,72 @@ class Belief(eqx.Module):
     pool: Pool
 
 
+def _role_log_weights(atoms: Atoms, log_prior, log_like) -> Float[Array, "R A"]:
+    """Unnormalized log weights of every role over the leading axis of ``atoms``.
+
+    A draw with zero refit weight, zero prior or zero likelihood has log weight
+    ``-inf``. The ``jnp.where`` keeps it there even when ``log_ref_density`` is also
+    ``-inf`` (which would otherwise give ``-inf - (-inf) = nan``); the sum is linear,
+    so the untaken branch passes no nan into the gradient.
+    """
+    cloud = atoms.cloud
+    dead = (
+        jnp.isneginf(cloud.log_weight)
+        | jnp.isneginf(log_prior)
+        | jnp.isneginf(log_like)
+    )
+    total = cloud.log_weight + log_prior - cloud.log_ref_density + log_like
+    return jnp.where(dead, -jnp.inf, total)
+
+
 def _role_weights(atoms: Atoms, log_prior, log_like) -> Float[Array, "R A"]:
     """Normalized weights of every role over the leading axis of ``atoms``."""
-    cloud = atoms.cloud
-    log_w = cloud.log_weight + log_prior - cloud.log_ref_density + log_like
-    return jax.nn.softmax(log_w, axis=-1)
+    return jax.nn.softmax(_role_log_weights(atoms, log_prior, log_like), axis=-1)
+
+
+def role_log_weights(
+    atoms: Atoms,
+    roles: Roles,
+    log_like: Float[Array, "R A"],
+    star,
+    pool: Pool,
+) -> Belief:
+    """Fill each role's prior over the draws and return the belief.
+
+    The weight of role ``r`` is
+    ``log w_r = log_weight + log_prior[r] - log_ref_density + log_like[r]``: the refit
+    weight, the role prior, minus the refit target ``p0``, plus the role's likelihood.
+
+    Preconditions: ``log_weight`` is against ``p0`` times the incoming likelihood, and
+    that likelihood is the same law for every role; every prior and ``p0`` share a
+    measure (checked here); the proposal covers the support of each role's prior times
+    its likelihood. A draw outside a prior's support has zero weight under that role.
+
+    Args:
+        atoms: the weighted draws of one refit.
+        roles: the forecast and the stacked verdict members.
+        log_like: summed log likelihood of the rows each role has seen, ``(R, A)``.
+        star: a pytree of scalar leaves describing the star.
+        pool: the undetected planets, which carry their own per-role mark weights.
+
+    Returns:
+        The belief with ``log_prior`` of shape ``(R, A)``, forecast in row 0.
+
+    Raises:
+        ValueError: if a prior's ``measure`` differs from the cloud's.
+    """
+    for name, prior in (("forecast", roles.forecast), ("verdict", roles.verdict)):
+        if prior.measure != atoms.cloud.measure:
+            raise ValueError(
+                f"the {name} prior is on measure {prior.measure!r} but the cloud is "
+                f"on {atoms.cloud.measure!r}"
+            )
+    forecast = roles.forecast.log_density(atoms, star)
+    verdict = eqx.filter_vmap(
+        lambda prior: prior.log_density(atoms, star), in_axes=eqx.if_array(0)
+    )(roles.verdict)
+    log_prior = jnp.concatenate([forecast[None], verdict], axis=0)
+    return Belief(atoms, log_prior, log_like, pool)
 
 
 def weights(b: Belief) -> Float[Array, "R A"]:
@@ -56,13 +118,17 @@ def _ratio(num, den):
     return jnp.where(den > 0, num / safe, 0.0)
 
 
-def _joint_mass(b: Belief, claim: Claim, star, planet) -> Float[Array, "R C1"]:
-    """Probability that the first ``c`` conjuncts hold, ``c = 0 .. C``, per role."""
+def _draw_joint(b: Belief, claim: Claim, star, planet) -> Float[Array, "C1 A"]:
+    """Per draw, the probability that the first ``c`` conjuncts hold, ``c = 0 .. C``."""
     probs = jnp.stack([c.prob(b.atoms, star) for c in claim.conjuncts])  # (C, A, K)
     one_planet = jnp.take(probs, planet, axis=2)  # (C, A)
     joint = jnp.cumprod(one_planet, axis=0)  # (C, A)
-    mass = weights(b) @ joint.T  # (R, C)
-    return jnp.concatenate([jnp.ones_like(mass[:, :1]), mass], axis=1)
+    return jnp.concatenate([jnp.ones_like(joint[:1]), joint], axis=0)
+
+
+def _joint_mass(b: Belief, claim: Claim, star, planet) -> Float[Array, "R C1"]:
+    """Probability that the first ``c`` conjuncts hold, ``c = 0 .. C``, per role."""
+    return weights(b) @ _draw_joint(b, claim, star, planet).T
 
 
 def q(b: Belief, claim: Claim, star, planet: Int[Array, ""]) -> Float[Array, " R"]:

@@ -1,10 +1,24 @@
-"""Information: the change of a log score on the claim-true count between beliefs."""
+"""Information and certificates.
 
+Information is the change of a log score on the claim-true count between beliefs. A
+certificate states that a claim holds (or fails) under every verdict member, with its
+Monte Carlo and tail diagnostics.
+"""
+
+import equinox as eqx
+import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Bool, Float, Int
 
-from spaceodyssey.belief import Belief, chain
+from spaceodyssey._standin.diagnostics import KHAT_MAX, kish_ess, mc_se, pareto_khat
+from spaceodyssey.belief import Belief, _draw_joint, _role_log_weights, chain, q
 from spaceodyssey.claim import Claim
+
+# Certificate status codes.
+POSITIVE = 0
+NEGATIVE = 1
+INAPPLICABLE = 2
+UNRESOLVED = 3
 
 
 def log_score(pmf: Float[Array, " N"], count: Int[Array, ""]) -> Float[Array, ""]:
@@ -62,3 +76,190 @@ def chain_gain(
     after = chain(b_after, claim, star, planet)[role]
     before = chain(b_before, claim, star, planet)[role]
     return jnp.log(after) - jnp.log(before)
+
+
+class Diagnostics(eqx.Module):
+    """What the weights say about one claim's probability, per role.
+
+    Attributes:
+        q: the claim probability.
+        mc_se: delta-method Monte Carlo standard error of ``q``; for a conditional
+            claim, the error of the ratio ``P(claim and given) / P(given)``.
+        khat: Pareto shape of the weight tail; NaN when the weights are constant.
+        n_eff: Kish size of the role weights; a warning, and the cap ``n`` in the
+            boundary bound of ``certify``.
+        cond_mass: ``P(given)``; 1 for an unconditional claim.
+        prior_mass_outside: the prior mass of the role outside the refit's support.
+            This is a prior mass: the posterior mass outside can be larger and is not
+            observable from the draws.
+    """
+
+    q: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
+    mc_se: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
+    khat: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
+    n_eff: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
+    cond_mass: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
+    prior_mass_outside: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
+
+
+def diagnose(
+    b: Belief,
+    claim: Claim,
+    star,
+    planet: Int[Array, ""],
+    prior_mass_outside: Float[Array, " R"],
+) -> Diagnostics:
+    """Read ``q`` and its diagnostics off the role weights.
+
+    The diagnostics see a heavy weight tail (``khat``) and a small sample (``n_eff``).
+    They cannot see mass the cloud never reached: an unvisited mode shows in neither.
+
+    Args:
+        b: the belief.
+        claim: the claim.
+        star: a pytree of scalar leaves describing the star.
+        planet: index of the planet along the ``K`` axis.
+        prior_mass_outside: the prior mass of each role outside the support box of the
+            refit, shape ``(R,)``, from whoever knows the box and the priors.
+
+    Returns:
+        The diagnostics, one entry per role.
+    """
+    log_w = _role_log_weights(b.atoms, b.log_prior, b.log_like)  # (R, A)
+    joint = _draw_joint(b, claim, star, planet)  # (C + 1, A)
+    h, g = joint[-1], joint[claim.given]
+    weights = jax.nn.softmax(log_w, axis=-1)
+    cond_mass = jnp.ones(log_w.shape[0]) if claim.given == 0 else weights @ g
+    return Diagnostics(
+        q=q(b, claim, star, planet),
+        mc_se=jax.vmap(mc_se, in_axes=(0, None, None))(log_w, h, g),
+        khat=jax.vmap(pareto_khat)(log_w),
+        n_eff=kish_ess(log_w),
+        cond_mass=cond_mass,
+        prior_mass_outside=jnp.broadcast_to(prior_mass_outside, cond_mass.shape),
+    )
+
+
+def clip_q(q: Float[Array, "..."], resolution: Float[Array, "..."]) -> Array:
+    """Clip a probability to ``[resolution, 1 - resolution]`` before any logarithm.
+
+    A cloud cannot resolve a probability finer than about one draw in ``2 n_eff``, so
+    the usual resolution is ``1 / (2 n_eff)``; a claim every draw agrees on is then
+    scored as ``1 - 1 / (2 n_eff)``, not as certain.
+
+    Args:
+        q: probabilities.
+        resolution: the clip resolution, usually ``0.5 / n_eff``.
+
+    Returns:
+        The clipped probabilities.
+    """
+    return jnp.clip(q, resolution, 1.0 - resolution)
+
+
+class Certificate(eqx.Module):
+    """A statement about a claim that holds under every verdict member.
+
+    Attributes:
+        status: ``POSITIVE`` (0), ``NEGATIVE`` (1), ``INAPPLICABLE`` (2: the condition
+            has no mass a cloud can resolve) or ``UNRESOLVED`` (3: no certificate, from
+            a heavy weight tail, an interval across a threshold, or members that
+            disagree).
+        q_lo: the smallest lower bound over the members.
+        q_hi: the largest upper bound over the members.
+    """
+
+    status: Int[Array, ""] = eqx.field(converter=jnp.asarray)
+    q_lo: Float[Array, ""] = eqx.field(converter=jnp.asarray)
+    q_hi: Float[Array, ""] = eqx.field(converter=jnp.asarray)
+
+
+def _bounds(d: Diagnostics, z: float):
+    """Per-row interval: the wider of the delta-method and Wilson (1927) intervals.
+
+    The Wilson interval at ``n = n_eff`` stays inside ``(0, 1)`` when every draw
+    agrees, which is where the delta-method error is exactly zero. The prior mass
+    ``m`` outside the support then widens it to its conservative ends,
+    ``(1 - m) lo`` and ``(1 - m) hi + m``.
+    """
+    n = d.n_eff
+    p = jnp.clip(d.q, 0.0, 1.0)
+    z2n = z**2 / n
+    center = (p + z2n / 2.0) / (1.0 + z2n)
+    half = z / (1.0 + z2n) * jnp.sqrt(p * (1.0 - p) / n + z2n / (4.0 * n))
+    lo = jnp.minimum(d.q - z * d.mc_se, center - half)
+    hi = jnp.maximum(d.q + z * d.mc_se, center + half)
+    m = d.prior_mass_outside
+    return (1.0 - m) * lo, (1.0 - m) * hi + m
+
+
+def certify(
+    d: Diagnostics, alpha: float, z: float = 2.0, khat_max: float = KHAT_MAX
+) -> Certificate:
+    """Issue a certificate on a claim from the verdict members (rows 1 to ``R - 1``).
+
+    Rules, in order:
+
+    - inapplicable when any member's ``cond_mass`` is below its clip resolution
+      ``1 / (2 n_eff)``;
+    - positive when every member's lower bound is at least ``1 - alpha``, and
+      negative when every member's upper bound is at most ``alpha``, both only when
+      every member's ``khat <= khat_max`` (a NaN ``khat`` fails);
+    - unresolved otherwise.
+
+    Each member's interval is the wider of ``q -+ z mc_se`` and the Wilson score
+    interval at ``n = n_eff``, then widened by the member's prior mass outside the
+    support. The forecast (row 0) is not a member.
+
+    Args:
+        d: the diagnostics of every role.
+        alpha: the risk of the certificate.
+        z: the width of the interval in standard errors.
+        khat_max: the largest acceptable Pareto shape; pass ``khat_threshold(S)`` for
+            a cloud of fewer than about 2,200 draws.
+
+    Returns:
+        The certificate.
+
+    Raises:
+        ValueError: if there are no verdict members.
+    """
+    if d.q.shape[0] < 2:
+        raise ValueError("certify needs at least one verdict member (R >= 2)")
+    members = jax.tree.map(lambda x: x[1:], d)
+    lo, hi = _bounds(members, z)
+    q_lo, q_hi = jnp.min(lo), jnp.max(hi)
+    inapplicable = jnp.any(members.cond_mass < 0.5 / members.n_eff)
+    tail_ok = jnp.all(members.khat <= khat_max)
+    status = jnp.select(
+        [inapplicable, tail_ok & (q_lo >= 1.0 - alpha), tail_ok & (q_hi <= alpha)],
+        [INAPPLICABLE, POSITIVE, NEGATIVE],
+        UNRESOLVED,
+    )
+    return Certificate(status, q_lo, q_hi)
+
+
+def refit_trigger(
+    d: Diagnostics, cert: Certificate, alpha: float, khat_max: float = KHAT_MAX
+) -> Bool[Array, ""]:
+    """Whether a refit could resolve the certificate.
+
+    True when a member's ``khat`` fails ``khat <= khat_max`` (NaN included) or the
+    certificate's interval straddles ``alpha`` or ``1 - alpha``; false for an
+    inapplicable claim. The caller states a cap on refit rounds and marks a capped
+    result unresolved.
+
+    Args:
+        d: the diagnostics the certificate was issued from.
+        cert: the certificate.
+        alpha: the risk of the certificate.
+        khat_max: the largest acceptable Pareto shape.
+
+    Returns:
+        The trigger.
+    """
+    heavy = ~jnp.all(d.khat[1:] <= khat_max)
+    straddles = ((cert.q_lo < 1.0 - alpha) & (cert.q_hi >= 1.0 - alpha)) | (
+        (cert.q_lo <= alpha) & (cert.q_hi > alpha)
+    )
+    return (cert.status != INAPPLICABLE) & (heavy | straddles)

@@ -5,7 +5,8 @@ planetary systems are weighted clouds of draws; claims are predicates on a plane
 the change of a log score on the count of claim-true planets.
 
 This is a from-scratch rewrite and is built layer by layer. The current layers are the types, the
-claim, the belief and the information.
+claim, the belief and the information, then the roles that reweight one cloud and the certificates
+read off their weights.
 
 A gas abundance with mean 0 and variance 1 above a floor of 0 holds with probability one half:
 
