@@ -1,4 +1,8 @@
 repos:
+  - repo: https://github.com/CoreySpohn/hwoutils
+    rev: 7ea5d77
+    hooks:
+      - id: no-internal-refs
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: "v6.0.0"
     hooks:
