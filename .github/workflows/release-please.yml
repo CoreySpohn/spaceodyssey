@@ -1,0 +1,28 @@
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+name: release-please
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          # this assumes that you have created a personal access token
+          # (PAT) and configured it as a GitHub action secret named
+          # `MY_RELEASE_PLEASE_TOKEN` (this secret name is not important).
+          token: ${{ secrets.MY_RELEASE_PLEASE_TOKEN }}
+          # Versioning rules (pre-1.0 breaking changes bump the minor version)
+          # live in release-please-config.json.
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
