@@ -3,6 +3,7 @@
 import importlib.util
 import os
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
@@ -74,19 +75,38 @@ class _Toy:
         )
 
     @classmethod
-    def pool(cls, mark_hz, mark_weights, log_mass, n_roles=1, like=1.0):
+    def pool(
+        cls,
+        mark_hz,
+        mark_weights,
+        log_mass,
+        n_roles=1,
+        like=1.0,
+        cloud=1.0,
+        ref=1.0,
+        log_mass0=None,
+    ):
         """A pool whose marks have the given claim bit and per-role weights (R, Am).
 
         `mark_weights` is the marks' prior and `like` their likelihood, both linear and
-        broadcast to (R, Am).
+        broadcast to (R, Am); `cloud` and `ref` are the marks' cloud weight and
+        reference density, linear, (Am,). `log_mass0` defaults to `log_mass`.
         """
         mark_hz = jnp.asarray(mark_hz, float)[:, None]
         n_mark = mark_hz.shape[0]
-        marks = cls.atoms(mark_hz, jnp.zeros_like(mark_hz), jnp.ones(n_mark))
+        cloud = jnp.broadcast_to(jnp.asarray(cloud, float), (n_mark,))
+        marks = cls.atoms(mark_hz, jnp.zeros_like(mark_hz), cloud)
+        marks = eqx.tree_at(
+            lambda a: a.cloud.log_ref_density,
+            marks,
+            jnp.broadcast_to(jnp.log(jnp.asarray(ref, float)), (n_mark,)),
+        )
         log_mass = jnp.broadcast_to(jnp.asarray(log_mass, float), (n_roles,))
+        log_mass0 = log_mass if log_mass0 is None else log_mass0
+        log_mass0 = jnp.broadcast_to(jnp.asarray(log_mass0, float), (n_roles,))
         log_prior = jnp.log(jnp.asarray(mark_weights, float))
         log_like = jnp.broadcast_to(jnp.log(jnp.asarray(like, float)), log_prior.shape)
-        return Pool(marks, log_prior, log_like, log_mass, log_mass)
+        return Pool(marks, log_prior, log_like, log_mass, log_mass0)
 
     @classmethod
     def empty_pool(cls, n_roles=1):

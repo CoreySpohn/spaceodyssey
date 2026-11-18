@@ -15,6 +15,7 @@ from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.information import chain_gain, diagnose, information
 
 PLANET = jnp.asarray(0)
+FLOOR = 0.3  # a nonzero gas floor, so its sign and its place in the indicator show
 
 
 @pytest.fixture(scope="module")
@@ -23,20 +24,21 @@ def stages(toy):
     oxygen).
     """
     hz4, size4 = [[0.0], [0.0], [1.0], [1.0]], [[0.0], [1.0], [0.0], [1.0]]
-    s0 = toy.atoms(hz4, size4, [0.25] * 4)
+    # An undetected gas sits at the floor with variance 4: probability 0.5.
+    undetected = {"mean": FLOOR, "var": 4.0}
+    s0 = toy.atoms(hz4, size4, [0.25] * 4, **undetected)
     # Orbit resolved: hz = 1 in both draws; the size bit splits 0.7 / 0.3.
     kw = {"hz": [[1.0], [1.0]], "size": [[1.0], [0.0]], "w": [0.7, 0.3]}
-    s1 = toy.atoms(**kw)
-    # A detected gas is a point state above the floor: x_var = 0, x_mean > 0.
-    s2 = toy.atoms(**kw, mean=[1.0, 0.0], var=[0.0, 1.0])
+    s1 = toy.atoms(**kw, **undetected)
+    # A detected gas is a point state above the floor: x_var = 0, x_mean > floor.
+    s2 = toy.atoms(**kw, mean=[1.0, FLOOR], var=[0.0, 4.0])
     s3 = toy.atoms(**kw, mean=[1.0, 1.0], var=[0.0, 0.0])
     return [toy.belief(a) for a in (s0, s1, s2, s3)]
 
 
 @pytest.fixture(scope="module")
 def claim(toy):
-    floor = 0.0
-    return Claim((toy.InHz(), toy.InSize(), GasAbove(0, floor), GasAbove(1, floor)))
+    return Claim((toy.InHz(), toy.InSize(), GasAbove(0, FLOOR), GasAbove(1, FLOOR)))
 
 
 def test_e_stage_values(stages, claim, toy):
@@ -101,17 +103,34 @@ def test_joint_versus_product(toy):
     0.3 * 0.8 = 0.59 and P(size | water) = 0.35 / 0.59 = 0.593. The product of marginals
     0.70 * 0.59 = 0.413 is not q.
 
-    Fails if a conditional claim returns the product of marginals, or the joint is not
-    read.
+    The gas probability is Phi((x_mean - floor) / sqrt(x_var)) at floor 0.3 and
+    variance 4, and checked once in closed form: x_mean = 1.3 gives Phi(0.5) = 0.6915,
+    and a point state at 0.2, below the floor, gives 0.
+
+    Fails if a conditional claim returns the product of marginals, the joint is not
+    read, the floor enters with the wrong sign or not at all in the point-state
+    indicator, or the variance divides in place of the standard deviation.
     """
-    # With unit variance and floor 0, x_mean = 0 gives P = 0.5; ndtri(0.8) gives 0.8.
-    water = jnp.array([0.0, float(ndtri(0.8))])
+    sd = 2.0
+    # x_mean = floor gives P = 0.5; floor + sd * ndtri(0.8) gives 0.8.
+    water = FLOOR + sd * jnp.array([0.0, float(ndtri(0.8))])
     atoms = toy.atoms(
-        [[1.0], [1.0]], [[1.0], [0.0]], [0.7, 0.3], mean=water[:, None], n_gas=1
+        [[1.0], [1.0]],
+        [[1.0], [0.0]],
+        [0.7, 0.3],
+        mean=water[:, None],
+        var=sd**2,
+        n_gas=1,
     )
     b = toy.belief(atoms)
-    joint = Claim((toy.InSize(), GasAbove(0, 0.0)), given=0)
-    given = Claim((GasAbove(0, 0.0), toy.InSize()), given=1)
+    joint = Claim((toy.InSize(), GasAbove(0, FLOOR)), given=0)
+    given = Claim((GasAbove(0, FLOOR), toy.InSize()), given=1)
+    closed = toy.atoms(
+        [[1.0], [1.0]], [[1.0], [1.0]], [0.5, 0.5], [[1.3], [0.2]], [[4.0], [0.0]], 1
+    )
+    assert_allclose(
+        GasAbove(0, FLOOR).prob(closed, toy.star)[:, 0], [0.6914624612740131, 0.0]
+    )
     assert_allclose(q(b, joint, toy.star, PLANET), [0.35], rtol=1e-12)
     p_water = 0.7 * 0.5 + 0.3 * 0.8
     assert_allclose(chain(b, given, toy.star, PLANET)[0, 0], p_water, rtol=1e-12)

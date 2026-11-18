@@ -57,8 +57,10 @@ def test_chain_multiplies_to_q_and_given_splits_it(toy):
     The expected P(given) is the weighted share of draws satisfying the first conjuncts,
     computed here directly from the draws; q is the joint over that share.
 
-    Fails if q and chain are computed from different masses, or `given` does not split
-    the chain.
+    A condition that no draw meets has zero mass; q and chain are then 0, not NaN.
+
+    Fails if q and chain are computed from different masses, `given` does not split the
+    chain, or a zero condition mass is divided by.
     """
     b, w = _random_belief(toy)
     conj = (toy.InHz(), toy.InSize(), GasAbove(0, 0.0), GasAbove(1, 0.0))
@@ -80,6 +82,10 @@ def test_chain_multiplies_to_q_and_given_splits_it(toy):
         assert_allclose(
             q(b, claim, toy.star, PLANET)[0], q_plain[0] / p_given, rtol=1e-12
         )
+    never = toy.belief(toy.atoms([[0.0], [0.0]], [[1.0], [1.0]], [0.5, 0.5]))
+    claim = Claim((toy.InHz(), toy.InSize()), given=1)
+    assert_allclose(q(never, claim, toy.star, PLANET), [0.0], atol=0.0)
+    assert_allclose(chain(never, claim, toy.star, PLANET), [[0.0, 0.0]], atol=0.0)
 
 
 def test_pool_count_pmf_by_hand(toy):
@@ -91,13 +97,28 @@ def test_pool_count_pmf_by_hand(toy):
     with n_max = 3: P(0) = e^-1 = 0.3679, P(1) = 0.3679, P(2) = 0.1839, P(3 or more) = 1
     - 0.9197 = 0.0803. Role 1 has P(0) = e^-0.4 = 0.6703. Each row sums to one.
 
+    Every term of the mark weights is live: cloud weight (2, 1) over reference density
+    (1, 2) is (2, 0.5); prior (0.5, 2) in both roles makes it (1, 1); likelihood (1, 1)
+    in role 0 and (0.2, 0.8) in role 1 gives the weights above. The mass at time zero is
+    5, not 2.
+
     Fails if the pool uses the wrong role's mark weights, forgets the claim probability
-    of a mark, or does not lump the tail.
+    of a mark, drops the marks' cloud weight, reference density or likelihood, reads
+    the mass at time zero, or does not lump the tail.
     """
     atoms = toy.atoms(
         np.zeros((1, 0)), np.zeros((1, 0)), [1.0]
     )  # K = 0: no draws' planets
-    pool = toy.pool([1.0, 0.0], [[0.5, 0.5], [0.2, 0.8]], np.log(2.0), n_roles=2)
+    pool = toy.pool(
+        [1.0, 0.0],
+        [[0.5, 2.0], [0.5, 2.0]],
+        np.log(2.0),
+        n_roles=2,
+        like=[[1.0, 1.0], [0.2, 0.8]],
+        cloud=[2.0, 1.0],
+        ref=[1.0, 2.0],
+        log_mass0=np.log(5.0),
+    )
     pmf = count_pmf(
         toy.belief(atoms, pool, n_roles=2), Claim((toy.InHz(),)), toy.star, 3
     )
@@ -111,19 +132,24 @@ def test_pool_count_pmf_by_hand(toy):
 
 def test_count_pmf_convolves_draws_and_pool(toy):
     """One certain planet in every draw plus a pool of mean 1 shifts the pool's pmf up
-    by one.
+    by one; more planets than bins stay in the last bin.
 
     The draws contribute exactly one claim-true planet, so the count is 1 + Poisson(1):
-    with n_max = 3, P = (0, e^-1, e^-1, 1 - 2 e^-1).
+    with n_max = 3, P = (0, e^-1, e^-1, 1 - 2 e^-1). A draw of three planets, each
+    claim-true with probability 0.5, and n_max = 1 (K > n_max) gives (0.125, 0.875).
 
     Fails if the draws' count and the pool's count are combined by addition of the pmfs
-    instead of convolution, or the lump is applied before the convolution.
+    instead of convolution, if the convolved tail is truncated instead of lumped, or if
+    mass at the cap leaks while the draws' planets are counted.
     """
     atoms = toy.atoms([[1.0]], [[1.0]], [1.0])
     pool = toy.pool([1.0], [[1.0]], 0.0)
     pmf = count_pmf(toy.belief(atoms, pool), Claim((toy.InHz(),)), toy.star, 3)
     e1 = np.exp(-1.0)
     assert_allclose(pmf[0], [0.0, e1, e1, 1 - 2 * e1], atol=1e-12)
+    three = toy.atoms([[0.5, 0.5, 0.5]], [[1.0, 1.0, 1.0]], [1.0])
+    pmf = count_pmf(toy.belief(three), Claim((toy.InHz(),)), toy.star, 1)
+    assert_allclose(pmf[0], [0.125, 0.875], atol=1e-12)
 
 
 @pytest.mark.parametrize(("n_conjuncts", "given"), [(0, 0), (2, 2), (2, 3), (2, -1)])
