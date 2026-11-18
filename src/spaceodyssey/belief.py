@@ -22,12 +22,32 @@ class Belief(eqx.Module):
         log_prior: log prior density of each draw under each role, shape ``(R, A)``.
         log_like: summed log likelihood of the rows each role has seen, ``(R, A)``.
         pool: the undetected planets.
+
+    Raises:
+        ValueError: if ``log_prior``, ``log_like`` and the pool disagree on the number
+            of roles, or the draws on their number.
     """
 
     atoms: Atoms
     log_prior: Float[Array, "R A"] = eqx.field(converter=jnp.asarray)
     log_like: Float[Array, "R A"] = eqx.field(converter=jnp.asarray)
     pool: Pool
+
+    def __check_init__(self):
+        """Check the static shapes: one ``R`` and one ``A`` across the fields."""
+        n_draw = self.atoms.cloud.log_weight.shape[-1]
+        roles = {
+            self.log_prior.shape[-2],
+            self.log_like.shape[-2],
+            self.pool.log_mass.shape[-1],
+        }
+        draws = {self.log_prior.shape[-1], self.log_like.shape[-1], n_draw}
+        if len(roles) != 1 or len(draws) != 1:
+            raise ValueError(
+                f"belief fields disagree on R or A (log_prior {self.log_prior.shape}, "
+                f"log_like {self.log_like.shape}, pool R "
+                f"{self.pool.log_mass.shape[-1]}, {n_draw} draws)"
+            )
 
 
 def _role_log_weights(atoms: Atoms, log_prior, log_like) -> Float[Array, "R A"]:

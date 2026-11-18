@@ -11,6 +11,7 @@ from numpy.testing import assert_allclose, assert_array_max_ulp
 from spaceodyssey.belief import Belief, chain, count_pmf, pool_rate, q, weights
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.information import log_score
+from spaceodyssey.types import Pool
 
 PLANET = jnp.asarray(0)
 
@@ -249,6 +250,25 @@ def test_a_nonexistent_slot_changes_nothing(toy):
     assert_allclose(
         count_pmf(b_pad, plain, toy.star, 3), count_pmf(b, plain, toy.star, 3)
     )
+
+
+def test_pool_and_belief_reject_mismatched_shapes(toy):
+    """A pool whose marks hold two planets, or whose fields disagree on the number of
+    roles, and a belief whose roles disagree with its pool's, are refused when built.
+
+    Fails if a pool with K > 1 marks is accepted (its first slot would be read
+    silently) or a role-count mismatch surfaces only later, inside a vmap.
+    """
+    pool = toy.pool([1.0, 0.0], [[0.5, 0.5]], 0.0)
+    fields = [pool.log_prior, pool.log_like, pool.log_mass, pool.log_mass0]
+    two_planets = toy.atoms([[1.0, 1.0]] * 2, [[0.0, 0.0]] * 2, [1.0, 1.0])
+    with pytest.raises(ValueError, match="K = 1"):
+        Pool(two_planets, *fields, pool.log_like0)
+    with pytest.raises(ValueError, match="disagree"):
+        Pool(pool.marks, *fields, jnp.zeros((2, 2)))
+    atoms = toy.atoms([[1.0]], [[1.0]], [1.0])
+    with pytest.raises(ValueError, match="disagree"):
+        Belief(atoms, jnp.zeros((2, 1)), jnp.zeros((2, 1)), pool)
 
 
 def test_count_pmf_rejects_a_conditional_claim(toy):

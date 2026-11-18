@@ -97,6 +97,10 @@ class Pool(eqx.Module):
         log_mass: log expected number of planets, per role, shape ``(R,)``.
         log_mass0: the same at time zero, shape ``(R,)``.
         log_like0: ``log_like`` at time zero, shape ``(R, Am)``.
+
+    Raises:
+        ValueError: if a mark holds more than one planet, or the fields disagree on
+            the number of roles or marks.
     """
 
     marks: Atoms
@@ -105,6 +109,24 @@ class Pool(eqx.Module):
     log_mass: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
     log_mass0: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
     log_like0: Float[Array, "R Am"] = eqx.field(converter=jnp.asarray)
+
+    def __check_init__(self):
+        """Check the static shapes: one planet per mark, one ``R`` and one ``Am``."""
+        if self.marks.x_mean.shape[-2] != 1:
+            raise ValueError(
+                f"a mark is one planet (K = 1), not K = {self.marks.x_mean.shape[-2]}"
+            )
+        n_mark = self.marks.cloud.log_weight.shape[-1]
+        per_mark = (self.log_prior, self.log_like, self.log_like0)
+        roles = {x.shape[-2] for x in per_mark}
+        roles |= {x.shape[-1] for x in (self.log_mass, self.log_mass0)}
+        if len(roles) != 1 or {x.shape[-1] for x in per_mark} != {n_mark}:
+            raise ValueError(
+                f"pool fields disagree on R or Am (log_prior {self.log_prior.shape}, "
+                f"log_like {self.log_like.shape}, log_like0 {self.log_like0.shape}, "
+                f"log_mass {self.log_mass.shape}, log_mass0 {self.log_mass0.shape}, "
+                f"{n_mark} marks)"
+            )
 
 
 class Row(eqx.Module):
