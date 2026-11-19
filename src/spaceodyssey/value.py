@@ -24,12 +24,17 @@ import abc
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float, Int
+from jaxtyping import Array, Bool, Float, PyTree
 
 from spaceodyssey._numerics import EXACT, guarded_log, safe_ratio
 from spaceodyssey.belief import Belief, count_pmf, mark_weights, pool_rate
 from spaceodyssey.claim import Claim
-from spaceodyssey.information import expected_log_score, outcome_prob, update_by_cell
+from spaceodyssey.information import (
+    expected_log_score,
+    outcome_prob,
+    require_point_draws,
+    update_by_cell,
+)
 from spaceodyssey.types import AbstractObservationModel, Action, Atoms, Pool
 
 
@@ -340,14 +345,74 @@ def _entries(menu: Menu, mode: int, star_index) -> tuple[list[int], Action]:
     return entries, actions
 
 
-def _after(b, model, payload, cell_prob, detect, star) -> Belief:
-    """A belief after a hypothetical outcome.
+class _Outcomes(eqx.Module):
+    """Every menu entry's outcome cells at one star, read once at the root.
 
-    Its pool is thinned by the detection probability of each mark, and its weights and
-    draws are conditioned on the cell.
+    On point draws an outcome changes only the weights and the pool, never the draws
+    or the marks, so each entry's cells and detection probabilities are the same at
+    every node of the lookahead. Cells are padded with zero-probability cells to the
+    widest entry's ``Y``, so the entries of every mode share one shape.
+
+    Attributes:
+        forecast: cell probabilities under the forecast's draws, ``(M, A_F, Y)``.
+        verdict: cell probabilities under the verdict's draws, ``(M, A_V, Y)``.
+        detect_forecast: detection probability of the forecast pool's marks,
+            ``(M, Am)``; zero for a model that does not search.
+        detect_verdict: the same for the verdict's pool, ``(M, Am)``.
+        detects: whether each cell is a detection (a searching model's cell other
+            than the miss), ``(M, Y)``.
     """
-    thinned = eqx.tree_at(lambda x: x.pool, b, thin(b.pool, detect))
-    return update_by_cell(thinned, model, payload, cell_prob, star)
+
+    forecast: Float[Array, "M AF Y"]
+    verdict: Float[Array, "M AV Y"]
+    detect_forecast: Float[Array, "M AmF"]
+    detect_verdict: Float[Array, "M AmV"]
+    detects: Bool[Array, "M Y"]
+
+
+def _outcomes(forecast, verdict, mode_models, menu, star_index) -> _Outcomes:
+    """The cells and detection probabilities of every entry, in menu order."""
+    order, parts = [], []
+    for mode, model in enumerate(mode_models):
+        entries, actions = _entries(menu, mode, star_index)
+        if not entries:
+            continue
+
+        def one(action, model=model):
+            return (
+                model.cells(forecast.atoms, action),
+                model.cells(verdict.atoms, action),
+                _detect_prob(model, forecast.pool.marks, action),
+                _detect_prob(model, verdict.pool.marks, action),
+            )
+
+        cells_f, cells_v, detect_f, detect_v = jax.vmap(one)(actions)
+        n_cell = cells_f.shape[-1]
+        detects = (jnp.arange(n_cell) > 0) & model.searches
+        order += entries
+        parts.append((cells_f, cells_v, detect_f, detect_v, detects, n_cell))
+    width = max(part[-1] for part in parts)
+
+    def pad(x):
+        return jnp.pad(x, [(0, 0)] * (x.ndim - 1) + [(0, width - x.shape[-1])])
+
+    back = jnp.asarray(sorted(range(len(order)), key=order.__getitem__))
+    cells_f, cells_v, detect_f, detect_v, detects = (
+        jnp.concatenate(column)[back]
+        for column in zip(
+            *[
+                (pad(f), pad(v), df, dv, pad(jnp.broadcast_to(d, (f.shape[0], n))))
+                for f, v, df, dv, d, n in parts
+            ],
+            strict=True,
+        )
+    )
+    return _Outcomes(cells_f, cells_v, detect_f, detect_v, detects)
+
+
+def _after(b: Belief, pool: Pool, cell_prob: Float[Array, " A"]) -> Belief:
+    """A belief after a hypothetical outcome: its pool thinned, its weights updated."""
+    return update_by_cell(eqx.tree_at(lambda x: x.pool, b, pool), cell_prob)
 
 
 def _charge(plan, detected) -> Float[Array, " M"]:
@@ -376,63 +441,51 @@ def _worth(node, plan, depth: int) -> Float[Array, ""]:
 def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
     """``E_F[W_depth(node after m)]`` for each entry ``m``, over the forecast's cells.
 
-    Each entry's cells are read off the node's own draws, each belief's, since a
-    hypothetical outcome may have changed them. After entry ``m`` with outcome in cell
-    ``y`` each belief is conditioned on the cell, weights and draws
-    (``update_by_cell``), and its pool is thinned by the entry's detection probability
-    in every cell; a searching entry's detection (any cell but the miss) marks the
-    planet detected. The entries of one mode are evaluated together. A cell the
-    forecast gives no mass adds nothing.
+    The cells are the root's (``_Outcomes``): on point draws an outcome changes only
+    the weights and the pool. After entry ``m`` with outcome in cell ``y`` each belief
+    is reweighted by its draws' probability of the cell (``update_by_cell``) and its
+    pool is thinned by the entry's detection probability in every cell; a searching
+    entry's detection (any cell but the miss) marks the planet detected. Every entry
+    and cell is one body under ``vmap``, so a level of the lookahead traces once. A
+    cell the forecast gives no mass (a padded cell among them) adds nothing.
     """
     forecast, verdict, detected = node
-    order, values = [], []
-    for mode, model in enumerate(plan.mode_models):
-        entries, actions = _entries(plan.menu, mode, plan.star_index)
-        if not entries:
-            continue
 
-        def entry(action, model=model):
-            cells_f = model.cells(forecast.atoms, action)  # (A_F, Y)
-            cells_v = model.cells(verdict.atoms, action)  # (A_V, Y)
-            payloads = model.cell_payloads(forecast.atoms, action)
-            detect_f = _detect_prob(model, forecast.pool.marks, action)
-            detect_v = _detect_prob(model, verdict.pool.marks, action)
-            p_cell = outcome_prob(forecast, cells_f)[0]  # (Y,), the forecast's
-            seen = p_cell > 0
+    def entry(cells_f, cells_v, detect_f, detect_v, detects):
+        p_cell = outcome_prob(forecast, cells_f)[0]  # (Y,), the forecast's
+        seen = p_cell > 0
+        pool_f, pool_v = thin(forecast.pool, detect_f), thin(verdict.pool, detect_v)
 
-            def worth_after(cell, payload, cf, cv):
-                after = (
-                    _after(forecast, model, payload, cf, detect_f, plan.star),
-                    _after(verdict, model, payload, cv, detect_v, plan.star),
-                    detected | (cell > 0) if model.searches else detected,
-                )
-                return _worth(after, plan, depth)
-
-            safe_f, safe_v = (jnp.where(seen, c, 1.0) for c in (cells_f, cells_v))
-            cell = jnp.arange(p_cell.shape[0])
-            worth = jax.vmap(worth_after, in_axes=(0, 0, 1, 1))(
-                cell, payloads, safe_f, safe_v
+        def worth_after(cf, cv, found):
+            after = (
+                _after(forecast, pool_f, cf),
+                _after(verdict, pool_v, cv),
+                detected | found,
             )
-            return jnp.sum(jnp.where(seen, p_cell * worth, 0.0))
+            return _worth(after, plan, depth)
 
-        order += entries
-        values.append(jax.vmap(entry)(actions))
-    back = jnp.asarray(sorted(range(len(order)), key=order.__getitem__))
-    return jnp.concatenate(values)[back]
+        safe_f, safe_v = (jnp.where(seen, c, 1.0) for c in (cells_f, cells_v))
+        worth = jax.vmap(worth_after, in_axes=(1, 1, 0))(safe_f, safe_v, detects)
+        return jnp.sum(jnp.where(seen, p_cell * worth, 0.0))
+
+    o = plan.outcomes
+    return jax.vmap(entry)(
+        o.forecast, o.verdict, o.detect_forecast, o.detect_verdict, o.detects
+    )
 
 
 class _Plan(eqx.Module):
     """What the recursion at one star reads besides the node.
 
-    The claim, the star, the utility, the menu and its models, and the price of time.
+    The claim, the star, the utility, the menu, each entry's outcomes, and the price
+    of time.
     """
 
     claim: Claim
-    star: object
+    star: PyTree
     utility: AbstractUtility
-    mode_models: tuple[AbstractObservationModel, ...]
     menu: Menu
-    star_index: Int[Array, ""]
+    outcomes: _Outcomes
     lam: Float[Array, ""]
 
 
@@ -456,9 +509,9 @@ def frontier(
     times its cost), or none. Its net value is ``E_F[W_{depth-1}(after m)] - U``, the
     utility ``U`` it is expected to add less the price of its follow-ups. The
     expectation is over the forecast's distribution of each outcome cell; an outcome
-    conditions each belief, weights and draws, by ``update_by_cell`` and thins its
-    pool by the entry's detection probability of each mark (``thin``; zero for a
-    model that does not search).
+    reweights each belief by ``update_by_cell`` and thins its pool by the entry's
+    detection probability of each mark (``thin``; zero for a model that does not
+    search).
 
     The frontier holds each plan's gross reward and its expected time. The expected
     time of the follow-ups ``F_m`` is the negative slope of the net value in the price
@@ -481,16 +534,15 @@ def frontier(
 
     This is the generic bounded recursion, the reference: it evaluates
     ``(M Y) ** depth`` hypothetical belief pairs per star, so it serves small menus and
-    shallow depths. The cells of every entry are read off each node's own draws: a
-    hypothetical reading of an uncertain gas block updates the block (the conjugate
-    update, as a replay does), so a second reading of it is not counted as independent
-    of the first given the draw.
+    shallow depths. The beliefs hold point draws (``planning_beliefs`` splits an
+    uncertain gas block into quadrature sub-draws, ``quadrature_draws``); given a point
+    draw the outcomes of rows are independent, so every entry's cells are read once at
+    the root and a hypothetical outcome updates a belief exactly by reweighting. A
+    belief with an uncertain block is refused (``require_point_draws``).
 
-    Two limits of the hypothetical update. A planet a hypothetical search finds is not
+    A limit of the hypothetical update: a planet a hypothetical search finds is not
     spawned as a track (that takes a refit), so it leaves the count; value a search
-    with ``Count``, which counts it as found. And a model that bins a continuous
-    reading conditions the draws on one representative reading per bin
-    (``cell_payloads``), exact for point draws and approximate for an uncertain block.
+    with ``Count``, which counts it as found.
 
     Every leaf of the two beliefs, ``star``, ``menu`` and the array leaves of
     ``utility`` (``Count``'s time-zero pool) carry a leading star axis ``S``; ``claim``
@@ -527,22 +579,24 @@ def frontier(
         raise ValueError("a menu entry's mode is not in the mode table")
 
     lam = jnp.asarray(lam, float)
+    forecast, verdict = require_point_draws(forecast), require_point_draws(verdict)
 
     def one_star(forecast, verdict, star, utility, menu, star_index):
         node = (forecast, verdict, menu.detected)
         offered = _offered(menu, menu.detected)
         now = utility(forecast, verdict, claim, star)
+        outcomes = _outcomes(forecast, verdict, mode_models, menu, star_index)
 
         def net(price):
-            plan = _Plan(claim, star, utility, mode_models, menu, star_index, price)
+            plan = _Plan(claim, star, utility, menu, outcomes, price)
             return jnp.where(offered, _expected_after(node, plan, depth - 1) - now, 0.0)
 
         value, slope = jax.jvp(net, (lam,), (jnp.ones_like(lam),))
         follow_d = jnp.where(offered, -slope, 0.0)
-        return value + lam * follow_d, menu.exposure_d + follow_d
+        return value + lam * follow_d, menu.exposure_d + follow_d, offered
 
     star_index = jnp.arange(menu.mask.shape[0])
-    reward, cost_d = eqx.filter_vmap(one_star)(
+    reward, cost_d, offered = eqx.filter_vmap(one_star)(
         forecast, verdict, star, utility, menu, star_index
     )
-    return Frontier(reward, cost_d, _offered(menu, menu.detected))
+    return Frontier(reward, cost_d, offered)

@@ -10,7 +10,7 @@ member, with its Monte Carlo and tail diagnostics.
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float, Int, PyTree
+from jaxtyping import Array, Bool, Float, Int
 
 from spaceodyssey._numerics import EXACT, guarded_log, safe_ratio
 from spaceodyssey._standin.diagnostics import KHAT_MAX, kish_ess, mc_se, pareto_khat
@@ -127,39 +127,52 @@ def outcome_prob(b: Belief, cells: Float[Array, "A Y"]) -> Float[Array, "R Y"]:
     return jnp.matmul(weights(b), cells, precision=EXACT)
 
 
-def update_by_cell(
-    b: Belief,
-    model: AbstractObservationModel,
-    payload: PyTree,
-    cell_prob: Float[Array, " A"],
-    star,
-) -> Belief:
+def update_by_cell(b: Belief, cell_prob: Float[Array, " A"]) -> Belief:
     """The belief after an outcome falls in one cell, without a refit.
 
-    Each draw's weight is multiplied by its probability of the cell, the exact Bayes
-    update of the weights; the probability is the same model for every role (laws are
-    equal across roles), so it joins every row of ``log_like``. The draws are then
-    conditioned on the cell's payload (``cell_payloads``) through the model's
-    ``stats`` and ``finalize``, as a replay conditions them on a row, so a second
-    hypothetical reading of an uncertain gas block reads the block the first one left
-    (the conjugate update) and the two are not counted as independent given the draw.
-    The pool is left as it is.
+    Each draw's weight is multiplied by its probability of the cell. On point draws
+    (``x_var = 0``, as ``quadrature_draws`` leaves them) that is the exact Bayes
+    update: the cells of rows are independent given a point draw, and an outcome
+    changes nothing in the draw itself. The probability is the same model for every
+    role (laws are equal across roles), so it joins every row of ``log_like``. The
+    draws and the pool are left as they are.
 
     Args:
-        b: the belief.
-        model: the observation model of the outcome.
-        payload: the payload the cell stands for, one row's.
+        b: the belief, on point draws.
         cell_prob: probability of the cell under each draw, shape ``(A,)``, read off
             ``b``'s own draws.
-        star: a pytree of scalar leaves describing the star.
 
     Returns:
         The updated belief. A cell no draw of a role can give leaves that role's
         weights NaN (see ``weights``).
     """
-    atoms = model.finalize(model.stats(payload, b.atoms, star), b.atoms, star)[1]
-    log_like = b.log_like + guarded_log(cell_prob)
-    return eqx.tree_at(lambda x: (x.atoms, x.log_like), b, (atoms, log_like))
+    return eqx.tree_at(lambda x: x.log_like, b, b.log_like + guarded_log(cell_prob))
+
+
+def require_point_draws(b: Belief) -> Belief:
+    """``b``, checked to hold point draws: every gas variance zero.
+
+    A hypothetical outcome updates a belief by reweighting alone (``update_by_cell``),
+    which is exact on point draws only: on a draw whose gas block is a distribution, a
+    binned outcome would have to update the block too, and no single reading stands
+    for a bin. Split such a belief first (``quadrature_draws``). The check runs under
+    ``jit`` as well.
+
+    Args:
+        b: the belief.
+
+    Returns:
+        ``b`` unchanged.
+
+    Raises:
+        EquinoxRuntimeError: if a draw's gas block has a nonzero variance.
+    """
+    return eqx.error_if(
+        b,
+        jnp.any(b.atoms.x_var != 0),
+        "a planner reads point draws; split an uncertain gas block with "
+        "quadrature_draws first",
+    )
 
 
 def _bit(q_claim: Float[Array, "..."]) -> Float[Array, "... 2"]:
@@ -181,7 +194,8 @@ def claim_information(
     Row ``r`` is ``E_F[ln p_r(Z | Y) - ln p_r(Z)]``: ``Z`` the claim bit, ``Y`` the
     action's outcome cell, ``p_r`` the verdict's role ``r`` and the expectation over
     the forecast's joint distribution of the two. Each belief is updated by the cell
-    on its own draws (``update_by_cell``), weights and draws. Passing the forecast as
+    on its own draws (``update_by_cell``); both must hold point draws
+    (``require_point_draws``). Passing the forecast as
     the verdict gives the forecast's own expected information, the mutual information
     of ``Z`` and ``Y`` under the forecast (Lindley 1956); a verdict's gain as the
     forecast expects it equals that mutual information only when the two agree, and
@@ -208,9 +222,9 @@ def claim_information(
     """
     if claim.given != 0:
         raise ValueError("claim_information needs an unconditional claim")
+    forecast, verdict = require_point_draws(forecast), require_point_draws(verdict)
     cells_f = model.cells(forecast.atoms, action)  # (A_F, Y)
     cells_v = model.cells(verdict.atoms, action)  # (A_V, Y)
-    payloads = model.cell_payloads(forecast.atoms, action)  # leading Y
     p_cell = outcome_prob(forecast, cells_f)[0]  # (Y,), the forecast's
     seen = p_cell > 0
     # A cell the forecast cannot give is replaced by a harmless one: its gain is
@@ -219,11 +233,10 @@ def claim_information(
     safe_v = jnp.where(seen, cells_v, 1.0)
 
     def q_after(b, cells):
-        def one(payload, c):
-            after = update_by_cell(b, model, payload, c, star)
-            return q(after, claim, star, planet)
+        def one(c):
+            return q(update_by_cell(b, c), claim, star, planet)
 
-        return jax.vmap(one, in_axes=(0, 1))(payloads, cells)
+        return jax.vmap(one, in_axes=1)(cells)
 
     q_f, q_v = q_after(forecast, safe_f)[:, 0], q_after(verdict, safe_v)  # (Y,), (Y, R)
     score = jax.vmap(expected_log_score, in_axes=(0, None))

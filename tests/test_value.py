@@ -3,7 +3,6 @@ forms and the sign errors they catch.
 """
 
 import itertools
-from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -22,6 +21,7 @@ from spaceodyssey.belief import (
     pool_rate,
     q,
     replay,
+    weights,
 )
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.information import claim_information
@@ -29,7 +29,6 @@ from spaceodyssey.price import dispatch, solve_price
 from spaceodyssey.roles import Roles
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
 from spaceodyssey.types import (
-    AbstractObservationModel,
     Action,
     ObservationLog,
     Refit,
@@ -380,15 +379,15 @@ def test_a_frozen_forecast_plans_on_its_own_replay(toy):
     frozen = replay(refit, log, models, toy.star, jnp.asarray(0.0))
     now = replay(refit, log, models, toy.star, jnp.asarray(1.0))
     forecast, verdict = planning_beliefs(
-        frozen, now, roles, models, toy.star, toy.empty_pool(2, 1)
+        frozen, now, roles, models, toy.star, toy.empty_pool(2, 1), jnp.zeros(1)
     )
 
     claim = Claim((GasAbove(0, 0.0),))
     p_water = float(norm.cdf(0.8 / np.sqrt(0.2)))
-    assert_allclose(forecast.atoms.x_mean, 0.0)
-    assert_allclose(forecast.atoms.x_var, 1.0)
-    assert_allclose(verdict.atoms.x_mean, 0.8, rtol=1e-12)
-    assert_allclose(verdict.atoms.x_var, 0.2, rtol=1e-12)
+    for b, mean in ((forecast, 0.0), (verdict, 0.8)):  # split into point draws
+        assert_allclose(b.atoms.x_var, 0.0)
+        w = np.asarray(weights(b))[0]  # the mean to quadrature error; q below exact
+        assert_allclose(w @ np.asarray(b.atoms.x_mean)[:, 0, 0], mean, atol=5e-3)
     assert_allclose(q(forecast, claim, toy.star, PLANET), [0.5], rtol=1e-12)
     assert_allclose(q(verdict, claim, toy.star, PLANET), [p_water], rtol=1e-12)
     expected = 0.5 * np.log(1.0 - p_water) + 0.5 * np.log(p_water)
@@ -397,110 +396,122 @@ def test_a_frozen_forecast_plans_on_its_own_replay(toy):
     assert round(expected, 3) == -1.670
 
 
-class PointReading(AbstractObservationModel):
-    """The Gaussian gas reading of one planet's one gas, its outcomes three point
-    readings `READINGS` with quadrature weights `OMEGA`: cell j has probability
-    OMEGA[j] N(READINGS[j]; m, v + sigma^2) under a draw with block N(m, v). Its
-    payloads are those readings, read by the Gaussian model's conjugate `stats` and
-    `finalize`, so a hypothetical reading of an uncertain block is exact.
+def _utility_of_bit(q_bit):
+    """`LogScore` of one planet's claim bit when forecast and verdict agree."""
+    q_bit = np.clip(q_bit, 1e-300, 1.0 - 1e-16)
+    return q_bit * np.log(q_bit) + (1.0 - q_bit) * np.log1p(-q_bit)
+
+
+def _binned_reading_oracle(m, v, sigma, depth):
+    """Lookahead value of a binned gas reading (one edge at 0) of one draw whose gas
+    is N(m, v), under `LogScore` on x > 0, forecast = verdict, lam = 0: dense
+    quadrature over x (40,001 points over 12 sd), the bins of the readings independent
+    given x. Also the bound of `depth` continuous readings, the value of observing
+    them instead of their bins (data processing).
     """
+    sd = np.sqrt(v)
+    x = np.linspace(m - 12.0 * sd, m + 12.0 * sd, 40001)
+    p = np.asarray(norm.pdf(x, m, sd))
+    p, above = p / p.sum(), x > 0.0
+    below_edge = np.asarray(norm.cdf(-x / sigma))
+    bins = np.stack([below_edge, 1.0 - below_edge], axis=1)  # P(bin | x)
 
-    searches: ClassVar[bool] = False
-    gas: GaussianGasModel
+    def worth(w, k):
+        now = _utility_of_bit(np.sum(w * above) / np.sum(w))
+        if k == 0:
+            return now
+        later = sum(np.sum(w * b) / np.sum(w) * worth(w * b, k - 1) for b in bins.T)
+        return max(now, later)
 
-    def _sigma2(self, action):
-        return (2.5 / (self.gas.snr_one_day[0] * jnp.sqrt(action.exposure_d))) ** 2
-
-    def cells(self, atoms, action):
-        mean, var = atoms.x_mean[:, 0, 0], atoms.x_var[:, 0, 0]
-        sd = jnp.sqrt(var + self._sigma2(action))[:, None]
-        return OMEGA * norm.pdf(READINGS, mean[:, None], sd)
-
-    def cell_payloads(self, atoms, action):
-        snr = self.gas.snr_one_day[0] * jnp.sqrt(action.exposure_d)
-        return {"snr": jnp.full((3, 1, 1), snr), "reading": READINGS[:, None, None]}
-
-    def stats(self, payload, atoms, star):
-        return self.gas.stats(payload, atoms, star)
-
-    def finalize(self, stats, atoms, star):
-        return self.gas.finalize(stats, atoms, star)
-
-    def sample(self, key, atoms, action):
-        raise NotImplementedError("read only through its cells")
-
-
-READINGS = jnp.array([-1.0, 0.0, 1.0])
-OMEGA = jnp.array([0.25, 0.5, 0.25])
+    exact = sum(np.sum(p * b) * worth(p * b, depth - 1) for b in bins.T)
+    exact -= _utility_of_bit(np.sum(p * above))
+    s2 = sigma**2 / depth  # `depth` readings: their mean, noise variance s2
+    sy = np.sqrt(v + s2)
+    y = np.linspace(m - 12.0 * sy, m + 12.0 * sy, 40001)
+    py = np.asarray(norm.pdf(y, m, sy))
+    post = m + v / (v + s2) * (y - m), v * s2 / (v + s2)
+    q_y = np.asarray(norm.cdf(post[0] / np.sqrt(post[1])))
+    bound = np.sum(py * _utility_of_bit(q_y)) / np.sum(py)
+    bound -= _utility_of_bit(float(norm.cdf(m / sd)))
+    return exact, bound
 
 
-def test_two_readings_of_an_uncertain_gas_use_the_joint(toy):
-    """Two hypothetical readings of one uncertain gas are valued from their joint
-    distribution, not as two independent readings given the draw.
+# The gas-reading stars: (prior mean, prior variance, replay time, exposure). A reading
+# y = 1 at S/N 5 released at day 1 turns N(0, 1) into N(0.8, 0.2); an exposure of 0.16
+# days reads at S/N 2.
+GAS_STARS = ((0.0, 1.0, 0.0, 1.0), (0.0, 1.0, 1.0, 1.0), (0.3, 0.1, 0.0, 1.0),
+             (0.0, 1.0, 1.0, 0.16))  # fmt: skip
+GAS_BLOCKS = ((0.0, 1.0), (0.8, 0.2), (0.3, 0.1), (0.8, 0.2))
 
-    Two draws of one planet, weights 0.6 and 0.4, water blocks N(0.3, 1) and
-    N(-0.5, 0.5); one point-reading entry at S/N 5 (sigma = 0.5); forecast and verdict
-    agree; `LogScore` on the count of water planets; depth 2 at lam = 0. The value is
-    computed here from the joint of the two readings given each draw, the bivariate
-    normal with variance v + sigma^2 and covariance v, and the conjugate posterior of
-    both readings (precision 1 / v + 2 / sigma^2): sum_i p_i max(U_i,
-    sum_j p_(j|i) U_ij) - U_0. Treating the readings as independent given the draw
-    (the second reading's cells off the prior block) gives another value.
 
-    Fails if a hypothetical reading reweights the draws without updating the block
-    (the conjugate update), so that the second reading is read off the prior block.
+@eqx.filter_jit
+@eqx.filter_vmap(in_axes=(0, None, 0, None, None))
+def _gas_planning_beliefs(refit, log, time_d, roles, pool):
+    models = (GaussianGasModel(snr_one_day=[5.0]),)
+    now = replay(refit, log, models, (), time_d)
+    return planning_beliefs(now, now, roles, models, (), pool, jnp.zeros(1))
+
+
+def test_a_binned_gas_reading_is_valued_exactly(toy):
+    """The frontier's value of a binned reading of an uncertain gas matches a dense
+    quadrature over the abundance, at depth 1 and 2, and never exceeds the value of
+    the continuous reading.
+
+    Four one-draw stars, built through `replay` and `planning_beliefs` (16 sub-draws per
+    draw): water N(0, 1); N(0.8, 0.2) after a reading y = 1 at S/N 5; a narrow
+    N(0.3, 0.1); and N(0.8, 0.2) read at S/N 2. One `GaussianGasModel` entry, one edge
+    at the floor; `LogScore` on the count of water planets, forecast = verdict,
+    lam = 0. The oracle (`_binned_reading_oracle`) at the prior, depth 1, is the
+    closed form U(q) - ln 0.5 with q = 2 P(x > 0, y > 0) = 1/2 + arcsin(1 /
+    sqrt(1.25)) / pi = 0.8524: 0.2747 (0.3778 at depth 2), against a continuous bound
+    of 0.3733; the others are 0.0293, 0.0462 and 0.0068 at depth 1.
+
+    Fails if a hypothetical bin conditions the block on one representative reading
+    instead of splitting it (the value then runs +46 to +187 percent above the oracle at
+    S/N 5, above the continuous bound, and -97 percent at S/N 2), if the split is
+    skipped (an uncertain block is refused, and reweighting it alone values it near
+    zero), or if the split moves mass across the floor.
     """
-    sigma2 = 0.25
-    w0 = np.array([0.6, 0.4])
-    m, v = np.array([0.3, -0.5]), np.array([1.0, 0.5])
-    y, omega = np.asarray(READINGS), np.asarray(OMEGA)
-    atoms = toy.atoms([[1.0], [1.0]], [[1.0], [1.0]], w0, m[:, None], v[:, None], 1)
-    b = toy.belief(atoms, n_roles=2)
-    claim = Claim((GasAbove(0, 0.0),))
-
-    def utility(w, mean, var):
-        q_water = np.sum(w * norm.cdf(mean / np.sqrt(var))) / np.sum(w)
-        return q_water * np.log(q_water) + (1 - q_water) * np.log(1 - q_water)
-
-    def posterior(readings):
-        precision = 1.0 / v + len(readings) / sigma2
-        mean = (m / v + sum(readings) / sigma2) / precision
-        return mean, 1.0 / precision
-
-    def one(y_i):  # density of one reading given each draw
-        return norm.pdf(y_i, m, np.sqrt(v + sigma2))
-
-    def two(y_i, y_j):  # joint density of two readings given each draw
-        cov = np.stack([[v + sigma2, v], [v, v + sigma2]])  # (2, 2, A)
-        det = cov[0, 0] * cov[1, 1] - cov[0, 1] ** 2
-        d_i, d_j = y_i - m, y_j - m
-        quad = (
-            cov[1, 1] * d_i**2 - 2 * cov[0, 1] * d_i * d_j + cov[0, 0] * d_j**2
-        ) / det
-        return np.exp(-0.5 * quad) / (2 * np.pi * np.sqrt(det))
-
-    def value(joint):
-        total = 0.0
-        for i in range(3):
-            w1 = w0 * omega[i] * one(y[i])
-            later = sum(
-                np.sum(w0 * omega[i] * omega[j] * joint(y[i], y[j]))
-                / np.sum(w1)
-                * utility(w0 * joint(y[i], y[j]), *posterior([y[i], y[j]]))
-                for j in range(3)
+    log_of = jnp.zeros(2, int), jnp.zeros(2)
+    payload = {"snr": jnp.full((2, 1, 1), 5.0), "reading": jnp.ones((2, 1, 1))}
+    rows = Row(
+        log_of[0], log_of[0], log_of[1], log_of[1] + 1.0, log_of[1],
+        jnp.array([1.0, 0.0]), log_of[0], log_of[0], (payload,),
+    )  # fmt: skip
+    log = ObservationLog(rows, 1)
+    refits = toy.stack(
+        *[
+            Refit(
+                toy.atoms([[1.0]], [[1.0]], [1.0], m, v, n_gas=1), jnp.zeros(2, bool), 0
             )
-            total += np.sum(w1) * max(utility(w1, *posterior([y[i]])), later)
-        return total - utility(w0, m, v)
-
-    exact = value(two)
-    apart = value(lambda y_i, y_j: one(y_i) * one(y_j))
-    assert abs(exact - apart) > 1e-3  # the fixture sees the difference
-
-    models, menu = (PointReading(GaussianGasModel(snr_one_day=[5.0])),), LOOK
-    f = _frontier_of(
-        toy.split(toy.stack(b)), claim, toy.star, LogScore(1), models, menu, 2
+            for m, v, _, _ in GAS_STARS
+        ]
     )
-    assert_allclose(f.reward[0, 0], exact, rtol=1e-10)
+    prior = toy.GasPrior("toy", n_gas=1)
+    times = jnp.asarray([t for _, _, t, _ in GAS_STARS])
+    beliefs = _gas_planning_beliefs(
+        refits, log, times, Roles(prior, toy.stack(prior)), toy.empty_pool(2, 1)
+    )
+    claim = Claim((GasAbove(0, 0.0),))
+    models = (GaussianGasModel(snr_one_day=[5.0]),)
+    exposure_d = np.array([[e] for _, _, _, e in GAS_STARS])
+    menu = _menu(exposure_d, (0,))
+    sigma = 2.5 / (5.0 * np.sqrt(exposure_d[:, 0]))
+
+    q_bit = 0.5 + np.arcsin(1.0 / np.sqrt(1.25)) / np.pi
+    closed = _utility_of_bit(q_bit) - np.log(0.5)
+    for depth, rounded in ((1, [0.2747, 0.0293, 0.0462, 0.0068]), (2, [0.3778])):
+        f = _frontier_of(beliefs, claim, toy.star, LogScore(1), models, menu, depth)
+        oracle = [
+            _binned_reading_oracle(m, v, s, depth)
+            for (m, v), s in zip(GAS_BLOCKS, sigma, strict=True)
+        ]
+        exact, bound = np.asarray(oracle).T
+        assert np.round(exact[: len(rounded)], 4).tolist() == rounded
+        assert_allclose(f.reward[:, 0], exact, rtol=0.01)
+        assert np.all(np.asarray(f.reward[:, 0]) <= bound)
+    assert_allclose(_binned_reading_oracle(0.0, 1.0, 0.5, 1)[0], closed, rtol=1e-5)
+    assert round(float(_binned_reading_oracle(0.0, 1.0, 0.5, 1)[1]), 4) == 0.3733
 
 
 def test_a_spectrum_waits_for_a_detection(toy):

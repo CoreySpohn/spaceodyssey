@@ -23,6 +23,7 @@ from spaceodyssey.belief import (
     planning_beliefs,
     pool_rate,
     q,
+    quadrature_draws,
     replay,
     replay_belief,
     role_belief,
@@ -133,8 +134,12 @@ def _cases(toy):
     cells = [model.cells(b.atoms, a) for b, a in zip((b0, b1), actions, strict=True)]
     detect = (jnp.array([0.3, 0.9, 0.1]), jnp.array([0.6, 0.2, 0.5]))
 
-    def cell_payload(b, action, cell):
-        return jax.tree.map(lambda x: x[cell], model.cell_payloads(b.atoms, action))
+    # The planner reads point draws: the frontier, the cell update and the claim-bit
+    # information run on the blocks' means, and the split is its own case.
+    point = [
+        eqx.tree_at(lambda b: b.atoms.x_var, b, 0.0 * b.atoms.x_var) for b in (b0, b1)
+    ]
+    floor = jnp.zeros(1)
 
     # Replays: two logs of one structure, a gas row per slot, released over time.
     gas = (model,)
@@ -219,7 +224,7 @@ def _cases(toy):
         ),
         "planning_beliefs": (
             lambda frozen, now: planning_beliefs(
-                frozen, now, roles, gas, star, b0.pool
+                frozen, now, roles, gas, star, b0.pool, floor, 4
             ),
             [(early[0], full[0]), (early[1], full[1])],
             lambda a: a[1].stats[0]["weighted_sum"],
@@ -234,11 +239,17 @@ def _cases(toy):
             None,
             None,
         ),
+        "quadrature_draws": (
+            lambda b: quadrature_draws(b, floor, 4),
+            [(b0,), (b1,)],
+            lambda a: a[0].atoms.x_mean,
+            belief_scalar,
+        ),
         "frontier": (
             value,
             [
-                (toy.stack(b0), Count(toy.stack(b0.pool)), menus[0]),
-                (toy.stack(b1), Count(toy.stack(b1.pool)), menus[1]),
+                (toy.stack(point[0]), Count(toy.stack(b0.pool)), menus[0]),
+                (toy.stack(point[1]), Count(toy.stack(b1.pool)), menus[1]),
             ],
             lambda a: a[2].exposure_d,
             lambda f: uneven(f.reward),
@@ -338,17 +349,17 @@ def _cases(toy):
             uneven,
         ),
         "update_by_cell": (
-            lambda b, payload, c: update_by_cell(b, model, payload, c, star),
-            [
-                (b0, cell_payload(b0, actions[0], 1), cells[0][:, 1]),
-                (b1, cell_payload(b1, actions[1], 2), cells[1][:, 2]),
-            ],
-            lambda a: a[1]["reading"],
+            update_by_cell,
+            [(point[0], cells[0][:, 1]), (point[1], cells[1][:, 2])],
+            lambda a: a[1],
             belief_scalar,
         ),
         "claim_information": (
             lambda b, m, a, k: claim_information(*toy.split(b), m, a, claim, star, k),
-            [(b0, model, actions[0], planets[0]), (b1, model, actions[1], planets[1])],
+            [
+                (point[0], model, actions[0], planets[0]),
+                (point[1], model, actions[1], planets[1]),
+            ],
             lambda a: a[0].log_prior,
             uneven,
         ),
@@ -397,6 +408,7 @@ CASES = [
     "absorb",
     "replay_belief",
     "planning_beliefs",
+    "quadrature_draws",
     "step",
     "frontier",
 ]
