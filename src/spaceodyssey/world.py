@@ -113,7 +113,8 @@ class SealedWorld(eqx.Module):
 
         Args:
             grant: the grant.
-            models: the model table of the run, static; ``grant.model`` indexes it.
+            models: the model table of the run, static; ``grant.model_slot`` indexes
+                it.
             key: the run key.
 
         Returns:
@@ -124,10 +125,10 @@ class SealedWorld(eqx.Module):
         Raises:
             ValueError: if a model slot of the grant is not in ``models``.
         """
-        if any(not 0 <= s < len(models) for s in grant.model):
+        if any(not 0 <= s < len(models) for s in grant.model_slot):
             raise ValueError("a grant's model slot is not in the model table")
         actions = grant.actions
-        n_row = len(grant.model)
+        n_row = len(grant.model_slot)
         keys = jax.vmap(row_key, in_axes=(None, 0, 0))(
             key, actions.star, jnp.arange(n_row)
         )
@@ -140,7 +141,9 @@ class SealedWorld(eqx.Module):
             buffer = jax.tree.map(
                 lambda x: jnp.zeros((n_row, *x.shape), x.dtype), shapes
             )
-            rows = jnp.asarray([i for i, s in enumerate(grant.model) if s == slot], int)
+            rows = jnp.asarray(
+                [i for i, s in enumerate(grant.model_slot) if s == slot], int
+            )
             if rows.size:
                 these = jax.tree.map(lambda leaf, rows=rows: leaf[rows], actions)
                 drawn = jax.vmap(self.observe, in_axes=(None, 0, 0))(

@@ -181,7 +181,7 @@ def _grant():
     """Three granted rows: star 1 in model slot 1, then stars 0 and 1 in slot 0."""
     actions = Action(kind=[0, 0, 0], star=[1, 0, 1], mode=[2, 0, 0], exposure_d=1.0)
     actions = eqx.tree_at(lambda a: a.exposure_d, actions, jnp.array([4.0, 1.0, 2.0]))
-    return Grant(actions, model=(1, 0, 0))
+    return Grant(actions, model_slot=(1, 0, 0))
 
 
 MODELS = (
@@ -213,8 +213,8 @@ def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
     assert_allclose(revealed.exposure_d, [4.0, 1.0, 2.0])
     assert_allclose(revealed.star, [1, 0, 1])
     assert_allclose(revealed.mode, [2, 0, 0])
-    assert_allclose(revealed.model, [1, 0, 0])
-    for i, slot in enumerate(grant.model):
+    assert_allclose(revealed.model_slot, [1, 0, 0])
+    for i, slot in enumerate(grant.model_slot):
         action = jax.tree.map(lambda leaf, i=i: leaf[i], grant.actions)
         key = row_key(KEY, action.star, i)
         expected = world.observe(MODELS[slot], action, key)
@@ -249,7 +249,7 @@ def test_reveal_differs_between_worlds(toy):
     for slot in (0, 1):
         assert _differ(payload_a[slot], payload_b[slot])
     no_int = jnp.zeros(0, int)
-    empty = Grant(Action(no_int, no_int, no_int, jnp.zeros(0)), model=())
+    empty = Grant(Action(no_int, no_int, no_int, jnp.zeros(0)), model_slot=())
     none = grant_rows(empty, a.reveal(empty, MODELS, KEY))
     assert none.star.shape == (0,)
     assert {k: v.shape for k, v in none.payload[0].items()} == {

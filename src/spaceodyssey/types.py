@@ -137,9 +137,10 @@ class Row(eqx.Module):
         charged_d: time charged against the budget in days.
         release_d: time at which the row is released, in days.
         refusal: refusal code, zero for an accepted row.
-        model: index of the model that inverts the payload.
+        model_slot: index into the run's model table of the model that inverts the
+            payload.
         payload: one payload per model, each a dict of named arrays, zero-padded; only
-            the payload of ``model`` is meaningful.
+            the payload in ``model_slot`` is meaningful.
     """
 
     star: Int[Array, ""] = eqx.field(converter=jnp.asarray)
@@ -149,7 +150,7 @@ class Row(eqx.Module):
     charged_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
     release_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
     refusal: Int[Array, ""] = eqx.field(converter=jnp.asarray)
-    model: Int[Array, ""] = eqx.field(converter=jnp.asarray)
+    model_slot: Int[Array, ""] = eqx.field(converter=jnp.asarray)
     payload: tuple[PyTree, ...] = eqx.field(
         converter=lambda p: tuple(_asarrays(x) for x in p)
     )
@@ -205,17 +206,17 @@ class Grant(eqx.Module):
     Attributes:
         actions: an ``Action`` whose leaves have a leading axis over the granted rows;
             each gives the star, the mode and the exposure that sets the S/N.
-        model: the model slot of each granted row, static, one entry per row.
+        model_slot: the model slot of each granted row, static, one entry per row.
     """
 
     actions: Action
-    model: tuple[int, ...] = eqx.field(
+    model_slot: tuple[int, ...] = eqx.field(
         static=True, converter=lambda s: tuple(int(i) for i in s)
     )
 
     def __check_init__(self):
         """Check that every granted row has one model slot."""
-        if jnp.shape(self.actions.star) != (len(self.model),):
+        if jnp.shape(self.actions.star) != (len(self.model_slot),):
             raise ValueError("a grant has one model slot per granted action")
 
 
@@ -243,7 +244,9 @@ def grant_rows(grant: Grant, payload: tuple[PyTree, ...]) -> Row:
         charged_d=zero_d,
         release_d=zero_d,
         refusal=zero_i,
-        model=jnp.asarray(grant.model, dtype=zero_i.dtype).reshape(zero_i.shape),
+        model_slot=jnp.asarray(grant.model_slot, dtype=zero_i.dtype).reshape(
+            zero_i.shape
+        ),
         payload=payload,
     )
 
