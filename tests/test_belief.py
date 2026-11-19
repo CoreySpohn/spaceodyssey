@@ -9,9 +9,11 @@ from jax.test_util import check_grads
 from jaxtyping import TypeCheckError
 from numpy.testing import assert_allclose, assert_array_max_ulp
 
-from spaceodyssey.belief import Belief, count_pmf
+from spaceodyssey.belief import Belief, count_pmf, pool_rate, role_pool
 from spaceodyssey.claim import AbstractConjunct, Claim, GasAbove
 from spaceodyssey.information import log_score
+from spaceodyssey.roles import Roles
+from spaceodyssey.toy import InHz, ToyPrior, point_atoms
 from spaceodyssey.types import Pool
 
 PLANET = jnp.asarray(0)
@@ -309,18 +311,6 @@ def test_annotations_are_checked_and_boolean_conjuncts_count(toy, typecheck):
     assert_allclose(pmf, [[0.0, 1.0]], atol=0.0)
 
 
-def test_count_pmf_rejects_a_conditional_claim(toy):
-    """A conditional claim has no count distribution.
-
-    Fails if count_pmf silently ignores `given`.
-    """
-    atoms = toy.atoms([[1.0]], [[1.0]], [1.0])
-    with pytest.raises(ValueError, match="unconditional"):
-        toy.jit.count_pmf(
-            toy.belief(atoms), Claim((toy.InHz(), toy.InSize()), given=1), toy.star, 2
-        )
-
-
 POOL_WEIGHTS = jnp.array([[0.5, 0.5], [0.2, 0.8]])
 
 
@@ -431,3 +421,51 @@ def test_pool_tail_is_accurate_in_float32(toy):
     assert_allclose(pmf64[0, 3], 1.6654e-10, rtol=1e-4)
     assert_allclose(pmf32, pmf64, rtol=1e-5, atol=1e-7)
     assert_allclose(pmf32[0, 3], pmf64[0, 3], rtol=1e-5)
+
+
+def test_a_pool_weighs_its_marks_under_each_role_through_the_gate():
+    """`role_pool` fills each role's prior ratio of the marks as a belief's draws get
+    theirs, through the same gate.
+
+    Four marks, in the HZ or not (1, 0, 1, 0), on a toy prior with P(HZ) = 0.5; the
+    forecast is that prior and the one member puts P(HZ) = 0.8. The forecast's ratios
+    are zero and the member's log(0.8 / 0.5) and log(0.2 / 0.5), so its mark weights
+    are (0.4, 0.1, 0.4, 0.1) and its claim-true (HZ) rate 0.8 of the mass. Their Kish
+    size is 1 / (2 (0.16 + 0.01)) = 2.94: a gate of 3 refuses the member's row (NaN,
+    and a NaN rate) and keeps the forecast's (size 4), unless the member's pool is
+    empty (mass zero, never refused, rate zero). An infinite `max_khat` turns the
+    Pareto check off, traced as well as static: four marks are too few for a Pareto
+    fit, whose NaN would refuse every row.
+
+    Fails if a mark's ratio has the wrong sign or role, if the gate is not applied to
+    the pool, refuses an empty pool, or reads a traced infinite `max_khat` as a bound.
+    """
+
+    def prior(hz_scale):
+        return ToyPrior("toy", [1.0], hz_scale, 0.5, 0.0, 1.0, n_gas=1)
+
+    star = {"p_hz": jnp.asarray(0.5)}
+    hz = jnp.array([1.0, 0.0, 1.0, 0.0])[:, None]
+    exists = jnp.ones((4, 1), bool)
+    marks = point_atoms(hz, 0.0 * hz, jnp.zeros((4, 1, 1)), exists, prior(1.0))
+    roles = Roles(prior(1.0), jax.tree.map(lambda x: jnp.stack([x]), prior(1.6)))
+    claim, flat = Claim((InHz(),)), jnp.zeros((2, 4))
+
+    def pool(log_mass, **gate):
+        return role_pool(marks, roles, flat, jnp.asarray(log_mass), star, **gate)
+
+    ungated = pool([0.0, 0.0], min_n_eff=0.0, max_khat=float("inf"))
+    expected = np.log([[1.0] * 4, [1.6, 0.4, 1.6, 0.4]])
+    assert_allclose(ungated.log_prior_ratio, expected, atol=1e-15)
+    assert_allclose(pool_rate(ungated, claim, star), [0.5, 0.8], rtol=1e-12)
+    traced = pool([0.0, 0.0], min_n_eff=0.0, max_khat=jnp.asarray(np.inf))
+    assert_allclose(traced.log_prior_ratio, expected, atol=1e-15)
+
+    gated = pool([0.0, 0.0], min_n_eff=3.0, max_khat=jnp.asarray(np.inf))
+    assert_allclose(gated.log_prior_ratio[0], 0.0)
+    assert np.all(np.isnan(gated.log_prior_ratio[1]))
+    rate = pool_rate(gated, claim, star)
+    assert rate[0] == 0.5 and np.isnan(rate[1])
+    empty = pool([0.0, -np.inf], min_n_eff=3.0, max_khat=jnp.asarray(np.inf))
+    assert_allclose(empty.log_prior_ratio, expected, atol=1e-15)
+    assert_allclose(pool_rate(empty, claim, star), [0.5, 0.0])

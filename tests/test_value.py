@@ -3,6 +3,7 @@ forms and the sign errors they catch.
 """
 
 import itertools
+import math
 
 import equinox as eqx
 import jax
@@ -26,7 +27,7 @@ from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.information import cell_probs, outcome_cells, update_by_cell
 from spaceodyssey.price import dispatch, solve_price
 from spaceodyssey.roles import Roles
-from spaceodyssey.toy import GaussianGasModel, StepReportModel
+from spaceodyssey.toy import DetectionModel, GaussianGasModel, StepReportModel
 from spaceodyssey.types import (
     Action,
     Atoms,
@@ -617,7 +618,7 @@ def test_a_model_without_gas_cells_cannot_read_a_belief_on_nodes(toy):
     on_nodes = toy.jit.quadrature_draws(gauss, claim, 4)
     with pytest.raises(eqx.EquinoxRuntimeError, match="without gas_cells"):
         cells(on_nodes, reader, action)
-    search = toy.Search(hit=0.6, other=0.1)
+    search = DetectionModel(0.6, 0.1)
     assert_allclose(
         cells(on_nodes, search, action).draw, cells(point, search, action).draw
     )
@@ -793,7 +794,7 @@ def test_a_spectrum_waits_for_a_detection(toy):
     atoms = toy.atoms(hz, hz, np.ones(4), water, 0.0, n_gas=1, exists=exists)
     beliefs = toy.split(toy.stack(toy.belief(atoms, n_roles=2)))
     claim = Claim((toy.InHz(), GasAbove(0, 0.0)))
-    models = (toy.Search(hit=1.0, other=1.0), StepReportModel(snr_one_day=[6.0]))
+    models = (DetectionModel(1.0, 1.0), StepReportModel(snr_one_day=[6.0]))
 
     def entropy(q):
         return q * np.log(q) + (1 - q) * np.log(1 - q)
@@ -824,7 +825,7 @@ def _search(toy):
     """Test 5's search: it detects a planet in the HZ with probability 0.8 and any
     other with 0.2, in one day.
     """
-    return toy.Search(hit=0.8, other=0.2)
+    return DetectionModel(0.8, 0.2)
 
 
 def _search_belief(toy, pool):
@@ -1149,3 +1150,101 @@ def test_cells_reward_matches_nested_monte_carlo(toy):
     score = np.log(p_after) - np.log(p_before)
     se = score.std() / np.sqrt(n)
     assert abs(score.mean() - exact) < 3.0 * se
+
+
+def _brute_pair_pmf(c, z, w, lam_f, lam_n, n_max):
+    """The joint of (F, N) by enumeration: every planet state of every draw, mixed by
+    the weights `w` (R, A), and the pool's two Poisson counts summed term by term.
+
+    `c` and `z` (A, K) are each planet's probability of the condition and of the
+    claim; each count is lumped at `n_max`.
+    """
+    n_draw, n_planet = c.shape
+    cap = lambda x: min(x, n_max)  # noqa: E731
+    per_draw = np.zeros((n_draw, n_max + 1, n_max + 1))
+    for a in range(n_draw):
+        for states in itertools.product(range(3), repeat=n_planet):
+            p = np.prod(
+                [
+                    (1 - c[a, k], c[a, k] - z[a, k], z[a, k])[s]
+                    for k, s in enumerate(states)
+                ]
+            )
+            per_draw[a, states.count(1), states.count(2)] += p
+    mixed = np.einsum("ra,afn->rfn", w, per_draw)
+    out = np.zeros_like(mixed)
+    pois = lambda lam, k: np.exp(-lam) * lam**k / math.factorial(k)  # noqa: E731
+    for r in range(w.shape[0]):
+        bins, terms = range(n_max + 1), range(40)
+        for f1, n1, f2, n2 in itertools.product(bins, bins, terms, terms):
+            p = mixed[r, f1, n1] * pois(lam_f[r], f2) * pois(lam_n[r], n2)
+            out[r, cap(f1 + f2), cap(n1 + n2)] += p
+    return out
+
+
+def test_a_conditional_claim_counts_true_planets_given_the_admitted_ones(toy):
+    """A conditional claim (HZ given, then Earth size) plans on the joint of `F`, the
+    planets that meet the condition and fail the claim, and `N`, the claim-true ones,
+    and `LogScore` scores `N` given `M = F + N`.
+
+    Three draws of two planets with fractional bits (each planet's probability of the
+    condition c = hz and of the claim z = hz * size), two roles weighing the draws
+    differently, and a pool of mass 0.7 on two marks. `count_pmf` equals the joint by
+    enumeration of every planet state and the pool's two Poisson counts (independent:
+    a Poisson process marked by the claim), and `pool_rate` is the pool's claim-true
+    rate; `LogScore` equals `sum P_F(f, n) ln P_V(n | f + n)` from the enumerated
+    joints. Learning only the condition earns nothing: on one planet with
+    P(hz) = 0.6 and P(size | hz) = 0.7, a search that finds the planet exactly when it
+    is in the HZ is worth 0 under the conditional claim at depth 1 (before it
+    -0.6 h(0.7), after it -h(0.7) with probability 0.6 and 0 otherwise), and
+    h(0.42) - 0.6 h(0.7) = 0.314 under the unconditional one.
+
+    Fails if the conditional count ignores the condition (counts the claim alone),
+    counts F as all planets failing the claim, treats the pool's two counts as one, or
+    if `LogScore` scores the joint (it would pay for learning the condition).
+    """
+    hz = np.array([[0.9, 0.3], [0.5, 0.0], [1.0, 0.6]])
+    size = np.array([[0.7, 0.4], [0.2, 0.8], [0.5, 0.5]])
+    atoms = toy.atoms(hz, size, np.ones(3), 0.0, 0.0, n_gas=1)
+    pool = toy.pool([0.8, 0.3], [[0.6, 0.4], [0.3, 0.7]], np.log(0.7), n_roles=2)
+    pool = eqx.tree_at(
+        lambda p: p.marks.cloud.samples["size"], pool, jnp.array([[0.5], [0.9]])
+    )
+    log_prior = np.log(np.array([[0.2, 0.5, 0.3], [0.6, 0.1, 0.3]]))
+    b = Belief(atoms, log_prior, np.zeros((2, 3)), pool)
+    claim = Claim((toy.InHz(), toy.InSize()), given=1)
+    n_max = 3
+
+    w = np.exp(log_prior) / np.exp(log_prior).sum(-1, keepdims=True)
+    marks_w = np.array([[0.6, 0.4], [0.3, 0.7]])
+    c_bar = marks_w @ np.array([0.8, 0.3])
+    z_bar = marks_w @ np.array([0.8 * 0.5, 0.3 * 0.9])
+    lam_f, lam_n = 0.7 * (c_bar - z_bar), 0.7 * z_bar
+    expected = _brute_pair_pmf(hz, hz * size, w, lam_f, lam_n, n_max)
+    got = toy.jit.count_pmf(b, claim, toy.star, n_max)
+    assert_allclose(got, expected, rtol=1e-10, atol=1e-14)
+    assert_allclose(toy.jit.pool_rate(pool, claim, toy.star), lam_n, rtol=1e-12)
+
+    total = np.add.outer(np.arange(n_max + 1), np.arange(n_max + 1))
+    by_total = np.array([[expected[1][total == m].sum()] for m in range(2 * n_max + 1)])
+    given_m = expected[1] / by_total[total, 0]
+    score = np.sum(expected[0] * np.log(given_m))
+    forecast, verdict = toy.split(b)
+    assert_allclose(
+        LogScore(n_max)(forecast, verdict, claim, toy.star), score, rtol=1e-10
+    )
+
+    def h(p):
+        return -(p * np.log(p) + (1 - p) * np.log(1 - p))
+
+    hz1, size1, w1 = [[1.0], [1.0], [0.0]], [[1.0], [0.0], [0.0]], [0.42, 0.18, 0.4]
+    one = toy.atoms(hz1, size1, w1, 0.0, 0.0)
+    reveal = (DetectionModel(1.0, 0.0),)
+    beliefs = toy.split(toy.stack(toy.belief(one, n_roles=2)))
+    look = _menu([[1.0]], (0,))
+    rewards = [
+        _frontier_of(beliefs, c, toy.star, LogScore(1), reveal, look, 1).reward[0, 0]
+        for c in (claim, Claim(claim.conjuncts))
+    ]
+    assert_allclose(rewards[0], 0.0, atol=1e-12)
+    assert_allclose(rewards[1], h(0.42) - 0.6 * h(0.7), rtol=1e-10)

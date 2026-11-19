@@ -17,6 +17,7 @@ from spaceodyssey.policy import AbstractPolicy, public_view
 from spaceodyssey.types import (
     ACCEPTED,
     OVER_BUDGET,
+    WAITED,
     AbstractObservationModel,
     Action,
     Grant,
@@ -102,10 +103,13 @@ def step(
 
     The row starts on the calendar at the later of the action's ``not_before_d`` and
     the time the instrument is next free (``clock_d``), so waiting costs no budget. An
-    action whose exposure fits the budget left (the budget less ``spent_d``) is
-    accepted: it is charged its exposure, its payload is drawn
-    by the world under the model of its mode with ``row_key(key, star, count)``, and
-    it is released ``mode.latency_d`` after its exposure ends. One that does not fit is
+    action of zero exposure is a wait (``WAITED``): the instrument idles until its
+    start, which moves the clock; it is charged nothing, carries no payload and is
+    released at its start, so no replay applies it. Any other action whose exposure
+    fits the budget left (the budget less ``spent_d``) is accepted: it is charged its
+    exposure, its payload is drawn by the world under the model of its mode with
+    ``row_key(key, star, count)``, and it is released ``mode.latency_d`` after its
+    exposure ends. One that does not fit is
     refused (``OVER_BUDGET``): charged nothing, its payload zeros. A refused row still
     starts on the calendar, so a refused row that asked to wait moves the clock to its
     requested start: the refusal is a budget verdict made at that start, and waiting
@@ -133,7 +137,8 @@ def step(
         log.count, log.count >= log.rows.star.shape[0], "the log is full"
     )
     time_d = jnp.maximum(action.not_before_d, clock_d(log))
-    accepted = action.exposure_d <= resources.budget_d - spent_d(log)
+    waited = action.exposure_d <= 0.0
+    accepted = ~waited & (action.exposure_d <= resources.budget_d - spent_d(log))
     drawn = world.observe(
         row_key(key, action.star, index), models[mode.model_slot], action
     )
@@ -151,7 +156,7 @@ def step(
         exposure_d=action.exposure_d,
         charged_d=charged_d,
         release_d=time_d + charged_d + jnp.where(accepted, mode.latency_d, 0.0),
-        refusal=jnp.where(accepted, ACCEPTED, OVER_BUDGET),
+        refusal=jnp.where(waited, WAITED, jnp.where(accepted, ACCEPTED, OVER_BUDGET)),
         model_slot=mode.model_slot,
         payload=buffers,
     )

@@ -1,7 +1,8 @@
 """Every public function of `belief` and `information`, the replay and the planner's
-two beliefs, the pool functions, `frontier` of `value` and the survey `step`, under
-`jax.jit`, `jax.vmap` over a leading world axis, and `jax.grad` where it is
-differentiable (forward mode only for `absorb`).
+two beliefs, the pool functions (their roles, thinning and replay), the stage a
+star's rows reached, `frontier` of `value` and the survey `step`, under `jax.jit`,
+`jax.vmap` over a leading world axis, and `jax.grad` where it is differentiable
+(forward mode only for `absorb`).
 """
 
 import equinox as eqx
@@ -27,6 +28,7 @@ from spaceodyssey.belief import (
     replay,
     replay_belief,
     role_belief,
+    role_pool,
     weights,
 )
 from spaceodyssey.claim import Claim, GasAbove
@@ -50,9 +52,17 @@ from spaceodyssey.information import (
 )
 from spaceodyssey.log import step
 from spaceodyssey.roles import AbstractRolePrior, Roles
-from spaceodyssey.toy import GaussianGasModel
+from spaceodyssey.toy import DetectionModel, GaussianGasModel
 from spaceodyssey.types import Action, ObservationLog, Refit, Row
-from spaceodyssey.value import Count, Menu, completeness, frontier, thin
+from spaceodyssey.value import (
+    Count,
+    Menu,
+    completeness,
+    frontier,
+    reached_stage,
+    replay_pool,
+    thin,
+)
 from spaceodyssey.world import SealedWorld
 
 N_ROLES, N_DRAWS, N_PLANETS = 3, 6, 2
@@ -197,7 +207,7 @@ def _cases(toy):
         return uneven(c.draw) + uneven(c.node)
 
     # One star per world for `frontier`, valued by `Count` on a search.
-    search = (toy.Search(hit=0.6, other=0.1),)
+    search = (DetectionModel(0.6, 0.1),)
     menus = (
         Menu(jnp.array([[1.0, 2.5]]), jnp.array([[True, True]]), (0, 0)),
         Menu(jnp.array([[0.5, 1.5]]), jnp.array([[True, False]]), (0, 0)),
@@ -207,6 +217,33 @@ def _cases(toy):
         return frontier(
             *toy.split(b), plain, star, utility, search, menu, jnp.asarray(0.0), 1
         )
+
+    # Searches for the pool and the stage: two logs of one structure, each row a
+    # search of its own exposure, some of them finding a planet.
+    def search_log(exposure_d, release_d, detected):
+        zero_i, zero_d = jnp.zeros(CAPACITY, int), jnp.zeros(CAPACITY)
+        payload = {
+            "exposure_d": exposure_d,
+            "p_hz_one_day": zero_d + 0.6,
+            "p_other_one_day": zero_d + 0.1,
+            "detected": jnp.asarray(detected, float),
+        }
+        rows = Row(
+            zero_i, zero_i, zero_d, exposure_d, exposure_d, release_d, zero_i, zero_i,
+            (payload,),
+        )  # fmt: skip
+        return ObservationLog(rows, jnp.asarray(3))
+
+    searches = (
+        search_log(
+            jnp.array([1.0, 0.5, 2.0, 1.0]), jnp.array([0.0, 0.5, 1.5, 3.0]),
+            [[0, 0], [1, 0], [0, 0], [0, 1]],
+        ),
+        search_log(
+            jnp.array([0.7, 1.5, 0.2, 1.0]), jnp.array([2.5, 0.0, 0.5, 1.0]),
+            [[0, 0], [0, 0], [0, 1], [1, 1]],
+        ),
+    )  # fmt: skip
 
     # `step` on two sealed worlds of one star each, taking the free slot of a log.
     truths = [
@@ -252,6 +289,32 @@ def _cases(toy):
             [(early[0], full[0]), (early[1], full[1])],
             lambda a: a[1].stats[0]["weighted_sum"],
             lambda pair: belief_scalar(pair[0]) + belief_scalar(pair[1]),
+        ),
+        "role_pool": (
+            lambda roles, b: role_pool(
+                b.pool.marks,
+                roles,
+                b.pool.log_like,
+                b.pool.log_mass,
+                star,
+                min_n_eff=1.0,
+                max_khat=jnp.inf,
+            ),
+            [(roles, b0), (roles1, b1)],
+            lambda a: a[0].verdict.shift,
+            lambda p: uneven(mark_weights(p)),
+        ),
+        "replay_pool": (
+            lambda p, lg, t: replay_pool(p, refits[0], lg, search, t),
+            [(b0.pool, searches[0], times[0]), (b1.pool, searches[1], times[1])],
+            lambda a: a[1].rows.exposure_d,
+            lambda p: uneven(p.log_mass) + uneven(mark_weights(p)),
+        ),
+        "reached_stage": (
+            lambda lg, t: reached_stage(lg, search, jnp.asarray(0), t),
+            [(searches[0], times[0]), (searches[1], times[1])],
+            None,
+            None,
         ),
         "step": (
             take,
@@ -414,9 +477,7 @@ def _cases(toy):
             lambda p: uneven(p.log_mass) + uneven(mark_weights(p)),
         ),
         "completeness": (
-            lambda p, a: completeness(
-                p, toy.Search(hit=0.6, other=0.1), a, hz_only, star
-            ),
+            lambda p, a: completeness(p, DetectionModel(0.6, 0.1), a, hz_only, star),
             [(b0.pool, actions[0]), (b1.pool, actions[1])],
             lambda a: a[1].exposure_d,
             uneven,
@@ -456,6 +517,9 @@ CASES = [
     "replay_belief",
     "planning_beliefs",
     "quadrature_draws",
+    "role_pool",
+    "replay_pool",
+    "reached_stage",
     "step",
     "frontier",
 ]

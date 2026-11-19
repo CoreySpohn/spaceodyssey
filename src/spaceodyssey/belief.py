@@ -146,18 +146,23 @@ def role_belief(
     return Belief(atoms, log_prior_ratio, log_like, pool)
 
 
-def _gate(log_weights, ratio, min_n_eff, max_khat) -> Float[Array, "R A"]:
+def _gate(log_weights, ratio, min_n_eff, max_khat, exempt=None) -> Float[Array, "R A"]:
     """``ratio``, with NaN rows for the roles the reweighting gate refuses.
 
     Both statistics are taken on the reweighted cloud ``log_weights + ratio``, the
-    draws of zero weight left out. A Python ``inf`` for ``max_khat`` is static, so the
-    Pareto fit is skipped.
+    draws of zero weight left out. An infinite ``max_khat`` turns the Pareto check
+    off, a failed fit (NaN, too few exceedances) included; a Python ``inf`` is static,
+    so the fit is skipped, and a traced one gives the same rows. A row of ``exempt``
+    (``(R,)``, or None for none) is kept whatever its statistics.
     """
     dead = jnp.isneginf(log_weights) | jnp.isneginf(ratio)
     total = jnp.where(dead, -jnp.inf, log_weights + ratio)
     ok = kish_ess(total) >= min_n_eff
     if not (isinstance(max_khat, float) and max_khat == math.inf):
-        ok = ok & (jax.vmap(pareto_khat)(total) <= max_khat)
+        khat_ok = jax.vmap(pareto_khat)(total) <= max_khat
+        ok = ok & (khat_ok | jnp.isposinf(max_khat))
+    if exempt is not None:
+        ok = ok | exempt
     return jnp.where(ok[:, None], ratio, jnp.nan)
 
 
@@ -169,11 +174,12 @@ def _prior_ratio_rows(
     stacked: bool,
     min_n_eff,
     max_khat,
+    exempt=None,
 ) -> Float[Array, "R A"]:
     """Gated ``log pi_r - log pi_0`` of each draw, a row per member when stacked.
 
     Checks the chart against that of the refit's prior. A draw outside either prior's
-    support gets ``-inf``.
+    support gets ``-inf``. Rows in ``exempt`` are not gated.
     """
     base = atoms.cloud.prior
     if prior.chart != base.chart:
@@ -190,24 +196,67 @@ def _prior_ratio_rows(
     log_p0 = base.log_prob(atoms, star)
     outside = jnp.isneginf(log_p) | jnp.isneginf(log_p0)
     ratio = jnp.where(outside, -jnp.inf, log_p - log_p0)
-    return _gate(atoms.cloud.log_weights, ratio, min_n_eff, max_khat)
+    return _gate(atoms.cloud.log_weights, ratio, min_n_eff, max_khat, exempt)
 
 
 def _role_log_prior_ratio(
-    atoms: Atoms, roles: Roles, star, min_n_eff, max_khat
+    atoms: Atoms, roles: Roles, star, min_n_eff, max_khat, exempt=None
 ) -> Float[Array, "R A"]:
-    """Every role's gated prior ratio of each draw, forecast in row 0."""
+    """Every role's gated prior ratio of each draw, forecast in row 0.
+
+    ``exempt`` (``(R,)``, or None) names the rows that are not gated.
+    """
+    head, tail = (None, None) if exempt is None else (exempt[:1], exempt[1:])
+    gate = (min_n_eff, max_khat)
     return jnp.concatenate(
         [
             _prior_ratio_rows(
-                atoms, roles.forecast, star, "forecast", False, min_n_eff, max_khat
+                atoms, roles.forecast, star, "forecast", False, *gate, head
             ),
-            _prior_ratio_rows(
-                atoms, roles.verdict, star, "verdict", True, min_n_eff, max_khat
-            ),
+            _prior_ratio_rows(atoms, roles.verdict, star, "verdict", True, *gate, tail),
         ],
         axis=0,
     )
+
+
+def role_pool(
+    marks: Atoms,
+    roles: Roles,
+    log_like: Float[Array, "R Am"],
+    log_mass: Float[Array, " R"],
+    star,
+    *,
+    min_n_eff,
+    max_khat,
+) -> Pool:
+    """The pool of a role set over the marks of one refit, each role's prior filled in.
+
+    A mark's weight under role ``r`` is formed as a draw's is (``role_belief``):
+    ``log_weights + log pi_r - log pi_0 + log_like[r]``, with ``pi_0`` the prior of the
+    marks' cloud. The prior ratio is built by the same function and gate as a
+    belief's: a role whose reweighted marks fail the gate gets a NaN row, and its rate
+    then reads NaN, never zero. A role whose pool is empty (``log_mass = -inf``) is
+    never refused: it holds no planet to misread, and its rate is zero.
+
+    Args:
+        marks: the marks, one planet each (``K = 1``), on the refit prior's chart.
+        roles: the forecast and the stacked verdict members.
+        log_like: log likelihood of each mark under each role, ``(R, Am)``.
+        log_mass: log expected number of undetected planets per role, ``(R,)``.
+        star: a pytree of scalar leaves describing the star.
+        min_n_eff: the least Kish size of a role's mark weights.
+        max_khat: the largest Pareto shape of a role's reweighted marks.
+
+    Returns:
+        The pool, forecast in row 0.
+
+    Raises:
+        ValueError: if a role prior's chart differs from that of the marks' prior.
+    """
+    log_mass = jnp.asarray(log_mass)
+    empty = jnp.isneginf(log_mass)
+    ratio = _role_log_prior_ratio(marks, roles, star, min_n_eff, max_khat, empty)
+    return Pool(marks, ratio, log_like, log_mass)
 
 
 def log_weights(b: Belief) -> Float[Array, "R A"]:
@@ -380,32 +429,40 @@ def _poisson(lam: Float[Array, ""], n_bins: int) -> Float[Array, " N"]:
     return jnp.append(head, tail)
 
 
+def _pool_masses(pool: Pool, claim: Claim, star) -> Float[Array, "R C1"]:
+    """Expected number of pool planets meeting the first ``c`` conjuncts, ``c = 0..C``.
+
+    Per role, the pool's expected number times the mark-weighted probability that the
+    first ``c`` conjuncts hold; column 0 is the expected number itself.
+    """
+    probs = _conjunct_probs(pool.marks, claim, star)[:, :, 0]  # (C, Am)
+    joint = jnp.concatenate([jnp.ones_like(probs[:1]), jnp.cumprod(probs, axis=0)])
+    weighted = jnp.matmul(mark_weights(pool), joint.T, precision=EXACT)  # (R, C + 1)
+    return jnp.exp(pool.log_mass)[:, None] * weighted
+
+
 def pool_rate(pool: Pool, claim: Claim, star) -> Float[Array, " R"]:
     """Expected number of claim-true planets in the pool, per role.
 
     The rate of role ``r`` is ``exp(log_mass[r]) * pbar[r]``, where ``pbar[r]`` is the
-    claim probability of a mark averaged with role ``r``'s own mark weights. The rate
-    at time zero is this function of the pool at time zero.
+    probability that a mark meets every conjunct of the claim, averaged with role
+    ``r``'s own mark weights. For a conditional claim that is the rate of planets that
+    meet the condition and the claim: a claim-true planet is one the claim holds for,
+    and it holds only where its condition does. The rate at time zero is this function
+    of the pool at time zero.
 
     Args:
         pool: the undetected planets.
-        claim: an unconditional claim.
+        claim: the claim.
         star: a pytree of scalar leaves describing the star.
 
     Returns:
         The rate per role, shape ``(R,)``.
-
-    Raises:
-        ValueError: if the claim is conditional.
     """
-    if claim.given != 0:
-        raise ValueError("pool_rate needs an unconditional claim (claim.given == 0)")
-    p_mark = jnp.prod(_conjunct_probs(pool.marks, claim, star), axis=0)[:, 0]  # (Am,)
-    weighted = jnp.matmul(mark_weights(pool), p_mark, precision=EXACT)  # (R,)
-    return jnp.exp(pool.log_mass) * weighted
+    return _pool_masses(pool, claim, star)[:, -1]
 
 
-def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
+def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Array:
     """Distribution of the number of claim-true planets at a star, per role.
 
     The count is the sum of two independent parts: the draws' planets (a
@@ -413,35 +470,89 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
     count with mean ``exp(log_mass) * pbar``, where ``pbar`` is the claim probability
     averaged over the marks with the role's own mark weights). Only slots that exist
     are counted, among the draws' planets and the marks. Mass at or beyond
-    ``n_max`` is lumped into the last bin, so each row has ``n_max + 1`` bins and sums
-    to one.
+    ``n_max`` is lumped into the last bin, so each axis has ``n_max + 1`` bins.
+
+    A conditional claim (``claim.given > 0``, condition ``C``, claim ``Z``, with ``Z``
+    holding only where ``C`` does) counts two things: ``N``, the planets for which
+    ``Z`` holds, and ``F``, those that meet ``C`` and fail ``Z``. The result is their
+    joint distribution, ``F`` along axis ``-2`` and ``N`` along axis ``-1``. On a draw
+    planet ``k`` adds one to ``F`` with probability ``c_k - z_k`` and one to ``N`` with
+    ``z_k``, with ``c_k = P(C)`` and ``z_k = P(C, Z)`` on the draw; the pool adds the
+    independent Poisson counts ``F ~ Poisson(Lam (cbar - zbar))`` and
+    ``N ~ Poisson(Lam zbar)`` (a Poisson process marked by the claim):
+
+        P(F = f, N = n) = sum_a w_a [PB2_a * Pool2](f, n),
+
+    with ``PB2_a`` the two-count Poisson-binomial of draw ``a`` and ``*`` the
+    convolution in both counts, each lumped at ``n_max``. The planets that meet the
+    condition number ``M = F + N``; a planner scores ``N`` given ``M`` (``LogScore``),
+    so it is paid for what it learns about the claim among the planets its condition
+    admits, and not for learning the condition alone (for one planet with ``P(C) = c``
+    and ``P(Z | C) = z``, learning ``C`` leaves the expected score ``-c h(z)``
+    unchanged).
 
     Independence between the pool and the draws' planets is exact only for an
     unpruned Poisson process.
 
     Args:
         b: the belief.
-        claim: an unconditional claim (``claim.given == 0``).
+        claim: the claim.
         star: a pytree of scalar leaves describing the star.
         n_max: the count at which mass is lumped, static.
 
     Returns:
-        Probabilities of shape ``(R, n_max + 1)``.
-
-    Raises:
-        ValueError: if the claim is conditional.
+        Probabilities of shape ``(R, n_max + 1)`` for an unconditional claim, each row
+        summing to one; of shape ``(R, n_max + 1, n_max + 1)`` (``F``, then ``N``) for
+        a conditional claim, each role's table summing to one.
     """
-    if claim.given != 0:
-        raise ValueError("count_pmf needs an unconditional claim (claim.given == 0)")
     n_bins = n_max + 1
+    probs = _conjunct_probs(b.atoms, claim, star)  # (C, A, K)
+    p_draw = jnp.prod(probs, axis=0)  # (A, K)
+    rates = _pool_masses(b.pool, claim, star)  # (R, C + 1)
 
-    p_draw = jnp.prod(_conjunct_probs(b.atoms, claim, star), axis=0)  # (A, K)
-    per_draw = _poisson_binomial(p_draw, n_bins)  # (A, N)
-    from_draws = jnp.matmul(weights(b), per_draw, precision=EXACT)  # (R, N)
+    if claim.given == 0:
+        per_draw = _poisson_binomial(p_draw, n_bins)  # (A, N)
+        from_draws = jnp.matmul(weights(b), per_draw, precision=EXACT)  # (R, N)
+        from_pool = jax.vmap(_poisson, in_axes=(0, None))(rates[:, -1], n_bins)
+        return _add_counts(from_draws, from_pool)
 
-    lam = pool_rate(b.pool, claim, star)  # (R,)
-    from_pool = jax.vmap(_poisson, in_axes=(0, None))(lam, n_bins)  # (R, N)
-    return _add_counts(from_draws, from_pool)
+    p_cond = jnp.prod(probs[: claim.given], axis=0)  # (A, K)
+    per_draw = _pair_poisson_binomial(p_cond - p_draw, p_draw, n_bins)  # (A, N, N)
+    from_draws = jnp.einsum("ra,afn->rfn", weights(b), per_draw, precision=EXACT)
+    poisson = jax.vmap(_poisson, in_axes=(0, None))
+    failed = poisson(rates[:, claim.given] - rates[:, -1], n_bins)  # (R, N)
+    true = poisson(rates[:, -1], n_bins)
+    from_pool = failed[:, :, None] * true[:, None, :]
+    return _add_pair_counts(from_draws, from_pool)
+
+
+def _pair_poisson_binomial(
+    p_f: Float[Array, "A K"], p_n: Float[Array, "A K"], n_bins: int
+) -> Float[Array, "A N N"]:
+    """Joint distribution of two counts per draw, each planet adding to at most one.
+
+    Planet ``k`` adds one to the first count with probability ``p_f``, one to the
+    second with ``p_n`` and nothing otherwise; each count is lumped at
+    ``n_bins - 1``.
+    """
+    n_draw = p_f.shape[0]
+    start = jnp.zeros((n_draw, n_bins, n_bins), p_f.dtype).at[:, 0, 0].set(1.0)
+
+    def up(pmf, axis):
+        moved = jnp.roll(pmf, 1, axis=axis)
+        first = [slice(None)] * 3
+        first[axis] = 0
+        last = [slice(None)] * 3
+        last[axis] = -1
+        moved = moved.at[tuple(first)].set(0.0)
+        return moved.at[tuple(last)].add(pmf[tuple(last)])  # the cap keeps its mass
+
+    def add_planet(pmf, p_k):
+        f, n = p_k[0][:, None, None], p_k[1][:, None, None]
+        return pmf * (1.0 - f - n) + up(pmf, 1) * f + up(pmf, 2) * n, None
+
+    pmf, _ = lax.scan(add_planet, start, (p_f.T, p_n.T))
+    return pmf
 
 
 def _add_counts(a: Float[Array, "... N"], b: Float[Array, "... N"]) -> Array:
@@ -462,6 +573,23 @@ def _add_counts(a: Float[Array, "... N"], b: Float[Array, "... N"]) -> Array:
     to_bin = np.eye(n_bins)[pair_bin.reshape(-1)]  # (N N, N), a 0/1 matrix
     pairs = (a[..., :, None] * b[..., None, :]).reshape(*a.shape[:-1], n_bins**2)
     return jnp.matmul(pairs, jnp.asarray(to_bin, a.dtype), precision=EXACT)
+
+
+def _add_pair_counts(a: Float[Array, "... N N"], b: Float[Array, "... N N"]) -> Array:
+    """Distribution of the sum of two independent pairs of counts, each count lumped.
+
+    ``out[f, n] = sum a[f1, n1] b[f2, n2]`` over ``min(f1 + f2, N - 1) = f`` and
+    ``min(n1 + n2, N - 1) = n``: the convolution of ``_add_counts`` in both counts,
+    by one contraction with its fixed 0/1 table.
+    """
+    n_bins = a.shape[-1]
+    pair_bin = np.minimum(
+        np.add.outer(np.arange(n_bins), np.arange(n_bins)), n_bins - 1
+    )
+    to_bin = jnp.asarray(np.eye(n_bins)[pair_bin], a.dtype)  # (N, N, N), a 0/1 table
+    return jnp.einsum(
+        "...ij,...kl,ikf,jln->...fn", a, b, to_bin, to_bin, precision=EXACT
+    )
 
 
 class Replay(eqx.Module):
@@ -979,13 +1107,16 @@ def planning_beliefs(
     verdict's, one role per member, off ``verdict`` under the members; each replay is
     read under its own roles only. The two replays may hold different rows: a frozen
     forecast is the replay at ``time_d = 0`` while the verdict's follows the decision
-    time. Each reads its own pool at its own time, the forecast row 0 of
-    ``forecast_pool`` and the verdict rows 1 on of ``verdict_pool``, so a frozen
-    forecast holds the pool at time zero while real nulls thin the verdict's. Each
-    belief carries its own draws, so a gas block the verdict's rows update never
-    reaches the forecast. Each is then put on quadrature nodes split at the claim's
-    floors (``quadrature_draws``, with ``models`` for their steps), on which a
-    hypothetical outcome updates the belief exactly by reweighting.
+    time. Each reads its own pool, the forecast row 0 of ``forecast_pool`` and the
+    verdict rows 1 on of ``verdict_pool``. The pools' role prior ratios are formed
+    here, as the draws' are, by the same function and gate (``role_pool``): the
+    ratios the pools carry in are not read, so a pool's marks are weighed under
+    exactly the priors and the gate the draws are, and a role whose marks fail the
+    gate reads NaN (an empty pool is never refused). Each belief carries its own
+    draws, so a gas block the verdict's rows update never reaches the forecast. Each
+    is then put on quadrature nodes split at the claim's floors (``quadrature_draws``,
+    with ``models`` for their steps), on which a hypothetical outcome updates the
+    belief exactly by reweighting.
 
     Args:
         forecast: the forecast's replay.
@@ -993,9 +1124,8 @@ def planning_beliefs(
         roles: the forecast and the stacked verdict members.
         models: the run's model table, static.
         star: a pytree of scalar leaves describing the star.
-        forecast_pool: the undetected planets at the forecast's replay time, every
-            role (a frozen forecast's is the pool at time zero).
-        verdict_pool: the undetected planets at the verdict's replay time, every role.
+        forecast_pool: the undetected planets the forecast reads, every role.
+        verdict_pool: the undetected planets the verdict reads, every role.
         claim: the claim; its ``GasAbove`` floors split the quadrature
             (``quadrature_draws``).
         n: quadrature nodes per gas factor, a static planning setting.
@@ -1013,9 +1143,11 @@ def planning_beliefs(
     """
 
     def read(r, prior, name, stacked, pool):
-        ratio = _prior_ratio_rows(
-            r.refit.atoms, prior, star, name, stacked, min_n_eff, max_khat
-        )
+        gate = (min_n_eff, max_khat)
+        ratio = _prior_ratio_rows(r.refit.atoms, prior, star, name, stacked, *gate)
+        empty = jnp.isneginf(pool.log_mass)
+        marks = _prior_ratio_rows(pool.marks, prior, star, name, stacked, *gate, empty)
+        pool = Pool(pool.marks, marks, pool.log_like, pool.log_mass)
         atoms, log_like = _finalized(r, models, star)
         log_like = jnp.broadcast_to(log_like, ratio.shape)
         return quadrature_draws(Belief(atoms, ratio, log_like, pool), claim, n, models)

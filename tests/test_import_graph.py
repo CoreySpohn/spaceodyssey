@@ -23,8 +23,8 @@ ORDER = [
     "_version", "_standin", "_numerics",
     "types", "claim", "roles", "design", "belief", "information", "value",  # rank 0
     "price", "policy",  # rank 1
-    "world", "log", "toy",  # rank 2
-    "study", "score",  # rank 3
+    "world", "log",  # rank 2
+    "study", "toy", "score",  # rank 3: the toy builds a study
     "__init__",
 ]  # fmt: skip
 RANK = {name: i for i, name in enumerate(ORDER)}

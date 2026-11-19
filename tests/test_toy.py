@@ -11,6 +11,7 @@ from spaceodyssey.claim import GasAbove
 from spaceodyssey.toy import (
     GAS_FLOOR,
     GAS_PRIOR_SD,
+    DetectionModel,
     GaussianGasModel,
     StepReportModel,
 )
@@ -81,6 +82,58 @@ def test_cells_normalize_and_match_the_binned_default(model, edges_b, var, toy):
             assert_array_max_ulp(p.sum(axis=1), np.ones(4), maxulp=4)
         se = np.sqrt(exact * (1.0 - exact) / CELL_SAMPLES)
         assert np.all(np.abs(binned - exact) <= 3.0 * se)
+
+
+def test_a_search_detects_with_its_closed_form_probability(toy):
+    """`DetectionModel`: slot k of a draw is seen with d_k = 1 - (1 - p)^t, p the
+    one-day probability of its planet (0.6 in the HZ, 0.2 out of it), 0 for an empty
+    slot or no exposure.
+
+    Draws of two slots: (HZ, other), (other, empty) and (empty, empty). Over two days
+    d = (0.84, 0.36), (0.36, 0) and (0, 0). The four cells index the slots' bits as a
+    base-2 number, slot 0 the most significant: draw 0's cells are (0.16 x 0.64,
+    0.16 x 0.36, 0.84 x 0.64, 0.84 x 0.36), and they match the binned-sample default
+    within 3 Monte Carlo standard errors (exact for a zero cell). A payload's `cell`
+    reads its bits the same way, a zero payload in cell 0. A row's log likelihood is
+    the sum of log d_k over the slots seen and log (1 - d_k) over the rest: a
+    detection of slot 0 alone is log (0.84 x 0.64), log 0.36 and impossible.
+
+    Fails if a slot's probability ignores its HZ bit, an empty slot or the exposure,
+    if `cell` and `cells` order the joint index differently, or the likelihood
+    misreads a slot not seen.
+    """
+    exists = [[True, True], [True, False], [False, False]]
+    atoms = toy.atoms(
+        [[1.0, 0.0], [0.0, 0.0], [0.0, 0.0]], [[0.0] * 2] * 3, [1 / 3] * 3,
+        exists=exists,
+    )  # fmt: skip
+    model = DetectionModel(0.6, 0.2)
+    exact = model.cells(atoms, _action(2.0))
+    d0, d1 = 0.84, 0.36
+    assert_allclose(
+        exact[0], [(1 - d0) * (1 - d1), (1 - d0) * d1, d0 * (1 - d1), d0 * d1],
+        rtol=1e-12,
+    )  # fmt: skip
+    assert_allclose(exact[1], [1 - d1, 0.0, d1, 0.0], rtol=1e-12, atol=1e-15)
+    assert_allclose(exact[2], [1.0, 0.0, 0.0, 0.0], atol=1e-15)
+    assert_allclose(model.cells(atoms, _action(0.0))[:, 0], 1.0)
+    binned = binned_cells(model, atoms, _action(2.0), model.cell, 4)
+    se = np.sqrt(exact * (1.0 - exact) / CELL_SAMPLES)
+    assert np.all(np.abs(binned - exact) <= 3.0 * se)
+
+    def payload(bits):
+        return {
+            "exposure_d": jnp.asarray(2.0),
+            "p_hz_one_day": jnp.asarray(0.6),
+            "p_other_one_day": jnp.asarray(0.2),
+            "detected": jnp.asarray(bits, float),
+        }
+
+    cells = [int(model.cell(payload(b))) for b in ([0, 0], [0, 1], [1, 0], [1, 1])]
+    assert cells == [0, 1, 2, 3]
+    assert int(model.cell(jax.tree.map(jnp.zeros_like, payload([1, 1])))) == 0
+    like = row_log_like(model, payload([1, 0]), atoms, toy.star)
+    assert_allclose(like, [np.log(d0 * (1 - d1)), np.log(d1), -np.inf], rtol=1e-12)
 
 
 def test_step_report(toy):

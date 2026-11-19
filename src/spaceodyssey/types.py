@@ -269,6 +269,11 @@ OVER_BUDGET = 1
 """Refusal code of a row whose exposure exceeds the budget left: charged nothing, its
 payload zeros."""
 
+WAITED = 2
+"""Code of a wait, a row of zero exposure: the instrument idles until the row's start.
+Charged nothing, its payload zeros, released at its start; it carries no data, so no
+replay applies it and ``score`` stages it as no observation, but it moves the clock."""
+
 
 class Row(eqx.Module):
     """One released observation result.
@@ -284,7 +289,7 @@ class Row(eqx.Module):
         exposure_d: exposure length in days.
         charged_d: time charged against the budget in days.
         release_d: calendar time at which the row is released, in days.
-        refusal: refusal code, ``ACCEPTED`` or ``OVER_BUDGET``.
+        refusal: refusal code, ``ACCEPTED``, ``OVER_BUDGET`` or ``WAITED``.
         model_slot: index into the run's model table of the model that inverts the
             payload.
         payload: one payload per model, each a dict of named arrays, zero-padded; only
@@ -426,7 +431,9 @@ class AbstractObservationModel(eqx.Module):
 
     A model holds configuration only, never an observed datum; it is handed a payload
     each time it scores one. Its outcomes are also offered as discrete cells
-    (``cells``), which a planner reads ahead of the data. That is a deliberate
+    (``cells``), which a planner reads ahead of the data, and a real row's payload
+    falls in one of them (``cell``), so real outcomes advance a plan as hypothetical
+    ones do. That is a deliberate
     difference from a data-bearing likelihood term: the log is a fixed-capacity buffer
     of payloads per model, scored by one commutative sum per model.
 
@@ -531,6 +538,22 @@ class AbstractObservationModel(eqx.Module):
         Returns:
             The log marginal likelihood of the rows per draw, shape ``(A,)``, and the
             draws updated by the rows.
+        """
+
+    @abc.abstractmethod
+    def cell(self, payload: PyTree) -> Int[Array, ""]:
+        """The outcome cell of one real row: the cell of ``cells`` its payload is in.
+
+        A planner reads the cells ahead of the data; a run's rows, once released, are
+        read back into the same cells, so the stage a star has reached and the misses
+        of a search are read off real rows exactly as the lookahead coded them. A zero
+        payload (a refused row or a wait) is in cell 0.
+
+        Args:
+            payload: the payload of one row, a dict of named arrays.
+
+        Returns:
+            The index of the cell, in ``0 .. Y - 1``.
         """
 
     @abc.abstractmethod

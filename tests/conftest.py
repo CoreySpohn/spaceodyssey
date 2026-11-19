@@ -23,13 +23,12 @@ if TYPECHECK:
     install_import_hook("spaceodyssey", "beartype.beartype")
 
 from spaceodyssey import belief, information, value  # noqa: E402
+from spaceodyssey import toy as package_toy  # noqa: E402
 from spaceodyssey._standin import diagnostics  # noqa: E402
 from spaceodyssey.belief import Belief, select_roles  # noqa: E402
-from spaceodyssey.claim import AbstractConjunct  # noqa: E402
 from spaceodyssey.log import execute  # noqa: E402
 from spaceodyssey.policy import AbstractPolicy  # noqa: E402
 from spaceodyssey.types import (  # noqa: E402
-    AbstractObservationModel,
     AbstractRolePrior,
     Atoms,
     Pool,
@@ -114,11 +113,11 @@ class _Flat(AbstractRolePrior):
 
 
 # Toy state for the layer tests: per-draw, per-planet `hz` and `size` bits plus a gas
-# block. Builders, conjuncts, the toy prior and search, and the assertion and stacking
-# helpers are exposed through the `toy` fixture, not imported.
+# block (the package's toy state). Builders, conjuncts, the toy survey, and the
+# assertion and stacking helpers are exposed through the `toy` fixture, not imported.
 class _Toy:
-    """Constructed fixtures: conjuncts, a prior and a search on the toy state, belief
-    builders, and the helpers the layer tests share.
+    """Constructed fixtures: conjuncts and a prior on the toy state, belief builders,
+    the package's toy survey, and the helpers the layer tests share.
     """
 
     star = ()  # the toy's star is an empty pytree, never None
@@ -127,17 +126,9 @@ class _Toy:
     # Reweighting thresholds that refuse nothing: the tests read the raw beliefs.
     ungated: ClassVar[dict] = {"min_n_eff": 0.0, "max_khat": jnp.inf}
 
-    class InHz(AbstractConjunct):
-        """The `hz` bit of the toy state."""
-
-        def prob(self, atoms, star):
-            return atoms.cloud.samples["hz"]
-
-    class InSize(AbstractConjunct):
-        """The `size` bit of the toy state."""
-
-        def prob(self, atoms, star):
-            return atoms.cloud.samples["size"]
+    InHz = package_toy.InHz  # the toy state's bits, from the package's toy
+    InSize = package_toy.InSize
+    survey = staticmethod(package_toy.toy_survey)  # many stars, their menu and grant
 
     @staticmethod
     def atoms(hz, size, w, mean=0.0, var=1.0, n_gas=2, exists=True, prior=None):
@@ -238,40 +229,6 @@ class _Toy:
             x = self.mean + self.sd * jax.random.normal(key, (1, 1, self.n_gas))
             block = (x[0], 0.0, self.n_gas)
             return _Toy.atoms([[1.0]], [[1.0]], [1.0], *block, prior=self)
-
-    class Search(AbstractObservationModel):
-        """A test search of planet 0: per day of exposure it detects the planet with
-        probability `hit` when its `hz` bit is set and `other` otherwise, so
-        `1 - (1 - p)**exposure_d` in all, smooth in the exposure. A slot with no
-        planet is always missed. Cell 0 is the miss, cell 1 the detection, which
-        reaches stage 1; a payload carries the exposure and whether the planet was
-        detected.
-        """
-
-        searches: ClassVar[bool] = True
-        stage: ClassVar[int] = 1  # a detection opens a spectrum
-        hit: jax.Array = eqx.field(converter=jnp.asarray)
-        other: jax.Array = eqx.field(converter=jnp.asarray)
-
-        def _detect(self, atoms, exposure_d):
-            p = jnp.where(atoms.cloud.samples["hz"][:, 0] > 0.5, self.hit, self.other)
-            d = -jnp.expm1(exposure_d * jnp.log1p(-p))
-            return jnp.where(atoms.exists[:, 0], d, 0.0)
-
-        def cells(self, atoms, action):
-            d = self._detect(atoms, action.exposure_d)
-            return jnp.stack([1.0 - d, d], axis=-1)
-
-        def stats(self, payload, atoms, star):
-            d = self._detect(atoms, payload["exposure_d"])
-            p = jnp.where(payload["detected"] > 0.5, d, 1.0 - d)
-            return jnp.log(p)
-
-        def finalize(self, stats, atoms, star):
-            return stats, atoms
-
-        def sample(self, key, atoms, action):
-            raise NotImplementedError("a planning search: read through cells")
 
     @staticmethod
     def assert_non_interference(key, policy, worlds, blind, seeing, grant):

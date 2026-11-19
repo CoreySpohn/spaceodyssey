@@ -24,6 +24,7 @@ import abc
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Bool, Float, Int, PyTree
 
 from spaceodyssey._numerics import EXACT, TIE_ULPS, guarded_log, safe_ratio
@@ -39,7 +40,17 @@ from spaceodyssey.information import (
     require_point_draws,
     update_by_cell,
 )
-from spaceodyssey.types import AbstractObservationModel, Action, Atoms, Pool, as_index
+from spaceodyssey.types import (
+    ACCEPTED,
+    AbstractObservationModel,
+    Action,
+    Atoms,
+    ObservationLog,
+    Pool,
+    Refit,
+    as_index,
+    real_rows,
+)
 
 
 class Frontier(eqx.Module):
@@ -126,7 +137,7 @@ class AbstractUtility(eqx.Module):
         Args:
             forecast: the forecast's belief, one role (``R = 1``).
             verdict: the verdict's belief, one role per member.
-            claim: an unconditional claim.
+            claim: the claim.
             star: a pytree of scalar leaves describing the star.
 
         Returns:
@@ -149,8 +160,14 @@ class LogScore(AbstractUtility):
     prior count. It equals the forecast's mutual information of ``N`` and ``Y`` only
     when forecast and verdict agree.
 
+    A conditional claim scores the claim-true count ``N`` given the count ``M`` of
+    planets its condition admits (``count_pmf``):
+    ``U = sum_{f,n} P_F(F = f, N = n) ln P_gamma(N = n | M = f + n)``, so learning the
+    condition alone adds nothing in expectation; it pays only as a way to the claim.
+
     Attributes:
-        n_max: the count at which ``count_pmf`` lumps the tail, static.
+        n_max: the count at which ``count_pmf`` lumps the tail, static; it belongs to
+            this utility (``Count`` reads no distribution of the count).
     """
 
     n_max: int = eqx.field(static=True)
@@ -167,7 +184,21 @@ class LogScore(AbstractUtility):
                 f"LogScore plans with one verdict member, not {pmf.shape[0]}"
             )
         expected = count_pmf(forecast, claim, star, self.n_max)[0]
-        return expected_log_score(pmf[0], expected)
+        if claim.given == 0:
+            return expected_log_score(pmf[0], expected)
+        return expected_log_score(_given_admitted(pmf[0]).ravel(), expected.ravel())
+
+
+def _given_admitted(joint: Float[Array, "N N"]) -> Float[Array, "N N"]:
+    """``P(N = n | M = f + n)`` from the joint of ``(F, N)`` (``count_pmf``).
+
+    ``M = F + N`` is read off the bin indices, a lumped bin counting as its index.
+    A total no outcome reaches gives 0, as ``safe_ratio`` does.
+    """
+    n_bins = joint.shape[-1]
+    total = np.add.outer(np.arange(n_bins), np.arange(n_bins))  # M of each (f, n)
+    by_total = jnp.zeros(2 * n_bins - 1, joint.dtype).at[total].add(joint)
+    return safe_ratio(joint, by_total[total])
 
 
 class Count(AbstractUtility):
@@ -329,7 +360,7 @@ def completeness(
         pool: the undetected planets.
         model: the observation model of the action.
         action: the action.
-        claim: an unconditional claim.
+        claim: the claim.
         star: a pytree of scalar leaves describing the star.
 
     Returns:
@@ -338,6 +369,103 @@ def completeness(
     detect = _detect_prob(model, pool.marks, action)
     found = pool_rate(thin(pool, 1.0 - detect), claim, star)
     return safe_ratio(found, pool_rate(pool, claim, star))
+
+
+def _row_cells(model: AbstractObservationModel, payload: PyTree) -> Int[Array, " W"]:
+    """The outcome cell of every row of a log's payload buffer of one model."""
+    return jax.vmap(model.cell)(payload)
+
+
+def reached_stage(
+    log: ObservationLog,
+    models: tuple[AbstractObservationModel, ...],
+    star_index: Int[Array, ""],
+    time_d: Float[Array, ""],
+) -> Int[Array, ""]:
+    """The stage a star's released rows have reached: the planner's ``Menu.stage``.
+
+    A row reaches its model's ``stage`` when its outcome is in any cell but cell 0
+    (``AbstractObservationModel.cell``), as a hypothetical outcome does in the
+    lookahead (``frontier``); the star is at the highest stage any of its accepted rows
+    released by ``time_d`` reached, 0 before any. Rows in flight, refused rows and
+    waits reach nothing.
+
+    Args:
+        log: the run's log, all stars.
+        models: the run's model table, static; ``Row.model_slot`` indexes it.
+        star_index: the star's index in the log's ``star`` column.
+        time_d: the query time, days from the start of the survey.
+
+    Returns:
+        The stage.
+    """
+    rows = log.rows
+    mine = (
+        real_rows(log)
+        & (rows.release_d <= time_d)
+        & (rows.refusal == ACCEPTED)
+        & (rows.star == star_index)
+    )
+    stage = jnp.zeros((), int)
+    for slot, model in enumerate(models):
+        if model.stage == 0:
+            continue  # static: this model opens nothing
+        found = _row_cells(model, rows.payload[slot]) > 0
+        hit = mine & (rows.model_slot == slot) & found
+        stage = jnp.maximum(stage, jnp.where(jnp.any(hit), model.stage, 0))
+    return stage
+
+
+def replay_pool(
+    pool: Pool,
+    refit: Refit,
+    log: ObservationLog,
+    models: tuple[AbstractObservationModel, ...],
+    time_d: Float[Array, ""],
+) -> Pool:
+    """The pool at a query time: the refit's pool thinned by the searches since.
+
+    Every accepted row of a searching model at the refit's star, released by
+    ``time_d`` and not among the rows the refit represents (``Refit.row_mask``; the
+    refit's pool already carries those), thins the pool by its probability of missing
+    each mark (``thin``), whatever it found: a Poisson process of undetected planets
+    thinned by a search is the planets it missed, a Poisson process whose law does not
+    depend on what was found (the finds become tracks only through a refit). So the
+    pool depends on which searches were taken, never on their payloads, and thinning
+    by several rows is thinning once by the product of their miss probabilities, in
+    any order: this replays the whole log, as ``replay`` does, and a planner calls it
+    afresh at each time rather than absorbing rows into it. Rows in flight, refused
+    rows, waits and rows of a model that does not search leave the pool as it is.
+
+    Args:
+        pool: the refit's pool, every role, as the refit returned it.
+        refit: the refit of the same star: its index and the rows it represents.
+        log: the run's log, all stars.
+        models: the run's model table, static; ``Row.model_slot`` indexes it.
+        time_d: the query time, days from the start of the survey.
+
+    Returns:
+        The pool at ``time_d``.
+    """
+    rows = log.rows
+    due = (
+        real_rows(log)
+        & (rows.release_d <= time_d)
+        & (rows.refusal == ACCEPTED)
+        & (rows.star == refit.star_index)
+        & ~refit.row_mask
+    )
+    actions = Action(rows.star, rows.mode, rows.exposure_d)
+    miss = jnp.ones(pool.marks.exists.shape[0], pool.log_mass.dtype)
+    for slot, model in enumerate(models):
+        if not model.searches:
+            continue  # static: only a search thins the pool
+        detect = jax.vmap(lambda a, model=model: _detect_prob(model, pool.marks, a))(
+            actions
+        )  # (W, Am)
+        keep = (due & (rows.model_slot == slot))[:, None]
+        miss = miss * jnp.prod(jnp.where(keep, 1.0 - detect, 1.0), axis=0)
+    return thin(pool, 1.0 - miss)
 
 
 def _entries(menu: Menu, mode: int, star_index) -> tuple[list[int], Action]:
@@ -582,6 +710,8 @@ def frontier(
     menu: Menu,
     lam: Float[Array, ""],
     depth: int,
+    *,
+    star_index: Int[Array, " S"] | None = None,
 ) -> Frontier:
     """The reward and expected time of each menu entry's plan at each star.
 
@@ -640,7 +770,7 @@ def frontier(
         forecast: the forecast's beliefs, one per star, one role each.
         verdict: the verdict's beliefs, one per star, one role each (planning reads
             one member).
-        claim: an unconditional claim.
+        claim: the claim.
         star: the stars, a pytree whose leaves have a leading axis ``S``.
         utility: the utility.
         mode_models: the observation model of each mode (``mode_models`` of the
@@ -650,6 +780,8 @@ def frontier(
             by the stars, ``lam >= 0``.
         depth: the number of entries a plan may take at the star, the first one
             included, static, at least 1.
+        star_index: each star's index in the survey, which its actions carry (a
+            model with per-star configuration reads it); ``0 .. S - 1`` by default.
 
     Returns:
         The frontier: each plan's reward and expected time (zero and the exposure at
@@ -684,8 +816,72 @@ def frontier(
             follow_d = jnp.where(offered, -slope, 0.0)
         return value + lam * follow_d, menu.exposure_d + follow_d, offered
 
-    star_index = jnp.arange(menu.mask.shape[0])
+    if star_index is None:
+        star_index = jnp.arange(menu.mask.shape[0])
     reward, cost_d, offered = eqx.filter_vmap(one_star)(
         forecast, verdict, star, utility, menu, star_index
     )
     return Frontier(reward, cost_d, offered)
+
+
+def frontier_at_prices(
+    forecast: Belief,
+    verdict: Belief,
+    claim: Claim,
+    star,
+    utility: AbstractUtility,
+    mode_models: tuple[AbstractObservationModel, ...],
+    menu: Menu,
+    lam: Float[Array, " P"],
+    depth: int,
+    *,
+    star_index: Int[Array, " S"] | None = None,
+) -> Frontier:
+    """Each star's plans built at several prices, offered side by side as options.
+
+    A frontier's option is its plan's tangent at the price it was built at
+    (``frontier``): exact there, a bound above it and not one below. Built at ``P``
+    prices, each star offers ``P`` tangents of every entry's plan, so the star's value
+    ``max(0, max_o (r_o - lam c_o))`` follows the convex curve of its plans over the
+    whole range the prices span, and a price solved on it moves only as far as the
+    plans really change (a plan that drops a follow-up when time is dear is offered
+    beside the one that keeps it). Option ``p M + m`` is entry ``m``'s plan built at
+    ``lam[p]``; ``option % M`` maps an option back to its entry. At ``depth = 1`` a plan
+    does not depend on the price, so one price suffices.
+
+    Args:
+        forecast: the forecast's beliefs, one per star (``frontier``).
+        verdict: the verdict's beliefs, one per star.
+        claim: the claim.
+        star: the stars, a pytree whose leaves have a leading axis ``S``.
+        utility: the utility.
+        mode_models: the observation model of each mode, static.
+        menu: the menu of each star.
+        lam: the prices the plans are built at, shape ``(P,)``.
+        depth: the number of entries a plan may take at the star, static.
+        star_index: each star's index in the survey (``frontier``).
+
+    Returns:
+        The frontier, ``(S, P M)``.
+    """
+
+    def at(price):
+        return frontier(
+            forecast,
+            verdict,
+            claim,
+            star,
+            utility,
+            mode_models,
+            menu,
+            price,
+            depth,
+            star_index=star_index,
+        )
+
+    f = jax.vmap(at)(jnp.asarray(lam, float))  # leaves (P, S, M)
+
+    def options(x):
+        return jnp.moveaxis(x, 0, 1).reshape(x.shape[1], -1)
+
+    return Frontier(options(f.reward), options(f.cost_d), options(f.mask))
