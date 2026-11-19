@@ -878,21 +878,20 @@ def test_a_refused_forecast_reads_nan_not_zero(toy):
     """A forecast the reweighting gate refuses (a NaN row) gives NaN rewards and NaN
     claim-bit information, never a confident zero, while the verdict is kept.
 
-    Four point draws (`_coarsening_belief`'s), refit prior flat, both roles the gas
-    prior N(0, 1); the draws' Kish size is 4, so a gate with `min_n_eff = 5` refuses
-    the forecast's row. On test 5's search and pool, the `LogScore` utility, the
-    `LogScore` rewards at depth 1 and 2, the `Count` reward and `claim_information`
-    are NaN.
+    Test 5's star, search and pool (one placeholder draw, so the programs are test 5's),
+    both roles the gas prior N(0, 1): the draw's Kish size is 1, so a gate with
+    `min_n_eff = 5` refuses the forecast's row. The `LogScore` utility, the `Count`
+    rewards at depth 1 and 2 and `claim_information` are NaN.
 
     Fails if a guard reads a NaN forecast as giving no mass (`forecast > 0` in
     `expected_log_score`, `p_cell > 0` in `frontier` or `claim_information`), which
     values a refused star at zero and so never observes it, or if the log of a NaN
     mass is read as `-inf` (a refused pool row would thin to an empty pool).
     """
-    atoms = _coarsening_belief(toy).atoms
-    prior = toy.GasPrior("toy", n_gas=1)
-    roles, pool = Roles(prior, toy.stack(prior)), _search_pool(toy)
-    log_like = jnp.zeros((2, 4))
+    pool, claim = _search_pool(toy), Claim((toy.InHz(),))
+    atoms = _search_belief(toy, pool).atoms
+    prior = toy.GasPrior("toy", n_gas=2)
+    roles, log_like = Roles(prior, toy.stack(prior)), jnp.zeros((2, 1))
     refused = toy.jit.role_belief(
         atoms, roles, log_like, toy.star, pool, min_n_eff=jnp.asarray(5.0),
         max_khat=jnp.inf,
@@ -902,15 +901,16 @@ def test_a_refused_forecast_reads_nan_not_zero(toy):
     assert np.all(np.isnan(np.asarray(forecast.log_prior_ratio)))
     assert np.all(np.isfinite(np.asarray(verdict.log_prior_ratio)))
 
-    claim, models = Claim((toy.InHz(),)), (_search(toy),)
     assert np.isnan(LogScore(1)(forecast, verdict, claim, toy.star))
     beliefs = (toy.stack(forecast), toy.stack(verdict))
-    count = Count(toy.stack(pool))
-    for utility, depth in ((LogScore(1), 1), (LogScore(1), 2), (count, 1)):
-        f = _frontier_of(beliefs, claim, toy.star, utility, models, LOOK, depth)
-        assert np.isnan(f.reward[0, 0]), (utility, depth)
+    for depth in (1, 2):
+        f = _frontier_of(
+            beliefs, claim, toy.star, Count(toy.stack(pool)), (_search(toy),), LOOK,
+            depth,
+        )  # fmt: skip
+        assert np.isnan(f.reward[0, 0]), depth
     info = toy.jit.claim_information(
-        forecast, verdict, models[0], Action(0, 0, 1.0), claim, toy.star, PLANET
+        forecast, verdict, _search(toy), Action(0, 0, 1.0), claim, toy.star, PLANET
     )
     assert np.all(np.isnan(np.asarray(info)))
     # A refused pool row thins to an unknown mass, not to an empty pool.
