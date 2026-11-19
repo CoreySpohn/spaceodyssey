@@ -14,6 +14,8 @@ the claim as stated, conditional when ``claim.given`` is set; a planet whose tru
 the condition is void, recorded in its own column beside the certificate.
 """
 
+import math
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -36,7 +38,7 @@ from spaceodyssey.information import (
     widen_by_mass_outside,
 )
 from spaceodyssey.study import Study
-from spaceodyssey.types import ACCEPTED, Atoms, ObservationLog
+from spaceodyssey.types import ACCEPTED, Atoms, ObservationLog, spent_d
 from spaceodyssey.world import SealedWorld
 
 
@@ -48,11 +50,13 @@ class Report(eqx.Module):
 
     Attributes:
         information: one entry per star, planet, stage and member: the stage
-            (``stage``, from 1) and the time it ends (``time_d``), whether the planet
-            is claim-true (``truth``), the whole claim's clipped ``q`` before and after
-            the stage, the signed ``information`` (the change of ``ln q`` for a
-            claim-true planet, of ``ln(1 - q)`` for a look-alike), and the
-            ``chain_gain`` of each conjunct, shape ``(n, C)``, NaN for a look-alike.
+            (``stage``, from 1), the time it ends (``time_d``), whether that is the
+            run's end (``end``; a later stage holds rows in flight then), whether
+            the planet is claim-true (``truth``), the whole claim's clipped ``q``
+            before and after the stage, the signed ``information`` (the change of
+            ``ln q`` for a claim-true planet, of ``ln(1 - q)`` for a look-alike), and
+            the ``chain_gain`` of each conjunct, shape ``(n, C)``, NaN for a
+            look-alike.
         certificates: one entry per star and planet, at the last stage: the
             certificate's ``status``, ``q_lo`` and ``q_hi``; ``void`` (the truth fails
             the claim's condition); ``truth``; the refit trigger ``refit``; and the
@@ -76,7 +80,8 @@ class Report(eqx.Module):
 
 
 _INFORMATION = (
-    "star", "planet", "stage", "time_d", "member", "truth", "q_before", "q_after",
+    "star", "planet", "stage", "time_d", "end", "member", "truth", "q_before",
+    "q_after",
     "information", "chain_gain",
 )  # fmt: skip
 _CERTIFICATES = (
@@ -132,19 +137,26 @@ def _star(tree, s: int):
     return jax.tree.map(lambda leaf: leaf[s], tree)
 
 
-def _stage_beliefs(study: Study, log: ObservationLog, s: int):
-    """The times that end star ``s``'s stages and its belief after each.
+def _stage_beliefs(study: Study, log: ObservationLog, s: int, end_d: float):
+    """The times that end star ``s``'s stages, the run's end stage, and the beliefs.
 
     Stage 0 ends at time zero, with the grant; each later stage ends at a release time
-    of one of the star's accepted rows. The replay is brought from one stage to the
-    next by ``absorb``, so each row goes through it once.
+    of one of the star's accepted rows, or at the run's end ``end_d``, a stage of its
+    own. A release that agrees with the end to rounding is the end stage. The replay
+    is brought from one stage to the next by ``absorb``, so each row goes through it
+    once.
+
+    Returns:
+        The stage times, the time of the end stage, and the belief after each stage.
     """
     star_col, refusal, release_d = (
         np.asarray(x) for x in (log.rows.star, log.rows.refusal, log.rows.release_d)
     )
     real = np.arange(star_col.shape[0]) < int(log.count)
     mine = real & (star_col == s) & (refusal == ACCEPTED)
-    times = [0.0, *sorted({float(t) for t in release_d[mine] if t > 0.0})]
+    releases = sorted({float(t) for t in release_d[mine] if t > 0.0})
+    end = next((t for t in releases if math.isclose(t, end_d, rel_tol=1e-12)), end_d)
+    times = [0.0, *sorted({*releases, end} if end > 0.0 else releases)]
 
     models, roles = study.design.models, study.roles
     refit, pool = _star(study.refits, s), _star(study.pool, s)
@@ -154,7 +166,7 @@ def _stage_beliefs(study: Study, log: ObservationLog, s: int):
     for time_d in times[1:]:
         r = _absorb(r, log, models, star, jnp.asarray(time_d))
         beliefs.append(_replay_belief(r, roles, models, star, pool))
-    return times, beliefs
+    return times, end, beliefs
 
 
 def associate_planets(truth: Atoms, draws: Atoms) -> Int[Array, " K"]:
@@ -210,8 +222,14 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
     planet the truth holds is scored at every stage by every verdict member, each
     planet read from the slot of the draws that ``associate_planets`` gives it. The
     certificates and the refit trigger gate the Pareto shape
-    at ``khat_threshold`` of the refit's draw count. All rows are read, those still in
-    flight when the run ended included.
+    at ``khat_threshold`` of the refit's draw count.
+
+    Every row the run took is scored at its own release time, those still in flight
+    when the run ended included: their data were taken, and the science arrives after
+    the last exposure. The run's end, the time it charged (``spent_d``), is a stage of
+    its own at every star, marked in the information table's ``end`` column, so the
+    table shows what was known at the end and what the rows in flight added after it.
+    The certificates, the resolution and the counts are read after the last release.
 
     Args:
         log: the run's log.
@@ -230,10 +248,11 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
     n_star, n_role = study.prior_mass_outside.shape
     khat_max = khat_threshold(study.refits.atoms.cloud.log_weights.shape[-1])
     members = range(1, n_role)
+    end_d = float(spent_d(log))
 
     information, certificates, resolution, planets = [], [], [], []
     for s in range(n_star):
-        times, beliefs = _stage_beliefs(study, log, s)
+        times, end, beliefs = _stage_beliefs(study, log, s, end_d)
         star, outside = _star(study.stars, s), study.prior_mass_outside[s]
         truth_s = _star(truth, s)
         slots = associate_planets(truth_s, _star(study.refits, s).atoms)
@@ -269,6 +288,7 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
                     information.append(
                         {
                             "star": s, "planet": k, "stage": j, "time_d": times[j],
+                            "end": times[j] == end,
                             "member": m, "truth": true, "q_before": before,
                             "q_after": after, "information": change,
                             "chain_gain": gain[m],
@@ -374,18 +394,27 @@ def _table(title: str, columns: dict) -> str:
 
 
 def _totals(information: dict) -> dict:
-    """Each planet's information summed over its stages, per member."""
+    """Each planet's information summed over its stages, per member.
+
+    The sum runs up to the run's end (``information_at_end``) and over every stage
+    (``information``).
+    """
     info = {name: np.asarray(column) for name, column in information.items()}
     keys = sorted({*zip(info["star"], info["planet"], info["member"], strict=True)})
     picks = [
         (info["star"] == s) & (info["planet"] == k) & (info["member"] == m)
         for s, k, m in keys
     ]
+    end_d = info["time_d"][info["end"]].max(initial=0.0)
+    at_end = info["time_d"] <= end_d
     return {
         "star": np.asarray([key[0] for key in keys], int),
         "planet": np.asarray([key[1] for key in keys], int),
         "member": np.asarray([key[2] for key in keys], int),
         "truth": np.asarray([info["truth"][pick].any() for pick in picks], bool),
+        "information_at_end": np.asarray(
+            [info["information"][pick & at_end].sum() for pick in picks]
+        ),
         "information": np.asarray([info["information"][pick].sum() for pick in picks]),
         "chain_gain": np.asarray(
             [info["chain_gain"][pick].sum(axis=0) for pick in picks]

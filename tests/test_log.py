@@ -173,14 +173,16 @@ def test_milestone_1_e_and_l_as_a_scored_log(toy):
     """Milestone 1: E and L as a scored log from a real `execute` and `score`.
 
     Step rule (S/N 6 reports), a cloud of 4,000 point draws: E's q is 0.0625, 0.175,
-    0.35, 0.70 over the stages, its information +2.42 in total, split 0.69 + 0.34 +
-    0.69 + 0.69 over hz, size, water and oxygen; L, the look-alike with the same rows,
-    loses 1.14. E's conditional q (both gases given the candidacy) is 1, so E is
-    issued, its lower bound the Wilson bound n / (n + 4) at n = n_eff psi; L fails the
-    condition and is void. Gaussian gas model at S/N 5, readings at their expected
-    value, 4,000 draws: q is 0.0625, 0.175, 0.337, 0.649, E gains +1.03, +0.66, +0.66
-    (2.34) and L loses 0.13, 0.22, 0.64 (0.98); E's conditional q is 0.649 / 0.70 =
-    0.927 < 0.95, so E is not issued. Both runs print their tables.
+    0.35, 0.70 over the stages (then a marked end stage at day 6, after its last
+    release at day 5, with no new rows), its information +2.42 in total, split
+    0.69 + 0.34 + 0.69 + 0.69 over hz, size, water and oxygen; L, the look-alike
+    with the same rows, loses 1.14. E's conditional q (both gases given the
+    candidacy) is 1, so E is issued, its lower bound the Wilson bound n / (n + 4) at
+    n = n_eff psi; L fails the condition and is void. Gaussian gas model at S/N 5,
+    readings at their expected value, 4,000 draws: q is 0.0625, 0.175, 0.337, 0.649,
+    E gains +1.03, +0.66, +0.66 (2.34) and L loses 0.13, 0.22, 0.64 (0.98); E's
+    conditional q is 0.649 / 0.70 = 0.927 < 0.95, so E is not issued. Both runs print
+    their tables.
 
     Fails if `execute` drops, reorders or misroutes a row, `score` reads the wrong
     stage, role or sign, the chain split does not sum to the information, the
@@ -195,7 +197,11 @@ def test_milestone_1_e_and_l_as_a_scored_log(toy):
     log, report = _run(toy, _step_rule_cloud(toy), step_models)
     assert int(log.count) == 6
     e, look_alike = _by_star(report, 0), _by_star(report, 1)
-    assert_allclose(e["q_after"], [0.175, 0.35, 0.70], rtol=1e-10)
+    # E's last row is released at day 5, the run ends at day 6: a marked end stage.
+    assert list(e["end"]) == [False, False, False, True]
+    assert list(look_alike["end"]) == [False, False, True]
+    assert_allclose(e["information"][3], 0.0, atol=1e-12)
+    assert_allclose(e["q_after"], [0.175, 0.35, 0.70, 0.70], rtol=1e-10)
     assert_allclose(e["q_before"][0], 0.0625, rtol=1e-10)
     assert_allclose(look_alike["q_after"], [0.175, 0.35, 0.70], rtol=1e-10)
     assert round(float(e["information"].sum()), 2) == 2.42
@@ -222,8 +228,8 @@ def test_milestone_1_e_and_l_as_a_scored_log(toy):
     )
     log, report = _run(toy, _gaussian_cloud(toy), gaussian_models)
     e, look_alike = _by_star(report, 0), _by_star(report, 1)
-    assert_allclose(e["q_after"], [0.175, 0.337, 0.649], atol=5e-4)
-    assert_allclose(e["information"], [1.03, 0.66, 0.66], atol=5e-3)
+    assert_allclose(e["q_after"], [0.175, 0.337, 0.649, 0.649], atol=5e-4)
+    assert_allclose(e["information"], [1.03, 0.66, 0.66, 0.0], atol=5e-3)
     assert_allclose(look_alike["information"], [-0.13, -0.22, -0.64], atol=5e-3)
     assert round(float(e["information"].sum()), 2) == 2.34
     assert round(float(look_alike["information"].sum()), 2) == -0.98
@@ -470,3 +476,34 @@ def test_two_planets_at_a_star_run_through_execute_and_score(toy):
     assert list(np.asarray(associate_planets(at_star, cloud))) == [0, 1]
     with pytest.raises(ValueError, match="planet slots"):
         associate_planets(at_star, _step_rule_cloud(toy))
+
+
+def test_rows_in_flight_at_the_end_are_scored_after_a_marked_end(toy):
+    """A row still in flight when the run ends is scored at its release, after a
+    marked end stage, and the totals print the information at the end beside the
+    total.
+
+    Two rows at E's star, the orbit and then water, one day each, released half a day
+    after they end: the run ends at day 2 with the water row in flight until day 2.5.
+    E's stages end at days 1.5, 2 (the end, marked, nothing new) and 2.5, gaining
+    ln 2.8, 0 and ln 2; the totals give ln 2.8 at the end and ln 5.6 in all.
+
+    Fails if `score` drops or misdates a row released after the run ends, does not
+    mark the end as its own stage, or totals the information at the end wrongly.
+    """
+    design = _design(_step_models(), latency_d=0.5)
+    study = _study(toy, _step_rule_cloud(toy), design, 2, _e_track_claim(toy))
+    world = _el_world(toy)
+    table = TablePolicy(Action([0, 0], [0, 1], [1.0, 1.0]))
+    report = score(execute(KEY, table, world, design, _no_grant()), world, study)
+
+    e = _by_star(report, 0)
+    assert_allclose(e["time_d"], [1.5, 2.0, 2.5])
+    assert list(e["end"]) == [False, True, False]
+    assert_allclose(e["information"], [np.log(2.8), 0.0, np.log(2.0)], atol=1e-10)
+    totals = format_report(report).split("Information in total (nats)\n")[1]
+    header, first = (line.split() for line in totals.splitlines()[:2])
+    row = dict(zip(header, first, strict=True))
+    assert (row["star"], row["planet"], row["member"]) == ("0", "0", "1")
+    assert row["information_at_end"] == f"{np.log(2.8):.4f}"
+    assert row["information"] == f"{np.log(5.6):.4f}"
