@@ -19,7 +19,7 @@ from jaxtyping import Array, Bool, Float, Int, PyTree
 
 from spaceodyssey._numerics import EXACT, guarded_log, safe_ratio
 from spaceodyssey.claim import Claim
-from spaceodyssey.roles import Roles
+from spaceodyssey.roles import AbstractRolePrior, Roles
 from spaceodyssey.types import (
     ACCEPTED,
     AbstractObservationModel,
@@ -134,24 +134,39 @@ def role_belief(
     return Belief(atoms, _role_log_prior(atoms, roles, star), log_like, pool)
 
 
-def _role_log_prior(atoms: Atoms, roles: Roles, star) -> Float[Array, "R A"]:
-    """Every role's log prior of each draw, forecast in row 0; checks the charts."""
+def _prior_rows(
+    atoms: Atoms, prior: AbstractRolePrior, star, name: str, stacked: bool
+) -> Float[Array, "R A"]:
+    """The log prior of each draw under one prior, a row per member when ``stacked``.
+
+    Checks the chart against the cloud's.
+    """
     if atoms.cloud.chart is None:
         raise ValueError(
             "a cloud without a declared chart cannot be reweighted to a role"
         )
     _require_ref_density(atoms.cloud)
-    for name, prior in (("forecast", roles.forecast), ("verdict", roles.verdict)):
-        if prior.chart != atoms.cloud.chart:
-            raise ValueError(
-                f"the {name} prior is on chart {prior.chart!r} but the cloud is "
-                f"on {atoms.cloud.chart!r}"
-            )
-    forecast = roles.forecast.log_prob(atoms, star)
-    verdict = eqx.filter_vmap(
-        lambda prior: prior.log_prob(atoms, star), in_axes=eqx.if_array(0)
-    )(roles.verdict)
-    return jnp.concatenate([forecast[None], verdict], axis=0)
+    if prior.chart != atoms.cloud.chart:
+        raise ValueError(
+            f"the {name} prior is on chart {prior.chart!r} but the cloud is "
+            f"on {atoms.cloud.chart!r}"
+        )
+    if not stacked:
+        return prior.log_prob(atoms, star)[None]
+    return eqx.filter_vmap(
+        lambda member: member.log_prob(atoms, star), in_axes=eqx.if_array(0)
+    )(prior)
+
+
+def _role_log_prior(atoms: Atoms, roles: Roles, star) -> Float[Array, "R A"]:
+    """Every role's log prior of each draw, forecast in row 0; checks the charts."""
+    return jnp.concatenate(
+        [
+            _prior_rows(atoms, roles.forecast, star, "forecast", stacked=False),
+            _prior_rows(atoms, roles.verdict, star, "verdict", stacked=True),
+        ],
+        axis=0,
+    )
 
 
 def log_weights(b: Belief) -> Float[Array, "R A"]:
@@ -647,13 +662,21 @@ def replay_belief(
         ValueError: if the cloud declares no chart or no ``log_ref_density``, or a
             role prior's chart differs from the cloud's.
     """
+    log_prior = _role_log_prior(r.refit.atoms, roles, star)
+    atoms, log_like = _finalized(r, models, star)
+    return Belief(atoms, log_prior, jnp.broadcast_to(log_like, log_prior.shape), pool)
+
+
+def _finalized(
+    r: Replay, models: tuple[AbstractObservationModel, ...], star
+) -> tuple[Atoms, Float[Array, " A"]]:
+    """The draws a replay holds and the joint log likelihood of its applied rows."""
     atoms = r.refit.atoms
-    log_prior = _role_log_prior(atoms, roles, star)
     log_like = jnp.zeros_like(atoms.cloud.log_weights)
     for model, stats in zip(models, r.stats, strict=True):
         slot_log_like, atoms = model.finalize(stats, atoms, star)
         log_like = log_like + slot_log_like
-    return Belief(atoms, log_prior, jnp.broadcast_to(log_like, log_prior.shape), pool)
+    return atoms, log_like
 
 
 def _floor_nodes(
@@ -781,14 +804,18 @@ def select_roles(b: Belief, rows: slice) -> Belief:
     Returns:
         The belief of those roles, on the same draws.
     """
-    pool = b.pool
-    pool = Pool(
+    pool = _pool_rows(b.pool, rows)
+    return Belief(b.atoms, b.log_prior[..., rows, :], b.log_like[..., rows, :], pool)
+
+
+def _pool_rows(pool: Pool, rows: slice) -> Pool:
+    """The pool of some roles: its rows ``rows``, leading axes kept."""
+    return Pool(
         pool.marks,
         pool.log_prior[..., rows, :],
         pool.log_like[..., rows, :],
         pool.log_mass[..., rows],
     )
-    return Belief(b.atoms, b.log_prior[..., rows, :], b.log_like[..., rows, :], pool)
 
 
 def planning_beliefs(
@@ -797,7 +824,8 @@ def planning_beliefs(
     roles: Roles,
     models: tuple[AbstractObservationModel, ...],
     star,
-    pool: Pool,
+    forecast_pool: Pool,
+    verdict_pool: Pool,
     floor: Float[Array, " G"],
     n: int = 16,
 ) -> tuple[Belief, Belief]:
@@ -805,9 +833,12 @@ def planning_beliefs(
 
     Each is read off its own replay of the log (``replay_belief``): the forecast's
     belief, one role (``R = 1``), off ``forecast`` under the forecast prior, and the
-    verdict's, one role per member, off ``verdict`` under the members, each with its
-    own rows of the pool. The two replays may hold different rows: a frozen forecast is
-    the replay at ``time_d = 0`` while the verdict's follows the decision time. Each
+    verdict's, one role per member, off ``verdict`` under the members; each replay is
+    read under its own roles only. The two replays may hold different rows: a frozen
+    forecast is the replay at ``time_d = 0`` while the verdict's follows the decision
+    time. Each reads its own pool at its own time, the forecast row 0 of
+    ``forecast_pool`` and the verdict rows 1 on of ``verdict_pool``, so a frozen
+    forecast holds the pool at time zero while real nulls thin the verdict's. Each
     belief carries its own draws, so a gas block the verdict's rows update never
     reaches the forecast. Each is then split into point sub-draws at the claim's
     floors (``quadrature_draws``), on which a hypothetical outcome updates the belief
@@ -819,7 +850,9 @@ def planning_beliefs(
         roles: the forecast and the stacked verdict members.
         models: the run's model table, static.
         star: a pytree of scalar leaves describing the star.
-        pool: the undetected planets, every role.
+        forecast_pool: the undetected planets at the forecast's replay time, every
+            role (a frozen forecast's is the pool at time zero).
+        verdict_pool: the undetected planets at the verdict's replay time, every role.
         floor: the abundance at which the claim steps, per gas (``quadrature_draws``).
         n: quadrature nodes per gas factor, a static planning setting.
 
@@ -827,9 +860,26 @@ def planning_beliefs(
         The forecast's belief (``R = 1``) and the verdict's (``R`` the members), on
         point draws.
     """
-    from_forecast = replay_belief(forecast, roles, models, star, pool)
-    from_verdict = replay_belief(verdict, roles, models, star, pool)
+
+    def read(r, prior, name, stacked, pool):
+        log_prior = _prior_rows(r.refit.atoms, prior, star, name, stacked)
+        atoms, log_like = _finalized(r, models, star)
+        log_like = jnp.broadcast_to(log_like, log_prior.shape)
+        return quadrature_draws(Belief(atoms, log_prior, log_like, pool), floor, n)
+
     return (
-        quadrature_draws(select_roles(from_forecast, slice(0, 1)), floor, n),
-        quadrature_draws(select_roles(from_verdict, slice(1, None)), floor, n),
+        read(
+            forecast,
+            roles.forecast,
+            "forecast",
+            False,
+            _pool_rows(forecast_pool, slice(0, 1)),
+        ),
+        read(
+            verdict,
+            roles.verdict,
+            "verdict",
+            True,
+            _pool_rows(verdict_pool, slice(1, None)),
+        ),
     )

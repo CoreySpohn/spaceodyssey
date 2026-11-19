@@ -224,7 +224,7 @@ def _cases(toy):
         ),
         "planning_beliefs": (
             lambda frozen, now: planning_beliefs(
-                frozen, now, roles, gas, star, b0.pool, floor, 4
+                frozen, now, roles, gas, star, b0.pool, b1.pool, floor, 4
             ),
             [(early[0], full[0]), (early[1], full[1])],
             lambda a: a[1].stats[0]["weighted_sum"],

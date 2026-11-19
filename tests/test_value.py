@@ -360,7 +360,8 @@ def test_a_frozen_forecast_plans_on_its_own_replay(toy):
     verdict's own -0.157 had the forecast been read off the verdict's replay.
 
     Fails if the forecast is read off the verdict's replay, or shares its draws: a
-    frozen forecast would then see the reading released at day 1.
+    frozen forecast would then see the reading released at day 1; or if it reads the
+    pool now instead of the pool at time zero.
     """
     model = GaussianGasModel(snr_one_day=[5.0])
     models, capacity = (model,), 2
@@ -378,9 +379,13 @@ def test_a_frozen_forecast_plans_on_its_own_replay(toy):
     roles = Roles(prior, toy.stack(prior))
     frozen = replay(refit, log, models, toy.star, jnp.asarray(0.0))
     now = replay(refit, log, models, toy.star, jnp.asarray(1.0))
+    pool0, pool = toy.empty_pool(2, 1), toy.empty_pool(2, 1)
+    pool = eqx.tree_at(lambda p: p.log_mass, pool, jnp.array([-1.0, -2.0]))
     forecast, verdict = planning_beliefs(
-        frozen, now, roles, models, toy.star, toy.empty_pool(2, 1), jnp.zeros(1)
+        frozen, now, roles, models, toy.star, pool0, pool, jnp.zeros(1)
     )
+    assert_allclose(forecast.pool.log_mass, [-np.inf])  # the pool at time zero
+    assert_allclose(verdict.pool.log_mass, [-2.0])  # the verdict's row of the pool now
 
     claim = Claim((GasAbove(0, 0.0),))
     p_water = float(norm.cdf(0.8 / np.sqrt(0.2)))
@@ -449,7 +454,7 @@ GAS_BLOCKS = ((0.0, 1.0), (0.8, 0.2), (0.3, 0.1), (0.8, 0.2))
 def _gas_planning_beliefs(refit, log, time_d, roles, pool):
     models = (GaussianGasModel(snr_one_day=[5.0]),)
     now = replay(refit, log, models, (), time_d)
-    return planning_beliefs(now, now, roles, models, (), pool, jnp.zeros(1))
+    return planning_beliefs(now, now, roles, models, (), pool, pool, jnp.zeros(1))
 
 
 def test_a_binned_gas_reading_is_valued_exactly(toy):
