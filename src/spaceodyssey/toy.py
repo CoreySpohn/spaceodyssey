@@ -27,6 +27,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import ndtr
+from jax.scipy.stats import norm
 from jaxtyping import Array, Float, Int
 
 from spaceodyssey._numerics import safe_ratio
@@ -72,6 +73,14 @@ def _cell_index(codes: Int[Array, "K G"], n_bin: int) -> Int[Array, ""]:
     return jnp.sum(flat * powers)
 
 
+def _cell_codes(shape: tuple[int, int], n_bin: int) -> Int[Array, "Y K G"]:
+    """The per-factor codes of every cell, the inverse of ``_cell_index``."""
+    n_factor = shape[0] * shape[1]
+    powers = n_bin ** jnp.arange(n_factor - 1, -1, -1)
+    cell = jnp.arange(n_bin**n_factor)
+    return ((cell[:, None] // powers) % n_bin).reshape(-1, *shape)
+
+
 class GaussianGasModel(AbstractObservationModel):
     """A linear Gaussian reading of every gas abundance.
 
@@ -82,7 +91,12 @@ class GaussianGasModel(AbstractObservationModel):
 
     The outcome cells bin each reading at ``edges``; an uncovered gas has one outcome
     (cell 0). A row's cells are the joint over planets and gases; ``cell`` and
-    ``n_cells`` give the same coding for ``binned_cells``.
+    ``n_cells`` give the same coding for ``binned_cells``. A cell stands for the mean
+    reading in its bin under the reading's distribution at the verdict's gas prior,
+    ``N(GAS_FLOOR, GAS_PRIOR_SD**2 + sigma**2)`` (``cell_payloads``). Conditioning a
+    point block on it changes nothing; conditioning an uncertain block at that prior
+    gives the exact posterior mean given the bin (the update is linear in the reading)
+    and a variance smaller than the exact one, since one reading stands for the bin.
 
     Two rows reading one gas of a draw with ``x_var > 0`` share its abundance, so
     their per-row likelihoods do not add; ``stats`` and ``finalize`` carry the exact
@@ -171,6 +185,27 @@ class GaussianGasModel(AbstractObservationModel):
         """``(len(edges) + 1) ** (K G)``."""
         n_planet, n_gas = atoms.x_mean.shape[-2:]
         return (self.edges.shape[0] + 1) ** (n_planet * n_gas)
+
+    def cell_payloads(self, atoms, action):
+        """Each cell's payload: the mean reading in each covered gas's bin.
+
+        The mean of ``N(GAS_FLOOR, s**2)``, ``s**2 = GAS_PRIOR_SD**2 + sigma**2``,
+        truncated to the bin ``[a, b)``: ``GAS_FLOOR + s (phi(alpha) - phi(beta)) /
+        (Phi(beta) - Phi(alpha))`` with ``alpha, beta = (a, b) - GAS_FLOOR) / s``.
+        """
+        shape = atoms.x_mean.shape[-2:]
+        snr = jnp.broadcast_to(_snr(self.snr_one_day, action), shape)
+        codes = _cell_codes(shape, self.edges.shape[0] + 1)  # (Y, K, G)
+        bounds = jnp.concatenate(
+            [-jnp.inf * jnp.ones(1), self.edges, jnp.inf * jnp.ones(1)]
+        )
+        sd = jnp.sqrt(GAS_PRIOR_SD**2 + self._noise_var(snr))
+        alpha = (bounds[codes] - GAS_FLOOR) / sd
+        beta = (bounds[codes + 1] - GAS_FLOOR) / sd
+        mass = ndtr(beta) - ndtr(alpha)
+        mean = GAS_FLOOR + sd * safe_ratio(norm.pdf(alpha) - norm.pdf(beta), mass)
+        snr = jnp.broadcast_to(snr, codes.shape)
+        return {"snr": snr, "reading": jnp.where(snr > 0, mean, 0.0)}
 
     def cells(self, atoms, action):
         """Closed form: each bin is a difference of normal CDFs of the reading."""
@@ -273,6 +308,13 @@ class StepReportModel(AbstractObservationModel):
         """``3 ** (K G)``."""
         n_planet, n_gas = atoms.x_mean.shape[-2:]
         return 3 ** (n_planet * n_gas)
+
+    def cell_payloads(self, atoms, action):
+        """Each cell's payload: the S/N and the bit its codes report, exact."""
+        shape = atoms.x_mean.shape[-2:]
+        codes = _cell_codes(shape, 3)  # (Y, K, G)
+        snr = jnp.broadcast_to(_snr(self.snr_one_day, action), codes.shape)
+        return {"snr": snr, "bit": (codes == 2).astype(snr.dtype)}
 
     def cells(self, atoms, action):
         """Closed form: the bit follows the probability of the gas above its floor."""

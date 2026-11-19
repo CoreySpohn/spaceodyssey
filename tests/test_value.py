@@ -3,6 +3,7 @@ forms and the sign errors they catch.
 """
 
 import itertools
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -26,7 +27,13 @@ from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.information import claim_information
 from spaceodyssey.roles import Roles
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
-from spaceodyssey.types import Action, ObservationLog, Refit, Row
+from spaceodyssey.types import (
+    AbstractObservationModel,
+    Action,
+    ObservationLog,
+    Refit,
+    Row,
+)
 from spaceodyssey.value import (
     Count,
     Frontier,
@@ -389,6 +396,112 @@ def test_a_frozen_forecast_plans_on_its_own_replay(toy):
     assert round(expected, 3) == -1.670
 
 
+class PointReading(AbstractObservationModel):
+    """The Gaussian gas reading of one planet's one gas, its outcomes three point
+    readings `READINGS` with quadrature weights `OMEGA`: cell j has probability
+    OMEGA[j] N(READINGS[j]; m, v + sigma^2) under a draw with block N(m, v). Its
+    payloads are those readings, read by the Gaussian model's conjugate `stats` and
+    `finalize`, so a hypothetical reading of an uncertain block is exact.
+    """
+
+    searches: ClassVar[bool] = False
+    gas: GaussianGasModel
+
+    def _sigma2(self, action):
+        return (2.5 / (self.gas.snr_one_day[0] * jnp.sqrt(action.exposure_d))) ** 2
+
+    def cells(self, atoms, action):
+        mean, var = atoms.x_mean[:, 0, 0], atoms.x_var[:, 0, 0]
+        sd = jnp.sqrt(var + self._sigma2(action))[:, None]
+        return OMEGA * norm.pdf(READINGS, mean[:, None], sd)
+
+    def cell_payloads(self, atoms, action):
+        snr = self.gas.snr_one_day[0] * jnp.sqrt(action.exposure_d)
+        return {"snr": jnp.full((3, 1, 1), snr), "reading": READINGS[:, None, None]}
+
+    def stats(self, payload, atoms, star):
+        return self.gas.stats(payload, atoms, star)
+
+    def finalize(self, stats, atoms, star):
+        return self.gas.finalize(stats, atoms, star)
+
+    def sample(self, key, atoms, action):
+        raise NotImplementedError("read only through its cells")
+
+
+READINGS = jnp.array([-1.0, 0.0, 1.0])
+OMEGA = jnp.array([0.25, 0.5, 0.25])
+
+
+def test_two_readings_of_an_uncertain_gas_use_the_joint(toy):
+    """Two hypothetical readings of one uncertain gas are valued from their joint
+    distribution, not as two independent readings given the draw.
+
+    Two draws of one planet, weights 0.6 and 0.4, water blocks N(0.3, 1) and
+    N(-0.5, 0.5); one point-reading entry at S/N 5 (sigma = 0.5); forecast and verdict
+    agree; `LogScore` on the count of water planets; depth 2 at lam = 0. The value is
+    computed here from the joint of the two readings given each draw, the bivariate
+    normal with variance v + sigma^2 and covariance v, and the conjugate posterior of
+    both readings (precision 1 / v + 2 / sigma^2): sum_i p_i max(U_i,
+    sum_j p_(j|i) U_ij) - U_0. Treating the readings as independent given the draw
+    (the second reading's cells off the prior block) gives another value.
+
+    Fails if a hypothetical reading reweights the draws without updating the block
+    (the conjugate update), so that the second reading is read off the prior block.
+    """
+    sigma2 = 0.25
+    w0 = np.array([0.6, 0.4])
+    m, v = np.array([0.3, -0.5]), np.array([1.0, 0.5])
+    y, omega = np.asarray(READINGS), np.asarray(OMEGA)
+    atoms = toy.atoms([[1.0], [1.0]], [[1.0], [1.0]], w0, m[:, None], v[:, None], 1)
+    b = toy.belief(atoms, n_roles=2)
+    claim = Claim((GasAbove(0, 0.0),))
+
+    def utility(w, mean, var):
+        q_water = np.sum(w * norm.cdf(mean / np.sqrt(var))) / np.sum(w)
+        return q_water * np.log(q_water) + (1 - q_water) * np.log(1 - q_water)
+
+    def posterior(readings):
+        precision = 1.0 / v + len(readings) / sigma2
+        mean = (m / v + sum(readings) / sigma2) / precision
+        return mean, 1.0 / precision
+
+    def one(y_i):  # density of one reading given each draw
+        return norm.pdf(y_i, m, np.sqrt(v + sigma2))
+
+    def two(y_i, y_j):  # joint density of two readings given each draw
+        cov = np.stack([[v + sigma2, v], [v, v + sigma2]])  # (2, 2, A)
+        det = cov[0, 0] * cov[1, 1] - cov[0, 1] ** 2
+        d_i, d_j = y_i - m, y_j - m
+        quad = (
+            cov[1, 1] * d_i**2 - 2 * cov[0, 1] * d_i * d_j + cov[0, 0] * d_j**2
+        ) / det
+        return np.exp(-0.5 * quad) / (2 * np.pi * np.sqrt(det))
+
+    def value(joint):
+        total = 0.0
+        for i in range(3):
+            w1 = w0 * omega[i] * one(y[i])
+            later = sum(
+                np.sum(w0 * omega[i] * omega[j] * joint(y[i], y[j]))
+                / np.sum(w1)
+                * utility(w0 * joint(y[i], y[j]), *posterior([y[i], y[j]]))
+                for j in range(3)
+            )
+            total += np.sum(w1) * max(utility(w1, *posterior([y[i]])), later)
+        return total - utility(w0, m, v)
+
+    exact = value(two)
+    apart = value(lambda y_i, y_j: one(y_i) * one(y_j))
+    assert abs(exact - apart) > 1e-3  # the fixture sees the difference
+
+    models, menu = (PointReading(GaussianGasModel(snr_one_day=[5.0])),), LOOK
+    f = _frontier_of(
+        toy.split(toy.stack(b)), claim, toy.star, LogScore(1), models, menu, 2
+    )
+    assert_allclose(f.reward[0, 0], exact, rtol=1e-10)
+
+
 LOOK = _menu([[1.0]], (0,))
 
 
@@ -505,6 +618,7 @@ def test_a_model_that_does_not_search_leaves_the_pool(toy):
     assert_allclose(f.reward[0], [0.8, 0.0], rtol=1e-12, atol=1e-12)
 
 
+@pytest.mark.medium(reason="depth-2 frontier over three modes, compiled for two shapes")
 def test_a_second_star_and_world_add_no_traces(toy):
     """`frontier` traces once per structure: two worlds of two stars, with other
     weights, menu exposures, costs, masks and price, run one program, and a star's

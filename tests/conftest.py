@@ -202,28 +202,37 @@ class _Toy:
         """A test search of planet 0: per day of exposure it detects the planet with
         probability `hit` when its `hz` bit is set and `other` otherwise, so
         `1 - (1 - p)**exposure_d` in all, smooth in the exposure. A slot with no
-        planet is always missed. Cell 0 is the miss, cell 1 the detection. Read only
-        through `cells`.
+        planet is always missed. Cell 0 is the miss, cell 1 the detection; a payload
+        carries the exposure and whether the planet was detected.
         """
 
         searches: ClassVar[bool] = True
         hit: jax.Array = eqx.field(converter=jnp.asarray)
         other: jax.Array = eqx.field(converter=jnp.asarray)
 
-        def cells(self, atoms, action):
+        def _detect(self, atoms, exposure_d):
             p = jnp.where(atoms.cloud.samples["hz"][:, 0] > 0.5, self.hit, self.other)
-            d = -jnp.expm1(action.exposure_d * jnp.log1p(-p))
-            d = jnp.where(atoms.exists[:, 0], d, 0.0)
+            d = -jnp.expm1(exposure_d * jnp.log1p(-p))
+            return jnp.where(atoms.exists[:, 0], d, 0.0)
+
+        def cells(self, atoms, action):
+            d = self._detect(atoms, action.exposure_d)
             return jnp.stack([1.0 - d, d], axis=-1)
 
-        def sample(self, key, atoms, action):
-            raise NotImplementedError("read only through cells")
+        def cell_payloads(self, atoms, action):
+            exposure_d = jnp.full(2, action.exposure_d)
+            return {"exposure_d": exposure_d, "detected": jnp.array([0.0, 1.0])}
 
         def stats(self, payload, atoms, star):
-            raise NotImplementedError("read only through cells")
+            d = self._detect(atoms, payload["exposure_d"])
+            p = jnp.where(payload["detected"] > 0.5, d, 1.0 - d)
+            return jnp.log(p)
 
         def finalize(self, stats, atoms, star):
-            raise NotImplementedError("read only through cells")
+            return stats, atoms
+
+        def sample(self, key, atoms, action):
+            raise NotImplementedError("a planning search: read through cells")
 
     @staticmethod
     def assert_non_interference(key, policy, worlds, blind, seeing, grant):

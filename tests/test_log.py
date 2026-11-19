@@ -60,6 +60,9 @@ class OrbitReport(AbstractObservationModel):
         hz = atoms.cloud.samples["hz"][:, 0]
         return jnp.stack([1.0 - hz, hz], axis=-1)
 
+    def cell_payloads(self, atoms, action):
+        return {"hz": jnp.broadcast_to(jnp.arange(2.0)[:, None], (2, 1))}
+
 
 class ExpectedReading(AbstractObservationModel):
     """The Gaussian gas model with every reading at its expected value: the true
@@ -81,6 +84,9 @@ class ExpectedReading(AbstractObservationModel):
 
     def cells(self, atoms, action):
         return self.gas.cells(atoms, action)
+
+    def cell_payloads(self, atoms, action):
+        return self.gas.cell_payloads(atoms, action)
 
 
 def _no_grant():
@@ -356,6 +362,9 @@ class Blind(AbstractObservationModel):
 
     def cells(self, atoms, action):
         return jnp.ones((atoms.exists.shape[0], 1))
+
+    def cell_payloads(self, atoms, action):
+        return {"value": jnp.zeros((1, *atoms.exists.shape[1:]))}
 
 
 class EchoState(eqx.Module):

@@ -133,6 +133,9 @@ def _cases(toy):
     cells = [model.cells(b.atoms, a) for b, a in zip((b0, b1), actions, strict=True)]
     detect = (jnp.array([0.3, 0.9, 0.1]), jnp.array([0.6, 0.2, 0.5]))
 
+    def cell_payload(b, action, cell):
+        return jax.tree.map(lambda x: x[cell], model.cell_payloads(b.atoms, action))
+
     # Replays: two logs of one structure, a gas row per slot, released over time.
     gas = (model,)
     rng = np.random.default_rng(1)
@@ -335,10 +338,13 @@ def _cases(toy):
             uneven,
         ),
         "update_by_cell": (
-            update_by_cell,
-            [(b0, cells[0][:, 1]), (b1, cells[1][:, 2])],
-            lambda a: a[1],
-            lambda b: uneven(weights(b)),
+            lambda b, payload, c: update_by_cell(b, model, payload, c, star),
+            [
+                (b0, cell_payload(b0, actions[0], 1), cells[0][:, 1]),
+                (b1, cell_payload(b1, actions[1], 2), cells[1][:, 2]),
+            ],
+            lambda a: a[1]["reading"],
+            belief_scalar,
         ),
         "claim_information": (
             lambda b, m, a, k: claim_information(*toy.split(b), m, a, claim, star, k),

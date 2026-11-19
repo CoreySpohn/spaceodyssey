@@ -337,7 +337,9 @@ class AbstractObservationModel(eqx.Module):
     """The contract of an observation model, a row's payload given a draw and an action.
 
     A model holds configuration only, never an observed datum; it is handed a payload
-    each time it scores one. That is a deliberate difference from a data-bearing
+    each time it scores one. Its outcomes are also offered as discrete cells
+    (``cells``), each standing for a payload (``cell_payloads``), which a planner
+    reads ahead of the data. That is a deliberate difference from a data-bearing
     likelihood term: the log is a fixed-capacity buffer of payloads per model, scored
     by one commutative sum per model.
 
@@ -430,6 +432,25 @@ class AbstractObservationModel(eqx.Module):
 
         Returns:
             Cell probabilities of shape ``(A, Y)``; each row sums to one.
+        """
+
+    @abc.abstractmethod
+    def cell_payloads(self, atoms: Atoms, action: Action) -> PyTree:
+        """The payload each outcome cell stands for, for a hypothetical row.
+
+        A planner conditions its draws on a hypothetical outcome as a replay conditions
+        them on a row: ``finalize`` of the cell's payload's ``stats``. For a model
+        whose cells are its outcomes (a report, a detection) the payload is exact. A
+        model that bins a continuous reading gives a representative reading of each
+        bin, which conditions an uncertain quantity only approximately.
+
+        Args:
+            atoms: the draws (for the payload's shape).
+            action: the action.
+
+        Returns:
+            One payload per cell, a dict of named arrays with leading axis ``Y`` in the
+            order of ``cells``.
         """
 
 
