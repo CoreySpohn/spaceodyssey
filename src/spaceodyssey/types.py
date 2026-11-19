@@ -1,9 +1,9 @@
-"""Leaf types shared by every layer: draws, pool, rows, actions, the model contract.
+"""Leaf types shared by every layer: draws, pool, rows, actions, model and refit.
 
 This module imports nothing from the package. Axis names used in the annotations:
-``A`` draws, ``K`` planets one draw can hold, ``G`` gases, ``R`` roles (forecast is
-row 0, the verdict members are rows 1 to ``R - 1``), ``W`` log row capacity and ``Am``
-the atoms of a pool.
+``A`` draws, ``K`` planets one draw can hold (a star's planet capacity), ``G``
+gases, ``R`` roles (forecast is row 0, the verdict members are rows 1 to ``R - 1``),
+``W`` log row capacity and ``Am`` the atoms of a pool.
 """
 
 import abc
@@ -181,6 +181,25 @@ class Atoms[StateT](eqx.Module):
     nodes: GasNodes | None = None
 
 
+def planet_tracks(atoms: Atoms) -> Bool[Array, " K"]:
+    """The planet slots a cloud holds a track in: those some draw holds a planet in.
+
+    ``K`` is the planet capacity of a star, static and padded: a slot no draw holds is
+    free, and a detection there is of a planet new to the cloud (association by truth
+    label, declared deviation 2: the payload's slot is the truth's). A new planet is
+    not scored against the draws (it cannot be, none holds it); it is a pool event,
+    already counted found by the pool's replay, and a refit's job
+    (``AbstractRefitter``).
+
+    Args:
+        atoms: the draws of one star.
+
+    Returns:
+        True for each slot some draw holds a planet in, shape ``(K,)``.
+    """
+    return jnp.any(atoms.exists, axis=0)
+
+
 def as_index(x) -> Int[Array, "..."]:
     """``x`` as the default integer type, never weakly typed, in any shape.
 
@@ -274,6 +293,11 @@ WAITED = 2
 Charged nothing, its payload zeros, released at its start; it carries no data, so no
 replay applies it and ``score`` stages it as no observation, but it moves the clock."""
 
+PAST_END = 3
+"""Refusal code of a row that would start after the calendar's end
+(``Resources.end_d``), or whose star never leaves keepout before it: charged nothing,
+its payload zeros."""
+
 
 class Row(eqx.Module):
     """One released observation result.
@@ -289,7 +313,8 @@ class Row(eqx.Module):
         exposure_d: exposure length in days.
         charged_d: time charged against the budget in days.
         release_d: calendar time at which the row is released, in days.
-        refusal: refusal code, ``ACCEPTED``, ``OVER_BUDGET`` or ``WAITED``.
+        refusal: refusal code, ``ACCEPTED``, ``OVER_BUDGET``, ``WAITED`` or
+            ``PAST_END``.
         model_slot: index into the run's model table of the model that inverts the
             payload.
         payload: one payload per model, each a dict of named arrays, zero-padded; only
@@ -382,9 +407,16 @@ class Action(eqx.Module):
     """What a policy asks for: one observation of one star in one mode.
 
     An action starts at the later of ``not_before_d`` and the time the instrument is
-    next free (``clock_d``), so a policy waits by asking for a later start; waiting
-    costs calendar time and no budget. A granted action's ``not_before_d`` is ignored:
-    the grant is released at time zero.
+    next free (``clock_d``), and later still while its star is in keepout, so a policy
+    waits by asking for a later start; waiting costs calendar time and no budget. A
+    granted action's ``not_before_d`` is ignored: the grant is released at time zero.
+
+    A model reads an action's start as its ``not_before_d``: ``step`` hands the world
+    the action with ``not_before_d`` set to the realized start, a replay of a real row
+    rebuilds it from the row's ``time_d``, and a planner's lookahead gives its actions
+    the planned start. A model whose rows depend on the start (a search whose
+    detection probability follows the orbital phase or the zodi) records it in its
+    payload.
 
     Attributes:
         star: star index.
@@ -392,7 +424,7 @@ class Action(eqx.Module):
         exposure_d: requested exposure in days.
         not_before_d: earliest calendar start, days from the start of the survey;
             zero (as soon as the instrument is free) by default, and broadcast to the
-            shape of ``exposure_d``.
+            shape of ``exposure_d``. Once realized, the start itself.
     """
 
     star: Int[Array, ""] = eqx.field(converter=as_index)
@@ -481,6 +513,12 @@ class AbstractObservationModel(eqx.Module):
     A model whose cells step in the abundance (a one-bit report of a gas above its
     floor) declares the step, ``gas_step``, so the quadrature splits the block there
     (``quadrature_draws``); a model whose cells are smooth in it leaves it None.
+
+    A searching model also says which planet slots a real row detected
+    (``detections``), and its ``stats`` score only the detections of tracks
+    (``planet_tracks``): a detection in a slot no draw holds is a planet new to the
+    cloud, which no draw can explain, so it is not scored (the pool's replay already
+    counts it found, and a refit adds its track).
 
     Attributes:
         searches: whether the model detects planets, a class constant every concrete
@@ -571,6 +609,21 @@ class AbstractObservationModel(eqx.Module):
         Returns:
             Cell probabilities of shape ``(A, Y)``; each row sums to one.
         """
+
+    def detections(self, payload: PyTree) -> Bool[Array, " K"] | None:
+        """The planet slots a real row of a searching model detected.
+
+        Slots follow the truth's labels (declared deviation 2); a zero payload (a
+        refused row or a wait) detects nothing. A model that does not search returns
+        None, the default; every searching model overrides it.
+
+        Args:
+            payload: the payload of one row, a dict of named arrays.
+
+        Returns:
+            True for each slot detected, shape ``(K,)``; or None.
+        """
+        return None
 
     def gas_cells(self, atoms: Atoms, action: Action) -> Float[Array, "A K G B"] | None:
         """Each gas factor's probability of each of its bins, on point gas blocks.
@@ -666,3 +719,72 @@ def binned_cells(
     index = jax.vmap(jax.vmap(cell))(payloads)  # (n, A)
     counts = jax.nn.one_hot(index, n_cells).sum(axis=0)
     return counts / CELL_SAMPLES
+
+
+class RefitTerm(eqx.Module):
+    """The rows a refit adds to a star's cloud: the new likelihood term.
+
+    Attributes:
+        log: the run's log, all stars: the public record a refit reads.
+        rows: the rows the term adds, shape ``(W,)``: the star's accepted rows
+            released by the query time that the cloud does not yet represent
+            (``due_rows``).
+        models: the run's model table, static in structure; ``Row.model_slot``
+            indexes it.
+        star: a pytree of scalar leaves describing the star.
+    """
+
+    log: ObservationLog
+    rows: Bool[Array, " W"]
+    models: tuple[AbstractObservationModel, ...]
+    star: PyTree
+
+
+class AbstractRefitter(eqx.Module):
+    """The producer of a star's refits: a new cloud from its cloud and its new rows.
+
+    A planner queues a refit of a star whose released rows detected a planet its cloud
+    holds no track for (``planet_tracks``); the refit returns a cloud that represents
+    the old cloud's rows and the term's, the new planet a track in a free slot of the
+    star's planet capacity ``K``. It reads only the public log. A refitter is a record
+    of configuration (the backend); the toy's is an importance refit
+    (``toy.ToyRefitter``), and a study of real data plugs its fitter in here.
+
+    The call has the shape of a posterior update by one likelihood term: the star's
+    current cloud, the new rows as the term, the key, and the reweighting gate's
+    thresholds (the planner's ``PlannerSettings``), so a fitter whose update takes
+    ``(posterior, term, backend, key, *, min_n_eff, max_khat)`` is wrapped directly. A
+    cloud the gate refuses carries NaN log weights, so the star is refused, never
+    planned on silently. The thresholds are checked on the host where they are set
+    (``PlannerSettings`` refuses NaN). A decision's queue is refit in one call,
+    ``refit_stars``, which maps the stars in chunks of a batch size.
+
+    The new refit's pool is not the refitter's job: the planner thins the old pool by
+    the searches the new refit represents (``replay_pool``), which counts the new
+    planet found whatever the refit makes of it.
+    """
+
+    @abc.abstractmethod
+    def refit(
+        self,
+        refit: Refit,
+        term: RefitTerm,
+        key: PRNGKeyArray,
+        *,
+        min_n_eff: Float[Array, ""],
+        max_khat: Float[Array, ""],
+    ) -> Refit:
+        """A new refit of one star: its cloud updated by the term's rows.
+
+        Args:
+            refit: the star's refit now.
+            term: the rows to add, of the same star.
+            key: the key of the refit.
+            min_n_eff: the least Kish size of the new cloud's weights.
+            max_khat: the largest Pareto shape of the new cloud's weights.
+
+        Returns:
+            The new refit: its draws, of the same ``A`` and ``K``, NaN weights where
+            the gate refuses them; its ``row_mask``, the old one and the term's rows;
+            and the star's index.
+        """

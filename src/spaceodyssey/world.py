@@ -120,12 +120,14 @@ class SealedWorld(eqx.Module):
 
         The host passes the model and the row's key, from ``row_key``, and writes the
         row: its times, charge and model slot are the host's bookkeeping, not the
-        world's. A stack of worlds is observed under ``eqx.filter_vmap``.
+        world's. The action carries its realized start as ``not_before_d`` (``step``
+        sets it), so a model whose rows depend on the time reads the start the row
+        really had. A stack of worlds is observed under ``eqx.filter_vmap``.
 
         Args:
             key: the row's key.
             model: the model of the action's mode.
-            action: the action.
+            action: the action, at its realized start.
 
         Returns:
             The payload, a dict of named arrays.
@@ -163,7 +165,12 @@ class SealedWorld(eqx.Module):
             ValueError: if a granted row's mode is not in ``modes`` or its model slot
                 is not in ``models``.
         """
-        actions = grant.actions
+        # A granted row starts at time zero, whatever its action asked for.
+        actions = eqx.tree_at(
+            lambda a: a.not_before_d,
+            grant.actions,
+            jnp.zeros_like(grant.actions.not_before_d),
+        )
         slots = model_slots(modes, actions.mode)
         if any(not 0 <= s < len(models) for s in slots):
             raise ValueError("a grant's model slot is not in the model table")

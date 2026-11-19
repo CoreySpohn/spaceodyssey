@@ -19,6 +19,7 @@ from spaceodyssey.types import (
     CELL_SAMPLES,
     Action,
     binned_cells,
+    planet_tracks,
     row_log_like,
     row_update,
 )
@@ -134,6 +135,36 @@ def test_a_search_detects_with_its_closed_form_probability(toy):
     assert int(model.cell(jax.tree.map(jnp.zeros_like, payload([1, 1])))) == 0
     like = row_log_like(model, payload([1, 0]), atoms, toy.star)
     assert_allclose(like, [np.log(d0 * (1 - d1)), np.log(d1), -np.inf], rtol=1e-12)
+
+
+def test_a_detection_no_draw_tracks_is_not_scored(toy):
+    """A detection in a slot no draw holds is a new planet: `stats` leaves it
+    unscored, and `detections` reports it.
+
+    Draws (HZ, empty) and (other, empty), a two-day search (d = 0.84 and 0.36 in slot
+    0): slot 1 is held by no draw (`planet_tracks` is (True, False)). A row that
+    detects both slots scores slot 0 alone: log 0.84 and log 0.36.
+
+    Fails if a new detection is scored against the draws (each would read it as
+    impossible), if `planet_tracks` misreads a slot, or if `detections` misreads the
+    detected bits.
+    """
+    exists = [[True, False], [True, False]]
+    atoms = toy.atoms(
+        [[1.0, 0.0], [0.0, 0.0]], [[0.0] * 2] * 2, [0.5] * 2, exists=exists
+    )
+    model = DetectionModel(0.6, 0.2)
+    payload = {
+        "exposure_d": jnp.asarray(2.0),
+        "time_d": jnp.asarray(0.0),
+        "p_hz_one_day": jnp.asarray(0.6),
+        "p_other_one_day": jnp.asarray(0.2),
+        "detected": jnp.asarray([1.0, 1.0]),
+    }
+    assert list(np.asarray(planet_tracks(atoms))) == [True, False]
+    like = row_log_like(model, payload, atoms, toy.star)
+    assert_allclose(like, np.log([0.84, 0.36]), rtol=1e-12)
+    assert list(np.asarray(model.detections(payload))) == [True, True]
 
 
 def test_step_report(toy):

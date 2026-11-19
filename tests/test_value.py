@@ -362,8 +362,9 @@ def test_a_frozen_forecast_plans_on_its_own_replay(toy):
     verdict's own -0.157 had the forecast been read off the verdict's replay.
 
     Fails if the forecast is read off the verdict's replay, or shares its draws: a
-    frozen forecast would then see the reading released at day 1; or if it reads the
-    pool now instead of the pool at time zero.
+    frozen forecast would then see the reading released at day 1; or if the two do
+    not read their own rows of the one pool, the pool now: the pool follows the
+    searches taken, which read no payload, so a frozen forecast reads it too.
     """
     model = GaussianGasModel(snr_one_day=[5.0])
     models, capacity = (model,), 2
@@ -381,14 +382,15 @@ def test_a_frozen_forecast_plans_on_its_own_replay(toy):
     roles = Roles(prior, toy.stack(prior))
     frozen = toy.jit.replay(refit, log, models, toy.star, jnp.asarray(0.0))
     now = toy.jit.replay(refit, log, models, toy.star, jnp.asarray(1.0))
-    pool0, pool = toy.empty_pool(2, 1), toy.empty_pool(2, 1)
-    pool = eqx.tree_at(lambda p: p.log_mass, pool, jnp.array([-1.0, -2.0]))
+    pool = eqx.tree_at(
+        lambda p: p.log_mass, toy.empty_pool(2, 1), jnp.array([-1.0, -2.0])
+    )
     claim = Claim((GasAbove(0, 0.0),))
     forecast, verdict = toy.jit.planning_beliefs(
-        frozen, now, roles, models, toy.star, pool0, pool, claim, **toy.ungated
+        frozen, now, roles, models, toy.star, pool, claim, **toy.ungated
     )
-    assert_allclose(forecast.pool.log_mass, [-np.inf])  # the pool at time zero
-    assert_allclose(verdict.pool.log_mass, [-2.0])  # the verdict's row of the pool now
+    assert_allclose(forecast.pool.log_mass, [-1.0])  # row 0 of the one pool
+    assert_allclose(verdict.pool.log_mass, [-2.0])  # the member's row of it
 
     p_water = float(norm.cdf(0.8 / np.sqrt(0.2)))
     for b, mean in ((forecast, 0.0), (verdict, 0.8)):  # on quadrature nodes
@@ -471,7 +473,6 @@ def _gas_planning_beliefs(refit, log, time_d, roles, pool, claim, n):
         roles,
         models,
         (),
-        pool,
         pool,
         claim,
         n,
@@ -840,16 +841,17 @@ def test_count_and_thin_by_hand(toy):
 
     Role 0: dbar = 0.5, so a null leaves mass 2 x 0.5 = 1.0, and the marks reweight by
     (0.2, 0.8) to (0.1 / 0.5, 0.4 / 0.5) = (0.2, 0.8); the claim-true rate falls from
-    2 x 0.5 = 1.0 to 0.2. `Count` is then 1.0 - 0.2 = 0.8, the expected number found
-    2 x (0.5 x 1 x 0.8 + 0.5 x 0 x 0.2). Role 1: dbar = 0.32, mass 1.36, rate from 0.4
-    to 0.4 x 0.2 = 0.08. Completeness is 0.8 for both roles (only the first mark is
-    claim-true). Through `frontier`, one search is worth 0.8 planets and a revisit at
-    depth 2 adds the 0.2 x 0.8 = 0.16 the first look missed: 0.96.
+    2 x 0.5 = 1.0 to 0.2. `Count` is then -0.2, and its gain 1.0 - 0.2 = 0.8 is
+    the expected number found 2 x (0.5 x 1 x 0.8 + 0.5 x 0 x 0.2). Role 1:
+    dbar = 0.32, mass 1.36, rate from 0.4 to 0.4 x 0.2 = 0.08. Completeness is 0.8 for
+    both roles (only the first mark is claim-true). Through `frontier`, one search is
+    worth 0.8 planets and a revisit at depth 2 adds the 0.2 x 0.8 = 0.16 the first
+    look missed: 0.96.
 
     Fails if a null is not thinned (a revisit counts the same planets twice: 1.6 at
-    depth 2, and `Count` stays 0), if the mass is thinned but the marks are not
+    depth 2, and `Count` gains nothing), if the mass is thinned but the marks are not
     reweighted (1.2 at depth 2), if a role's mass is thinned with another role's mark
-    weights, or if `Count` counts from the current pool rather than from time zero.
+    weights, or if `Count` is not the negative of the forecast's current pool rate.
     """
     pool, claim = _search_pool(toy), Claim((toy.InHz(),))
     after = toy.jit.thin(pool, jnp.array([0.8, 0.2]))
@@ -858,8 +860,11 @@ def test_count_and_thin_by_hand(toy):
     assert_allclose(toy.jit.pool_rate(after, claim, toy.star), [0.2, 0.08], rtol=1e-12)
     assert_allclose(toy.jit.pool_rate(pool, claim, toy.star), [1.0, 0.4], rtol=1e-12)
 
-    belief = _search_belief(toy, after)
-    assert_allclose(Count(pool)(*toy.split(belief), claim, toy.star), 0.8, rtol=1e-12)
+    def count(pool):
+        return Count()(*toy.split(_search_belief(toy, pool)), claim, toy.star)
+
+    assert_allclose(count(after), -0.2, rtol=1e-12)
+    assert_allclose(count(after) - count(pool), 0.8, rtol=1e-12)
 
     action = Action(0, 0, 1.0)
     assert_allclose(
@@ -868,9 +873,7 @@ def test_count_and_thin_by_hand(toy):
 
     start = toy.split(toy.stack(_search_belief(toy, pool)))
     for depth, found in ((1, 0.8), (2, 0.96)):
-        f = _frontier_of(
-            start, claim, toy.star, Count(toy.stack(pool)), (_search(toy),), LOOK, depth
-        )
+        f = _frontier_of(start, claim, toy.star, Count(), (_search(toy),), LOOK, depth)
         assert_allclose(f.reward[0, 0], found, rtol=1e-12)
 
 
@@ -891,7 +894,7 @@ def test_a_follow_up_is_charged_at_the_price(toy):
     """
     pool, claim = _search_pool(toy), Claim((toy.InHz(),))
     start = toy.split(toy.stack(_search_belief(toy, pool)))
-    count = Count(toy.stack(pool))
+    count = Count()
 
     def plan(lam):
         f = _frontier_of(start, claim, toy.star, count, (_search(toy),), LOOK, 2, lam)
@@ -926,7 +929,7 @@ def test_a_follow_up_worth_nothing_more_is_never_bought_at_price_zero(toy):
     pools = (empty, _search_pool(toy))
     start = toy.split(toy.stack(*[_search_belief(toy, pool) for pool in pools]))
     f = _frontier_of(
-        start, claim, toy.star, Count(toy.stack(*pools)), (_search(toy),),
+        start, claim, toy.star, Count(), (_search(toy),),
         _menu(np.ones((2, 1)), (0,)), 2, 0.0,
     )  # fmt: skip
     assert_allclose(f.cost_d[:, 0], [1.0, 2.0], rtol=1e-12)
@@ -957,7 +960,7 @@ def test_follow_up_time_raises_the_price_and_keeps_the_budget(toy):
         for r in rates
     ]
     start = toy.split(toy.stack(*[_search_belief(toy, pool) for pool in pools]))
-    count = Count(toy.stack(*pools))
+    count = Count()
     menu = _menu(np.ones((8, 1)), (0,))
     lam0, budget = 0.72, jnp.asarray(6.0)
     f = _frontier_of(
@@ -1000,7 +1003,7 @@ def test_a_model_that_does_not_search_leaves_the_pool(toy):
         toy.split(toy.stack(_search_belief(toy, pool))),
         claim,
         toy.star,
-        Count(toy.stack(pool)),
+        Count(),
         (_search(toy), reading),
         _menu([[1.0, 1.0]], (0, 1)),
         1,
@@ -1039,7 +1042,7 @@ def test_a_refused_forecast_reads_nan_not_zero(toy):
     beliefs = (toy.stack(forecast), toy.stack(verdict))
     for depth in (1, 2):
         f = _frontier_of(
-            beliefs, claim, toy.star, Count(toy.stack(pool)), (_search(toy),), LOOK,
+            beliefs, claim, toy.star, Count(), (_search(toy),), LOOK,
             depth,
         )  # fmt: skip
         assert np.isnan(f.reward[0, 0]), depth

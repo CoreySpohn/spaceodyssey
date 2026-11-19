@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 from jax.scipy.special import gammainc, ndtr, ndtri
-from jaxtyping import Array, Bool, Float, Int, PyTree
+from jaxtyping import Array, Bool, Float, Int, Key, PyTree
 
 from spaceodyssey._numerics import EXACT, safe_ratio
 from spaceodyssey._standin.diagnostics import kish_ess, pareto_khat
@@ -24,12 +24,15 @@ from spaceodyssey.roles import Roles
 from spaceodyssey.types import (
     ACCEPTED,
     AbstractObservationModel,
+    AbstractRefitter,
     AbstractRolePrior,
     Atoms,
     GasNodes,
     ObservationLog,
     Pool,
     Refit,
+    RefitTerm,
+    planet_tracks,
     real_rows,
 )
 
@@ -217,6 +220,34 @@ def _role_log_prior_ratio(
         ],
         axis=0,
     )
+
+
+def refused_roles(
+    refit: Refit, pool: Pool, roles: Roles, star, *, min_n_eff, max_khat
+) -> Bool[Array, " R"]:
+    """The roles the reweighting gate refuses at a star, on its draws or its marks.
+
+    A role is refused when its prior ratio on the refit's draws (``role_belief``) or on
+    the pool's marks (``role_pool``; an empty pool is never refused) fails the gate:
+    everything read from it is then NaN. This is the report a run summary gives per
+    role, beside a planner's refused stars.
+
+    Args:
+        refit: the star's refit.
+        pool: the star's pool, every role.
+        roles: the forecast and the stacked verdict members.
+        star: a pytree of scalar leaves describing the star.
+        min_n_eff: the least Kish size of a role's weights.
+        max_khat: the largest Pareto shape of a role's reweighted cloud.
+
+    Returns:
+        True for each refused role, forecast first, shape ``(R,)``.
+    """
+    gate = (min_n_eff, max_khat)
+    draws = _role_log_prior_ratio(refit.atoms, roles, star, *gate)
+    empty = jnp.isneginf(pool.log_mass)
+    marks = _role_log_prior_ratio(pool.marks, roles, star, *gate, empty)
+    return jnp.any(jnp.isnan(draws), axis=-1) | jnp.any(jnp.isnan(marks), axis=-1)
 
 
 def role_pool(
@@ -615,13 +646,21 @@ class Replay(eqx.Module):
     applied: Bool[Array, " W"]
 
 
-def _due(log: ObservationLog, refit: Refit, time_d) -> Bool[Array, " W"]:
+def due_rows(log: ObservationLog, refit: Refit, time_d) -> Bool[Array, " W"]:
     """The log rows a replay of ``refit`` applies at the query time ``time_d``.
 
     A row is due when it is real (``index < count``), released by the query time
     (``release_d <= time_d``), accepted (``refusal == ACCEPTED``), of the refit's
     star, and not among the rows the refit represents. A row in flight stays in the
     log and falls due once the query time reaches its release.
+
+    Args:
+        log: the run's log, all stars.
+        refit: the refit: its star and the rows it represents.
+        time_d: the query time, days from the start of the survey.
+
+    Returns:
+        True for each row due, shape ``(W,)``.
     """
     rows = log.rows
     return (
@@ -721,7 +760,7 @@ def replay(
             f"row_mask {refit.row_mask.shape} does not match the log capacity "
             f"{rows.star.shape}"
         )
-    applied = _due(log, refit, time_d)
+    applied = due_rows(log, refit, time_d)
     stats = tuple(
         _summed_stats(
             model,
@@ -766,7 +805,7 @@ def absorb(
         The replay with every row due at ``time_d`` applied.
     """
     atoms = r.refit.atoms
-    due = _due(log, r.refit, time_d)
+    due = due_rows(log, r.refit, time_d)
 
     def new(carry):
         return due & ~carry[1]
@@ -787,6 +826,61 @@ def absorb(
         lambda carry: jnp.any(new(carry)), apply_first, (r.stats, r.applied)
     )
     return Replay(r.refit, stats, applied)
+
+
+def new_planets(
+    refit: Refit,
+    log: ObservationLog,
+    models: tuple[AbstractObservationModel, ...],
+    time_d: Float[Array, ""],
+) -> Bool[Array, " K"]:
+    """The planet slots a star's rows detected that its refit holds no track for.
+
+    Read off the rows due at ``time_d`` (``due_rows``) of every searching model
+    (``detections``), against the refit's tracks (``planet_tracks``). Such a planet is
+    not scored against the draws (the search's ``stats`` leave it out); it is a pool
+    event, counted found by ``replay_pool``, and waits for a refit
+    (``AbstractRefitter``), which turns it into a track.
+
+    Args:
+        refit: the star's refit.
+        log: the run's log, all stars.
+        models: the run's model table, static.
+        time_d: the query time, days from the start of the survey.
+
+    Returns:
+        True for each slot a due row detected and no draw holds, shape ``(K,)``.
+    """
+    due = due_rows(log, refit, time_d)
+    n_slot = refit.atoms.exists.shape[-1]
+    return detected_slots(log, due, models, n_slot) & ~planet_tracks(refit.atoms)
+
+
+def detected_slots(
+    log: ObservationLog,
+    rows: Bool[Array, " W"],
+    models: tuple[AbstractObservationModel, ...],
+    n_slot: int,
+) -> Bool[Array, " K"]:
+    """The planet slots any of the given rows detected, read by every searching model.
+
+    Args:
+        log: the run's log, all stars.
+        rows: the rows to read, shape ``(W,)``.
+        models: the run's model table, static.
+        n_slot: the planet capacity of a star, ``K``, static.
+
+    Returns:
+        True for each slot a row detected (``detections``), shape ``(K,)``.
+    """
+    found = jnp.zeros(n_slot, bool)
+    for slot, model in enumerate(models):
+        if not model.searches:
+            continue  # static: only a search detects planets
+        detected = jax.vmap(model.detections)(log.rows.payload[slot])  # (W, K)
+        keep = rows & (log.rows.model_slot == slot)
+        found = found | jnp.any(detected & keep[:, None], axis=0)
+    return found
 
 
 def replay_belief(
@@ -834,20 +928,100 @@ def replay_belief(
         ValueError: if a role prior's chart differs from that of the refit's prior.
     """
     ratio = _role_log_prior_ratio(r.refit.atoms, roles, star, min_n_eff, max_khat)
-    atoms, log_like = _finalized(r, models, star)
+    atoms, log_like = replay_likelihood(r, models, star)
     return Belief(atoms, ratio, jnp.broadcast_to(log_like, ratio.shape), pool)
 
 
-def _finalized(
+def replay_likelihood(
     r: Replay, models: tuple[AbstractObservationModel, ...], star
 ) -> tuple[Atoms, Float[Array, " A"]]:
-    """The draws a replay holds and the joint log likelihood of its applied rows."""
+    """The draws a replay holds and the joint log likelihood of its applied rows.
+
+    The slots are finalized in table order, each against the draws the slot before it
+    returned, and their log marginal likelihoods add (``replay_belief``).
+
+    Args:
+        r: the replay.
+        models: the run's model table, static.
+        star: a pytree of scalar leaves describing the replay's star.
+
+    Returns:
+        The draws updated by every applied row, and the joint log likelihood of those
+        rows per draw, shape ``(A,)``.
+    """
     atoms = r.refit.atoms
     log_like = jnp.zeros_like(atoms.cloud.log_weights)
     for model, stats in zip(models, r.stats, strict=True):
         slot_log_like, atoms = model.finalize(stats, atoms, star)
         log_like = log_like + slot_log_like
     return atoms, log_like
+
+
+def gate_weights(
+    log_weights: Float[Array, " A"], *, min_n_eff, max_khat
+) -> Float[Array, " A"]:
+    """A cloud's log weights, all NaN when the reweighting gate refuses them.
+
+    The gate is a role's (``role_belief``): the Kish size of the weights at least
+    ``min_n_eff`` and their Pareto shape at most ``max_khat``.
+
+    Args:
+        log_weights: the cloud's log weights, shape ``(A,)``.
+        min_n_eff: the least Kish size.
+        max_khat: the largest Pareto shape.
+
+    Returns:
+        ``log_weights``, or NaN at every draw if the gate refuses them.
+    """
+    zero = jnp.zeros_like(log_weights)[None]
+    return log_weights + _gate(log_weights[None], zero, min_n_eff, max_khat)[0]
+
+
+def refit_stars(
+    refitter: AbstractRefitter,
+    refits: Refit,
+    rows: Bool[Array, "N W"],
+    stars,
+    keys: Key[Array, " N"],
+    queued: Bool[Array, " N"],
+    log: ObservationLog,
+    models: tuple[AbstractObservationModel, ...],
+    *,
+    min_n_eff,
+    max_khat,
+    batch_size: int,
+) -> Refit:
+    """A queue of refits in one call: each queued star's cloud updated by its rows.
+
+    The stars are mapped in chunks of ``batch_size`` (``jax.lax.map``); a star that is
+    not queued keeps its refit, and its refit is not computed outside ``vmap``.
+
+    Args:
+        refitter: the producer of refits.
+        refits: the stars' refits, leaves with a leading axis ``N``.
+        rows: each star's term rows (``RefitTerm.rows``), shape ``(N, W)``.
+        stars: the stars, a pytree whose leaves have a leading axis ``N``.
+        keys: one key per star, shape ``(N,)``.
+        queued: which stars to refit, shape ``(N,)``.
+        log: the run's log, all stars.
+        models: the run's model table, static.
+        min_n_eff: the gate's least Kish size of a new cloud's weights.
+        max_khat: the gate's largest Pareto shape of a new cloud's weights.
+        batch_size: stars refit at once, static: a memory bound.
+
+    Returns:
+        The refits, leading axis ``N``.
+    """
+    gate = {"min_n_eff": min_n_eff, "max_khat": max_khat}
+
+    def one(args):
+        refit, rows_s, star, key, queued_s = args
+        term = RefitTerm(log, rows_s, models, star)
+        return jax.lax.cond(
+            queued_s, lambda: refitter.refit(refit, term, key, **gate), lambda: refit
+        )
+
+    return jax.lax.map(one, (refits, rows, stars, keys, queued), batch_size=batch_size)
 
 
 MAX_NODES = 2**22
@@ -1092,8 +1266,7 @@ def planning_beliefs(
     roles: Roles,
     models: tuple[AbstractObservationModel, ...],
     star,
-    forecast_pool: Pool,
-    verdict_pool: Pool,
+    pool: Pool,
     claim: Claim,
     n: int = 24,
     *,
@@ -1105,27 +1278,31 @@ def planning_beliefs(
     Each is read off its own replay of the log (``replay_belief``): the forecast's
     belief, one role (``R = 1``), off ``forecast`` under the forecast prior, and the
     verdict's, one role per member, off ``verdict`` under the members; each replay is
-    read under its own roles only. The two replays may hold different rows: a frozen
-    forecast is the replay at ``time_d = 0`` while the verdict's follows the decision
-    time. Each reads its own pool, the forecast row 0 of ``forecast_pool`` and the
-    verdict rows 1 on of ``verdict_pool``. The pools' role prior ratios are formed
-    here, as the draws' are, by the same function and gate (``role_pool``): the
-    ratios the pools carry in are not read, so a pool's marks are weighed under
-    exactly the priors and the gate the draws are, and a role whose marks fail the
-    gate reads NaN (an empty pool is never refused). Each belief carries its own
-    draws, so a gas block the verdict's rows update never reaches the forecast. Each
-    is then put on quadrature nodes split at the claim's floors (``quadrature_draws``,
-    with ``models`` for their steps), on which a hypothetical outcome updates the
-    belief exactly by reweighting.
+    read under its own roles only. The two replays may hold different draws and rows:
+    a frozen forecast is the replay at time zero while the verdict's follows the
+    decision time. Both read one pool, the pool at the decision time (``replay_pool``):
+    the pool follows the searches taken, which read no payload, so it is a public fact
+    of the actions under either forecast. Its row 0 is the forecast's and its rows 1
+    on the members'. The pool's role prior ratios are formed here, as the draws' are,
+    by the same function and gate (``role_pool``): the ratios the pool carries in are
+    not read, so its marks are weighed under exactly the priors and the gate the draws
+    are, and a role whose marks fail the gate reads NaN (an empty pool is never
+    refused). Each belief carries its own draws, so a gas block the verdict's rows
+    update never reaches the forecast. Each is then put on quadrature nodes split at
+    the claim's floors (``quadrature_draws``, with ``models`` for their steps), on
+    which a hypothetical outcome updates the belief exactly by reweighting.
+
+    A planner that reads one member passes the roles and the pool rows of that member
+    alone, so only it is gated and put on nodes.
 
     Args:
         forecast: the forecast's replay.
         verdict: the verdict's replay.
-        roles: the forecast and the stacked verdict members.
+        roles: the forecast and the stacked verdict members read.
         models: the run's model table, static.
         star: a pytree of scalar leaves describing the star.
-        forecast_pool: the undetected planets the forecast reads, every role.
-        verdict_pool: the undetected planets the verdict reads, every role.
+        pool: the undetected planets at the decision time, a row per role of
+            ``roles``.
         claim: the claim; its ``GasAbove`` floors split the quadrature
             (``quadrature_draws``).
         n: quadrature nodes per gas factor, a static planning setting.
@@ -1148,23 +1325,13 @@ def planning_beliefs(
         empty = jnp.isneginf(pool.log_mass)
         marks = _prior_ratio_rows(pool.marks, prior, star, name, stacked, *gate, empty)
         pool = Pool(pool.marks, marks, pool.log_like, pool.log_mass)
-        atoms, log_like = _finalized(r, models, star)
+        atoms, log_like = replay_likelihood(r, models, star)
         log_like = jnp.broadcast_to(log_like, ratio.shape)
         return quadrature_draws(Belief(atoms, ratio, log_like, pool), claim, n, models)
 
     return (
         read(
-            forecast,
-            roles.forecast,
-            "forecast",
-            False,
-            _pool_rows(forecast_pool, slice(0, 1)),
+            forecast, roles.forecast, "forecast", False, _pool_rows(pool, slice(0, 1))
         ),
-        read(
-            verdict,
-            roles.verdict,
-            "verdict",
-            True,
-            _pool_rows(verdict_pool, slice(1, None)),
-        ),
+        read(verdict, roles.verdict, "verdict", True, _pool_rows(pool, slice(1, None))),
     )

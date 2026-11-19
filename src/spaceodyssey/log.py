@@ -12,11 +12,20 @@ import jax.numpy as jnp
 from jax import lax
 from jaxtyping import PRNGKeyArray, PyTree
 
-from spaceodyssey.design import Design, Mode, Resources, model_slots
+from spaceodyssey.design import (
+    Design,
+    Keepout,
+    Mode,
+    Resources,
+    fits,
+    model_slots,
+    next_open,
+)
 from spaceodyssey.policy import AbstractPolicy, public_view
 from spaceodyssey.types import (
     ACCEPTED,
     OVER_BUDGET,
+    PAST_END,
     WAITED,
     AbstractObservationModel,
     Action,
@@ -98,25 +107,31 @@ def step(
     action: Action,
     mode: Mode,
     resources: Resources,
+    keepout: Keepout,
 ) -> ObservationLog:
     """Take one action: draw its row from the world and write it at ``count``.
 
-    The row starts on the calendar at the later of the action's ``not_before_d`` and
-    the time the instrument is next free (``clock_d``), so waiting costs no budget. An
-    action of zero exposure is a wait (``WAITED``): the instrument idles until its
-    start, which moves the clock; it is charged nothing, carries no payload and is
-    released at its start, so no replay applies it. Any other action whose exposure
-    fits the budget left (the budget less ``spent_d``) is accepted: it is charged its
+    The row is ready on the calendar at the later of the action's ``not_before_d`` and
+    the time the instrument is next free (``clock_d``), so waiting costs no budget; an
+    observation asked for while its star is in keepout waits for the star to open
+    (``next_open``). An action of zero exposure is a wait (``WAITED``): the instrument
+    idles until its start, which moves the clock; keepout does not delay it; it is
+    charged nothing, carries no payload and is released at its start, so no replay
+    applies it. A row that would start after the calendar's end
+    (``Resources.end_d``), or whose star never opens again, is refused
+    (``PAST_END``). Any other action whose exposure fits the budget left (the budget
+    less ``spent_d``, by the one rule ``fits``) is accepted: it is charged its
     exposure, its payload is drawn by the world under the model of its mode with
-    ``row_key(key, star, count)``, and it is released ``mode.latency_d`` after its
-    exposure ends. One that does not fit is
-    refused (``OVER_BUDGET``): charged nothing, its payload zeros. A refused row still
-    starts on the calendar, so a refused row that asked to wait moves the clock to its
-    requested start: the refusal is a budget verdict made at that start, and waiting
-    costs nothing, so nothing is gained or lost. The payload sits in
-    its model's buffer and the other buffers hold zeros. The model is picked by the
-    mode's static slot, so nothing switches on a traced value, and under ``jax.vmap``
-    over worlds (``log`` and ``world`` stacked) one program serves every world.
+    ``row_key(key, star, count)`` from the action at its realized start (its
+    ``not_before_d`` set to the start), and it is released ``mode.latency_d`` after
+    its exposure ends. One that does not fit is refused (``OVER_BUDGET``): charged
+    nothing, its payload zeros. A refused row still starts on the calendar, so a
+    refused row that asked to wait moves the clock to its requested start: the
+    refusal is a verdict made at that start, and waiting costs nothing, so nothing is
+    gained or lost. The payload sits in its model's buffer and the other buffers hold
+    zeros. The model is picked by the mode's static slot, so nothing switches on a
+    traced value, and under ``jax.vmap`` over worlds (``log`` and ``world`` stacked)
+    one program serves every world.
 
     Args:
         key: the run's noise key (``run_keys``).
@@ -125,7 +140,8 @@ def step(
         models: the design's model table, static.
         action: the action.
         mode: the action's mode, from the design's mode table.
-        resources: the run's budget.
+        resources: the run's budget and the calendar's end.
+        keepout: the design's keepout table.
 
     Returns:
         The log with the new row and its count one higher.
@@ -136,11 +152,16 @@ def step(
     index = eqx.error_if(
         log.count, log.count >= log.rows.star.shape[0], "the log is full"
     )
-    time_d = jnp.maximum(action.not_before_d, clock_d(log))
+    ready_d = jnp.maximum(action.not_before_d, clock_d(log))
     waited = action.exposure_d <= 0.0
-    accepted = ~waited & (action.exposure_d <= resources.budget_d - spent_d(log))
+    opens_d = jnp.where(waited, ready_d, next_open(keepout, action.star, ready_d))
+    late = ~(opens_d <= resources.end_d)  # never opening is late too
+    time_d = jnp.where(jnp.isfinite(opens_d), opens_d, ready_d)
+    left_d = resources.budget_d - spent_d(log)
+    accepted = ~waited & ~late & fits(action.exposure_d, left_d)
+    started = Action(action.star, action.mode, action.exposure_d, time_d)
     drawn = world.observe(
-        row_key(key, action.star, index), models[mode.model_slot], action
+        row_key(key, action.star, index), models[mode.model_slot], started
     )
     buffers = tuple(
         jax.tree.map(lambda x: jnp.where(accepted, x, 0), drawn)
@@ -156,7 +177,9 @@ def step(
         exposure_d=action.exposure_d,
         charged_d=charged_d,
         release_d=time_d + charged_d + jnp.where(accepted, mode.latency_d, 0.0),
-        refusal=jnp.where(waited, WAITED, jnp.where(accepted, ACCEPTED, OVER_BUDGET)),
+        refusal=jnp.select(
+            [late, waited, accepted], [PAST_END, WAITED, ACCEPTED], OVER_BUDGET
+        ),
         model_slot=mode.model_slot,
         payload=buffers,
     )
@@ -218,7 +241,7 @@ def execute(
     payload = world.reveal(noise_key, grant, design.models, design.modes)
     log = start_log(grant_rows(grant, payload, design.modes), design.capacity)
     n_granted = log.count
-    public = _public_view(log, n_granted, design.resources)
+    public = _public_view(log, n_granted, design.resources, design.keepout)
     state = policy.init(public)
     while True:
         decision_key = jax.random.fold_in(policy_key, public.n_taken)
@@ -235,6 +258,13 @@ def execute(
             raise ValueError(f"the policy asks for more than {design.capacity} rows")
         mode = design.modes[mode_index]
         log = _step(
-            noise_key, log, world, design.models, action, mode, design.resources
+            noise_key,
+            log,
+            world,
+            design.models,
+            action,
+            mode,
+            design.resources,
+            design.keepout,
         )
-        public = _public_view(log, n_granted, design.resources)
+        public = _public_view(log, n_granted, design.resources, design.keepout)

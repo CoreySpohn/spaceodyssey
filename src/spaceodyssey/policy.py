@@ -12,17 +12,27 @@ from typing import ClassVar
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
 
 from spaceodyssey._numerics import safe_ratio
-from spaceodyssey.belief import Replay, absorb, planning_beliefs, replay, select_roles
+from spaceodyssey.belief import (
+    Replay,
+    absorb,
+    due_rows,
+    new_planets,
+    planning_beliefs,
+    refit_stars,
+    replay,
+)
 from spaceodyssey.claim import Claim
-from spaceodyssey.design import Resources
-from spaceodyssey.price import dispatch, solve_price
+from spaceodyssey.design import Keepout, Resources, fits, next_open, open_at
+from spaceodyssey.price import dispatch, refused_stars, solve_price
 from spaceodyssey.roles import Roles
 from spaceodyssey.types import (
     ACCEPTED,
     AbstractObservationModel,
+    AbstractRefitter,
     Action,
     ObservationLog,
     Pool,
@@ -52,6 +62,8 @@ class PublicView(eqx.Module):
             flight shows its star, mode, times and charge, not its data.
         time_d: the current calendar time, days: when the instrument is next free.
         budget_left_d: the budget not yet charged, days.
+        end_d: the calendar's end, days: no row starts after it.
+        keepout: when each star can be observed (the design's table).
         in_flight: the rows taken and not yet released, shape ``(W,)``.
         n_taken: the actions taken so far, refused ones included: the rows after the
             grant.
@@ -60,19 +72,25 @@ class PublicView(eqx.Module):
     log: ObservationLog
     time_d: Float[Array, ""] = eqx.field(converter=as_float)
     budget_left_d: Float[Array, ""] = eqx.field(converter=as_float)
+    end_d: Float[Array, ""] = eqx.field(converter=as_float)
+    keepout: Keepout
     in_flight: Bool[Array, " W"] = eqx.field(converter=jnp.asarray)
     n_taken: Int[Array, ""] = eqx.field(converter=as_index)
 
 
 def public_view(
-    log: ObservationLog, n_granted: Int[Array, ""], resources: Resources
+    log: ObservationLog,
+    n_granted: Int[Array, ""],
+    resources: Resources,
+    keepout: Keepout,
 ) -> PublicView:
     """The public view of a run at the calendar time its rows end (``clock_d``).
 
     Args:
         log: the log, grant rows first.
         n_granted: the number of grant rows at the head of the log.
-        resources: the run's budget.
+        resources: the run's budget and the calendar's end.
+        keepout: the design's keepout table.
 
     Returns:
         The view a policy decides from.
@@ -91,6 +109,8 @@ def public_view(
         log=public,
         time_d=time_d,
         budget_left_d=resources.budget_d - spent_d(log),
+        end_d=resources.end_d,
+        keepout=keepout,
         in_flight=real & ~released,
         n_taken=log.count - n_granted,
     )
@@ -212,24 +232,39 @@ class PlannerSettings(eqx.Module):
 
     Attributes:
         min_n_eff: the least Kish size of a role's reweighted draws or marks
-            (``role_belief``, ``role_pool``).
-        max_khat: the largest Pareto shape of a role's reweighted draws or marks.
+            (``role_belief``, ``role_pool``) and of a refit's new weights
+            (``AbstractRefitter``); NaN is refused on the host.
+        max_khat: the largest Pareto shape of a role's reweighted draws or marks
+            and of a refit's new weights; NaN is refused on the host.
         price_factors: the plans of each star are built at the last solved price times
             each factor and offered side by side (``frontier_at_prices``), shape
             ``(P,)``, beside the first action alone (the plan at an infinite price,
             which no factor of a zero price reaches); at ``depth = 1`` only the first
-            factor is used, since a plan does not depend on the price there.
+            factor is used, since a plan does not depend on the price there. A star
+            whose build price is so far from the solved price that the price has left
+            the factors' range (below the least factor or above the greatest, times
+            the build price) is re-priced (``PricePolicy``).
         depth: the number of actions a plan may take at a star, static.
+        member: the verdict member the planner plans with, static, required: planning
+            reads one member (declared deviation 6: a minimum over members inside
+            ``LogScore`` is not a proper score), so which member steers the plan is a
+            study's choice, recorded with its results. Only that member is gated and
+            put on nodes; a star the gate refuses for it, or for the forecast, is
+            refused (``PriceState.refused``) while the other members may still judge
+            it in ``score``.
         n_quad: quadrature nodes per gas factor (``quadrature_draws``), static: 24
             values a reading binned at the floor within 0.9 percent to S/N 50, 48
             within 0.06 percent; 16 is within 2.7 percent to S/N 20 only, at 0.7 times
             the cost.
-        member: the verdict member the planner reads, static (planning reads one
-            member, a declared deviation).
         price_rounds: how many times the time-zero price is re-solved on plans rebuilt
             at it, static; one at ``depth = 1``.
         star_batch: stars priced at once when every star is priced (at time zero),
+            and stars refit at once in a decision's refit queue (``refit_stars``),
             static: a memory bound.
+        rebuild_capacity: the most stars a decision reads afresh (a refit, the rows
+            released at them, or a re-price), static: a decision gathers at most this
+            many and the rest wait their turn, so a decision's cost is bounded by it
+            (under ``vmap`` over worlds every gathered slot is computed).
         forecast_updates: whether the forecast's draws learn from the released rows,
             static. When false they stay at the replay at time zero, a frozen-forecast
             surrogate that is not a martingale; the pool follows the searches taken
@@ -240,10 +275,11 @@ class PlannerSettings(eqx.Module):
     max_khat: Float[Array, ""] = eqx.field(converter=as_float)
     price_factors: Float[Array, " P"] = eqx.field(converter=as_float)
     depth: int = eqx.field(static=True)
-    n_quad: int = eqx.field(static=True)
     member: int = eqx.field(static=True)
+    n_quad: int = eqx.field(static=True)
     price_rounds: int = eqx.field(static=True)
     star_batch: int = eqx.field(static=True)
+    rebuild_capacity: int = eqx.field(static=True)
     forecast_updates: bool = eqx.field(static=True)
 
     def __init__(
@@ -252,28 +288,41 @@ class PlannerSettings(eqx.Module):
         max_khat,
         depth: int,
         *,
+        member: int,
         n_quad: int = 24,
         price_factors=(0.5, 1.0, 2.0),
-        member: int = 0,
         price_rounds: int = 3,
         star_batch: int = 8,
+        rebuild_capacity: int = 2,
         forecast_updates: bool = True,
     ):
-        """Settings; the thresholds and the depth are required."""
+        """Settings; the thresholds, the depth and the member are required."""
         self.min_n_eff = min_n_eff
         self.max_khat = max_khat
         self.price_factors = price_factors
         self.depth = int(depth)
-        self.n_quad = int(n_quad)
         self.member = int(member)
+        self.n_quad = int(n_quad)
         self.price_rounds = int(price_rounds)
         self.star_batch = int(star_batch)
+        self.rebuild_capacity = int(rebuild_capacity)
         self.forecast_updates = bool(forecast_updates)
 
     def __check_init__(self):
-        """Check the static settings."""
-        if self.depth < 1 or self.price_rounds < 1 or self.star_batch < 1:
-            raise ValueError("depth, price_rounds and star_batch are at least 1")
+        """Check the static settings, and that no threshold is NaN."""
+        for name in ("min_n_eff", "max_khat"):
+            try:
+                nan = bool(np.any(np.isnan(np.asarray(getattr(self, name)))))
+            except jax.errors.TracerArrayConversionError:
+                nan = False  # traced: checked where it was set
+            if nan:
+                raise ValueError(f"{name} is NaN: a NaN threshold gates nothing")
+        counts = (self.depth, self.price_rounds, self.star_batch, self.rebuild_capacity)
+        if min(counts) < 1 or self.member < 0:
+            raise ValueError(
+                "depth, price_rounds, star_batch and rebuild_capacity are at least 1, "
+                "member at least 0"
+            )
         if self.price_factors.ndim != 1 or self.price_factors.shape[0] < 1:
             raise ValueError("price_factors is a nonempty vector")
 
@@ -281,34 +330,43 @@ class PlannerSettings(eqx.Module):
 class PriceState(eqx.Module):
     """What a ``PricePolicy`` carries from one decision to the next.
 
-    Every per-star field has a leading star axis ``S``.
+    Every per-star field has a leading star axis ``S``. A star's refit, its pool and
+    its replay live here, not in the policy: a refit that lands swaps them.
 
     Attributes:
-        forecast: the forecast's replay of each star: at the decision time when the
-            forecast learns, at time zero when it is frozen.
-        verdict: the verdict's replay of each star, at the last time the star was
-            priced.
+        replay: each star's replay of the log into its refit now (``Replay.refit``),
+            at the last time the star was read. The verdict reads it, and the forecast
+            too when it learns.
+        frozen: each star's replay at time zero, after the grant, which a frozen
+            forecast reads; None when the forecast learns (one replay serves both).
+        pool: each star's pool as its refit now left it: the searches its refit does
+            not represent thin it at each decision (``replay_pool``).
         stage: the stage each star's released rows have reached (``reached_stage``).
         frontier: each star's options, its plans built at the price factors and, at
-            ``depth > 1``, its entries alone (``_star_plans``), unmasked; a star is
-            rebuilt only when rows of it are released.
+            ``depth > 1``, its entries alone (``_star_plans``), unmasked.
+        built_lam: the price each star's plans were built at.
         lam: the last solved price of time, reward per day.
         bound: the dual at ``lam``: no schedule of the offered plans, at most one per
             star, earns more within the budget left.
         refused: the stars with an option the menu offers that is not finite (a role
-            the reweighting gate refused), priced as if absent and reported here,
-            never read as worth zero; reported whether or not the star could be bought
-            now (busy, or out of budget).
+            the reweighting gate refused): those options are priced as if absent and
+            reported here, never read as worth zero, whether or not the star could be
+            bought now (busy, in keepout, or out of budget).
+        pending: the stars whose released rows the state has not read yet (a refit
+            waiting among them): busy, offering nothing, until a decision reads them.
         seen: the log rows released by the last decision, ``(W,)``.
     """
 
-    forecast: Replay
-    verdict: Replay
+    replay: Replay
+    frozen: Replay | None
+    pool: Pool
     stage: Int[Array, " S"] = eqx.field(converter=as_index)
     frontier: Frontier
+    built_lam: Float[Array, " S"] = eqx.field(converter=as_float)
     lam: Float[Array, ""] = eqx.field(converter=as_float)
     bound: Float[Array, ""] = eqx.field(converter=as_float)
     refused: Bool[Array, " S"] = eqx.field(converter=jnp.asarray)
+    pending: Bool[Array, " S"] = eqx.field(converter=jnp.asarray)
     seen: Bool[Array, " W"] = eqx.field(converter=jnp.asarray)
 
 
@@ -316,26 +374,39 @@ class PricePolicy(AbstractPolicy):
     """The planner: a price on survey time over each star's plans, re-solved as it goes.
 
     Each star offers plans (``frontier``: a first action and up to ``depth - 1``
-    follow-ups at the star, each chosen on the outcomes so far), built at several
-    prices around the last solved one (``frontier_at_prices``) and, at ``depth > 1``,
-    each first action alone. The price of time
-    ``lam`` minimizes the dual over the stars' options within the budget left
-    (``solve_price``), and ``dispatch`` buys at most one option per star. Of the options
-    bought, the one with the most reward per day of its expected time runs now; a star
-    with a row in flight offers nothing until the row is released. When nothing is
-    bought and rows are in flight, the policy waits for the next release (an action of
-    zero exposure that starts then, ``WAITED``); when nothing is bought and nothing is
-    in flight, or no entry fits the budget left, it stops.
+    follow-ups at the star, each chosen on the outcomes so far, all at the decision's
+    time), built at several prices around the last solved one
+    (``frontier_at_prices``) and, at ``depth > 1``, each first action alone. The price
+    of time ``lam`` minimizes the dual over the stars' options within the budget left
+    (``solve_price``), and ``dispatch`` buys at most one option per star. Of the
+    options bought, the one with the most reward per day of its expected time runs
+    now. A star offers nothing while it is busy (a row of it in flight, or its
+    released rows not yet read), in keepout, or after the calendar's end, and an
+    option whose first action does not fit the budget left (``fits``) is not offered.
+    When nothing is bought the policy waits (an action of zero exposure,
+    ``WAITED``) for the earliest of: the next release, the next opening of a star in
+    keepout that holds an option worth its price, or, when stars wait to be read, now;
+    when there is nothing to wait for before the calendar's end, or no entry fits the
+    budget left, it stops.
 
-    ``init`` replays every star at time zero, builds every star's plans in batches of
-    stars, and re-solves the price ``price_rounds`` times on plans rebuilt at it.
-    ``decide`` absorbs the rows released since the last decision into the replays of
-    their stars, moves each such star to the stage its rows reached and its pool to
-    the searches taken (``reached_stage``, ``replay_pool``), rebuilds only those stars'
-    plans at the last price, and solves the price once. The beliefs are read as two,
-    the forecast's and one verdict member's (``planning_beliefs``), gated per role:
-    a star whose options come out NaN is refused, reported in the state and priced as
-    if absent.
+    ``init`` replays every star at the time of the view, builds every star's plans in
+    batches of stars, and re-solves the price ``price_rounds`` times on plans rebuilt
+    at it; a star whose granted rows found a planet its refit holds no track for
+    starts pending. ``decide`` marks the stars of the rows released since the last
+    decision pending, then reads at most ``rebuild_capacity`` stars, pending ones
+    first and then those whose price has left the range of their build factors: a
+    pending star whose rows found a new planet (``new_planets``) is refit, the
+    decision's queue in one call (``refit_stars``: the star's cloud, its new rows as
+    the term, a key folded from the decision's key and the star, and the gate's
+    thresholds), and its pool is the old one thinned by the searches the new refit
+    represents (``replay_pool``); any other
+    absorbs its rows (``absorb``); each moves to the stage its rows reached and gets
+    plans rebuilt at the last price, which becomes its build price. The gathered stars
+    are scattered back, the price is solved once on the options offered, and the
+    action chosen. The beliefs are read as two, the forecast's and the planner's
+    verdict member's (``planning_beliefs``, only that member's roles and pool rows
+    passed), gated per role: an option that comes out NaN is refused, its star
+    reported in the state and the option priced as if absent.
 
     The policy reads the public view only, never a world: everything it learns is in
     its state.
@@ -347,13 +418,14 @@ class PricePolicy(AbstractPolicy):
         stars: the stars, a pytree whose leaves have a leading star axis.
         roles: the forecast and the stacked verdict members.
         claim: the claim the plans are valued on.
-        utility: the utility; its array leaves (``Count``'s time-zero pool) carry a
-            leading star axis.
+        utility: the utility, shared by the stars.
         models: the run's model table, static in structure; ``Row.model_slot``
             indexes it.
         mode_models: the model of each mode (``mode_models`` of the design);
             ``menu.mode`` indexes it.
         menu: each star's menu; its ``stage`` is not read (the state's is).
+        refitter: the producer of a star's new refit when its searches find a planet
+            new to its cloud.
         settings: the planner's settings.
     """
 
@@ -366,6 +438,7 @@ class PricePolicy(AbstractPolicy):
     models: tuple[AbstractObservationModel, ...]
     mode_models: tuple[AbstractObservationModel, ...]
     menu: Menu
+    refitter: AbstractRefitter
     settings: PlannerSettings
 
     def init(self, public: PublicView) -> PriceState:
@@ -375,7 +448,7 @@ class PricePolicy(AbstractPolicy):
     def decide(
         self, key: PRNGKeyArray, state: PriceState, public: PublicView
     ) -> tuple[Action, Bool[Array, ""], PriceState]:
-        """Absorb the released rows, re-price their stars, and run or wait or stop."""
+        """Read the released rows and stale stars, re-price, and run, wait or stop."""
         return _price_decide(self, key, state, public)
 
 
@@ -390,10 +463,23 @@ def _factors(policy: PricePolicy) -> Float[Array, " P"]:
     return factors if policy.settings.depth > 1 else factors[:1]
 
 
+def _planner_roles(policy: PricePolicy) -> tuple[Roles, Int[Array, " 2"]]:
+    """The roles the planner reads (the forecast and its member) and their pool rows."""
+    m = policy.settings.member
+    member = jax.tree.map(lambda x: x[m : m + 1], policy.roles.verdict)
+    return Roles(policy.roles.forecast, member), jnp.asarray([0, 1 + m])
+
+
+def _pool_now(policy, pool, replay_s, log, time_d) -> Pool:
+    """A star's pool at the decision time: its refit's pool thinned since the refit."""
+    return replay_pool(pool, replay_s.refit, log, policy.models, time_d)
+
+
 def _star_plans(
     policy: PricePolicy,
     forecast: Replay,
     verdict: Replay,
+    pool: Pool,
     s: Int[Array, ""],
     log: ObservationLog,
     time_d: Float[Array, ""],
@@ -401,31 +487,33 @@ def _star_plans(
 ) -> tuple[Int[Array, ""], tuple[Array, Array, Array]]:
     """Star ``s``'s stage and its options: reward, cost and mask, a frontier row each.
 
-    The frontier is formed once every star is in. Option ``p M + m`` is entry ``m``'s
-    plan built at ``lam`` times factor ``p``; at ``depth > 1`` the last ``M`` options
-    are the entries alone, no follow-up (the plans at an infinite price), so the time
-    left can always be spent on single actions even when the last price, and so every
-    factor of it, was zero. ``option % M`` is the entry either way.
+    ``pool`` is the star's pool at ``time_d``. The frontier is formed once every star
+    is in. Option ``p M + m`` is entry ``m``'s plan built at ``lam`` times factor
+    ``p``; at ``depth > 1`` the last ``M`` options are the entries alone, no follow-up
+    (the plans at an infinite price), so the time left can always be spent on single
+    actions even when the last price, and so every factor of it, was zero.
+    ``option % M`` is the entry either way. Every action is planned to start at
+    ``time_d``.
     """
     settings = policy.settings
-    star, refit = _pick(policy.stars, s), _pick(policy.refits, s)
-    pool = replay_pool(_pick(policy.pool, s), refit, log, policy.models, time_d)
+    star = _pick(policy.stars, s)
     stage = reached_stage(log, policy.models, s, time_d)
+    roles, rows = _planner_roles(policy)
+    pool = Pool(
+        pool.marks, pool.log_prior_ratio[rows], pool.log_like[rows], pool.log_mass[rows]
+    )
     forecast_b, verdict_b = planning_beliefs(
         forecast,
         verdict,
-        policy.roles,
+        roles,
         policy.models,
         star,
-        pool,
         pool,
         policy.claim,
         settings.n_quad,
         min_n_eff=settings.min_n_eff,
         max_khat=settings.max_khat,
     )
-    member = slice(settings.member, settings.member + 1)
-    verdict_b = select_roles(verdict_b, member)
     menu = policy.menu
     one_star = Menu(
         menu.exposure_d[s][None],
@@ -438,36 +526,57 @@ def _star_plans(
     def one(tree):
         return jax.tree.map(lambda x: x[None], tree)
 
-    utility = jax.tree.map(lambda x: x[s][None], policy.utility)
-    args = (one(forecast_b), one(verdict_b), policy.claim, one(star), utility)
+    args = (one(forecast_b), one(verdict_b), policy.claim, one(star), policy.utility)
     args = (*args, policy.mode_models, one_star)
-    f = frontier_at_prices(
-        *args, lam * _factors(policy), settings.depth, star_index=s[None]
-    )
+    where = {"star_index": s[None], "time_d": time_d}
+    f = frontier_at_prices(*args, lam * _factors(policy), settings.depth, **where)
     if settings.depth > 1:
-        alone = frontier(*args, lam, 1, star_index=s[None])
+        alone = frontier(*args, lam, 1, **where)
         f = jax.tree.map(lambda a, b: jnp.concatenate([a, b], -1), f, alone)
     return stage, (f.reward[0], f.cost_d[0], f.mask[0])
 
 
 def _usable(
-    policy: PricePolicy, f: Frontier, busy: Bool[Array, " S"], budget_d
+    policy: PricePolicy, f: Frontier, closed: Bool[Array, " S"], budget_d
 ) -> Frontier:
-    """The options a decision may buy: offered, at a free star, first action in budget.
+    """The options a decision may buy: offered, at an open star, first action in budget.
 
-    A star with a row in flight offers nothing; an option whose first action exceeds
-    the budget left would be refused by ``step``, so it is not offered.
+    ``closed`` marks the stars that offer nothing now: busy (a row in flight, or rows
+    not yet read), in keepout, or past the calendar's end. An option whose first
+    action does not fit the budget left would be refused by ``step``, so it is not
+    offered.
     """
     n_plan = f.reward.shape[-1] // policy.menu.exposure_d.shape[-1]
     exposure_d = jnp.tile(policy.menu.exposure_d, (1, n_plan))
-    usable = f.mask & ~busy[:, None] & (exposure_d <= budget_d)
+    usable = f.mask & ~closed[:, None] & fits(exposure_d, budget_d)
     return Frontier(f.reward, f.cost_d, usable)
 
 
-def _refused(f: Frontier) -> Bool[Array, " S"]:
-    """The stars with an offered option that is not finite."""
-    finite = jnp.isfinite(f.reward) & jnp.isfinite(f.cost_d)
-    return jnp.any(f.mask & ~finite, axis=-1)
+def _read_star(
+    policy, fresh_s, found_s, replay_s, pool_s, frozen_s, s, log, time_d, lam
+):
+    """Star ``s`` read afresh at ``time_d``: refit or absorbed, its stage and plans.
+
+    A star whose rows found a planet its refit holds no track for takes its new refit
+    ``fresh_s`` (``refit_stars``), and its pool becomes the old one thinned by the
+    searches the new refit represents; any other absorbs its released rows. Its plans
+    are rebuilt at ``lam``.
+    """
+    star = _pick(policy.stars, s)
+    models = policy.models
+
+    def refit_now(_):
+        pool = _pool_now(policy, pool_s, replay_s, log, time_d)
+        return replay(fresh_s, log, models, star, time_d), pool
+
+    def absorbed(_):
+        return absorb(replay_s, log, models, star, time_d), pool_s
+
+    replay_s, pool_s = jax.lax.cond(found_s, refit_now, absorbed, None)
+    forecast = replay_s if frozen_s is None else frozen_s
+    pool_now = _pool_now(policy, pool_s, replay_s, log, time_d)
+    stage, f = _star_plans(policy, forecast, replay_s, pool_now, s, log, time_d, lam)
+    return replay_s, pool_s, stage, f
 
 
 @eqx.filter_jit
@@ -476,17 +585,22 @@ def _price_init(policy: PricePolicy, public: PublicView) -> PriceState:
     log, time_d = public.log, public.time_d
     n_star = policy.menu.mask.shape[0]
     stars = jnp.arange(n_star)
-    verdict = jax.vmap(
-        lambda refit, star: replay(refit, log, policy.models, star, time_d)
-    )(policy.refits, policy.stars)
-    busy = jnp.zeros(n_star, bool).at[log.rows.star].max(public.in_flight)
+    models = policy.models
+    replays = jax.vmap(lambda refit, star: replay(refit, log, models, star, time_d))(
+        policy.refits, policy.stars
+    )
+    pending = jax.vmap(lambda refit: jnp.any(new_planets(refit, log, models, time_d)))(
+        policy.refits
+    )
     budget_d = public.budget_left_d
+    busy = jnp.zeros(n_star, bool).at[log.rows.star].max(public.in_flight)
+    closed = busy | pending | ~_open_now(public, n_star)
 
     def plans(lam):
         def one(s):
-            return _star_plans(
-                policy, _pick(verdict, s), _pick(verdict, s), s, log, time_d, lam
-            )
+            r = _pick(replays, s)
+            pool = _pool_now(policy, _pick(policy.pool, s), r, log, time_d)
+            return _star_plans(policy, r, r, pool, s, log, time_d, lam)
 
         return jax.lax.map(one, stars, batch_size=policy.settings.star_batch)
 
@@ -494,15 +608,46 @@ def _price_init(policy: PricePolicy, public: PublicView) -> PriceState:
         lam = carry[0]
         stage, f = plans(lam)
         f = Frontier(*f)
-        lam, bound, _ = solve_price(_usable(policy, f, busy, budget_d), budget_d)
-        return lam, bound, _refused(f), stage, f
+        new_lam, bound, _ = solve_price(_usable(policy, f, closed, budget_d), budget_d)
+        return new_lam, bound, refused_stars(f), stage, f, lam
 
     start = jax.eval_shape(lambda: round_(0, (jnp.zeros(()),)))
     start = jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), start)
     rounds = 1 if policy.settings.depth == 1 else policy.settings.price_rounds
-    lam, bound, refused, stage, f = jax.lax.fori_loop(0, rounds, round_, start)
+    lam, bound, refused, stage, f, built = jax.lax.fori_loop(0, rounds, round_, start)
     released = real_rows(log) & (log.rows.release_d <= time_d)
-    return PriceState(verdict, verdict, stage, f, lam, bound, refused, released)
+    frozen = None if policy.settings.forecast_updates else replays
+    return PriceState(
+        replay=replays,
+        frozen=frozen,
+        pool=policy.pool,
+        stage=stage,
+        frontier=f,
+        built_lam=jnp.full(n_star, built),
+        lam=lam,
+        bound=bound,
+        refused=refused,
+        pending=pending,
+        seen=released,
+    )
+
+
+def _open_now(public: PublicView, n_star: int) -> Bool[Array, " S"]:
+    """The stars out of keepout at the view's time, none after the calendar's end."""
+    stars = jnp.arange(n_star)
+    is_open = jax.vmap(open_at, in_axes=(None, 0, None))(
+        public.keepout, stars, public.time_d
+    )
+    return is_open & (public.time_d <= public.end_d)
+
+
+def _stale(policy: PricePolicy, state: PriceState) -> Bool[Array, " S"]:
+    """The stars whose build price the last solved price has left the factors' range."""
+    if policy.settings.depth == 1:  # static: a plan does not depend on the price
+        return jnp.zeros_like(state.pending)
+    factors = policy.settings.price_factors
+    low, high = jnp.min(factors) * state.built_lam, jnp.max(factors) * state.built_lam
+    return ~((state.lam >= low) & (state.lam <= high))
 
 
 @eqx.filter_jit
@@ -515,35 +660,71 @@ def _price_decide(
     n_star = policy.menu.mask.shape[0]
     released = real_rows(log) & (rows.release_d <= time_d)
     new = released & ~state.seen & (rows.refusal == ACCEPTED)
-    touched = jnp.zeros(n_star, bool).at[rows.star].max(new)
-    busy = jnp.zeros(n_star, bool).at[rows.star].max(public.in_flight)
+    pending = state.pending | jnp.zeros(n_star, bool).at[rows.star].max(new)
 
-    def one(s):
-        forecast, verdict = _pick(state.forecast, s), _pick(state.verdict, s)
+    # Gather the stars to read, pending first, then stale, lowest index first.
+    rank = jnp.where(pending, 0, jnp.where(_stale(policy, state), 1, 2))
+    picks = jnp.argsort(rank * n_star + jnp.arange(n_star))[
+        : policy.settings.rebuild_capacity
+    ]
+    chosen = rank[picks] < 2
+
+    # The refit queue: the gathered stars whose rows found a planet new to their
+    # cloud, refit in one call.
+    models, settings = policy.models, policy.settings
+    old = _pick(state.replay, picks).refit
+    found = chosen & jax.vmap(lambda r: jnp.any(new_planets(r, log, models, time_d)))(
+        old
+    )
+    fresh = refit_stars(
+        policy.refitter,
+        old,
+        jax.vmap(lambda r: due_rows(log, r, time_d))(old),
+        _pick(policy.stars, picks),
+        jax.vmap(jax.random.fold_in, in_axes=(None, 0))(key, picks),
+        found,
+        log,
+        models,
+        min_n_eff=settings.min_n_eff,
+        max_khat=settings.max_khat,
+        batch_size=settings.star_batch,
+    )
+
+    def one(i):
+        s = picks[i]
+        replay_s, pool_s = _pick(state.replay, s), _pick(state.pool, s)
+        frozen_s = None if state.frozen is None else _pick(state.frozen, s)
         row = _pick(state.frontier, s)
-        kept = (forecast, verdict, state.stage[s], (row.reward, row.cost_d, row.mask))
+        kept = (replay_s, pool_s, state.stage[s], (row.reward, row.cost_d, row.mask))
+        args = (_pick(fresh, i), found[i], replay_s, pool_s, frozen_s, s, log, time_d)
+        return jax.lax.cond(
+            chosen[i],
+            lambda _: _read_star(policy, *args, state.lam),
+            lambda _: kept,
+            None,
+        )
 
-        def rebuild(_):
-            star = _pick(policy.stars, s)
-            verdict_now = absorb(verdict, log, policy.models, star, time_d)
-            forecast_now = (
-                absorb(forecast, log, policy.models, star, time_d)
-                if policy.settings.forecast_updates
-                else forecast
-            )
-            stage, f = _star_plans(
-                policy, forecast_now, verdict_now, s, log, time_d, state.lam
-            )
-            return forecast_now, verdict_now, stage, f
+    replay_c, pool_c, stage_c, f_c = jax.lax.map(one, jnp.arange(picks.shape[0]))
 
-        return jax.lax.cond(touched[s], rebuild, lambda _: kept, None)
+    def scatter(full, part):
+        return full.at[picks].set(part)
 
-    forecast, verdict, stage, f = jax.lax.map(one, jnp.arange(n_star))
-    f = Frontier(*f)
+    replays = jax.tree.map(scatter, state.replay, replay_c)
+    pools = jax.tree.map(scatter, state.pool, pool_c)
+    stage = state.stage.at[picks].set(stage_c)
+    old = (state.frontier.reward, state.frontier.cost_d, state.frontier.mask)
+    f = Frontier(*jax.tree.map(scatter, old, f_c))
+    built_lam = state.built_lam.at[picks].set(
+        jnp.where(chosen, state.lam, state.built_lam[picks])
+    )
+    pending = pending.at[picks].set(pending[picks] & ~chosen)
+
     budget_d = public.budget_left_d
-    usable = _usable(policy, f, busy, budget_d)
+    in_flight = jnp.zeros(n_star, bool).at[rows.star].max(public.in_flight)
+    is_open = _open_now(public, n_star)
+    usable = _usable(policy, f, in_flight | pending | ~is_open, budget_d)
     lam, bound, _ = solve_price(usable, budget_d)
-    refused = _refused(f)
+    refused = refused_stars(f)
     bought, _ = dispatch(lam, usable, budget_d)
 
     per_day = jnp.where(bought, safe_ratio(usable.reward, usable.cost_d), -jnp.inf)
@@ -553,13 +734,45 @@ def _price_decide(
     run = Action(
         s, jnp.asarray(policy.menu.mode)[entry], policy.menu.exposure_d[s, entry]
     )
+
+    # What a wait could wake on: a release, a star leaving keepout that holds an option
+    # worth its price, or now, when stars wait to be read.
     flight = jnp.where(public.in_flight, rows.release_d, jnp.inf)
     awaited = jnp.argmin(flight)
-    wait = Action(rows.star[awaited], rows.mode[awaited], 0.0, flight[awaited])
+    stars = jnp.arange(n_star)
+    exposure_d = jnp.tile(
+        policy.menu.exposure_d, (1, f.mask.shape[-1] // policy.menu.mask.shape[-1])
+    )
+    worth = f.mask & fits(exposure_d, budget_d) & (f.reward - lam * f.cost_d > 0)
+    wanted = jnp.any(worth, axis=-1) & ~in_flight & ~pending & ~is_open
+    opens_d = jax.vmap(next_open, in_axes=(None, 0, None))(
+        public.keepout, stars, time_d
+    )
+    opens_d = jnp.where(wanted, opens_d, jnp.inf)
+    reading_d = jnp.where(jnp.any(pending), time_d, jnp.inf)
+    wake_d = jnp.min(jnp.stack([flight[awaited], jnp.min(opens_d), reading_d]))
+    wait_star = jnp.select(
+        [wake_d == flight[awaited], wake_d == jnp.min(opens_d)],
+        [rows.star[awaited], jnp.argmin(opens_d)],
+        jnp.argmax(pending),
+    )
+    wait = Action(wait_star, policy.menu.mode[0], 0.0, wake_d)
 
     running = jnp.any(bought)
-    affordable = jnp.any(policy.menu.mask & (policy.menu.exposure_d <= budget_d))
-    waiting = ~running & jnp.any(public.in_flight) & affordable
+    affordable = jnp.any(policy.menu.mask & fits(policy.menu.exposure_d, budget_d))
+    waiting = ~running & affordable & (wake_d <= public.end_d)
     action = jax.tree.map(lambda a, b: jnp.where(running, a, b), run, wait)
-    new_state = PriceState(forecast, verdict, stage, f, lam, bound, refused, released)
+    new_state = PriceState(
+        replay=replays,
+        frozen=state.frozen,
+        pool=pools,
+        stage=stage,
+        frontier=f,
+        built_lam=built_lam,
+        lam=lam,
+        bound=bound,
+        refused=refused,
+        pending=pending,
+        seen=released,
+    )
     return action, ~running & ~waiting, new_state

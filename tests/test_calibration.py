@@ -16,7 +16,7 @@ from jax.scipy.stats import norm
 
 from spaceodyssey.belief import absorb, q, replay, replay_belief
 from spaceodyssey.claim import Claim, GasAbove
-from spaceodyssey.design import Mode, Resources
+from spaceodyssey.design import Mode, Resources, no_keepout
 from spaceodyssey.log import grant_rows, start_log, step
 from spaceodyssey.roles import Roles
 from spaceodyssey.toy import GaussianGasModel
@@ -95,11 +95,11 @@ def _issue(toy, roles, cloud):
         jnp.arange(N_WORLD)
     )
     take = eqx.filter_jit(
-        eqx.filter_vmap(step, in_axes=(0, 0, 0, None, None, None, None))
+        eqx.filter_vmap(step, in_axes=(0, 0, 0, None, None, None, None, None))
     )
-    action, budget = Action(0, 0, 1.0), Resources(10.0)
+    action, budget = Action(0, 0, 1.0), Resources(10.0, 365.0)
     for _ in range(2):
-        log = take(noise, log, worlds, MODELS, action, MODE, budget)
+        log = take(noise, log, worlds, MODELS, action, MODE, budget, no_keepout(1))
 
     refit, pool = Refit(cloud, jnp.zeros(2, bool), 0), toy.empty_pool(2, 1)
 

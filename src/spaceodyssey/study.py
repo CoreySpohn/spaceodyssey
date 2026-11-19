@@ -48,9 +48,10 @@ class Study(eqx.Module):
         alpha: the risk of a certificate, static.
 
     Raises:
-        ValueError: if the refits, the pools and ``prior_mass_outside`` disagree on the
-            number of stars, the pools and ``prior_mass_outside`` on the number of
-            roles, or the refits' row masks are not of the log's capacity.
+        ValueError: if the refits, the pools, ``prior_mass_outside`` and the design's
+            keepout table disagree on the number of stars, the pools and
+            ``prior_mass_outside`` on the number of roles, or the refits' row masks
+            are not of the log's capacity.
     """
 
     claim: Claim
@@ -93,6 +94,7 @@ class Study(eqx.Module):
             self.refits.star_index.shape[0],
             self.pool.log_mass.shape[0],
             self.prior_mass_outside.shape[0],
+            self.design.keepout.closed.shape[0],
         }
         if len(n_star) != 1:
             raise ValueError(f"per-star fields disagree on S: {n_star}")

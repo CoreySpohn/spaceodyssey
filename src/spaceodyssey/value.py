@@ -164,6 +164,9 @@ class LogScore(AbstractUtility):
     planets its condition admits (``count_pmf``):
     ``U = sum_{f,n} P_F(F = f, N = n) ln P_gamma(N = n | M = f + n)``, so learning the
     condition alone adds nothing in expectation; it pays only as a way to the claim.
+    ``M`` is read off the bin indices, so mass lumped at ``n_max`` is scored as
+    ``M = n_max``: the conditional score is exact when ``n_max`` exceeds every count
+    with mass.
 
     Attributes:
         n_max: the count at which ``count_pmf`` lumps the tail, static; it belongs to
@@ -202,25 +205,19 @@ def _given_admitted(joint: Float[Array, "N N"]) -> Float[Array, "N N"]:
 
 
 class Count(AbstractUtility):
-    """Expected number of claim-true planets found since time zero, under the forecast.
+    """Expected number of claim-true planets found, under the forecast, to a constant.
 
-    ``U = rate0 - rate``, the forecast's claim-true pool rate (``pool_rate``) in the
-    pool at time zero less the rate in the forecast belief's pool. A planet found is
-    one no longer in the pool, so a second look at a star counts only what the first
-    look missed: ``thin`` has already taken the found planets out of the pool. The
-    verdict is not read.
-
-    Attributes:
-        pool0: the pool at time zero, after the grant, its row 0 the forecast's; held
-            beside the beliefs, not in them.
+    ``U = -rate``, the negative of the forecast's claim-true pool rate (``pool_rate``)
+    in the forecast belief's pool. A planet found is one no longer in the pool, so a
+    second look at a star counts only what the first look missed: ``thin`` has already
+    taken the found planets out of the pool. A utility matters only up to a constant,
+    so ``U`` is the number found since any reference time less the rate then; the
+    number a run found is ``pool_found``. The verdict is not read.
     """
 
-    pool0: Pool
-
     def __call__(self, forecast, verdict, claim, star):
-        """The claim-true rate at time zero less the rate now, for the forecast."""
-        now = pool_rate(forecast.pool, claim, star)[0]
-        return pool_rate(self.pool0, claim, star)[0] - now
+        """The negative of the forecast's claim-true pool rate."""
+        return -pool_rate(forecast.pool, claim, star)[0]
 
 
 class Menu(eqx.Module):
@@ -434,8 +431,10 @@ def replay_pool(
     pool depends on which searches were taken, never on their payloads, and thinning
     by several rows is thinning once by the product of their miss probabilities, in
     any order: this replays the whole log, as ``replay`` does, and a planner calls it
-    afresh at each time rather than absorbing rows into it. Rows in flight, refused
-    rows, waits and rows of a model that does not search leave the pool as it is.
+    afresh at each time rather than absorbing rows into it. Each row is read as its
+    action at its realized start (``Row.time_d``), as it was taken. Rows in flight,
+    refused rows, waits and rows of a model that does not search leave the pool as it
+    is.
 
     Args:
         pool: the refit's pool, every role, as the refit returned it.
@@ -455,7 +454,7 @@ def replay_pool(
         & (rows.star == refit.star_index)
         & ~refit.row_mask
     )
-    actions = Action(rows.star, rows.mode, rows.exposure_d)
+    actions = Action(rows.star, rows.mode, rows.exposure_d, rows.time_d)
     miss = jnp.ones(pool.marks.exists.shape[0], pool.log_mass.dtype)
     for slot, model in enumerate(models):
         if not model.searches:
@@ -468,12 +467,49 @@ def replay_pool(
     return thin(pool, 1.0 - miss)
 
 
-def _entries(menu: Menu, mode: int, star_index) -> tuple[list[int], Action]:
-    """The menu entries of one mode at one star, and their actions (leading axis)."""
+def pool_found(
+    pool: Pool,
+    refit: Refit,
+    log: ObservationLog,
+    models: tuple[AbstractObservationModel, ...],
+    claim: Claim,
+    star,
+    time_d: Float[Array, ""],
+) -> Float[Array, " R"]:
+    """Expected number of claim-true planets a run's searches found at a star, per role.
+
+    The claim-true rate of the refit's pool less that of the pool its searches
+    released by ``time_d`` left (``replay_pool``): what ``Count`` values, read off the
+    log. It reads no payload, so it is a forecast of the finds, not the finds; the
+    planets a run really found are read against the truth (``score.found_count``).
+
+    Args:
+        pool: the refit's pool, every role.
+        refit: the refit of the same star.
+        log: the run's log, all stars.
+        models: the run's model table, static.
+        claim: the claim.
+        star: a pytree of scalar leaves describing the star.
+        time_d: the query time, days from the start of the survey.
+
+    Returns:
+        The expected claim-true planets found, per role, shape ``(R,)``.
+    """
+    now = replay_pool(pool, refit, log, models, time_d)
+    return pool_rate(pool, claim, star) - pool_rate(now, claim, star)
+
+
+def _entries(menu: Menu, mode: int, star_index, time_d) -> tuple[list[int], Action]:
+    """The menu entries of one mode at one star, and their actions (leading axis).
+
+    Every action carries the planned start ``time_d``.
+    """
     entries = [m for m, e in enumerate(menu.mode) if e == mode]
     exposure_d = menu.exposure_d[jnp.asarray(entries, int)]
     shape = exposure_d.shape
-    actions = Action(jnp.full(shape, star_index), jnp.full(shape, mode), exposure_d)
+    actions = Action(
+        jnp.full(shape, star_index), jnp.full(shape, mode), exposure_d, time_d
+    )
     return entries, actions
 
 
@@ -519,11 +555,11 @@ def _pad_cells(cells: OutcomeCells, n_cell: int, n_bin: int) -> OutcomeCells:
     )
 
 
-def _outcomes(forecast, verdict, mode_models, menu, star_index) -> _Outcomes:
+def _outcomes(forecast, verdict, mode_models, menu, star_index, time_d) -> _Outcomes:
     """The cells and detection probabilities of every entry, in menu order."""
     order, parts = [], []
     for mode, model in enumerate(mode_models):
-        entries, actions = _entries(menu, mode, star_index)
+        entries, actions = _entries(menu, mode, star_index, time_d)
         if not entries:
             continue
 
@@ -712,6 +748,7 @@ def frontier(
     depth: int,
     *,
     star_index: Int[Array, " S"] | None = None,
+    time_d: Float[Array, ""] | float = 0.0,
 ) -> Frontier:
     """The reward and expected time of each menu entry's plan at each star.
 
@@ -760,11 +797,16 @@ def frontier(
     spawned as a track (that takes a refit), so it leaves the count; value a search
     with ``Count``, which counts it as found.
 
-    Every leaf of the two beliefs, ``star``, ``menu`` and the array leaves of
-    ``utility`` (``Count``'s time-zero pool) carry a leading star axis ``S``; ``claim``
-    and ``mode_models`` are shared by the stars. The menu's modes, the cell counts and
-    ``depth`` are static, so another star or world of the same shapes reuses the
-    compiled program.
+    Every action of a plan, the follow-ups included, is read at the planned start
+    ``time_d``, the time the plan is built: the cells are read once at the root, so a
+    follow-up's later start is not modeled. A model whose outcomes follow the time
+    (orbital phase, zodi) reads every level of the lookahead at the plan's start.
+
+    Every leaf of the two beliefs, ``star`` and ``menu`` carry a leading star axis
+    ``S``; ``claim``, ``utility`` and ``mode_models`` are shared by the stars (a
+    utility holds no per-star state). The menu's modes, the cell counts and ``depth``
+    are static, so another star or world of the same shapes reuses the compiled
+    program.
 
     Args:
         forecast: the forecast's beliefs, one per star, one role each.
@@ -782,6 +824,8 @@ def frontier(
             included, static, at least 1.
         star_index: each star's index in the survey, which its actions carry (a
             model with per-star configuration reads it); ``0 .. S - 1`` by default.
+        time_d: the planned start of every action of the plans, days from the start
+            of the survey; zero by default.
 
     Returns:
         The frontier: each plan's reward and expected time (zero and the exposure at
@@ -797,13 +841,14 @@ def frontier(
         raise ValueError("a menu entry's mode is not in the mode table")
 
     lam = jnp.asarray(lam, float)
+    time_d = jnp.asarray(time_d, float)
     forecast, verdict = require_point_draws(forecast), require_point_draws(verdict)
 
-    def one_star(forecast, verdict, star, utility, menu, star_index):
+    def one_star(forecast, verdict, star, menu, star_index):
         node = (forecast, verdict, menu.stage)
         offered = _offered(menu, menu.stage)
         now = utility(forecast, verdict, claim, star)
-        outcomes = _outcomes(forecast, verdict, mode_models, menu, star_index)
+        outcomes = _outcomes(forecast, verdict, mode_models, menu, star_index, time_d)
 
         def net(price):
             plan = _Plan(claim, star, utility, menu, outcomes, price)
@@ -819,7 +864,7 @@ def frontier(
     if star_index is None:
         star_index = jnp.arange(menu.mask.shape[0])
     reward, cost_d, offered = eqx.filter_vmap(one_star)(
-        forecast, verdict, star, utility, menu, star_index
+        forecast, verdict, star, menu, star_index
     )
     return Frontier(reward, cost_d, offered)
 
@@ -836,6 +881,7 @@ def frontier_at_prices(
     depth: int,
     *,
     star_index: Int[Array, " S"] | None = None,
+    time_d: Float[Array, ""] | float = 0.0,
 ) -> Frontier:
     """Each star's plans built at several prices, offered side by side as options.
 
@@ -860,6 +906,7 @@ def frontier_at_prices(
         lam: the prices the plans are built at, shape ``(P,)``.
         depth: the number of entries a plan may take at the star, static.
         star_index: each star's index in the survey (``frontier``).
+        time_d: the planned start of every action of the plans (``frontier``).
 
     Returns:
         The frontier, ``(S, P M)``.
@@ -877,6 +924,7 @@ def frontier_at_prices(
             price,
             depth,
             star_index=star_index,
+            time_d=time_d,
         )
 
     f = jax.vmap(at)(jnp.asarray(lam, float))  # leaves (P, S, M)

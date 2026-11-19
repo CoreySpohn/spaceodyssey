@@ -5,6 +5,7 @@ study's roles stage by stage, a stage ending at each release time of the star's 
 and every planet of the truth is scored at each stage. It returns the tables milestone 1
 needs, as generic columns: the information table, the certificate table, the resolution
 numbers and the predicted and realized counts. ``format_report`` prints them.
+``found_count`` reads the planets a run's searches found against the truth.
 
 The claim is read two ways. Its information is that of the whole conjunction, the
 planet's claim bit: a claim-true planet scores ``ln q`` and a look-alike ``ln(1 - q)``,
@@ -38,7 +39,14 @@ from spaceodyssey.information import (
     widen_by_mass_outside,
 )
 from spaceodyssey.study import Study
-from spaceodyssey.types import ACCEPTED, Atoms, ObservationLog, clock_d, real_rows
+from spaceodyssey.types import (
+    ACCEPTED,
+    Atoms,
+    ObservationLog,
+    clock_d,
+    planet_tracks,
+    real_rows,
+)
 from spaceodyssey.world import SealedWorld
 
 
@@ -62,7 +70,9 @@ class Report(eqx.Module):
             the claim's condition); ``truth``; the refit trigger ``refit``; and the
             candidacy range over the members, ``psi_lo`` and ``psi_hi``.
         resolution: one entry per star, planet and member, at the last stage: the
-            claim's ``q``, its ``mc_se``, ``khat`` against ``khat_max``, ``n_eff``, the
+            claim's ``q``, its ``mc_se``, ``khat`` against ``khat_max`` and whether
+            the member is ``refused`` there (``khat`` above it or NaN: the gate of
+            the certificates and the refit trigger), ``n_eff``, the
             Kish size of the condition-weighted draws ``n_cond`` (the ``n`` of the
             certificate's Wilson bound), the clip ``resolution`` ``1 / (2 n_eff)``
             and the number of stages whose whole claim ``q`` it ``clipped``, the
@@ -70,9 +80,10 @@ class Report(eqx.Module):
             ``prior_mass_outside`` ``m`` with the hard bound it puts on ``q``,
             ``[(1 - m) q, (1 - m) q + m]`` (``q_bound_lo``, ``q_bound_hi``).
         counts: one entry per member: the predicted applicable count ``sum psi``
-            beside the realized one, and the predicted applicable errors
+            beside the realized one, the predicted applicable errors
             ``sum (psi - q)``, with ``q`` the whole claim's, beside the realized ones
-            (applicable planets that are not claim-true).
+            (applicable planets that are not claim-true), and the stars at which the
+            member is refused (``refused_stars``).
     """
 
     information: dict[str, Array]
@@ -91,12 +102,13 @@ _CERTIFICATES = (
     "psi_hi",
 )  # fmt: skip
 _RESOLUTION = (
-    "star", "planet", "member", "q", "mc_se", "khat", "khat_max", "n_eff", "n_cond",
-    "resolution", "clipped", "psi", "prior_mass_outside", "q_bound_lo", "q_bound_hi",
+    "star", "planet", "member", "q", "mc_se", "khat", "khat_max", "refused", "n_eff",
+    "n_cond", "resolution", "clipped", "psi", "prior_mass_outside", "q_bound_lo",
+    "q_bound_hi",
 )  # fmt: skip
 _COUNTS = (
     "member", "predicted_applicable", "realized_applicable", "predicted_errors",
-    "realized_errors",
+    "realized_errors", "refused_stars",
 )  # fmt: skip
 
 _replay = eqx.filter_jit(replay)
@@ -315,18 +327,21 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
                 q_m, mass = d.q[m], d.prior_mass_outside[m]
                 bound_lo, bound_hi = widen_by_mass_outside(q_m, q_m, mass)
                 n_eff = float(d.n_eff[m])
+                refused = not float(d.khat[m]) <= khat_max
                 resolution.append(
                     {
                         "star": s, "planet": k, "member": m, "q": float(q_m),
                         "mc_se": float(d.mc_se[m]), "khat": float(d.khat[m]),
-                        "khat_max": khat_max, "n_eff": n_eff,
+                        "khat_max": khat_max, "refused": refused, "n_eff": n_eff,
                         "n_cond": float(d.n_cond[m]), "resolution": 0.5 / n_eff,
                         "clipped": int(np.sum(q_whole[:, m] != q_clip[:, m])),
                         "psi": psi[m], "prior_mass_outside": float(mass),
                         "q_bound_lo": float(bound_lo), "q_bound_hi": float(bound_hi),
                     }
                 )  # fmt: skip
-                planets.append((m, psi[m], q_whole[-1, m], applicable, true))
+                planets.append(
+                    (m, psi[m], q_whole[-1, m], applicable, true, refused, s)
+                )
 
     counts = [
         {
@@ -335,6 +350,7 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
             "realized_applicable": sum(p[3] for p in planets if p[0] == m),
             "predicted_errors": sum(p[1] - p[2] for p in planets if p[0] == m),
             "realized_errors": sum(p[3] and not p[4] for p in planets if p[0] == m),
+            "refused_stars": len({p[6] for p in planets if p[0] == m and p[5]}),
         }
         for m in members
     ]
@@ -345,6 +361,62 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
         resolution=_columns(resolution, _RESOLUTION),
         counts=_columns(counts, _COUNTS),
     )
+
+
+@eqx.filter_jit
+def _found(log, truth, refits, stars, models, claim):
+    """Per star, the claim-true planets of the truth its accepted searches found.
+
+    Only planets the star's time-zero refit held no track for are counted.
+    """
+    rows = log.rows
+    accepted = real_rows(log) & (rows.refusal == ACCEPTED)
+
+    def one(refit, truth_s, star):
+        mine = accepted & (rows.star == refit.star_index)
+        found = jnp.zeros(truth_s.exists.shape[-1], bool)
+        for slot, model in enumerate(models):
+            if not model.searches:
+                continue  # static: only a search detects planets
+            detected = jax.vmap(model.detections)(rows.payload[slot])  # (W, K)
+            keep = mine & (rows.model_slot == slot)
+            found = found | jnp.any(detected & keep[:, None], axis=0)
+        held = jnp.ones(truth_s.exists.shape, float)
+        for conjunct in claim.conjuncts:
+            held = held * conjunct.prob(truth_s, star)
+        claim_true = (held[0] > 0.5) & truth_s.exists[0]
+        return jnp.sum(found & ~planet_tracks(refit.atoms) & claim_true)
+
+    return jax.vmap(one)(refits, truth, stars)
+
+
+def found_count(log: ObservationLog, world: SealedWorld, study: Study) -> Array:
+    """The planets a run found: claim-true planets of the truth its searches detected.
+
+    Read against the truth, per star: a planet counts when it is claim-true in the
+    truth (every conjunct of the claim, the condition included, holds), the star's
+    time-zero refit held no track for it (it was undetected: ``Count``'s planets), and
+    an accepted row of a searching model detected it (``detections``), released or
+    still in flight at the run's end. This is the realized ``Count``; ``pool_found``
+    is the forecast's expectation of it, which reads no payload. A planet's slot in a
+    payload is the truth's (declared deviation 2).
+
+    Args:
+        log: the run's log.
+        world: the run's sealed world, one world (no world axis).
+        study: the study the run belongs to.
+
+    Returns:
+        The number of planets found at each star, shape ``(S,)``.
+
+    Raises:
+        ValueError: if the truth and the refits hold different numbers of planet
+            slots (``associate_planets``).
+    """
+    truth = world.unseal()
+    associate_planets(_star(truth, 0), _star(study.refits, 0).atoms)
+    models, claim = study.design.models, study.claim
+    return _found(log, truth, study.refits, study.stars, models, claim)
 
 
 def _columns(entries: list[dict], names: tuple[str, ...], **widths: int) -> dict:

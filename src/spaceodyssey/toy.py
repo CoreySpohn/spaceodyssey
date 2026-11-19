@@ -2,8 +2,9 @@
 
 The toy state holds, per draw and planet slot, two bits (``"hz"``, the planet is in the
 habitable zone; ``"size"``, it is Earth-sized) and a gas block; ``InHz`` and ``InSize``
-read the bits, ``ToyPrior`` is a role prior over whole draws, and ``toy_survey`` builds
-a study of many stars on it, with its menu and grant.
+read the bits, ``ToyPrior`` is a role prior over whole draws, ``ToyRefitter`` turns a
+planet a search finds into a track, and ``toy_survey`` builds a study of many stars on
+it, with its menu, grant, keepout table and refitter.
 
 An observation model (``AbstractObservationModel``, defined in ``types``) turns an
 action on a star into a row payload (``sample``), scores rows against every draw through
@@ -37,19 +38,27 @@ from jax.scipy.stats import norm
 from jaxtyping import Array, Float, Int
 
 from spaceodyssey._numerics import guarded_log, safe_ratio
-from spaceodyssey.belief import role_pool
+from spaceodyssey.belief import (
+    detected_slots,
+    gate_weights,
+    replay,
+    replay_likelihood,
+    role_pool,
+)
 from spaceodyssey.claim import AbstractConjunct, Claim, GasAbove
-from spaceodyssey.design import Design, Mode, Resources
+from spaceodyssey.design import Design, Keepout, Mode, Resources
 from spaceodyssey.roles import Roles
 from spaceodyssey.study import Study
 from spaceodyssey.types import (
     AbstractObservationModel,
+    AbstractRefitter,
     AbstractRolePrior,
     Action,
     Atoms,
     Grant,
     Refit,
     WeightedCloud,
+    planet_tracks,
 )
 from spaceodyssey.value import Menu
 
@@ -379,12 +388,17 @@ class DetectionModel(AbstractObservationModel):
     at the action's star (a per-target detection scale). With ``p = 1 - exp(-1 / tau)``
     a star's completeness is ``1 - exp(-t / tau)``.
 
-    The payload holds the exposure, the two probabilities it was taken at and whether
-    each planet slot was detected, ``"detected"`` of shape ``(K,)``. Its cells are the
-    joint of the planets' detections, ``2 ** K`` of them, mixed radix with the first
-    planet most significant: cell 0 is the miss of every planet, and any other cell is
-    a detection, which reaches stage 1 (a spectrum may follow it). Rows are independent
-    given the draw, so ``stats`` is the log likelihood of each row per draw.
+    The payload holds the exposure, its start (``"time_d"``, the action's realized
+    start), the two probabilities it was taken at and whether each planet slot was
+    detected, ``"detected"`` of shape ``(K,)``, slots labeled as the truth's (declared
+    deviation 2; ``detections`` reads them). Its cells are the joint of the planets'
+    detections, ``2 ** K`` of them, mixed radix with the first planet most
+    significant: cell 0 is the miss of every planet, and any other cell is a
+    detection, which reaches stage 1 (a spectrum may follow it). Rows are independent
+    given the draw, so ``stats`` is the log likelihood of each row per draw; it scores
+    the detections of tracks only (``planet_tracks``): a detection in a slot no draw
+    holds is of a planet new to the cloud, left for a refit. The toy's probabilities
+    do not depend on the start; the payload keeps it for a model whose do.
 
     Attributes:
         p_hz_one_day: probability of detecting a planet in the habitable zone in one
@@ -413,13 +427,18 @@ class DetectionModel(AbstractObservationModel):
         lead = d.shape[:1]
         return {
             "exposure_d": jnp.broadcast_to(action.exposure_d, lead),
+            "time_d": jnp.broadcast_to(action.not_before_d, lead),
             "p_hz_one_day": jnp.broadcast_to(p_hz, lead),
             "p_other_one_day": jnp.broadcast_to(p_other, lead),
             "detected": detected.astype(d.dtype),
         }
 
     def stats(self, payload, atoms, star):
-        """The log probability of the row's detections and misses under each draw."""
+        """The log probability of the row's detections and misses under each draw.
+
+        A detection in a slot no draw holds (a planet new to the cloud) is not scored:
+        no draw can explain it, and a refit adds its track.
+        """
         d = _detect(
             atoms,
             payload["exposure_d"],
@@ -427,11 +446,16 @@ class DetectionModel(AbstractObservationModel):
             payload["p_other_one_day"],
         )
         seen = payload["detected"] > 0.5
-        return jnp.sum(guarded_log(jnp.where(seen, d, 1.0 - d)), axis=-1)
+        scored = jnp.where(seen & ~planet_tracks(atoms), 1.0, jnp.where(seen, d, 1 - d))
+        return jnp.sum(guarded_log(scored), axis=-1)
 
     def finalize(self, stats, atoms, star):
         """The summed log likelihoods, with the draws unchanged."""
         return stats, atoms
+
+    def detections(self, payload):
+        """The slots the row detected."""
+        return payload["detected"] > 0.5
 
     def cell(self, payload):
         """The joint of the planets' detections, mixed radix, cell 0 the miss."""
@@ -565,6 +589,72 @@ class ToyPrior(AbstractRolePrior):
         return point_atoms(hz.astype(x.dtype), size.astype(x.dtype), x, exists, self)
 
 
+class ToyRefitter(AbstractRefitter):
+    """An importance refit: a new planet's state drawn for each draw, rows rescored.
+
+    Each slot the term's rows detected and no draw holds becomes a track: every draw
+    gets a planet there, its state drawn from ``law`` (the law of one undetected
+    planet, the pool marks' law), and the other slots keep their states. The weights
+    are the joint likelihood of every row the new refit represents (those the old
+    refit represented and the term's), scored on the new draws through the models'
+    statistics; the draws' gas blocks are those rows' updates
+    (``replay_likelihood``). The draws are therefore read as proposed by the refit's
+    prior, a new planet's state by ``law``: the existence of a planet in the new slot
+    is given by the detection, and the prior's existence probability there is one
+    constant factor, so the weights are the likelihood alone. That holds for a cloud
+    of prior draws of equal weight (the toy survey's) and for every cloud this
+    refitter returns, since it rescores every represented row afresh and never keeps
+    a weight. Weights the gate refuses (``gate_weights``) are NaN: an importance refit
+    has no fallback. The cloud's target and evidence are placeholders, as
+    ``point_atoms``'.
+
+    Attributes:
+        law: the law of one new planet, a one-slot ``ToyPrior``.
+    """
+
+    law: ToyPrior
+
+    def refit(self, refit, term, key, *, min_n_eff, max_khat):
+        """The star's cloud with each new planet a track, rescored on its rows."""
+        atoms = refit.atoms
+        n_draw, n_slot = atoms.exists.shape
+        detected = detected_slots(term.log, term.rows, term.models, n_slot)
+        new = detected & ~planet_tracks(atoms)  # (K,)
+        fresh = self.law.draws(key, term.star, n_draw * n_slot)
+        samples = atoms.cloud.samples
+
+        def place(old, drawn):
+            drawn = drawn.reshape(n_draw, n_slot, *drawn.shape[2:])
+            return jnp.where(new.reshape(1, -1, *([1] * (old.ndim - 2))), drawn, old)
+
+        samples = {
+            "hz": place(samples["hz"], fresh.cloud.samples["hz"]),
+            "size": place(samples["size"], fresh.cloud.samples["size"]),
+        }
+        cloud = WeightedCloud(
+            samples,
+            jnp.zeros(n_draw),
+            atoms.cloud.log_target,
+            jnp.nan,
+            atoms.cloud.prior,
+        )
+        proposed = Atoms(
+            cloud,
+            place(atoms.x_mean, fresh.x_mean),
+            place(atoms.x_var, fresh.x_var),
+            atoms.exists | new,
+        )
+        represented = refit.row_mask | term.rows
+        # Every represented row is released, so the replay applies them all.
+        scored = Refit(proposed, ~represented, refit.star_index)
+        every = jnp.asarray(jnp.inf)
+        rescored = replay(scored, term.log, term.models, term.star, every)
+        drawn, log_like = replay_likelihood(rescored, term.models, term.star)
+        log_like = gate_weights(log_like, min_n_eff=min_n_eff, max_khat=max_khat)
+        weighted = eqx.tree_at(lambda a: a.cloud.log_weights, drawn, log_like)
+        return Refit(weighted, represented, refit.star_index)
+
+
 class ToySurvey(eqx.Module):
     """A toy study with what a run of it reads besides a policy.
 
@@ -573,11 +663,14 @@ class ToySurvey(eqx.Module):
             the design.
         menu: the planner's menu of each star.
         grant: the rows given at time zero.
+        refitter: the refit a planner queues when a search finds a planet new to a
+            star's cloud.
     """
 
     study: Study
     menu: Menu
     grant: Grant
+    refitter: ToyRefitter
 
 
 TOY_SEARCH_D = (0.5, 1.0)
@@ -589,6 +682,37 @@ TOY_SPECTRUM_D = (0.6, 1.2)
 TOY_LATENCY_D = (2.0, 10.0)
 """Latency of the toy survey's search and spectrum modes, days."""
 
+TOY_KEEPOUT_D = 120.0
+"""Days of each year a toy star spends in keepout, one window a year."""
+
+TOY_YEAR_D = 365.25
+"""The toy's year, days: the period of its keepout."""
+
+TOY_KEEPOUT_STEP_D = 5.0
+"""Width of a bin of the toy survey's keepout table, days."""
+
+
+def toy_keepout(key, n_star: int, end_d: float) -> Keepout:
+    """A keepout table: each star closed ``TOY_KEEPOUT_D`` days a year.
+
+    Star ``s`` is closed while the time since its window opened, modulo the year, is
+    below ``TOY_KEEPOUT_D``; the windows open at days uniform over the year, read at
+    the middle of each bin of ``TOY_KEEPOUT_STEP_D`` days over ``[0, end_d)``.
+
+    Args:
+        key: the key of the windows.
+        n_star: the number of stars, ``S``.
+        end_d: the calendar's end, days.
+
+    Returns:
+        The table.
+    """
+    opens_d = jax.random.uniform(key, (n_star, 1), maxval=TOY_YEAR_D)
+    n_bin = max(1, int(-(-end_d // TOY_KEEPOUT_STEP_D)))
+    middle_d = (jnp.arange(n_bin) + 0.5) * TOY_KEEPOUT_STEP_D
+    closed = jnp.mod(middle_d - opens_d, TOY_YEAR_D) < TOY_KEEPOUT_D
+    return Keepout(closed, TOY_KEEPOUT_STEP_D)
+
 
 def toy_survey(
     key,
@@ -598,63 +722,86 @@ def toy_survey(
     *,
     pool_mass: float,
     budget_d: float,
+    end_d: float,
     capacity: int,
+    n_slot: int = 2,
     n_grant: int = 0,
 ) -> ToySurvey:
     """A toy survey of many stars, built in one place for the tests and the scripts.
 
-    Each star's planets sit in two slots: slot 0 always holds a planet and slot 1 one
-    half the time; a planet is in the habitable zone with the star's ``"p_hz"`` (uniform
-    on ``[0.2, 0.6]`` over the stars), Earth-sized half the time, and has one gas
-    ``N(GAS_FLOOR, GAS_PRIOR_SD**2)``. That is the truth's prior (``ToyPrior``), from
-    which the worlds are drawn and each star's refit is drawn too: ``n_draw`` point
-    draws of equal weight. The forecast is the truth; the verdict has two members, one
-    with 0.8 times the habitable-zone probability and gases ``N(0, 0.8**2)``, one with
-    1.2 times it and gases ``N(0.2, 1.2**2)``. Beside the slots each star has a pool of
-    ``pool_mass`` undetected planets in expectation, every role, on ``n_mark`` marks
-    drawn from the truth's prior of one planet, its role prior ratios formed ungated
-    (``role_pool``; a planner gates them again). The claim is a planet in the habitable
-    zone with its gas above the floor.
+    Each star has a known planet, the track in slot 0, and ``pool_mass`` undetected
+    planets in expectation, which the truth holds in the free slots ``1 .. n_slot -
+    1``, each with probability ``pool_mass / (n_slot - 1)``: the truth's pool count is
+    binomial where the forecast's is Poisson, of the same mean, so every expected count
+    the planner forecasts (a search's finds above all) is the truth's. A planet is in
+    the habitable zone with the star's ``"p_hz"`` (uniform on ``[0.2, 0.6]`` over the
+    stars), Earth-sized half the time, and has one gas ``N(GAS_FLOOR,
+    GAS_PRIOR_SD**2)``. That is the truth's prior (``ToyPrior``), from which the worlds
+    are drawn. Each star's refit holds ``n_draw`` point draws of equal weight of the
+    track alone (the free slots empty: the pool holds the undetected planets), on the
+    truth's prior. The pool holds ``pool_mass`` planets, every role, on ``n_mark``
+    marks drawn from the truth's prior of one planet, its role prior ratios formed
+    ungated (``role_pool``; a planner gates them again). The forecast is the truth; the
+    verdict has two members, one with 0.8 times the habitable-zone probability and
+    gases ``N(0, 0.8**2)``, one with 1.2 times it and gases ``N(0.2, 1.2**2)``, the
+    free slots' existence as the truth's. The claim is a planet in the habitable zone
+    with its gas above the floor.
 
     The design has a search (``DetectionModel``: a planet in the habitable zone is
     found in one day with probability 0.75, any other with 0.5) and a spectrum
     (``GaussianGasModel`` at S/N 4 in one day), released ``TOY_LATENCY_D`` after their
-    exposures. The menu offers each star two searches (``TOY_SEARCH_D``) and two
-    spectra (``TOY_SPECTRUM_D``), the spectra once a search has found a planet (stage
-    1). The grant is one archival search (the first exposure) of each of the first
-    ``n_grant`` stars.
+    exposures; a calendar that ends at ``end_d``; and a keepout table
+    (``toy_keepout``). The menu offers each star two searches (``TOY_SEARCH_D``) and
+    two spectra (``TOY_SPECTRUM_D``), the spectra once a search has found a planet
+    (stage 1). The grant is one archival search (the first exposure) of each of the
+    first ``n_grant`` stars. A search that finds a pool planet hands it to the refit
+    (``ToyRefitter``, on the law of one planet).
 
     Args:
-        key: the key of the stars, the refits and the marks.
+        key: the key of the stars, the refits, the marks and the keepout.
         n_star: the number of stars, ``S``.
         n_draw: the draws of each star's refit, ``A``.
         n_mark: the marks of each star's pool.
-        pool_mass: the expected number of undetected planets at each star.
+        pool_mass: the expected number of undetected planets at each star, below
+            ``n_slot - 1`` (a free slot certain to hold a planet would leave every
+            refit draw, whose free slots are empty, outside the prior).
         budget_d: the survey's budget, days.
+        end_d: the calendar's end, days.
         capacity: the log's row capacity ``W``.
+        n_slot: the planet capacity of a star, ``K``: the track and the free slots.
         n_grant: the number of stars with an archival search.
 
     Returns:
         The survey.
+
+    Raises:
+        ValueError: if the free slots cannot hold the pool's mean count.
     """
-    truth = ToyPrior("toy", [1.0, 0.5], 1.0, 0.5, GAS_FLOOR, GAS_PRIOR_SD, n_gas=1)
+    if n_slot < 2 or not 0.0 <= pool_mass < n_slot - 1:
+        raise ValueError(
+            f"{n_slot - 1} free slots cannot hold a pool of mass {pool_mass}"
+        )
+    p_exist = [1.0] + [pool_mass / (n_slot - 1)] * (n_slot - 1)
+    truth = ToyPrior("toy", p_exist, 1.0, 0.5, GAS_FLOOR, GAS_PRIOR_SD, n_gas=1)
     members = (
-        ToyPrior("toy", [1.0, 0.5], 0.8, 0.5, GAS_FLOOR, 0.8 * GAS_PRIOR_SD, n_gas=1),
+        ToyPrior("toy", p_exist, 0.8, 0.5, GAS_FLOOR, 0.8 * GAS_PRIOR_SD, n_gas=1),
         ToyPrior(
-            "toy", [1.0, 0.5], 1.2, 0.5, GAS_FLOOR + 0.2, 1.2 * GAS_PRIOR_SD, n_gas=1
+            "toy", p_exist, 1.2, 0.5, GAS_FLOOR + 0.2, 1.2 * GAS_PRIOR_SD, n_gas=1
         ),
     )
     verdict = jax.tree.map(lambda *x: jnp.stack(x), *members)
     roles = Roles(truth, verdict)
     claim = Claim((InHz(), GasAbove(0, GAS_FLOOR)))
 
-    k_star, k_draw, k_mark = jax.random.split(key, 3)
+    k_star, k_draw, k_mark, k_keepout = jax.random.split(key, 4)
     stars = {"p_hz": jax.random.uniform(k_star, (n_star,), minval=0.2, maxval=0.6)}
     one_planet = eqx.tree_at(lambda p: p.p_exist, truth, truth.p_exist[:1])
+    track = eqx.tree_at(lambda p: p.p_exist, truth, truth.p_exist.at[1:].set(0.0))
     n_role = 3
 
     def per_star(k_d, k_m, star, index):
-        atoms = truth.draws(k_d, star, n_draw)
+        drawn = track.draws(k_d, star, n_draw)
+        atoms = eqx.tree_at(lambda a: a.cloud.prior, drawn, truth)
         refit = Refit(atoms, jnp.zeros(capacity, bool), index)
         drawn = one_planet.draws(k_m, star, n_mark)
         marks = eqx.tree_at(lambda a: a.cloud.prior, drawn, truth)
@@ -681,7 +828,8 @@ def toy_survey(
         GaussianGasModel(snr_one_day=[4.0]),
     )
     modes = (Mode(0, TOY_LATENCY_D[0]), Mode(1, TOY_LATENCY_D[1]))
-    design = Design(models, modes, Resources(budget_d), capacity)
+    keepout = toy_keepout(k_keepout, n_star, end_d)
+    design = Design(models, modes, Resources(budget_d, end_d), keepout, capacity)
     study = Study(
         claim,
         truth,
@@ -709,4 +857,4 @@ def toy_survey(
             jnp.full(n_grant, TOY_SEARCH_D[0]),
         )
     )
-    return ToySurvey(study, menu, grant)
+    return ToySurvey(study, menu, grant, ToyRefitter(one_planet))

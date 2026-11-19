@@ -18,8 +18,9 @@ ch. 5.
 
 An option whose reward or cost is not finite (NaN: a role the reweighting gate refused,
 upstream) is refused, never priced: ``solve_price`` and ``dispatch`` drop it and return
-the stars that offered one, so the caller can refit them, and the other stars are priced
-as if it were absent. One refused star never stops the batch.
+the stars that offered one (``refused_stars``), so the caller can refit them, and the
+star's other options and the other stars are priced as if it were absent. One refused
+option never stops the batch.
 """
 
 import jax
@@ -27,6 +28,7 @@ import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float
 
 from spaceodyssey._numerics import TIE_ULPS
+from spaceodyssey.design import fits
 from spaceodyssey.value import Frontier, value_and_spend
 
 
@@ -47,18 +49,39 @@ def dual(
     return lam * capacity_d + jnp.sum(values)
 
 
+def _finite_options(f: Frontier) -> Bool[Array, "S M"]:
+    """The offered options whose reward and cost are finite."""
+    return f.mask & jnp.isfinite(f.reward) & jnp.isfinite(f.cost_d)
+
+
+def refused_stars(f: Frontier) -> Bool[Array, " S"]:
+    """The stars that offer an option whose reward or cost is not finite.
+
+    Such an option (NaN: a role the reweighting gate refused) is refused, never priced:
+    its star's other options are priced as if it were absent. A caller reads the stars
+    off whatever mask it offers: the options it may buy now, or every option a star
+    has (a planner reports a refused star whether or not it could be bought now).
+
+    Args:
+        f: the frontier; its mask names the options offered.
+
+    Returns:
+        True for each star with an offered option that is not finite, shape ``(S,)``.
+    """
+    return jnp.any(f.mask & ~_finite_options(f), axis=-1)
+
+
 def _finite(f: Frontier) -> tuple[Frontier, Bool[Array, " S"]]:
     """The frontier with every non-finite option refused, and the stars that had one.
 
     An offered option whose reward or cost is not finite is masked out and its entries
     set to zero, so it is neither a breakpoint nor a choice.
     """
-    usable = f.mask & jnp.isfinite(f.reward) & jnp.isfinite(f.cost_d)
-    refused = jnp.any(f.mask & ~usable, axis=-1)
+    usable = _finite_options(f)
     clean = Frontier(
         jnp.where(usable, f.reward, 0.0), jnp.where(usable, f.cost_d, 0.0), usable
     )
-    return clean, refused
+    return clean, refused_stars(f)
 
 
 def _with_null(f: Frontier):
@@ -148,6 +171,7 @@ def dispatch(
     after those choices is then handed out in order of star index, lowest first, each
     tied star taking its most expensive tied option that still fits. At a zero price
     tied options have equal reward, so a dearer one gains nothing and none is taken.
+    Whether an upgrade fits the budget left is the one budget rule, ``fits``.
 
     At the minimizing price the untied choices plus the cheapest tied options fit the
     budget (the right derivative of the dual is nonnegative there), so the result is a
@@ -176,13 +200,12 @@ def dispatch(
     base = jnp.argmin(jnp.where(tied, cost, jnp.inf), axis=-1)
     base_cost = jnp.take_along_axis(cost, base[:, None], axis=-1)[:, 0]
     capacity_d = jnp.asarray(capacity_d, dtype)
-    slack = TIE_ULPS * jnp.finfo(dtype).eps * jnp.abs(capacity_d)
 
     def upgrade(left, star):
         tied_s, cost_s, base_s, base_cost_s = star
-        fits = tied_s & (lam > 0) & (cost_s - base_cost_s <= left + slack)
-        dearest = jnp.argmax(jnp.where(fits, cost_s, -jnp.inf))
-        pick = jnp.where(fits.any(), dearest, base_s)
+        within = tied_s & (lam > 0) & fits(cost_s - base_cost_s, left)
+        dearest = jnp.argmax(jnp.where(within, cost_s, -jnp.inf))
+        pick = jnp.where(within.any(), dearest, base_s)
         return left - (cost_s[pick] - base_cost_s), pick
 
     left = capacity_d - jnp.sum(base_cost)

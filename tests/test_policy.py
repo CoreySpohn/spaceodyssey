@@ -18,13 +18,24 @@ import pytest
 from numpy.testing import assert_allclose
 
 from spaceodyssey.belief import (
+    due_rows,
+    new_planets,
     planning_beliefs,
     pool_rate,
+    refit_stars,
     replay,
+    replay_likelihood,
     role_pool,
 )
 from spaceodyssey.claim import Claim
-from spaceodyssey.design import Design, Mode, Resources, mode_models
+from spaceodyssey.design import (
+    Design,
+    Keepout,
+    Mode,
+    Resources,
+    mode_models,
+    no_keepout,
+)
 from spaceodyssey.log import execute, grant_rows, start_log
 from spaceodyssey.policy import (
     AbstractPolicy,
@@ -35,7 +46,9 @@ from spaceodyssey.policy import (
 )
 from spaceodyssey.price import dispatch, solve_price
 from spaceodyssey.roles import Roles
-from spaceodyssey.toy import DetectionModel, InHz, ToyPrior, point_atoms
+from spaceodyssey.score import found_count
+from spaceodyssey.study import Study
+from spaceodyssey.toy import DetectionModel, InHz, ToyPrior, ToyRefitter, point_atoms
 from spaceodyssey.types import (
     ACCEPTED,
     OVER_BUDGET,
@@ -50,6 +63,7 @@ from spaceodyssey.value import (
     Count,
     Menu,
     frontier_at_prices,
+    pool_found,
     reached_stage,
     replay_pool,
 )
@@ -62,7 +76,10 @@ STAR = {"p_hz": jnp.asarray(0.5)}
 CLAIM = Claim((InHz(),))
 UNGATED = {"min_n_eff": 0.0, "max_khat": math.inf}
 SEARCH = DetectionModel(0.8, 0.2)  # layer 5 test 5's search
-DEPTH_1 = PlannerSettings(0.0, math.inf, 1)
+N_STAR = 3  # the most stars a test here plans
+END_D = 365.0  # the calendar's end, days
+REFITTER = ToyRefitter(PRIOR)  # a new planet's state from the one-slot prior
+DEPTH_1 = PlannerSettings(0.0, math.inf, 1, member=0)
 
 
 def _stack(*trees):
@@ -115,14 +132,17 @@ def _stars(masses, hz=(1.0, 0.0, 1.0, 0.0), log_weights=None, prior=PRIOR):
 
 
 def _world(n_star, hz=1.0, exists=True):
-    """Every star holds one planet, in the HZ or not, or none: a planner whose draws
-    hold no planet reads a detection as impossible (the star's beliefs go NaN until a
-    refit explains it), so its runs here search worlds with none."""
+    """Every star holds one planet, in the HZ or not, or none. The planners' draws
+    hold no planet, so a detection queues a refit (`ToyRefitter`); runs about the
+    pool search worlds with none."""
     return SealedWorld(_stack(*[_points(hz, exists, 1)] * n_star))
 
 
-def _design(budget_d, search=SEARCH, latency_d=0.0):
-    return Design((search,), (Mode(0, latency_d),), Resources(budget_d), CAPACITY)
+def _design(budget_d, search=SEARCH, latency_d=0.0, keepout=None):
+    """One search mode; no keepout unless given, a calendar of `END_D` days."""
+    keepout = no_keepout(N_STAR) if keepout is None else keepout
+    resources = Resources(budget_d, END_D)
+    return Design((search,), (Mode(0, latency_d),), resources, keepout, CAPACITY)
 
 
 def _menu(n_star, exposure_d=(1.0,)):
@@ -133,8 +153,8 @@ def _menu(n_star, exposure_d=(1.0,)):
 
 def _policy(stars, design, menu, settings):
     return PricePolicy(
-        stars.refits, stars.pool, stars.stars, stars.roles, CLAIM, Count(stars.pool),
-        design.models, mode_models(design), menu, settings,
+        stars.refits, stars.pool, stars.stars, stars.roles, CLAIM, Count(),
+        design.models, mode_models(design), menu, REFITTER, settings,
     )  # fmt: skip
 
 
@@ -143,7 +163,7 @@ def _public(design):
     grant = _no_grant()
     payload = _world(1).reveal(run_keys(KEY)[1], grant, design.models, design.modes)
     log = start_log(grant_rows(grant, payload, design.modes), design.capacity)
-    return public_view(log, jnp.asarray(0), design.resources)
+    return public_view(log, jnp.asarray(0), design.resources, design.keepout)
 
 
 @eqx.filter_jit
@@ -158,11 +178,18 @@ def _rates(pool, refit, log, models, time_d):
     return jax.vmap(one)(pool, refit)
 
 
+@eqx.filter_jit
+def _pool_found(stars, log, models, time_d):
+    def one(pool, refit, star):
+        return pool_found(pool, refit, log, models, CLAIM, star, time_d)[0]
+
+    return jnp.sum(jax.vmap(one)(stars.pool, stars.refits, stars.stars))
+
+
 def _found(stars, log, models, time_d):
-    """Expected claim-true planets found by a run's searches over every star: the
-    forecast's claim-true pool rate at time zero less its rate after them."""
-    before, after = _rates(stars.pool, stars.refits, log, models, time_d)
-    return float(jnp.sum(before - after))
+    """Expected claim-true planets found by a run's searches over every star, under
+    the forecast (`pool_found`)."""
+    return float(_pool_found(stars, log, models, time_d))
 
 
 def _column(log, name):
@@ -260,7 +287,7 @@ def test_dynamic_completeness_follows_the_searches_taken(updates):
     """
     stars = _stars([2.0])
     design = _design(3.0)
-    settings = PlannerSettings(0.0, math.inf, 1, forecast_updates=updates)
+    settings = PlannerSettings(0.0, math.inf, 1, member=0, forecast_updates=updates)
     trace = Trace(_policy(stars, design, _menu(1), settings))
     log = execute(KEY, _no_grant(), _world(1, exists=False), design, trace)
     rewards = [float(s.frontier.reward[0, 0]) for s in trace.states]
@@ -319,7 +346,7 @@ def test_a_refused_star_is_reported_and_priced_as_absent():
     weights = jnp.array([[0.0] * 4, [0.0, -jnp.inf, -jnp.inf, -jnp.inf]])
     stars = _stars([2.0, 2.0], log_weights=weights)
     design = _design(2.0)
-    settings = PlannerSettings(3.0, math.inf, 1)
+    settings = PlannerSettings(3.0, math.inf, 1, member=0)
     trace = Trace(_policy(stars, design, _menu(2), settings))
     log = execute(KEY, _no_grant(), _world(2, exists=False), design, trace)
     assert all(list(np.asarray(s.refused)) == [False, True] for s in trace.states)
@@ -403,7 +430,7 @@ def test_the_planner_weighs_the_pool_under_its_own_roles():
 
     def read(min_n_eff):
         return planning_beliefs(
-            r, r, roles, (SEARCH,), STAR, pool, pool, CLAIM, 4,
+            r, r, roles, (SEARCH,), STAR, pool, CLAIM, 4,
             min_n_eff=jnp.asarray(min_n_eff), max_khat=jnp.asarray(math.inf),
         )  # fmt: skip
 
@@ -436,7 +463,7 @@ def _beliefs(stars, search):
     def read(refit, pool):
         r = replay(refit, log, (search,), STAR, jnp.asarray(0.0))
         return planning_beliefs(
-            r, r, stars.roles, (search,), STAR, pool, pool, CLAIM, 4, **UNGATED
+            r, r, stars.roles, (search,), STAR, pool, CLAIM, 4, **UNGATED
         )
 
     return eqx.filter_vmap(read)(stars.refits, stars.pool)
@@ -466,7 +493,7 @@ def test_plans_at_several_prices_hold_the_price():
     @eqx.filter_jit
     def resolve(lam, factors):
         f = frontier_at_prices(
-            forecast, verdict, CLAIM, stars.stars, Count(stars.pool), (REVISIT,), menu,
+            forecast, verdict, CLAIM, stars.stars, Count(), (REVISIT,), menu,
             lam * factors, 2,
         )  # fmt: skip
         return solve_price(f, budget)[0]
@@ -502,7 +529,7 @@ def test_the_realized_spend_stays_within_the_budget():
     """
     stars = _revisit_stars()
     design = _design(4.0, REVISIT, latency_d=1.0)
-    settings = PlannerSettings(0.0, math.inf, 2)
+    settings = PlannerSettings(0.0, math.inf, 2, member=0)
     trace = Trace(_policy(stars, design, _menu(3), settings))
     log = execute(KEY, _no_grant(), _world(3, exists=False), design, trace)
     assert_allclose(trace.states[0].lam, 0.6, atol=1e-12)
@@ -562,22 +589,199 @@ class Counted(AbstractPolicy):
 def test_a_second_world_budget_and_prior_add_no_traces():
     """The planner compiles once per structure: a run on a second world (no planet in
     the HZ), with another budget, other pool masses, another forecast prior value and
-    its searches at another star, traces neither `init` nor `decide` again.
+    its searches at another star and another gate threshold, traces neither `init`
+    nor `decide` again. Both worlds hold planets the draws do not, so each run's
+    detections take the refit branch.
 
     Fails if a budget, a prior value, a mass or a threshold is a Python value or a
     static field, or a menu, star or row index is read on the host.
     """
     other = eqx.tree_at(lambda p: p.p_size, PRIOR, jnp.asarray(0.3))
+    gated = PlannerSettings(0.5, math.inf, 1, member=0)  # another threshold value
     runs = (
-        (_stars([2.0, 1.0]), 3.0, _world(2, hz=1.0)),
-        (_stars([0.5, 3.0], prior=other), 2.0, _world(2, hz=0.0)),
+        (_stars([2.0, 1.0]), 3.0, _world(2, hz=1.0), DEPTH_1),
+        (_stars([0.5, 3.0], prior=other), 2.0, _world(2, hz=0.0), gated),
     )
     counts, starts = [], []
-    for stars, budget_d, world in runs:
+    for stars, budget_d, world, settings in runs:
         design = _design(budget_d)
-        policy = Counted(_policy(stars, design, _menu(2), DEPTH_1))
+        policy = Counted(_policy(stars, design, _menu(2), settings))
         log = execute(KEY, _no_grant(), world, design, policy)
         counts.append((len(INIT_TRACES), len(DECIDE_TRACES)))
         starts.append(int(log.rows.star[0]))
     assert counts[1] == counts[0]
     assert starts == [0, 1]
+
+
+def test_a_new_detection_is_refit_and_its_star_planned_on():
+    """A search finds a planet the time-zero cloud holds no track for: the detection is
+    not scored against the draws, the star is refit, and the planner plans on it.
+
+    Layer 5 test 5's star (mass 2, marks in the HZ half the time), its four draws
+    holding no planet, in a world with one planet out of the HZ that the search finds
+    for certain (one-day probabilities 0.8 in the HZ, 1 out of it). The first search
+    detects it. Replayed over that row, the time-zero cloud keeps its weights: the
+    detection is new (`new_planets`), so it is not scored. At the next decision the
+    star is pending, then refit by `ToyRefitter`: every draw holds the planet in slot
+    0, the refit represents the row, and the star's options stay finite and
+    unrefused. The pool follows the searches, whatever they found, so the plan is test
+    2's: rewards 0.8, 0.8, 0.16, 0.032, 0.0064 and three searches.
+
+    The same refit through the queue (`refit_stars`) under a gate of five draws, more
+    than the cloud holds, comes back with NaN weights; a NaN threshold is refused when
+    the settings are made.
+
+    Fails if a new detection is scored against draws that hold no planet (their
+    weights go to zero, the replay's to NaN), if the star is not refit (its draws hold
+    no planet after the run) or is refused, if the refit thins the pool again by a
+    row it represents, or if a refit's weights or a threshold escape the gate.
+    """
+    stars = _stars([2.0])
+    design = _design(3.0, DetectionModel(0.8, 1.0))
+    trace = Trace(_policy(stars, design, _menu(1), DEPTH_1))
+    log = execute(KEY, _no_grant(), _world(1, hz=0.0), design, trace)
+    assert list(_column(log, "star")) == [0, 0, 0]
+    assert list(_column(log, "refusal")) == [ACCEPTED] * 3
+    assert_allclose(log.rows.payload[0]["detected"][0], [1.0])
+
+    refit0 = _pick(stars.refits, 0)
+    after = jnp.asarray(1.0)
+    assert list(np.asarray(new_planets(refit0, log, design.models, after))) == [True]
+    r = replay(refit0, log, design.models, STAR, after)
+    _, log_like = replay_likelihood(r, design.models, STAR)
+    assert_allclose(log_like, np.zeros(4), atol=1e-12)
+
+    rewards = [float(s.frontier.reward[0, 0]) for s in trace.states]
+    assert_allclose(rewards, [0.8, 0.8, 0.16, 0.032, 0.0064], rtol=1e-10)
+    assert list(np.asarray(trace.states[0].pending)) == [False]
+    last = trace.states[-1]
+    assert np.all(np.asarray(last.replay.refit.atoms.exists[0, :, 0]))
+    assert bool(last.replay.refit.row_mask[0, 0])
+    assert not np.any(np.asarray(last.refused))
+    assert not np.any(np.asarray(last.pending))
+
+    # The producer slot through its queue: a gate the four draws cannot meet refuses
+    # the new cloud (NaN weights), and a NaN threshold is refused on the host.
+    refused = refit_stars(
+        REFITTER, _stack(refit0), due_rows(log, refit0, after)[None], _stack(STAR),
+        jax.random.key(1)[None], jnp.array([True]), log, design.models,
+        min_n_eff=5.0, max_khat=math.inf, batch_size=1,
+    )  # fmt: skip
+    assert np.all(np.isnan(np.asarray(refused.atoms.cloud.log_weights)))
+    with pytest.raises(ValueError, match="NaN"):
+        PlannerSettings(math.nan, math.inf, 1, member=0)
+
+
+def test_a_star_in_keepout_offers_nothing_and_the_planner_waits_for_it():
+    """A star in keepout offers no option, the planner waits for it to open, and no
+    row starts after the calendar's end.
+
+    Two stars, all marks in the HZ, masses 2 and 1, a search certain to find an HZ
+    planet (worth 2 and 1, nothing after it), budget 3 days; star 0 is in keepout for
+    the first 5 days. At day 0 star 0 offers nothing, so star 1 is searched though
+    star 0 is worth more. At day 1 nothing open is worth its price, so the planner
+    waits for star 0 to open: a wait at star 0, not before day 5, charged nothing; at
+    day 5 it is searched. With the calendar ending at day 4, star 0 opens too late:
+    the planner stops after star 1's search.
+
+    Fails if a star in keepout offers an option (star 0 would be searched first, and
+    `step` would delay it to day 5), if the planner does not wait for a star leaving
+    keepout, or if it waits or asks for a row past the calendar's end.
+    """
+    stars = _stars([2.0, 1.0], hz=(1.0,))
+    closed = np.zeros((N_STAR, 2), bool)
+    closed[0, 0] = True  # star 0 closed over days [0, 5)
+    keepout = Keepout(closed, 5.0)
+    sure = DetectionModel(1.0, 0.0)
+    design = _design(3.0, sure, keepout=keepout)
+    log = execute(KEY, _no_grant(), _world(2, exists=False), design,
+                  _policy(stars, design, _menu(2), DEPTH_1))  # fmt: skip
+    assert list(_column(log, "star")) == [1, 0, 0]
+    assert list(_column(log, "refusal")) == [ACCEPTED, WAITED, ACCEPTED]
+    assert_allclose(_column(log, "time_d"), [0.0, 5.0, 5.0])
+    assert_allclose(_column(log, "charged_d"), [1.0, 0.0, 1.0])
+
+    short = eqx.tree_at(lambda d: d.resources.end_d, design, jnp.asarray(4.0))
+    log = execute(KEY, _no_grant(), _world(2, exists=False), short,
+                  _policy(stars, short, _menu(2), DEPTH_1))  # fmt: skip
+    assert list(_column(log, "star")) == [1]
+    assert list(_column(log, "refusal")) == [ACCEPTED]
+
+
+def test_the_realized_count_is_read_against_the_truth():
+    """`found_count` counts the claim-true planets of the truth a run's searches
+    detected, new to the time-zero refits; `pool_found` is the forecast's expectation.
+
+    Three stars, each searched once by a search certain to find any planet; the truth
+    holds a planet at each: in the HZ at stars 0 and 2, out of it at star 1. Star 2's
+    draws already hold its planet (a track). Realized: 1 at star 0 (claim-true, new),
+    0 at star 1 (not claim-true), 0 at star 2 (tracked at time zero). The forecast
+    expects 1.5 at star 0 (mass 3, half its marks in the HZ, all found) and 0.5 at
+    stars 1 and 2.
+
+    Fails if the realized count is read off the forecast (1.5, 0.5, 0.5), counts a
+    planet that is not claim-true or one the time-zero refit held, or counts a row
+    that was not accepted.
+    """
+    stars = _stars([3.0, 1.0, 1.0])
+    tracked = _points(1.0, True, 4)
+    refits = jax.tree.map(
+        lambda all_, one: all_.at[2].set(one), stars.refits.atoms, tracked
+    )
+    stars = eqx.tree_at(lambda s: s.refits.atoms, stars, refits)
+    design = _design(3.0, DetectionModel(1.0, 1.0))
+    world = SealedWorld(
+        _stack(_points(1.0, True, 1), _points(0.0, True, 1), _points(1.0, True, 1))
+    )
+    study = Study(
+        CLAIM, PRIOR, PRIOR, _stack(PRIOR), stars.refits, stars.pool, stars.stars,
+        design, jnp.zeros((3, 2)), alpha=0.05,
+    )  # fmt: skip
+    table = TablePolicy(Action([0, 1, 2], [0, 0, 0], [1.0, 1.0, 1.0]))
+    log = execute(KEY, _no_grant(), world, design, table)
+    assert_allclose(np.asarray(log.rows.payload[0]["detected"][:3, 0]), 1.0)
+    assert list(np.asarray(found_count(log, world, study))) == [1, 0, 0]
+
+    end = jnp.asarray(10.0)
+
+    def expected(pool, refit, star):
+        return pool_found(pool, refit, log, design.models, CLAIM, star, end)[0]
+
+    forecast = jax.vmap(expected)(stars.pool, stars.refits, stars.stars)
+    assert_allclose(forecast, [1.5, 0.5, 0.5], rtol=1e-12)
+
+
+@pytest.mark.medium(reason="compiles the depth-2 planner's init and decide, about 6 s")
+def test_a_star_whose_build_price_the_price_left_is_re_priced():
+    """A star's plans are rebuilt when the solved price leaves its factors' range.
+
+    The three revisit stars at depth 2, built at the time-zero price 0.6 (factors 0.5,
+    1, 2: plans at 0.3, 0.6 and 1.2), then decided with a budget of 100 days, so every
+    plan fits and the price falls to 0. The first decision reads no star (none is
+    stale at 0.6) and solves 0. The next finds every star stale (0 is below 0.3) and
+    re-prices the two it has room for, stars 0 and 1: their build price becomes 0 and
+    their plans at every factor revisit (reward 1.6), while star 2 keeps its plan at
+    1.2 (reward 1.0). The decision after re-prices star 2.
+
+    Fails if a stale star is never re-priced (its build price stays 0.6), if a star
+    is re-priced past the decision's capacity, or if the build price is not the price
+    the plans were built at.
+    """
+    stars = _revisit_stars()
+    settings = PlannerSettings(0.0, math.inf, 2, member=0)
+    policy = _policy(stars, _design(4.0, REVISIT), _menu(3), settings)
+    state = policy.init(_public(_design(4.0, REVISIT)))
+    assert_allclose(state.lam, 0.6, atol=1e-12)
+    assert_allclose(state.built_lam, 0.6, atol=1e-12)
+    rich = _public(_design(100.0, REVISIT))
+    built, lams, reward = [], [], []
+    for _ in range(3):
+        _, _, state = policy.decide(KEY, state, rich)
+        built.append(np.asarray(state.built_lam))
+        lams.append(float(state.lam))
+        reward.append(np.asarray(state.frontier.reward[:, :3]))
+    assert_allclose(lams, [0.0, 0.0, 0.0], atol=1e-12)
+    assert_allclose(built, [[0.6] * 3, [0.0, 0.0, 0.6], [0.0] * 3], atol=1e-12)
+    assert_allclose(reward[1][:2], 1.6, rtol=1e-12)
+    assert_allclose(reward[1][2, 2], 1.0, rtol=1e-12)
+    assert_allclose(reward[2], 1.6, rtol=1e-12)

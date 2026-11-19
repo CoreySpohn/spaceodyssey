@@ -17,7 +17,7 @@ import pytest
 from numpy.testing import assert_allclose
 
 from spaceodyssey.claim import Claim, GasAbove
-from spaceodyssey.design import Design, Mode, Resources
+from spaceodyssey.design import Design, Keepout, Mode, Resources, no_keepout
 from spaceodyssey.information import POSITIVE, UNRESOLVED
 from spaceodyssey.log import execute, grant_rows, start_log, step
 from spaceodyssey.policy import AbstractPolicy, TablePolicy, TableState, public_view
@@ -25,7 +25,9 @@ from spaceodyssey.score import associate_planets, format_report, score
 from spaceodyssey.study import Arm, Study
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
 from spaceodyssey.types import (
+    ACCEPTED,
     OVER_BUDGET,
+    PAST_END,
     WAITED,
     AbstractObservationModel,
     Action,
@@ -38,6 +40,7 @@ from spaceodyssey.world import SealedWorld, row_key, run_keys
 
 KEY = jax.random.key(0)
 CAPACITY = 8  # W
+END_D = 365.0  # the calendar's end, days
 COPIES = 250  # copies of each draw type: 16 x 250 = 4,000 draws for the step rule
 
 
@@ -101,13 +104,17 @@ def _no_grant():
 
 
 def _design(models, budget_d=10.0, latency_d=0.0):
-    """One mode per model, in model order."""
+    """One mode per model, in model order; no keepout at two stars, a calendar of
+    `END_D` days."""
     modes = tuple(Mode(slot, latency_d) for slot in range(len(models)))
-    return Design(models, modes, Resources(budget_d), CAPACITY)
+    resources = Resources(budget_d, END_D)
+    return Design(models, modes, resources, no_keepout(2), CAPACITY)
 
 
 def _study(toy, cloud, design, n_star, claim):
-    """A study whose every star starts from `cloud`, under flat roles on the toy."""
+    """A study whose every star starts from `cloud`, under flat roles on the toy,
+    with the design's keepout table resized to its stars."""
+    design = eqx.tree_at(lambda d: d.keepout, design, no_keepout(n_star))
     refits = toy.stack(
         *[Refit(cloud, jnp.zeros(CAPACITY, bool), s) for s in range(n_star)]
     )
@@ -353,7 +360,7 @@ def test_a_table_replays_to_the_log_it_describes(toy):
         assert_allclose(leaf[3], 0.0)
 
     three = eqx.tree_at(lambda x: x.count, log, jnp.asarray(3))
-    view = public_view(three, jnp.asarray(0), design.resources)
+    view = public_view(three, jnp.asarray(0), design.resources, design.keepout)
     assert_allclose(view.time_d, 4.0)
     assert_allclose(view.budget_left_d, 0.5)
     assert list(np.asarray(view.in_flight[:4])) == [False, False, True, False]
@@ -470,7 +477,7 @@ def test_a_table_decides_with_a_traced_cursor(toy):
     """
     design = _design(_step_models())
     log = _empty_log(_el_world(toy), design)
-    view = public_view(log, jnp.asarray(0), design.resources)
+    view = public_view(log, jnp.asarray(0), design.resources, design.keepout)
     table = TablePolicy(Action([1, 0], [2, 1], [1.5, 0.5]))
     traces = []
 
@@ -557,7 +564,7 @@ def test_waiting_costs_no_budget_and_releases_follow_the_calendar(toy):
     """
     models = (OrbitReport(),)
     modes = (Mode(0, 20.0), Mode(0, 0.0))
-    design = Design(models, modes, Resources(2.0), CAPACITY)
+    design = Design(models, modes, Resources(2.0, END_D), no_keepout(2), CAPACITY)
     table = TablePolicy(Action([0, 1], [0, 1], [1.0, 1.0], [0.0, 10.0]))
     world = _el_world(toy)
     log = execute(KEY, _no_grant(), world, design, table)
@@ -567,21 +574,23 @@ def test_waiting_costs_no_budget_and_releases_follow_the_calendar(toy):
     assert_allclose(rows.charged_d[:2], [1.0, 1.0])
     assert_allclose(rows.release_d[:2], [21.0, 11.0])
     assert list(np.asarray(rows.refusal[:2])) == [0, 0]
-    view = public_view(log, jnp.asarray(0), design.resources)
+    view = public_view(log, jnp.asarray(0), design.resources, design.keepout)
     assert_allclose([view.time_d, view.budget_left_d], [11.0, 0.0])
     assert list(np.asarray(view.in_flight[:2])) == [True, False]
     assert_allclose(view.log.rows.payload[0]["hz"][:2, 0], [0.0, 1.0])
     late = Action(0, 0, 1.0, 30.0)
     refused = eqx.filter_jit(step)(
-        run_keys(KEY)[1], log, world, models, late, modes[0], design.resources
-    )
+        run_keys(KEY)[1], log, world, models, late, modes[0], design.resources,
+        design.keepout,
+    )  # fmt: skip
     assert int(refused.rows.refusal[2]) == OVER_BUDGET
     assert_allclose([refused.rows.charged_d[2], spent_d(refused)], [0.0, 2.0])
     assert_allclose(clock_d(refused), 30.0)
     wait = Action(1, 0, 0.0, 40.0)
     waited = eqx.filter_jit(step)(
-        run_keys(KEY)[1], refused, world, models, wait, modes[0], design.resources
-    )
+        run_keys(KEY)[1], refused, world, models, wait, modes[0], design.resources,
+        design.keepout,
+    )  # fmt: skip
     assert int(waited.rows.refusal[3]) == WAITED
     assert_allclose([waited.rows.charged_d[3], spent_d(waited)], [0.0, 2.0])
     assert_allclose([waited.rows.release_d[3], clock_d(waited)], [40.0, 40.0])
@@ -601,6 +610,37 @@ def test_waiting_costs_no_budget_and_releases_follow_the_calendar(toy):
     assert_allclose(look_alike["information"][1], 0.0, atol=1e-12)
 
 
+def test_keepout_delays_a_row_and_nothing_starts_after_the_calendar_end(toy):
+    """`step` starts a row asked for in keepout when its star opens, and refuses one
+    that would start after the calendar's end.
+
+    Keepout bins of 10 days: star 0 is closed over days [0, 20), star 1 always; the
+    calendar ends at day 25. A table asks for four one-day rows: star 0 at day 0
+    (starts at day 20, when it opens), star 0 again (starts at day 21, when the
+    instrument is free), star 1 (never opens: refused `PAST_END` at its ready time,
+    day 22), and star 0 not before day 30 (after the end: refused `PAST_END`). The
+    refused rows are charged nothing.
+
+    Fails if a row starts in keepout (row 0 at day 0), if keepout is checked at the
+    requested time rather than the start (row 1), if a star that never opens or a
+    row past the end is accepted, or if a refused row is charged.
+    """
+    closed = np.array([[True, True, False], [True, True, True]])
+    design = Design(
+        (OrbitReport(),), (Mode(0, 0.0),), Resources(10.0, 25.0),
+        Keepout(closed, 10.0), CAPACITY,
+    )  # fmt: skip
+    table = TablePolicy(Action([0, 0, 1, 0], [0] * 4, [1.0] * 4, [0, 0, 0, 30.0]))
+    log = execute(KEY, _no_grant(), _el_world(toy), design, table)
+    rows = log.rows
+    assert int(log.count) == 4
+    assert_allclose(rows.time_d[:4], [20.0, 21.0, 22.0, 30.0])
+    assert list(np.asarray(rows.refusal[:4])) == [
+        ACCEPTED, ACCEPTED, PAST_END, PAST_END
+    ]  # fmt: skip
+    assert_allclose(rows.charged_d[:4], [1.0, 1.0, 0.0, 0.0])
+
+
 def test_a_second_world_and_star_do_not_retrace_step(toy):
     """`step` compiles once for a run: a second world, a second star, a later row and
     a refused row reuse the first program.
@@ -611,9 +651,9 @@ def test_a_second_world_and_star_do_not_retrace_step(toy):
     traces = []
 
     @eqx.filter_jit
-    def counted(key, log, world, models, action, mode, resources):
+    def counted(key, log, world, models, action, mode, resources, keepout):
         traces.append(None)
-        return step(key, log, world, models, action, mode, resources)
+        return step(key, log, world, models, action, mode, resources, keepout)
 
     models = _step_models()
     design = _design(models, budget_d=2.5)
@@ -624,8 +664,9 @@ def test_a_second_world_and_star_do_not_retrace_step(toy):
         for star in (0, 1, 0):
             action = Action(star, 1, 1.0)
             log = counted(
-                KEY, log, world, models, action, design.modes[1], design.resources
-            )
+                KEY, log, world, models, action, design.modes[1], design.resources,
+                design.keepout,
+            )  # fmt: skip
         assert_allclose(log.rows.refusal[:3], [0, 0, OVER_BUDGET])
     assert len(traces) == 1
 
@@ -727,7 +768,7 @@ def test_a_study_refuses_per_star_fields_that_disagree(toy):
         remake(jnp.zeros((3, 2)))
     with pytest.raises(ValueError, match="disagree on R"):
         remake(jnp.zeros((2, 3)))
-    small = Design(design.models, design.modes, design.resources, 4)
+    small = Design(design.models, design.modes, design.resources, design.keepout, 4)
     with pytest.raises(ValueError, match="row masks"):
         remake(jnp.zeros((2, 2)), small)
 

@@ -32,7 +32,7 @@ from spaceodyssey.belief import (
     weights,
 )
 from spaceodyssey.claim import Claim, GasAbove
-from spaceodyssey.design import Mode, Resources
+from spaceodyssey.design import Mode, Resources, no_keepout
 from spaceodyssey.information import (
     cell_probs,
     certify,
@@ -253,7 +253,10 @@ def _cases(toy):
     keys = (jax.random.key(3), jax.random.key(4))
 
     def take(key, lg, world, action):
-        return step(key, lg, world, gas, action, Mode(0, 0.5), Resources(10.0))
+        return step(
+            key, lg, world, gas, action, Mode(0, 0.5), Resources(10.0, 365.0),
+            no_keepout(1),
+        )  # fmt: skip
 
     return {
         "weights": (weights, [(b0,), (b1,)], lambda a: a[0].log_prior_ratio, uneven),
@@ -284,7 +287,7 @@ def _cases(toy):
         ),
         "planning_beliefs": (
             lambda frozen, now: planning_beliefs(
-                frozen, now, roles, gas, star, b0.pool, b1.pool, claim, 4, **toy.ungated
+                frozen, now, roles, gas, star, b0.pool, claim, 4, **toy.ungated
             ),
             [(early[0], full[0]), (early[1], full[1])],
             lambda a: a[1].stats[0]["weighted_sum"],
@@ -334,8 +337,8 @@ def _cases(toy):
         "frontier": (
             value,
             [
-                (toy.stack(point[0]), Count(toy.stack(b0.pool)), menus[0]),
-                (toy.stack(point[1]), Count(toy.stack(b1.pool)), menus[1]),
+                (toy.stack(point[0]), Count(), menus[0]),
+                (toy.stack(point[1]), Count(), menus[1]),
             ],
             lambda a: a[2].exposure_d,
             lambda f: uneven(f.reward),
