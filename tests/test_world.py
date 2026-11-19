@@ -38,7 +38,7 @@ class GasPrior(AbstractRolePrior):
         x = jax.random.normal(key, (1, 1, self.n_gas))
         one = jnp.ones((1, 1))
         cloud = WeightedCloud(
-            {"hz": one, "size": one}, jnp.zeros(1), 0.0, jnp.zeros(1), chart="toy"
+            {"hz": one, "size": one}, jnp.zeros(1), jnp.nan, jnp.zeros(1), chart="toy"
         )
         return Atoms(cloud, x, jnp.zeros_like(x), one > 0)
 

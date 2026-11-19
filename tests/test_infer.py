@@ -48,7 +48,7 @@ def _atoms(x, var, log_ref_density):
     n_draw = x.shape[0]
     block = jnp.broadcast_to(jnp.asarray(var, float), (n_draw,))[:, None, None]
     cloud = WeightedCloud(
-        {"x": x}, jnp.zeros(n_draw), 0.0, log_ref_density, chart="toy"
+        {"x": x}, jnp.zeros(n_draw), jnp.nan, log_ref_density, chart="toy"
     )
     return Atoms(cloud, x[:, None, None], block, jnp.ones((n_draw, 1), bool))
 

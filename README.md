@@ -16,7 +16,7 @@ import jax.numpy as jnp
 from spaceodyssey.claim import GasAbove
 from spaceodyssey.types import Atoms, WeightedCloud
 
-cloud = WeightedCloud({}, jnp.zeros(1), 0.0, jnp.zeros(1), chart="toy")
+cloud = WeightedCloud({}, jnp.zeros(1), jnp.nan, jnp.zeros(1), chart="toy")
 atoms = Atoms(
     cloud,
     x_mean=jnp.zeros((1, 1, 1)),

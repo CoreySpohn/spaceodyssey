@@ -50,8 +50,8 @@ class WeightedCloud(eqx.Module):
     Attributes:
         samples: the state pytree, every leaf of shape ``(A, *shape)``.
         log_weights: log of target over proposal, shape ``(A,)``.
-        evidence: log marginal likelihood ``log Z`` of the refit, a scalar; ``0.0``
-            where the refit does not estimate it.
+        evidence: log marginal likelihood ``log Z`` of the refit, a scalar; NaN
+            where the refit does not estimate it (unknown, not zero).
         log_ref_density: log of ``p0`` on ``chart``, shape ``(A,)``, or ``None`` when
             not declared.
         chart: the coordinates the leaves of ``samples`` are in, a static label, or

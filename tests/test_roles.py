@@ -82,7 +82,7 @@ class LookAlikeRatio(AbstractRolePrior):
 def _atoms(x, log_weights, log_ref, chart):
     """Atoms of a 1-D cloud: one planet per draw, an empty gas block."""
     n = x.shape[0]
-    cloud = WeightedCloud({"x": x[:, None]}, log_weights, 0.0, log_ref, chart=chart)
+    cloud = WeightedCloud({"x": x[:, None]}, log_weights, jnp.nan, log_ref, chart=chart)
     empty = jnp.zeros((n, 1, 0))
     return Atoms(cloud, empty, empty, jnp.ones((n, 1), bool))
 
@@ -178,14 +178,14 @@ def test_two_charts_and_a_one_sided_jacobian(clouds):
         _belief(clouds["y"], mixed)
 
     cloud = clouds["x"].cloud
-    no_chart = WeightedCloud(cloud.samples, cloud.log_weights, 0.0)
-    no_ref = WeightedCloud(cloud.samples, cloud.log_weights, 0.0, chart="x")
+    no_chart = WeightedCloud(cloud.samples, cloud.log_weights, jnp.nan)
+    no_ref = WeightedCloud(cloud.samples, cloud.log_weights, jnp.nan, chart="x")
     for undeclared in (no_chart, no_ref):
         atoms = eqx.tree_at(lambda a: a.cloud, clouds["x"], undeclared)
         with pytest.raises(ValueError, match="declared"):
             _belief(atoms, _roles("x"))
     with pytest.raises(ValueError, match="declares its chart"):
-        WeightedCloud(cloud.samples, cloud.log_weights, 0.0, cloud.log_ref_density)
+        WeightedCloud(cloud.samples, cloud.log_weights, jnp.nan, cloud.log_ref_density)
 
 
 def test_a_hard_edged_prior_keeps_weights_and_gradients_finite(clouds):

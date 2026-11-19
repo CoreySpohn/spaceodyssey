@@ -72,7 +72,7 @@ class _Toy:
         cloud = WeightedCloud(
             {"hz": hz, "size": size},
             jnp.log(jnp.asarray(w, float)),
-            0.0,
+            jnp.nan,
             jnp.zeros(n_draw),
             chart="toy",
         )
