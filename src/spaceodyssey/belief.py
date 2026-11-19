@@ -1,4 +1,9 @@
-"""Belief: weighted draws, a weight vector per role, and the probabilities read off."""
+"""Belief: weighted draws, a weight vector per role, and the probabilities read off.
+
+The belief at a star is inferred from one refit cloud and the log: ``infer`` replays
+every row the cloud does not already represent, and ``absorb`` reads one new row into a
+``Replay``, the same computation held open.
+"""
 
 from functools import partial
 
@@ -7,11 +12,17 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 from jax.scipy.special import gammainc
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Bool, Float, Int, PyTree
 
 from spaceodyssey.claim import Claim
 from spaceodyssey.roles import Roles
-from spaceodyssey.types import Atoms, Pool
+from spaceodyssey.types import (
+    AbstractObservationModel,
+    Atoms,
+    ObservationLog,
+    Pool,
+    Row,
+)
 
 
 class Belief(eqx.Module):
@@ -104,6 +115,11 @@ def role_log_weights(
     Raises:
         ValueError: if a prior's ``measure`` differs from the cloud's.
     """
+    return Belief(atoms, _role_log_prior(atoms, roles, star), log_like, pool)
+
+
+def _role_log_prior(atoms: Atoms, roles: Roles, star) -> Float[Array, "R A"]:
+    """Every role's log prior of each draw, forecast in row 0; checks the measures."""
     for name, prior in (("forecast", roles.forecast), ("verdict", roles.verdict)):
         if prior.measure != atoms.cloud.measure:
             raise ValueError(
@@ -114,8 +130,7 @@ def role_log_weights(
     verdict = eqx.filter_vmap(
         lambda prior: prior.log_prob(atoms, star), in_axes=eqx.if_array(0)
     )(roles.verdict)
-    log_prior = jnp.concatenate([forecast[None], verdict], axis=0)
-    return Belief(atoms, log_prior, log_like, pool)
+    return jnp.concatenate([forecast[None], verdict], axis=0)
 
 
 def weights(b: Belief) -> Float[Array, "R A"]:
@@ -318,4 +333,268 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
     full = jax.vmap(partial(jnp.convolve, precision=_EXACT))(from_draws, from_pool)
     return jnp.concatenate(
         [full[:, : n_bins - 1], full[:, n_bins - 1 :].sum(1, keepdims=True)], 1
+    )
+
+
+def _as_index(x) -> Int[Array, ""]:
+    """``x`` as the default integer type, never weakly typed.
+
+    A replay built from Python integers would otherwise hold weakly typed indices, and
+    the strongly typed ones a compiled ``absorb`` returns would trace it a second time.
+    """
+    return jnp.asarray(x, dtype=int)
+
+
+class Replay(eqx.Module):
+    """The rows of one star read into one refit cloud, held as summed statistics.
+
+    A replay is ``infer`` held open: ``replay`` reads a whole log into it, ``absorb``
+    reads the next row, and ``replay_belief`` turns it into the belief. Each model
+    slot keeps the leafwise sum of its rows' ``stats``; the draws stay as the refit
+    returned them, and every belief is finalized from them afresh, so a belief kept
+    current row by row equals the belief inferred from the whole log, to rounding.
+
+    Attributes:
+        atoms: the refit's draws, before any row is applied.
+        log_prior: log prior of each draw under each role, ``(R, A)``.
+        stats: one pytree per model slot, the summed statistics of the rows applied
+            in that slot, leaves with leading axis ``A``.
+        star_index: the star whose rows are applied.
+        count: the number of log rows read, applied or not.
+        pool: the undetected planets, carried unchanged.
+    """
+
+    atoms: Atoms
+    log_prior: Float[Array, "R A"] = eqx.field(converter=jnp.asarray)
+    stats: tuple[PyTree, ...]
+    star_index: Int[Array, ""] = eqx.field(converter=_as_index)
+    count: Int[Array, ""] = eqx.field(converter=_as_index)
+    pool: Pool
+
+
+def _applies(rows: Row, index, count, represented, star_index) -> Bool[Array, "*rows"]:
+    """Whether log rows are applied to a cloud of one star.
+
+    A row is applied when it is released (``index < count``), belongs to the star, was
+    accepted (``refusal == 0``) and is not among the rows the cloud already represents.
+    Its date plays no part.
+    """
+    released = index < count
+    return released & (rows.star == star_index) & (rows.refusal == 0) & ~represented
+
+
+def _add_stats(
+    total: PyTree,
+    model: AbstractObservationModel,
+    payload: PyTree,
+    keep: Bool[Array, ""],
+    atoms: Atoms,
+    star,
+) -> PyTree:
+    """``total`` plus one row's statistics where ``keep``, exact zeros elsewhere."""
+    stats = model.stats(payload, atoms, star)
+    return jax.tree.map(
+        lambda t, s: t + jnp.where(keep, s, jnp.zeros_like(s)), total, stats
+    )
+
+
+def _summed_stats(
+    model: AbstractObservationModel,
+    payload: PyTree,
+    keep: Bool[Array, " W"],
+    atoms: Atoms,
+    star,
+) -> PyTree:
+    """The statistics of the kept rows of one model slot, summed by one scan."""
+    one_row = jax.tree.map(
+        lambda x: jax.ShapeDtypeStruct(x.shape[1:], x.dtype), payload
+    )
+    shapes = jax.eval_shape(model.stats, one_row, atoms, star)
+    zero = jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), shapes)
+
+    def add(total, row):
+        return _add_stats(total, model, *row, atoms, star), None
+
+    total, _ = lax.scan(add, zero, (payload, keep))
+    return total
+
+
+def replay(
+    roles: Roles,
+    atoms: Atoms,
+    log: ObservationLog,
+    models: tuple[AbstractObservationModel, ...],
+    star,
+    star_index: Int[Array, ""],
+    pool: Pool,
+) -> Replay:
+    """Read every row of a log into a replay of one star's refit cloud.
+
+    Each model slot is one scan over the log's payload buffer of that slot, statically
+    unrolled over ``models``; nothing switches on a traced slot. A row contributes to
+    its slot's sum when it is applied (see ``infer``) and exactly zero otherwise, so the
+    sum is commutative and does not depend on where in the log a row sits.
+
+    Args:
+        roles: the forecast and the stacked verdict members.
+        atoms: the refit's draws, with the rows they represent in ``row_mask``.
+        log: the run's log, all stars.
+        models: the run's model table, static; ``Row.model_slot`` indexes it.
+        star: a pytree of scalar leaves describing the star.
+        star_index: the star's index in the log's ``star`` column.
+        pool: the undetected planets.
+
+    Returns:
+        The replay, with ``count`` equal to the log's.
+
+    Raises:
+        ValueError: if a role prior's measure differs from the cloud's, the model
+            table and the log's payload buffers differ in number, or ``row_mask`` does
+            not have the log's capacity.
+    """
+    rows = log.rows
+    if len(models) != len(rows.payload):
+        raise ValueError(
+            f"{len(models)} models for {len(rows.payload)} payload buffers in the log"
+        )
+    if atoms.row_mask.shape != rows.star.shape:
+        raise ValueError(
+            f"row_mask {atoms.row_mask.shape} does not match the log capacity "
+            f"{rows.star.shape}"
+        )
+    index = jnp.arange(rows.star.shape[0])
+    applies = _applies(rows, index, log.count, atoms.row_mask, star_index)
+    stats = tuple(
+        _summed_stats(
+            model, rows.payload[slot], applies & (rows.model_slot == slot), atoms, star
+        )
+        for slot, model in enumerate(models)
+    )
+    log_prior = _role_log_prior(atoms, roles, star)
+    return Replay(atoms, log_prior, stats, star_index, log.count, pool)
+
+
+def absorb(
+    r: Replay,
+    log: ObservationLog,
+    models: tuple[AbstractObservationModel, ...],
+    star,
+) -> Replay:
+    """Read the next row of the log, row ``r.count``, into a replay.
+
+    The row's statistics are added to its slot's sum when it applies, under the same
+    rule and with the same arithmetic as ``replay``, so ``replay_belief`` of a replay
+    advanced row by row equals ``infer`` on the whole log to rounding. When the log
+    holds no row past ``r.count`` the replay is returned unchanged; a row is never read
+    twice. The log must extend the one the replay has read. Every input is an array or
+    static structure, so under ``eqx.filter_jit`` a second row, a second star or a
+    longer log of the same capacity traces nothing new.
+
+    Args:
+        r: the replay.
+        log: the run's log, all stars.
+        models: the run's model table, static.
+        star: a pytree of scalar leaves describing the replay's star.
+
+    Returns:
+        The replay with the row read.
+    """
+    index = r.count
+    at = jnp.minimum(index, log.rows.star.shape[0] - 1)
+    row = jax.tree.map(lambda x: x[at], log.rows)
+    applies = _applies(row, index, log.count, r.atoms.row_mask[at], r.star_index)
+    stats = tuple(
+        _add_stats(
+            total,
+            model,
+            row.payload[slot],
+            applies & (row.model_slot == slot),
+            r.atoms,
+            star,
+        )
+        for slot, (model, total) in enumerate(zip(models, r.stats, strict=True))
+    )
+    count = index + (index < log.count).astype(index.dtype)
+    return eqx.tree_at(lambda x: (x.stats, x.count), r, (stats, count))
+
+
+def replay_belief(
+    r: Replay, models: tuple[AbstractObservationModel, ...], star
+) -> Belief:
+    """The belief a replay holds: every slot's sum finalized, then the role weights.
+
+    The slots are finalized in order, each against the draws the slot before it
+    returned, and their log marginal likelihoods add: the joint likelihood of all
+    applied rows by the chain rule. This needs a slot's ``stats`` to read nothing of a
+    draw that an earlier slot's ``finalize`` changes, since the statistics were taken
+    against the refit's draws (both toy models qualify: the Gaussian model's statistics
+    read no draw, the step report's read only point states, which nothing changes).
+
+    The likelihood is the same for every role (observation models are equal across
+    roles), so ``log_like`` is one row broadcast to ``(R, A)``.
+
+    Args:
+        r: the replay.
+        models: the run's model table, static.
+        star: a pytree of scalar leaves describing the replay's star.
+
+    Returns:
+        The belief, with the draws updated by every applied row and the refit's
+        ``row_mask`` and cloud.
+    """
+    atoms = r.atoms
+    log_like = jnp.zeros_like(atoms.cloud.log_weight)
+    for model, stats in zip(models, r.stats, strict=True):
+        slot_log_like, atoms = model.finalize(stats, atoms, star)
+        log_like = log_like + slot_log_like
+    log_like = jnp.broadcast_to(log_like, r.log_prior.shape)
+    return Belief(atoms, r.log_prior, log_like, r.pool)
+
+
+def infer(
+    roles: Roles,
+    atoms: Atoms,
+    log: ObservationLog,
+    models: tuple[AbstractObservationModel, ...],
+    star,
+    star_index: Int[Array, ""],
+    pool: Pool,
+) -> Belief:
+    """The belief at one star from a refit cloud and the log.
+
+    Every released row of the star outside the cloud's ``row_mask`` is applied once,
+    whatever its date; a row in ``row_mask`` (the cloud's weights already carry it), a
+    refused row, a row of another star and a row past the log's ``count`` contribute
+    exactly zero. Rows enter through their models' summed statistics and ``finalize``,
+    never as a sum of per-row likelihoods, so rows reading one uncertain quantity are
+    exact. The role weights are those of ``role_log_weights``, with every role's
+    likelihood the one ``finalize`` returns. This is ``replay_belief`` of ``replay``.
+
+    Always infer from the refit's draws. The belief's draws carry a gas block updated
+    by the applied rows but keep the refit's ``row_mask``, so reading them back into
+    ``infer`` would apply those rows twice.
+
+    Open point: the role weight ``log_prior - log_ref_density`` is a ratio of point
+    densities. On a draw whose gas block is a distribution (``x_var > 0``) it is exact
+    only when every role's gas prior equals the cloud's; a role whose gas prior differs
+    needs the ratio of the two priors integrated over the block, which no role prior
+    expresses yet.
+
+    Args:
+        roles: the forecast and the stacked verdict members.
+        atoms: the refit's draws, with the rows they represent in ``row_mask``.
+        log: the run's log, all stars; grant rows first, then observed rows.
+        models: the run's model table, static; ``Row.model_slot`` indexes it.
+        star: a pytree of scalar leaves describing the star.
+        star_index: the star's index in the log's ``star`` column.
+        pool: the undetected planets, carried unchanged.
+
+    Returns:
+        The belief.
+
+    Raises:
+        ValueError: as ``replay``.
+    """
+    return replay_belief(
+        replay(roles, atoms, log, models, star, star_index, pool), models, star
     )
