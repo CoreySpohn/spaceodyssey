@@ -538,7 +538,21 @@ def _close(actual, expected):
         assert_allclose(a, e, rtol=1e-10, atol=1e-12)
 
 
-@pytest.mark.parametrize("name", CASES)
+# Cases whose compiles alone sit at the unit budget: the lookahead under jit, vmap and
+# two derivatives, and the planning beliefs' quadrature under the same.
+MEDIUM = {
+    "frontier": "compiles the lookahead four ways, about 5 s",
+    "planning_beliefs": "compiles two replays and the quadrature four ways, about 5 s",
+}
+
+
+def _case(name):
+    if name not in MEDIUM:
+        return name
+    return pytest.param(name, marks=pytest.mark.medium(reason=MEDIUM[name]))
+
+
+@pytest.mark.parametrize("name", [_case(n) for n in CASES])
 def test_public_functions_jit_vmap_and_grad(cases, name):
     """Each public function gives its eager result under `jax.jit` and, for two
     worlds stacked on a leading axis, under `jax.vmap`; where differentiable, its
