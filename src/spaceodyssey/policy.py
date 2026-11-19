@@ -89,9 +89,10 @@ class AbstractPolicy(eqx.Module):
     A planning policy reads the forecast and the verdict as two beliefs, each from its
     own replay of the log. Whether the forecast's replay follows the decision time (a
     learning forecast) or stays at time zero (a frozen forecast, the replay at
-    ``time_d = 0``, which holds the grant's rows only) is a static field of the planning
-    policy, ``forecast_updates``, its only reader. With the forecast frozen the planner
-    maximizes a frozen-forecast surrogate, which is not a martingale.
+    ``time_d = 0``, which holds the grant's rows only) is the static field
+    ``forecast_updates`` of the planner (``PricePolicy``), its only reader. With the
+    forecast frozen the planner maximizes a frozen-forecast surrogate, which is not a
+    martingale.
     """
 
     @abc.abstractmethod

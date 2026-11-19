@@ -270,7 +270,7 @@ def test_two_arms_with_an_empty_log_and_different_grants(toy):
         toy.stack(toy.atoms([[1.0]], [[1.0]], [1.0], [[1.0, 1.0]], 0.0))
     )
     nothing = TablePolicy(Action(jnp.zeros(0, int), jnp.zeros(0, int), jnp.zeros(0)))
-    arms = [Arm(Grant(Action([0], [mode], [1.0])), False) for mode in (0, 1)]
+    arms = [Arm(Grant(Action([0], [mode], [1.0]))) for mode in (0, 1)]
     logs = [execute(KEY, nothing, world, design, arm.grant) for arm in arms]
     for log in logs:
         assert int(log.count) == 1

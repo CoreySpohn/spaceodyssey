@@ -1,7 +1,8 @@
 """A study: the claim, the truth and the roles, each star's starting draws, the design.
 
 A study is declared once and run in arms. An arm is the data given at time zero (a
-grant) and whether the planner's forecast learns from the rows released after it.
+grant); what a planner does with the rows after it is the planner's own
+configuration.
 """
 
 import equinox as eqx
@@ -15,23 +16,16 @@ from spaceodyssey.types import Grant, Pool, Refit
 
 
 class Arm(eqx.Module):
-    """One arm of a study: its grant and whether its forecast learns.
+    """One arm of a study: its grant.
 
-    The planner reads the forecast and the verdict as two beliefs, each from its own
-    replay of the log: the verdict's at the decision time, the forecast's at the
-    decision time when ``forecast_updates`` and at time zero otherwise. A frozen
-    forecast is therefore the replay at ``time_d = 0``, which holds the grant's rows
-    only, and released rows never touch its weights or its draws. With it frozen the
-    planner maximizes a frozen-forecast surrogate, which is not a martingale.
+    Whether a planner's forecast learns from the released rows is the planner's own
+    static field (see ``AbstractPolicy``), not the arm's: a table reads no forecast.
 
     Attributes:
         grant: the rows given at time zero.
-        forecast_updates: whether the forecast's replay follows the decision time,
-            static.
     """
 
     grant: Grant
-    forecast_updates: bool = eqx.field(static=True)
 
 
 class Study(eqx.Module):
