@@ -766,6 +766,12 @@ class AbstractRefitter(eqx.Module):
     The new refit's pool is not the refitter's job: the planner thins the old pool by
     the searches the new refit represents (``replay_pool``), which counts the new
     planet found whatever the refit makes of it.
+
+    A frozen forecast (``PlannerSettings.forecast_updates`` false) is the time-zero
+    replay of the planets it knew; when a refit adds a planet, the forecast is
+    extended by that planet at its time-zero belief, the refit prior's law of a planet
+    in that slot, with no row (``add_tracks``), so the frozen forecast predicts a
+    found planet's rows from its prior.
     """
 
     @abc.abstractmethod
@@ -794,4 +800,24 @@ class AbstractRefitter(eqx.Module):
             The new refit: its draws, of the same ``A`` and ``K``, NaN weights where
             the gate refuses them; its ``row_mask``, the old one and the term's rows;
             and the star's index.
+        """
+
+    @abc.abstractmethod
+    def add_tracks(
+        self, refit: Refit, slots: Bool[Array, " K"], key: PRNGKeyArray, star
+    ) -> Refit:
+        """The refit with a track in each slot of ``slots``, drawn at its prior.
+
+        Each draw gets a planet in each slot, its state drawn from the refit prior's
+        law of a planet there, with no row: the planet's belief at time zero. The
+        weights, the other slots and ``row_mask`` are kept.
+
+        Args:
+            refit: the star's refit.
+            slots: the slots to add a track in, shape ``(K,)``.
+            key: the key of the draws.
+            star: a pytree of scalar leaves describing the star.
+
+        Returns:
+            The refit with the tracks added.
         """

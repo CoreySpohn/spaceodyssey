@@ -672,6 +672,31 @@ class ToyRefitter(AbstractRefitter):
         )
         return Refit(weighted, represented, refit.star_index)
 
+    def add_tracks(self, refit, slots, key, star):
+        """Each draw with a planet in each of ``slots``, its state from ``law``."""
+        atoms = refit.atoms
+        n_draw, n_slot = atoms.exists.shape
+        law = eqx.tree_at(lambda p: p.p_exist, self.law, jnp.ones(1))
+        fresh = law.draws(key, star, n_draw * n_slot)
+
+        def place(old, drawn):
+            drawn = drawn.reshape(n_draw, n_slot, *drawn.shape[2:])
+            return jnp.where(slots.reshape(1, -1, *([1] * (old.ndim - 2))), drawn, old)
+
+        samples = atoms.cloud.samples
+        samples = {
+            "hz": place(samples["hz"], fresh.cloud.samples["hz"]),
+            "size": place(samples["size"], fresh.cloud.samples["size"]),
+        }
+        cloud = eqx.tree_at(lambda c: c.samples, atoms.cloud, samples)
+        added = Atoms(
+            cloud,
+            place(atoms.x_mean, fresh.x_mean),
+            place(atoms.x_var, fresh.x_var),
+            atoms.exists | slots,
+        )
+        return Refit(added, refit.row_mask, refit.star_index)
+
 
 class ToySurvey(eqx.Module):
     """A toy study with what a run of it reads besides a policy.

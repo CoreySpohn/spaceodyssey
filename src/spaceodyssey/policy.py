@@ -45,6 +45,7 @@ from spaceodyssey.types import (
     as_float,
     as_index,
     clock_d,
+    planet_tracks,
     real_rows,
     spent_d,
 )
@@ -639,30 +640,42 @@ def _append(policy, r, s, log, time_d):
 
 
 def _read_star(
-    policy, fresh_s, landed_s, absorbed_s, pool_s, frozen_s, s, log, time_d, lam
+    policy, fresh_s, landed_s, absorbed_s, pool_s, frozen_s, s, key, log, time_d, lam
 ):
     """Star ``s`` read afresh at ``time_d``: refit or absorbed, its stage and plans.
 
     A star whose refit landed takes its new refit ``fresh_s`` (``refit_stars``),
     replayed to ``time_d``, and its pool becomes the old one thinned by the searches the
     new refit represents; any other, a refused refit among them, keeps its replay with
-    the released rows appended (``absorbed_s``) and its pool. Its plans are rebuilt at
-    ``lam``.
+    the released rows appended (``absorbed_s``) and its pool. A frozen forecast
+    ``frozen_s`` (None when the forecast learns) gains each planet the refit added, at
+    its time-zero belief (``AbstractRefitter.add_tracks``, with ``key``), replayed at
+    time zero. Its plans are rebuilt at ``lam``.
     """
     star = _pick(policy.stars, s)
+    models = policy.models
 
     def refit_now(_):
         pool = _pool_now(policy, pool_s, absorbed_s, log, time_d)
-        return replay(fresh_s, log, policy.models, star, time_d), pool
+        return replay(fresh_s, log, models, star, time_d), pool
 
     def appended(_):
         return absorbed_s, pool_s
 
     replay_s, pool_s = jax.lax.cond(landed_s, refit_now, appended, None)
+    if frozen_s is not None:
+        added = planet_tracks(replay_s.refit.atoms)
+        added = added & ~planet_tracks(frozen_s.refit.atoms)
+
+        def extend(_):
+            refit = policy.refitter.add_tracks(frozen_s.refit, added, key, star)
+            return replay(refit, log, models, star, jnp.zeros_like(time_d))
+
+        frozen_s = jax.lax.cond(jnp.any(added), extend, lambda _: frozen_s, None)
     forecast = replay_s if frozen_s is None else frozen_s
     pool_now = _pool_now(policy, pool_s, replay_s, log, time_d)
     stage, f = _star_plans(policy, forecast, replay_s, pool_now, s, log, time_d, lam)
-    return replay_s, pool_s, stage, f
+    return replay_s, pool_s, frozen_s, stage, f
 
 
 @eqx.filter_jit
@@ -816,21 +829,33 @@ def _price_decide(
         replay_s, pool_s = _pick(state.replay, s), _pick(state.pool, s)
         frozen_s = None if state.frozen is None else _pick(state.frozen, s)
         row = _pick(state.frontier, s)
-        kept = (replay_s, pool_s, state.stage[s], (row.reward, row.cost_d, row.mask))
+        kept = (
+            replay_s,
+            pool_s,
+            frozen_s,
+            state.stage[s],
+            (row.reward, row.cost_d, row.mask),
+        )
         args = (_pick(fresh, i), landed[i], _pick(absorbed, i), pool_s, frozen_s, s)
+        added_key = jax.random.fold_in(jax.random.fold_in(key, s), 1)
         return jax.lax.cond(
             chosen[i],
-            lambda _: _read_star(policy, *args, log, time_d, state.lam),
+            lambda _: _read_star(policy, *args, added_key, log, time_d, state.lam),
             lambda _: kept,
             None,
         )
 
-    replay_c, pool_c, stage_c, f_c = jax.lax.map(one, jnp.arange(picks.shape[0]))
+    replay_c, pool_c, frozen_c, stage_c, f_c = jax.lax.map(
+        one, jnp.arange(picks.shape[0])
+    )
 
     def scatter(full, part):
         return full.at[picks].set(part)
 
     replays = jax.tree.map(scatter, state.replay, replay_c)
+    frozen = (
+        None if state.frozen is None else jax.tree.map(scatter, state.frozen, frozen_c)
+    )
     pools = jax.tree.map(scatter, state.pool, pool_c)
     stage = state.stage.at[picks].set(stage_c)
     old = (state.frontier.reward, state.frontier.cost_d, state.frontier.mask)
@@ -891,7 +916,7 @@ def _price_decide(
     action = jax.tree.map(lambda a, b: jnp.where(running, a, b), run, wait)
     new_state = PriceState(
         replay=replays,
-        frozen=state.frozen,
+        frozen=frozen,
         pool=pools,
         stage=stage,
         frontier=f,

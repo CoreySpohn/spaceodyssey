@@ -28,7 +28,7 @@ from spaceodyssey.belief import (
     replay_likelihood,
     role_pool,
 )
-from spaceodyssey.claim import Claim
+from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.design import (
     Design,
     Keepout,
@@ -50,7 +50,14 @@ from spaceodyssey.price import dispatch, solve_price
 from spaceodyssey.roles import Roles
 from spaceodyssey.score import found_count
 from spaceodyssey.study import Study
-from spaceodyssey.toy import DetectionModel, InHz, ToyPrior, ToyRefitter, point_atoms
+from spaceodyssey.toy import (
+    DetectionModel,
+    GaussianGasModel,
+    InHz,
+    ToyPrior,
+    ToyRefitter,
+    point_atoms,
+)
 from spaceodyssey.types import (
     ACCEPTED,
     OVER_BUDGET,
@@ -63,6 +70,7 @@ from spaceodyssey.types import (
 )
 from spaceodyssey.value import (
     Count,
+    LogScore,
     Menu,
     frontier_at_prices,
     pool_found,
@@ -771,6 +779,54 @@ def test_a_refit_refused_after_its_retry_is_reported_and_the_star_kept():
     assert_allclose(_found(stars, log, design.models, end), 0.9, rtol=1e-12)
     rate = _rates(last.pool, last.replay.refit, log, design.models, end)[1]
     assert_allclose(rate, [0.1], rtol=1e-10)
+
+
+@pytest.mark.medium(reason="compiles a LogScore planner per forecast mode, ~9 s each")
+def test_a_frozen_forecast_values_a_spectrum_of_a_planet_a_refit_added():
+    """A frozen forecast is extended by a planet a refit adds, at its time-zero
+    belief, so a spectrum of a found planet is worth its information.
+
+    One star, its 1,000 draws holding no planet, a pool of one planet; a search certain
+    to find any planet and a spectrum (S/N 4 in a day) that needs a detection;
+    `LogScore` on a planet in the HZ with its gas above the floor. The search finds
+    the world's planet; the next decision refits the star (the planet now a track,
+    in the HZ half the time, its gas at the prior) and offers the spectrum. With the
+    forecast learning, the spectrum's reward is the verdict gain on the found planet;
+    with it frozen at time zero, the forecast holds the planet at its prior, which is
+    what the refit holds too (the search reads neither bit nor gas), so the reward is
+    the same to the Monte Carlo error of the two clouds' draws.
+
+    Fails if a frozen forecast is never extended (its draws hold no planet, so a
+    spectrum's outcome says nothing about its count: the reward is far from the
+    learning arm's), or if the extension carries the refit's rows or weights.
+    """
+    claim = Claim((InHz(), GasAbove(0, 0.0)))
+    roles = Roles(PRIOR, _stack(PRIOR))
+    refit = Refit(_points(0.0, False, 1000), jnp.zeros(CAPACITY, bool), 0)
+    hz = jnp.array([[1.0], [0.0]])  # one mark in the HZ, one not; gas above
+    marks = point_atoms(hz, 0 * hz, jnp.ones((2, 1, 1)), hz >= 0, PRIOR)
+    pool = role_pool(marks, roles, jnp.zeros((2, 2)), jnp.zeros(2), STAR, **UNGATED)
+    models = (DetectionModel(1.0, 1.0), GaussianGasModel(snr_one_day=[4.0]))
+    design = Design(
+        models, (Mode(0, 0.0), Mode(1, 0.0)), Resources(3.0, END_D),
+        no_keepout(N_STAR), CAPACITY,
+    )  # fmt: skip
+    menu = Menu(jnp.ones((1, 2)), jnp.ones((1, 2), bool), (0, 1), (0, 1))
+    rewards = []
+    for updates in (True, False):
+        settings = PlannerSettings(0.0, math.inf, 1, member=0, forecast_updates=updates)
+        policy = PricePolicy(
+            _stack(refit), _stack(pool), _stack(STAR), roles, claim, LogScore(2),
+            design.models, mode_models(design), menu, REFITTER, settings,
+        )  # fmt: skip
+        trace = Trace(policy)
+        execute(KEY, _no_grant(), _world(1, hz=1.0), design, trace)
+        found = next(s for s in trace.states if int(s.stage[0]) == 1)
+        assert list(np.asarray(found.refits)) == [1]
+        rewards.append(float(found.frontier.reward[0, 1]))
+    learning, frozen = rewards
+    assert learning > 0.05  # 0.070
+    assert_allclose(frozen, learning, rtol=0.15)  # 0.072
 
 
 def test_a_star_in_keepout_offers_nothing_and_the_planner_waits_for_it():
