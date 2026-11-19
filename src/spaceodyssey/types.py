@@ -20,8 +20,8 @@ def _asarrays(tree):
     return jax.tree.map(jnp.asarray, tree)
 
 
-def as_float(x) -> Float[Array, ""]:
-    """``x`` as the default float type, never weakly typed."""
+def as_float(x) -> Float[Array, "..."]:
+    """``x`` as the default float type, never weakly typed, in any shape."""
     return jnp.asarray(x, dtype=float)
 
 
@@ -105,7 +105,7 @@ class Atoms[StateT](eqx.Module):
     exists: Bool[Array, "A K"] = eqx.field(converter=jnp.asarray)
 
 
-def as_index(x) -> Int[Array, ""]:
+def as_index(x) -> Int[Array, "..."]:
     """``x`` as the default integer type, never weakly typed.
 
     An index built from a Python integer would otherwise be weakly typed, and the

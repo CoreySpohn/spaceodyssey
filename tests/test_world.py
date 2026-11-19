@@ -13,7 +13,7 @@ from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.design import Mode
 from spaceodyssey.log import grant_rows
 from spaceodyssey.toy import GAS_FLOOR, GaussianGasModel, StepReportModel
-from spaceodyssey.types import Action, Grant, ObservationLog
+from spaceodyssey.types import Action, Grant, ObservationLog, WeightedCloud
 from spaceodyssey.world import SealedWorld, draw_worlds, row_key
 
 KEY = jax.random.key(0)
@@ -63,10 +63,8 @@ def test_row_noise_depends_only_on_star_index_and_key(toy):
     assert _differ(_observe(world, model, 0, 5), _observe(world, model, 1, 5))
     assert _differ(first[(0, 0)], first[(0, 2)])
 
-    two = draw_worlds(KEY, toy.GasPrior("toy", n_gas=2), STARS, 2).unseal().atoms.x_mean
-    three = (
-        draw_worlds(KEY, toy.GasPrior("toy", n_gas=2), STARS, 3).unseal().atoms.x_mean
-    )
+    two = draw_worlds(KEY, toy.GasPrior("toy", n_gas=2), STARS, 2).unseal().x_mean
+    three = draw_worlds(KEY, toy.GasPrior("toy", n_gas=2), STARS, 3).unseal().x_mean
     assert_array_max_ulp(two, three[:2], maxulp=4)
 
 
@@ -83,7 +81,7 @@ def test_draw_worlds_from_a_role_prior(toy):
     worlds (the spread collapses), or the drawn truth is not on the prior's terms.
     """
     prior = toy.GasPrior("toy", n_gas=2)
-    truth = draw_worlds(KEY, prior, STARS, 4000).unseal().atoms
+    truth = draw_worlds(KEY, prior, STARS, 4000).unseal()
     assert truth.x_mean.shape == (4000, 2, 1, 1, 2)
     assert_allclose(truth.cloud.log_weights, 0.0)
     x = np.asarray(truth.x_mean)
@@ -105,9 +103,7 @@ def test_world_keys_and_row_keys_are_distinct(toy):
     Fails if world keys and row keys are folded without distinct tags, so world i is
     correlated with star i's row noise.
     """
-    truth = (
-        draw_worlds(KEY, toy.GasPrior("toy", n_gas=2), STARS, 2).unseal().atoms.x_mean
-    )
+    truth = draw_worlds(KEY, toy.GasPrior("toy", n_gas=2), STARS, 2).unseal().x_mean
     for i in range(2):
         for s in range(2):
             for star, index in ((i, s), (s, i)):
@@ -115,17 +111,19 @@ def test_world_keys_and_row_keys_are_distinct(toy):
                 assert not np.allclose(truth[i, s], noise)
 
 
-def test_observe_reads_the_right_star_and_unseal_gives_a_point_belief(toy):
+def test_observe_reads_the_right_star_and_unseal_gives_the_truth(toy):
     """`observe` draws from the action's star, and `unseal` returns the truth itself.
 
     Star 0 has gases (0.3, -0.4) and star 1 (-0.3, 0.4); at S/N 10^4 the readings are
     within 1e-3 dex of the true star's abundances. Unsealed, each star is one draw of
-    weight one even when the truth was built with a zero weight: q of (water, oxygen)
-    is the truth bit (0 and 0) and q of water alone is (1, 0); the count distribution
-    is a one at the true count. A truth with a gas variance is refused.
+    unit weight (log weight and reference density zero) even when the truth was built
+    with a zero weight, and read as a belief of one role: q of (water, oxygen) is the
+    truth bit (0 and 0) and q of water alone is (1, 0); the count distribution is a one
+    at the true count. A truth of two planets unseals whole. A truth with a gas
+    variance is refused, and so is a truth on no chart.
 
-    Fails if `observe` reads the wrong star, `unseal` keeps a weight or a variance, or
-    the pool of an unsealed world adds expected planets.
+    Fails if `observe` reads the wrong star, `unseal` keeps a weight or a variance or
+    drops a planet, or sealing skips the cloud's chart check.
     """
     truth = _point_truth(toy, [[0.3, -0.4], [-0.3, 0.4]])
     truth = eqx.tree_at(
@@ -136,7 +134,10 @@ def test_observe_reads_the_right_star_and_unseal_gives_a_point_belief(toy):
     for star, x in enumerate(([0.3, -0.4], [-0.3, 0.4])):
         assert_allclose(_observe(world, model, star, 0)["reading"][0], x, atol=1e-3)
 
-    belief = world.unseal()
+    unsealed = world.unseal()
+    assert_allclose(unsealed.cloud.log_weights, 0.0)
+    assert_allclose(unsealed.cloud.log_ref_density, 0.0)
+    belief = jax.vmap(toy.belief)(unsealed)
     planet = jnp.asarray(0)
     water = Claim((GasAbove(0, GAS_FLOOR),))
     both = Claim((GasAbove(0, GAS_FLOOR), GasAbove(1, GAS_FLOOR)))
@@ -146,9 +147,15 @@ def test_observe_reads_the_right_star_and_unseal_gives_a_point_belief(toy):
     pmf = jax.vmap(count_pmf, in_axes=(0, None, None, None))(belief, water, (), 2)
     assert_allclose(pmf, [[[0.0, 1.0, 0.0]], [[1.0, 0.0, 0.0]]])
 
+    two = toy.atoms([[1.0, 1.0]], [[1.0, 0.0]], [1.0], [[0.5, -0.5]], 0.0)
+    assert SealedWorld(toy.stack(two)).unseal().x_mean.shape == (1, 1, 2, 2)
+
     fuzzy = eqx.tree_at(lambda a: a.x_var, truth, jnp.full((2, 1, 1, 2), 0.1))
     with pytest.raises(eqx.EquinoxRuntimeError, match="point state"):
         SealedWorld(fuzzy)
+    no_chart = WeightedCloud(truth.cloud.samples, truth.cloud.log_weights, jnp.nan)
+    with pytest.raises(ValueError, match="chart"):
+        SealedWorld(eqx.tree_at(lambda a: a.cloud, truth, no_chart))
 
 
 def _grant():

@@ -10,10 +10,15 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import ArrayLike, Int, PRNGKeyArray, PyTree
 
-from spaceodyssey.belief import Belief
 from spaceodyssey.design import Mode
 from spaceodyssey.roles import AbstractRolePrior
-from spaceodyssey.types import AbstractObservationModel, Action, Atoms, Grant, Pool
+from spaceodyssey.types import (
+    AbstractObservationModel,
+    Action,
+    Atoms,
+    Grant,
+    WeightedCloud,
+)
 
 _ROW_KEY_TAG = 0
 """Tag folded into the run key before a row's identity."""
@@ -48,9 +53,10 @@ class SealedWorld(eqx.Module):
     """The truth of a run, one point state per star.
 
     ``_truth`` is an ``Atoms`` whose leaves carry a leading star axis ``S`` and then one
-    draw (``A = 1``); a stack of worlds adds a world axis in front. On construction the
-    single draw's cloud weights are set to zero (weight one) and its gas block is
-    checked to be a point state (``x_var = 0``).
+    draw (``A = 1``) of ``K`` planets; a stack of worlds adds a world axis in front. On
+    construction the single draw is given unit weight (its log weight and its reference
+    density zero, on the truth's chart) and its gas block is checked to be a point
+    state (``x_var = 0``).
     """
 
     _truth: Atoms
@@ -63,7 +69,8 @@ class SealedWorld(eqx.Module):
                 has shape ``(..., S, 1, K, G)``.
 
         Raises:
-            ValueError: if the gas block has no star axis or more than one draw.
+            ValueError: if the gas block has no star axis or more than one draw, or
+                the truth declares no chart.
             EquinoxRuntimeError: if a gas of the truth has nonzero variance.
         """
         if truth.x_mean.ndim < 4 or truth.x_mean.shape[-3] != 1:
@@ -71,13 +78,18 @@ class SealedWorld(eqx.Module):
         x_var = eqx.error_if(
             truth.x_var, truth.x_var != 0, "the truth is a point state (x_var = 0)"
         )
-        zero = jnp.zeros_like(truth.cloud.log_weights)
-        self._truth = eqx.tree_at(
-            lambda a: (a.x_var, a.cloud.log_weights, a.cloud.log_ref_density),
-            truth,
-            (x_var, zero, zero),
-            is_leaf=lambda x: x is None,
+        cloud = truth.cloud
+        zero = jnp.zeros_like(cloud.log_weights)
+        # Built through the constructor, so the cloud's own checks run on the truth.
+        unit = WeightedCloud(
+            cloud.samples,
+            zero,
+            cloud.evidence,
+            zero,
+            chart=cloud.chart,
+            epoch=cloud.epoch,
         )
+        self._truth = Atoms(unit, truth.x_mean, x_var, truth.exists)
 
     def observe(
         self, key: PRNGKeyArray, model: AbstractObservationModel, action: Action
@@ -157,22 +169,16 @@ class SealedWorld(eqx.Module):
             payload.append(buffer)
         return tuple(payload)
 
-    def unseal(self) -> Belief:
-        """The truth as a belief with one role: one draw of weight one, an empty pool.
+    def unseal(self) -> Atoms:
+        """The truth: one draw of unit weight per star, a point state.
 
-        Only the scorer calls this. The belief keeps the leading star axis, so a claim
-        is read per star with ``jax.vmap``. The pool's single mark is the truth itself
-        with zero expected mass, so it never counts.
+        Only the scorer calls this. The draws keep the leading star axis, and every
+        planet slot of the truth, so a star with several planets is read whole.
 
         Returns:
-            A belief whose leaves have a leading star axis.
+            The truth's draws, leaves with a leading star axis.
         """
-        truth = self._truth
-        lead = truth.cloud.log_weights.shape[:-1]
-        flat = jnp.zeros((*lead, 1, 1))
-        no_mass = jnp.full((*lead, 1), -jnp.inf)
-        pool = Pool(truth, flat, flat, no_mass)
-        return Belief(truth, flat, flat, pool)
+        return self._truth
 
 
 def draw_worlds(
