@@ -98,7 +98,7 @@ def _empty_pool(n_roles):
     marks = _atoms(jnp.zeros(1), jnp.zeros(1), jnp.zeros(1), "x")
     flat = jnp.zeros((n_roles, 1))
     no_mass = jnp.full(n_roles, -jnp.inf)
-    return Pool(marks, flat, flat, no_mass, no_mass, flat)
+    return Pool(marks, flat, flat, no_mass)
 
 
 def _cloud(key, n, measure="x"):

@@ -93,15 +93,12 @@ class _Toy:
         like=1.0,
         cloud=1.0,
         ref=1.0,
-        log_mass0=None,
-        like0=None,
     ):
         """A pool whose marks have the given claim bit and per-role weights (R, Am).
 
         `mark_weights` is the marks' prior and `like` their likelihood, both linear and
         broadcast to (R, Am); `cloud` and `ref` are the marks' cloud weight and
-        reference density, linear, (Am,). `log_mass0` and `like0`, the time-zero
-        mass and likelihood, default to `log_mass` and `like`.
+        reference density, linear, (Am,).
         """
         mark_hz = jnp.asarray(mark_hz, float)[:, None]
         n_mark = mark_hz.shape[0]
@@ -113,13 +110,9 @@ class _Toy:
             jnp.broadcast_to(jnp.log(jnp.asarray(ref, float)), (n_mark,)),
         )
         log_mass = jnp.broadcast_to(jnp.asarray(log_mass, float), (n_roles,))
-        log_mass0 = log_mass if log_mass0 is None else log_mass0
-        log_mass0 = jnp.broadcast_to(jnp.asarray(log_mass0, float), (n_roles,))
         log_prior = jnp.log(jnp.asarray(mark_weights, float))
         log_like = jnp.broadcast_to(jnp.log(jnp.asarray(like, float)), log_prior.shape)
-        log_like0 = log_like if like0 is None else jnp.log(jnp.asarray(like0, float))
-        log_like0 = jnp.broadcast_to(log_like0, log_prior.shape)
-        return Pool(marks, log_prior, log_like, log_mass, log_mass0, log_like0)
+        return Pool(marks, log_prior, log_like, log_mass)
 
     @classmethod
     def empty_pool(cls, n_roles=1):

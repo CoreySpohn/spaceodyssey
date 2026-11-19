@@ -84,20 +84,17 @@ class Pool(eqx.Module):
     ``log_weight + log_prior[r] - log_ref_density + log_like[r]``, normalized over the
     marks.
 
-    The pool keeps its state at time zero beside the current one. A null observation
-    thins the pool: it lowers ``log_mass`` and adds the log probability of not being
-    detected to ``log_like``. ``log_mass0`` and ``log_like0`` stay, so the claim-true
-    rate at time zero, ``exp(log_mass0) * pbar0`` with ``pbar0`` under the time-zero
-    mark weights, can be set against the current one. A grant enters at time zero, so
-    its rows are already in ``log_like0``.
+    A null observation thins the pool: it lowers ``log_mass`` and adds the log
+    probability of not being detected to ``log_like``. The pool at time zero (after
+    the grant, which enters at time zero) is a ``Pool`` of its own, held by the caller
+    beside the current one, so the claim-true rate then can be set against the rate
+    now.
 
     Attributes:
         marks: the marks, leading axis ``Am``.
         log_prior: log prior of each mark under each role, shape ``(R, Am)``.
         log_like: log likelihood of each mark under each role, shape ``(R, Am)``.
         log_mass: log expected number of planets, per role, shape ``(R,)``.
-        log_mass0: the same at time zero, shape ``(R,)``.
-        log_like0: ``log_like`` at time zero, shape ``(R, Am)``.
 
     Raises:
         ValueError: if a mark holds more than one planet, or the fields disagree on
@@ -108,8 +105,6 @@ class Pool(eqx.Module):
     log_prior: Float[Array, "R Am"] = eqx.field(converter=jnp.asarray)
     log_like: Float[Array, "R Am"] = eqx.field(converter=jnp.asarray)
     log_mass: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
-    log_mass0: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
-    log_like0: Float[Array, "R Am"] = eqx.field(converter=jnp.asarray)
 
     def __check_init__(self):
         """Check the static shapes: one planet per mark, one ``R`` and one ``Am``."""
@@ -118,14 +113,12 @@ class Pool(eqx.Module):
                 f"a mark is one planet (K = 1), not K = {self.marks.x_mean.shape[-2]}"
             )
         n_mark = self.marks.cloud.log_weight.shape[-1]
-        per_mark = (self.log_prior, self.log_like, self.log_like0)
-        roles = {x.shape[-2] for x in per_mark}
-        roles |= {x.shape[-1] for x in (self.log_mass, self.log_mass0)}
+        per_mark = (self.log_prior, self.log_like)
+        roles = {x.shape[-2] for x in per_mark} | {self.log_mass.shape[-1]}
         if len(roles) != 1 or {x.shape[-1] for x in per_mark} != {n_mark}:
             raise ValueError(
                 f"pool fields disagree on R or Am (log_prior {self.log_prior.shape}, "
-                f"log_like {self.log_like.shape}, log_like0 {self.log_like0.shape}, "
-                f"log_mass {self.log_mass.shape}, log_mass0 {self.log_mass0.shape}, "
+                f"log_like {self.log_like.shape}, log_mass {self.log_mass.shape}, "
                 f"{n_mark} marks)"
             )
 

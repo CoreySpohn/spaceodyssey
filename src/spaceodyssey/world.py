@@ -166,7 +166,7 @@ class SealedWorld(eqx.Module):
         lead = truth.cloud.log_weight.shape[:-1]
         flat = jnp.zeros((*lead, 1, 1))
         no_mass = jnp.full((*lead, 1), -jnp.inf)
-        pool = Pool(truth, flat, flat, no_mass, no_mass, flat)
+        pool = Pool(truth, flat, flat, no_mass)
         return Belief(truth, flat, flat, pool)
 
 

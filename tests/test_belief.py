@@ -101,12 +101,11 @@ def test_pool_count_pmf_by_hand(toy):
 
     Every term of the mark weights is live: cloud weight (2, 1) over reference density
     (1, 2) is (2, 0.5); prior (0.5, 2) in both roles makes it (1, 1); likelihood (1, 1)
-    in role 0 and (0.2, 0.8) in role 1 gives the weights above. The mass at time zero is
-    5, not 2.
+    in role 0 and (0.2, 0.8) in role 1 gives the weights above.
 
     Fails if the pool uses the wrong role's mark weights, forgets the claim probability
-    of a mark, drops the marks' cloud weight, reference density or likelihood, reads
-    the mass at time zero, or does not lump the tail.
+    of a mark, drops the marks' cloud weight, reference density or likelihood, or does
+    not lump the tail.
     """
     atoms = toy.atoms(
         np.zeros((1, 0)), np.zeros((1, 0)), [1.0]
@@ -119,7 +118,6 @@ def test_pool_count_pmf_by_hand(toy):
         like=[[1.0, 1.0], [0.2, 0.8]],
         cloud=[2.0, 1.0],
         ref=[1.0, 2.0],
-        log_mass0=np.log(5.0),
     )
     pmf = count_pmf(
         toy.belief(atoms, pool, n_roles=2), Claim((toy.InHz(),)), toy.star, 3
@@ -133,30 +131,24 @@ def test_pool_count_pmf_by_hand(toy):
 
 
 def test_pool_rate_now_and_at_time_zero(toy):
-    """The pool keeps its time-zero mass and mark weights through a null observation.
+    """The rate now and at time zero, from the thinned pool and the pool at time zero.
 
-    Mass 2, two marks of weights (0.5, 0.5) and claim probabilities (1, 0), detection
-    probabilities (0.8, 0.2). Expected claim-true planets found by the observation: 2 *
-    (0.5 * 1 * 0.8 + 0.5 * 0 * 0.2) = 0.8. After a null the mass is 2 * (1 - 0.5) = 1.0
-    and the marks reweight by (0.2, 0.8), to weights (0.2, 0.8), so the claim-true rate
-    is 0.2, against 2 * 0.5 = 1.0 at time zero; the difference is the 0.8 found. The
-    count after the null is Poisson(0.2).
+    The pool at time zero is its own value. Mass 2, two marks of weights (0.5, 0.5)
+    and claim probabilities (1, 0), detection probabilities (0.8, 0.2). Expected
+    claim-true planets found by the observation: 2 * (0.5 * 1 * 0.8 + 0.5 * 0 * 0.2) =
+    0.8. After a null the mass is 2 * (1 - 0.5) = 1.0 and the marks reweight by (0.2,
+    0.8), to weights (0.2, 0.8), so the claim-true rate is 0.2, against 2 * 0.5 = 1.0
+    at time zero; the difference is the 0.8 found. The count after the null is
+    Poisson(0.2).
 
-    Fails if the time-zero rate reads the current mass or the current mark likelihood,
-    or the current rate reads either at time zero.
+    Fails if the rate drops the thinned mass or the marks' null likelihood.
     """
     atoms = toy.atoms(np.zeros((1, 0)), np.zeros((1, 0)), [1.0])
-    thinned = toy.pool(
-        [1.0, 0.0],
-        [[0.5, 0.5]],
-        np.log(1.0),
-        like=[[0.2, 0.8]],
-        log_mass0=np.log(2.0),
-        like0=1.0,
-    )
+    pool0 = toy.pool([1.0, 0.0], [[0.5, 0.5]], np.log(2.0))
+    thinned = toy.pool([1.0, 0.0], [[0.5, 0.5]], np.log(1.0), like=[[0.2, 0.8]])
     claim = Claim((toy.InHz(),))
     now = pool_rate(thinned, claim, toy.star)
-    then = pool_rate(thinned, claim, toy.star, time_zero=True)
+    then = pool_rate(pool0, claim, toy.star)
     assert_allclose(now, [0.2], rtol=1e-12)
     assert_allclose(then, [1.0], rtol=1e-12)
     assert_allclose(then - now, [0.8], rtol=1e-12)
@@ -261,12 +253,12 @@ def test_pool_and_belief_reject_mismatched_shapes(toy):
     silently) or a role-count mismatch surfaces only later, inside a vmap.
     """
     pool = toy.pool([1.0, 0.0], [[0.5, 0.5]], 0.0)
-    fields = [pool.log_prior, pool.log_like, pool.log_mass, pool.log_mass0]
+    fields = [pool.log_prior, pool.log_like, pool.log_mass]
     two_planets = toy.atoms([[1.0, 1.0]] * 2, [[0.0, 0.0]] * 2, [1.0, 1.0])
     with pytest.raises(ValueError, match="K = 1"):
-        Pool(two_planets, *fields, pool.log_like0)
+        Pool(two_planets, *fields)
     with pytest.raises(ValueError, match="disagree"):
-        Pool(pool.marks, *fields, jnp.zeros((2, 2)))
+        Pool(pool.marks, pool.log_prior, jnp.zeros((2, 2)), pool.log_mass)
     atoms = toy.atoms([[1.0]], [[1.0]], [1.0])
     with pytest.raises(ValueError, match="disagree"):
         Belief(atoms, jnp.zeros((2, 1)), jnp.zeros((2, 1)), pool)

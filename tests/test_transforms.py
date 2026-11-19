@@ -126,7 +126,7 @@ def _cases(toy):
             uneven,
         ),
         "pool_rate": (
-            lambda p: pool_rate(p, plain, star) + pool_rate(p, plain, star, True),
+            lambda p: pool_rate(p, plain, star),
             [(b0.pool,), (b1.pool,)],
             lambda a: a[0].log_like,
             uneven,
