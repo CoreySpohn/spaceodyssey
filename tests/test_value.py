@@ -378,7 +378,7 @@ def test_a_frozen_forecast_plans_on_its_own_replay(toy):
     pool0, pool = toy.empty_pool(2, 1), toy.empty_pool(2, 1)
     pool = eqx.tree_at(lambda p: p.log_mass, pool, jnp.array([-1.0, -2.0]))
     forecast, verdict = toy.jit.planning_beliefs(
-        frozen, now, roles, models, toy.star, pool0, pool, jnp.zeros(1)
+        frozen, now, roles, models, toy.star, pool0, pool, jnp.zeros(1), **toy.ungated
     )
     assert_allclose(forecast.pool.log_mass, [-np.inf])  # the pool at time zero
     assert_allclose(verdict.pool.log_mass, [-2.0])  # the verdict's row of the pool now
@@ -452,7 +452,18 @@ GAS_BLOCKS = ((0.0, 1.0), (0.8, 0.2), (0.3, 0.1), (0.8, 0.2))
 def _gas_planning_beliefs(refit, log, time_d, roles, pool):
     models = (GaussianGasModel(snr_one_day=[5.0]),)
     now = replay(refit, log, models, (), time_d)
-    return planning_beliefs(now, now, roles, models, (), pool, pool, jnp.zeros(1))
+    return planning_beliefs(
+        now,
+        now,
+        roles,
+        models,
+        (),
+        pool,
+        pool,
+        jnp.zeros(1),
+        min_n_eff=0.0,
+        max_khat=jnp.inf,
+    )
 
 
 def test_a_binned_gas_reading_is_valued_exactly(toy):

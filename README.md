@@ -12,12 +12,26 @@ sealed world, and the log it leaves is scored against the unsealed truth.
 A gas abundance with mean 0 and variance 1 above a floor of 0 holds with probability one half:
 
 ```python
+import jax
 import jax.numpy as jnp
 
 from spaceodyssey.claim import GasAbove
-from spaceodyssey.types import Atoms, WeightedCloud
+from spaceodyssey.types import AbstractRolePrior, Atoms, WeightedCloud
 
-cloud = WeightedCloud({}, jnp.zeros(1), jnp.nan, jnp.zeros(1), chart="toy")
+jax.config.update("jax_enable_x64", True)  # a cloud's log_target is float64
+
+
+class Flat(AbstractRolePrior):
+    """A constant prior density, the refit prior of this one-draw cloud."""
+
+    def log_prob(self, atoms, star):
+        return jnp.zeros(atoms.x_mean.shape[0])
+
+    def sample(self, key, star):
+        raise NotImplementedError
+
+
+cloud = WeightedCloud({}, jnp.zeros(1), jnp.zeros(1), jnp.nan, Flat("toy"))
 atoms = Atoms(
     cloud,
     x_mean=jnp.zeros((1, 1, 1)),

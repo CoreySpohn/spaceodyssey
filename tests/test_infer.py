@@ -10,7 +10,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax.scipy.special import ndtri
-from jax.scipy.stats import norm
 from numpy.testing import assert_allclose
 
 from spaceodyssey.belief import absorb, replay, replay_belief, weights
@@ -32,13 +31,15 @@ def roles(toy):
     )
 
 
-def _atoms(x, var, log_ref_density):
-    """Draws of one planet with one gas: abundance mean `x` and variance `var`."""
+def _atoms(x, var, prior):
+    """Draws of one planet with one gas: abundance mean `x` and variance `var`, the
+    refit's prior `prior`.
+    """
     x = jnp.asarray(x, float)
     n_draw = x.shape[0]
     block = jnp.broadcast_to(jnp.asarray(var, float), (n_draw,))[:, None, None]
     cloud = WeightedCloud(
-        {"x": x}, jnp.zeros(n_draw), jnp.nan, log_ref_density, chart="toy"
+        {"x": x}, jnp.zeros(n_draw), jnp.zeros(n_draw), jnp.nan, prior
     )
     return Atoms(cloud, x[:, None, None], block, jnp.ones((n_draw, 1), bool))
 
@@ -105,7 +106,13 @@ NOW = jnp.asarray(1.0)  # a query time after every row released at time zero
 def _infer(roles, refit, log, models, pool, time_d=NOW):
     """The belief at `time_d` under `roles`: `replay_belief` of `replay`."""
     return replay_belief(
-        replay(refit, log, models, STAR, time_d), roles, models, STAR, pool
+        replay(refit, log, models, STAR, time_d),
+        roles,
+        models,
+        STAR,
+        pool,
+        min_n_eff=0.0,
+        max_khat=jnp.inf,
     )
 
 
@@ -115,7 +122,7 @@ def test_replay_applies_each_row_outside_the_mask_once(toy, roles):
     x ~ N(0, 1) (the refit target p0 and the role prior of the forecast and the first
     member); rows y1 = y2 = 1 with noise sd 1. The draws are the 20,000 midpoint
     quantiles of the posterior given row 1, N(0.5, 0.5), with `row_mask` holding row
-    1 and `log_weights` 0, and `log_ref_density` is log p0. Row 2 is outside. The
+    1 and `log_weights` 0, and the refit's prior is p0. Row 2 is outside. The
     belief has the posterior of precision 1 + 1 + 1 = 3: mean 2/3 and variance 1/3
     under N(0, 1), and mean (1 + 1 + 1) / 3 = 1 under the member N(1, 1). Rows that
     must add nothing sit in the same log: another star's row, a refused row, a step
@@ -131,11 +138,11 @@ def test_replay_applies_each_row_outside_the_mask_once(toy, roles):
     Fails if a row in `row_mask` is applied again, a released row is dropped, a row of
     another star, a refused row, a row in flight or a row past `count` is applied, a
     row is not applied once released, a buffer is read in the wrong model slot, or
-    `log_ref_density` enters with the wrong sign.
+    the prior ratio enters with the wrong sign.
     """
     n = 20_000
     x = 0.5 + jnp.sqrt(0.5) * ndtri((jnp.arange(n) + 0.5) / n)
-    atoms = _atoms(x, 0.0, norm.logpdf(x))
+    atoms = _atoms(x, 0.0, toy.GasPrior("toy"))
     refit = _refit(atoms, [0])
     rows = [
         _row(0, _gas(2.5, 1.0), NO_STEP),  # row 1, represented by the cloud
@@ -186,7 +193,7 @@ def test_replay_is_order_free_and_absorb_equals_replay(toy, roles):
     a row sits in the log, or a second row, time or star retraces `absorb`.
     """
     x = jnp.linspace(-1.75, 2.25, 9)
-    atoms = _atoms(x, 0.0, norm.logpdf(x))
+    atoms = _atoms(x, 0.0, toy.GasPrior("toy"))
     refit = _refit(atoms, [0])
     observed = [
         _row(0, _gas(5.0, 1.3), NO_STEP, release_d=1.5),
@@ -222,7 +229,7 @@ def test_replay_is_order_free_and_absorb_equals_replay(toy, roles):
     assert r.applied[4]
     held = step(r, log, end)
     jax.tree.map(np.testing.assert_array_equal, held, r)
-    online = toy.jit.replay_belief(r, roles, MODELS, STAR, pool)
+    online = toy.jit.replay_belief(r, roles, MODELS, STAR, pool, **toy.ungated)
     toy.assert_ulp(online.log_like, batch.log_like)
     toy.assert_ulp(toy.jit.weights(online), toy.jit.weights(batch))
 
@@ -233,7 +240,7 @@ def test_replay_is_order_free_and_absorb_equals_replay(toy, roles):
     assert len(traces) == 1
     only_its_row = _log([grant, _row(0, _gas(2.5, 0.4), NO_STEP)], 2)
     expected = _infer(roles, refit, only_its_row, MODELS, pool)
-    held = toy.jit.replay_belief(star_one, roles, MODELS, STAR, pool)
+    held = toy.jit.replay_belief(star_one, roles, MODELS, STAR, pool, **toy.ungated)
     toy.assert_ulp(held.log_like, expected.log_like)
 
 
@@ -255,7 +262,7 @@ def test_replay_on_an_uncertain_gas_uses_the_joint_marginal(toy, roles):
     slot against the refit's draws (the prior counted once per slot), drops a row's
     statistics, or the step report refuses Gaussian draws it has no row about.
     """
-    refit = _refit(_atoms([0.0, 1.0], [1.0, 0.5], jnp.zeros(2)))
+    refit = _refit(_atoms([0.0, 1.0], [1.0, 0.5], toy.Flat("toy")))
     pool = toy.empty_pool(n_roles=3)
     one_slot = _log([_row(0, _gas(5.0, 1.0)), _row(0, _gas(2.5, 0.4))], 2)
     b = _infer(roles, refit, one_slot, (GAS,), pool)
@@ -309,22 +316,22 @@ def test_replay_refuses_what_it_cannot_replay(toy, roles):
     it replays draws that already carry the rows, or a step report on a Gaussian gas
     is summed as if the rows were independent.
     """
-    refit = _refit(_atoms([0.0, 1.0], 0.0, jnp.zeros(2)))
+    refit = _refit(_atoms([0.0, 1.0], 0.0, toy.Flat("toy")))
     log = _log([_row(0, _gas(2.5, 1.0), NO_STEP)], 1)
     pool = toy.empty_pool(n_roles=3)
     r = replay(refit, log, MODELS, STAR, NOW)
     on_y = Roles(roles.forecast, toy.GasPrior("y", mean=[0.0, 1.0], sd=[1.0, 1.0]))
     with pytest.raises(ValueError, match="chart"):
-        replay_belief(r, on_y, MODELS, STAR, pool)
+        replay_belief(r, on_y, MODELS, STAR, pool, **toy.ungated)
     with pytest.raises(ValueError, match="payload buffers"):
         replay(refit, log, (GAS,), STAR, NOW)
     short = eqx.tree_at(lambda r: r.row_mask, refit, jnp.zeros(3, bool))
     with pytest.raises(ValueError, match="capacity"):
         replay(short, log, MODELS, STAR, NOW)
-    updated = replay_belief(r, roles, MODELS, STAR, pool).atoms
+    updated = replay_belief(r, roles, MODELS, STAR, pool, **toy.ungated).atoms
     with pytest.raises((TypeError, AttributeError)):
         replay(updated, log, MODELS, STAR, NOW)
-    fuzzy = _refit(_atoms([0.0, 1.0], 1.0, jnp.zeros(2)))
+    fuzzy = _refit(_atoms([0.0, 1.0], 1.0, toy.Flat("toy")))
     reported = _log([_row(1, NO_GAS, _step(5.0, 1.0))], 1)
     with pytest.raises(RuntimeError, match="point gas"):
         _infer(roles, fuzzy, reported, MODELS, pool)

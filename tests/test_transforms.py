@@ -131,7 +131,9 @@ def _cases(toy):
     roles1 = Roles(Tilt("toy", 0.2), Tilt("toy", jnp.array([0.1, 0.7])))
 
     def reweight(roles, b):
-        return role_belief(b.atoms, roles, b.log_like, star, b.pool)
+        return role_belief(
+            b.atoms, roles, b.log_like, star, b.pool, min_n_eff=1.0, max_khat=jnp.inf
+        )
 
     hz_only = Claim((toy.InHz(),))
     model = GaussianGasModel(snr_one_day=[2.0], edges=[0.0, 0.6])
@@ -201,7 +203,7 @@ def _cases(toy):
         return step(key, lg, world, gas, action, Mode(0, 0.5), Resources(10.0))
 
     return {
-        "weights": (weights, [(b0,), (b1,)], lambda a: a[0].log_prior, uneven),
+        "weights": (weights, [(b0,), (b1,)], lambda a: a[0].log_prior_ratio, uneven),
         "log_weights": (log_weights, [(b0,), (b1,)], lambda a: a[0].log_like, uneven),
         "draw_claim_mass": (
             lambda b, k: draw_claim_mass(b, conditional, star, k),
@@ -222,14 +224,14 @@ def _cases(toy):
             lambda r: sum(uneven(x) for x in jax.tree.leaves(r.stats)),
         ),
         "replay_belief": (
-            lambda r, roles: replay_belief(r, roles, gas, star, b0.pool),
+            lambda r, roles: replay_belief(r, roles, gas, star, b0.pool, **toy.ungated),
             [(full[0], roles), (full[1], roles1)],
             lambda a: a[0].stats[0]["weighted_sum"],
             belief_scalar,
         ),
         "planning_beliefs": (
             lambda frozen, now: planning_beliefs(
-                frozen, now, roles, gas, star, b0.pool, b1.pool, floor, 4
+                frozen, now, roles, gas, star, b0.pool, b1.pool, floor, 4, **toy.ungated
             ),
             [(early[0], full[0]), (early[1], full[1])],
             lambda a: a[1].stats[0]["weighted_sum"],
@@ -262,7 +264,7 @@ def _cases(toy):
         "q": (
             lambda b, k: q(b, claim, star, k),
             [(b0, planets[0]), (b1, planets[1])],
-            lambda a: a[0].log_prior,
+            lambda a: a[0].log_prior_ratio,
             uneven,
         ),
         "chain": (
@@ -304,13 +306,13 @@ def _cases(toy):
         "chain_gain": (
             lambda before, after, k: chain_gain(before, after, plain, star, k, 1),
             [(b0, b1, planets[0]), (b1, b0, planets[1])],
-            lambda a: a[1].log_prior,
+            lambda a: a[1].log_prior_ratio,
             uneven,
         ),
         "diagnose": (
             diag,
             [(b0, planets[0]), (b1, planets[1])],
-            lambda a: a[0].log_prior,
+            lambda a: a[0].log_prior_ratio,
             lambda d: uneven(d.q) + uneven(d.mc_se) + uneven(d.n_eff),
         ),
         "clip_q": (
@@ -350,7 +352,7 @@ def _cases(toy):
         "outcome_prob": (
             outcome_prob,
             [(b0, cells[0]), (b1, cells[1])],
-            lambda a: a[0].log_prior,
+            lambda a: a[0].log_prior_ratio,
             uneven,
         ),
         "update_by_cell": (
@@ -365,7 +367,7 @@ def _cases(toy):
                 (point[0], model, actions[0], planets[0]),
                 (point[1], model, actions[1], planets[1]),
             ],
-            lambda a: a[0].log_prior,
+            lambda a: a[0].log_prior_ratio,
             uneven,
         ),
         "thin": (

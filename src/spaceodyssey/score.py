@@ -130,7 +130,7 @@ def _reading(b, truth, claim, star, planet, truth_planet, outside, alpha, khat_m
 def _chain_gains(before, after, claim, star, planet):
     """``chain_gain`` of the whole claim for every role, shape ``(R, C)``."""
     whole = Claim(claim.conjuncts)
-    roles = range(before.log_prior.shape[0])
+    roles = range(before.log_prior_ratio.shape[0])
     return jnp.stack([chain_gain(before, after, whole, star, planet, r) for r in roles])
 
 
@@ -162,11 +162,13 @@ def _stage_beliefs(study: Study, log: ObservationLog, s: int, end_d: float):
     models, roles = study.design.models, study.roles
     refit, pool = _star(study.refits, s), _star(study.pool, s)
     star = _star(study.stars, s)
+    # Raw beliefs: score reads each role's diagnostics and gates in ``certify``.
+    raw = {"min_n_eff": 0.0, "max_khat": math.inf}
     r = _replay(refit, log, models, star, jnp.asarray(0.0))
-    beliefs = [_replay_belief(r, roles, models, star, pool)]
+    beliefs = [_replay_belief(r, roles, models, star, pool, **raw)]
     for time_d in times[1:]:
         r = _absorb(r, log, models, star, jnp.asarray(time_d))
-        beliefs.append(_replay_belief(r, roles, models, star, pool))
+        beliefs.append(_replay_belief(r, roles, models, star, pool, **raw))
     return times, end, beliefs
 
 

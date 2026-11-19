@@ -284,7 +284,7 @@ def thin(pool: Pool, detect_prob: Float[Array, " Am"]) -> Pool:
     emptied = (kept <= 0)[:, None]
     return Pool(
         pool.marks,
-        pool.log_prior,
+        pool.log_prior_ratio,
         jnp.where(emptied, pool.log_like, pool.log_like + guarded_log(miss)),
         pool.log_mass + guarded_log(kept),
     )

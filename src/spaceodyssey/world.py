@@ -16,9 +16,9 @@ import jax.numpy as jnp
 from jaxtyping import ArrayLike, Int, PRNGKeyArray, PyTree
 
 from spaceodyssey.design import Mode, model_slots
-from spaceodyssey.roles import AbstractRolePrior
 from spaceodyssey.types import (
     AbstractObservationModel,
+    AbstractRolePrior,
     Action,
     Atoms,
     Grant,
@@ -82,8 +82,8 @@ class SealedWorld(eqx.Module):
 
     ``_truth`` is an ``Atoms`` whose leaves carry a leading star axis ``S`` and then one
     draw (``A = 1``) of ``K`` planets; a stack of worlds adds a world axis in front. On
-    construction the single draw is given unit weight (its log weight and its reference
-    density zero, on the truth's chart) and its gas block is checked to be a point
+    construction the single draw is given unit weight (log weight zero; its target, its
+    evidence and its prior are kept) and its gas block is checked to be a point
     state (``x_var = 0``).
     """
 
@@ -97,8 +97,7 @@ class SealedWorld(eqx.Module):
                 has shape ``(..., S, 1, K, G)``.
 
         Raises:
-            ValueError: if the gas block has no star axis or more than one draw, or
-                the truth declares no chart.
+            ValueError: if the gas block has no star axis or more than one draw.
             EquinoxRuntimeError: if a gas of the truth has nonzero variance.
         """
         if truth.x_mean.ndim < 4 or truth.x_mean.shape[-3] != 1:
@@ -110,12 +109,7 @@ class SealedWorld(eqx.Module):
         zero = jnp.zeros_like(cloud.log_weights)
         # Built through the constructor, so the cloud's own checks run on the truth.
         unit = WeightedCloud(
-            cloud.samples,
-            zero,
-            cloud.evidence,
-            zero,
-            chart=cloud.chart,
-            epoch=cloud.epoch,
+            cloud.samples, zero, cloud.log_target, cloud.log_evidence, cloud.prior
         )
         self._truth = Atoms(unit, truth.x_mean, x_var, truth.exists)
 

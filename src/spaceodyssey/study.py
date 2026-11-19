@@ -10,8 +10,8 @@ from jaxtyping import Array, Float, PyTree
 
 from spaceodyssey.claim import Claim
 from spaceodyssey.design import Design
-from spaceodyssey.roles import AbstractRolePrior, Roles
-from spaceodyssey.types import Grant, Pool, Refit, as_float
+from spaceodyssey.roles import Roles
+from spaceodyssey.types import AbstractRolePrior, Grant, Pool, Refit, as_float
 
 
 class Arm(eqx.Module):

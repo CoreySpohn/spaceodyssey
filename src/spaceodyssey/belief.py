@@ -8,6 +8,7 @@ verdict's, each off its own replay (``planning_beliefs``).
 """
 
 import itertools
+import math
 
 import equinox as eqx
 import jax
@@ -18,11 +19,13 @@ from jax.scipy.special import gammainc, ndtr, ndtri
 from jaxtyping import Array, Bool, Float, Int, PyTree
 
 from spaceodyssey._numerics import EXACT, guarded_log, safe_ratio
+from spaceodyssey._standin.diagnostics import kish_ess, pareto_khat
 from spaceodyssey.claim import Claim
-from spaceodyssey.roles import AbstractRolePrior, Roles
+from spaceodyssey.roles import Roles
 from spaceodyssey.types import (
     ACCEPTED,
     AbstractObservationModel,
+    AbstractRolePrior,
     Atoms,
     ObservationLog,
     Pool,
@@ -37,17 +40,19 @@ class Belief(eqx.Module):
     Attributes:
         atoms: the weighted draws; after a replay, their gas block carries the
             applied rows.
-        log_prior: log prior density of each draw under each role, shape ``(R, A)``.
+        log_prior_ratio: log of each role's prior over the refit's prior
+            (``log pi_r - log pi_0``) at each draw, shape ``(R, A)``; a row of NaN for
+            a role the reweighting gate refused (``role_belief``).
         log_like: summed log likelihood of the rows each role has seen, ``(R, A)``.
         pool: the undetected planets.
 
     Raises:
-        ValueError: if ``log_prior``, ``log_like`` and the pool disagree on the number
-            of roles, or the draws on their number.
+        ValueError: if ``log_prior_ratio``, ``log_like`` and the pool disagree on the
+            number of roles, or the draws on their number.
     """
 
     atoms: Atoms
-    log_prior: Float[Array, "R A"] = eqx.field(converter=jnp.asarray)
+    log_prior_ratio: Float[Array, "R A"] = eqx.field(converter=jnp.asarray)
     log_like: Float[Array, "R A"] = eqx.field(converter=jnp.asarray)
     pool: Pool
 
@@ -55,47 +60,34 @@ class Belief(eqx.Module):
         """Check the static shapes: one ``R`` and one ``A`` across the fields."""
         n_draw = self.atoms.cloud.log_weights.shape[-1]
         roles = {
-            self.log_prior.shape[-2],
+            self.log_prior_ratio.shape[-2],
             self.log_like.shape[-2],
             self.pool.log_mass.shape[-1],
         }
-        draws = {self.log_prior.shape[-1], self.log_like.shape[-1], n_draw}
+        draws = {self.log_prior_ratio.shape[-1], self.log_like.shape[-1], n_draw}
         if len(roles) != 1 or len(draws) != 1:
             raise ValueError(
-                f"belief fields disagree on R or A (log_prior {self.log_prior.shape}, "
-                f"log_like {self.log_like.shape}, pool R "
+                "belief fields disagree on R or A (log_prior_ratio "
+                f"{self.log_prior_ratio.shape}, log_like {self.log_like.shape}, pool R "
                 f"{self.pool.log_mass.shape[-1]}, {n_draw} draws)"
             )
 
 
-def _require_ref_density(cloud) -> None:
-    """Refuse a cloud whose reference density is not declared."""
-    if cloud.log_ref_density is None:
-        raise ValueError(
-            "a cloud without a declared log_ref_density (log p0 on its chart) cannot "
-            "be reweighted to a role"
-        )
-
-
-def _role_log_weights(atoms: Atoms, log_prior, log_like) -> Float[Array, "R A"]:
+def _role_log_weights(atoms: Atoms, log_prior_ratio, log_like) -> Float[Array, "R A"]:
     """Unnormalized log weights of every role over the leading axis of ``atoms``.
 
-    A draw with zero refit weight, zero prior or zero likelihood has log weight
-    ``-inf``. The ``jnp.where`` keeps it there even when ``log_ref_density`` is also
-    ``-inf`` (which would otherwise give ``-inf - (-inf) = nan``); the sum is linear,
-    so the untaken branch passes no nan into the gradient.
-
-    Raises:
-        ValueError: if the cloud does not declare ``log_ref_density``.
+    A draw with zero refit weight, zero prior ratio or zero likelihood has log weight
+    ``-inf``. The ``jnp.where`` keeps it there even when another term is ``+inf``; the
+    sum is linear, so the untaken branch passes no nan into the gradient. A NaN row (a
+    refused role) stays NaN.
     """
-    cloud = atoms.cloud
-    _require_ref_density(cloud)
+    log_weights = atoms.cloud.log_weights
     dead = (
-        jnp.isneginf(cloud.log_weights)
-        | jnp.isneginf(log_prior)
+        jnp.isneginf(log_weights)
+        | jnp.isneginf(log_prior_ratio)
         | jnp.isneginf(log_like)
     )
-    total = cloud.log_weights + log_prior - cloud.log_ref_density + log_like
+    total = log_weights + log_prior_ratio + log_like
     return jnp.where(dead, -jnp.inf, total)
 
 
@@ -105,17 +97,35 @@ def role_belief(
     log_like: Float[Array, "R A"],
     star,
     pool: Pool,
+    *,
+    min_n_eff,
+    max_khat,
 ) -> Belief:
     """The belief of a role set over one refit's draws, each role's prior filled in.
 
     The weight of role ``r`` (read with ``log_weights`` of the belief) is
-    ``log w_r = log_weights + log_prior[r] - log_ref_density + log_like[r]``: the refit
-    weight, the role prior, minus the refit target ``p0``, plus the role's likelihood.
+    ``log w_r = log_weights + log pi_r - log pi_0 + log_like[r]``: the refit weight,
+    the ratio of the role's prior ``pi_r`` to the refit's own prior ``pi_0`` (the
+    cloud's ``prior``), both evaluated on the draws, plus the role's likelihood. No old
+    likelihood term is evaluated: the refit's rows are in ``log_weights`` already.
 
-    Preconditions: ``log_weights`` is against ``p0`` times the incoming likelihood, and
-    that likelihood is the same model for every role; every prior and ``p0`` share a
-    chart (checked here); the proposal covers the support of each role's prior times
-    its likelihood. A draw outside a prior's support has zero weight under that role.
+    The reweighting is gated per role, the thresholds required: a role whose reweighted
+    cloud ``log_weights + log pi_r - log pi_0`` has a Kish size below ``min_n_eff`` or
+    an upper-tail Pareto shape above ``max_khat`` (a failed fit is NaN and fails) gets
+    a row of NaN, and so does everything read from it; the other roles are unchanged,
+    and under ``vmap`` each slice is gated on its own. A role with zero total weight
+    fails too. The shape is taken on the reweighted cloud, not on the ratios alone: the
+    draws follow the refit's proposal, not ``pi_0``, so the tail that sets the error is
+    that of the new weights (for draws of uniform weight the two agree). The gate
+    covers the prior swap only; the rows each role has seen are not part of it.
+    ``min_n_eff=0, max_khat=inf`` keeps every row (the Pareto fit is then skipped), for
+    a caller that reads the diagnostics itself.
+
+    Preconditions: ``log_weights`` is against ``pi_0`` times the incoming likelihood,
+    and that likelihood is the same model for every role; every prior and ``pi_0``
+    share a chart (checked here); the proposal covers the support of each role's prior
+    times its likelihood. A draw outside a prior's support, or outside ``pi_0``'s, has
+    zero weight under that role.
 
     Args:
         atoms: the weighted draws of one refit.
@@ -123,47 +133,78 @@ def role_belief(
         log_like: summed log likelihood of the rows each role has seen, ``(R, A)``.
         star: a pytree of scalar leaves describing the star.
         pool: the undetected planets, which carry their own per-role mark weights.
+        min_n_eff: the least Kish size of a role's weights.
+        max_khat: the largest Pareto shape of a role's reweighted cloud.
 
     Returns:
-        The belief with ``log_prior`` of shape ``(R, A)``, forecast in row 0.
+        The belief with ``log_prior_ratio`` of shape ``(R, A)``, forecast in row 0.
 
     Raises:
-        ValueError: if the cloud declares no chart or no ``log_ref_density``, or a
-            prior's ``chart`` differs from the cloud's.
+        ValueError: if a role prior's ``chart`` differs from that of the refit's prior.
     """
-    return Belief(atoms, _role_log_prior(atoms, roles, star), log_like, pool)
+    log_prior_ratio = _role_log_prior_ratio(atoms, roles, star, min_n_eff, max_khat)
+    return Belief(atoms, log_prior_ratio, log_like, pool)
 
 
-def _prior_rows(
-    atoms: Atoms, prior: AbstractRolePrior, star, name: str, stacked: bool
+def _gate(log_weights, ratio, min_n_eff, max_khat) -> Float[Array, "R A"]:
+    """``ratio``, with NaN rows for the roles the reweighting gate refuses.
+
+    Both statistics are taken on the reweighted cloud ``log_weights + ratio``, the
+    draws of zero weight left out. A Python ``inf`` for ``max_khat`` is static, so the
+    Pareto fit is skipped.
+    """
+    dead = jnp.isneginf(log_weights) | jnp.isneginf(ratio)
+    total = jnp.where(dead, -jnp.inf, log_weights + ratio)
+    ok = kish_ess(total) >= min_n_eff
+    if not (isinstance(max_khat, float) and max_khat == math.inf):
+        ok = ok & (jax.vmap(pareto_khat)(total) <= max_khat)
+    return jnp.where(ok[:, None], ratio, jnp.nan)
+
+
+def _prior_ratio_rows(
+    atoms: Atoms,
+    prior: AbstractRolePrior,
+    star,
+    name: str,
+    stacked: bool,
+    min_n_eff,
+    max_khat,
 ) -> Float[Array, "R A"]:
-    """The log prior of each draw under one prior, a row per member when ``stacked``.
+    """Gated ``log pi_r - log pi_0`` of each draw, a row per member when stacked.
 
-    Checks the chart against the cloud's.
+    Checks the chart against that of the refit's prior. A draw outside either prior's
+    support gets ``-inf``.
     """
-    if atoms.cloud.chart is None:
+    base = atoms.cloud.prior
+    if prior.chart != base.chart:
         raise ValueError(
-            "a cloud without a declared chart cannot be reweighted to a role"
+            f"the {name} prior is on chart {prior.chart!r} but the refit's prior is "
+            f"on {base.chart!r}"
         )
-    _require_ref_density(atoms.cloud)
-    if prior.chart != atoms.cloud.chart:
-        raise ValueError(
-            f"the {name} prior is on chart {prior.chart!r} but the cloud is "
-            f"on {atoms.cloud.chart!r}"
-        )
-    if not stacked:
-        return prior.log_prob(atoms, star)[None]
-    return eqx.filter_vmap(
-        lambda member: member.log_prob(atoms, star), in_axes=eqx.if_array(0)
-    )(prior)
+    if stacked:
+        log_p = eqx.filter_vmap(
+            lambda member: member.log_prob(atoms, star), in_axes=eqx.if_array(0)
+        )(prior)
+    else:
+        log_p = prior.log_prob(atoms, star)[None]
+    log_p0 = base.log_prob(atoms, star)
+    outside = jnp.isneginf(log_p) | jnp.isneginf(log_p0)
+    ratio = jnp.where(outside, -jnp.inf, log_p - log_p0)
+    return _gate(atoms.cloud.log_weights, ratio, min_n_eff, max_khat)
 
 
-def _role_log_prior(atoms: Atoms, roles: Roles, star) -> Float[Array, "R A"]:
-    """Every role's log prior of each draw, forecast in row 0; checks the charts."""
+def _role_log_prior_ratio(
+    atoms: Atoms, roles: Roles, star, min_n_eff, max_khat
+) -> Float[Array, "R A"]:
+    """Every role's gated prior ratio of each draw, forecast in row 0."""
     return jnp.concatenate(
         [
-            _prior_rows(atoms, roles.forecast, star, "forecast", stacked=False),
-            _prior_rows(atoms, roles.verdict, star, "verdict", stacked=True),
+            _prior_ratio_rows(
+                atoms, roles.forecast, star, "forecast", False, min_n_eff, max_khat
+            ),
+            _prior_ratio_rows(
+                atoms, roles.verdict, star, "verdict", True, min_n_eff, max_khat
+            ),
         ],
         axis=0,
     )
@@ -172,21 +213,17 @@ def _role_log_prior(atoms: Atoms, roles: Roles, star) -> Float[Array, "R A"]:
 def log_weights(b: Belief) -> Float[Array, "R A"]:
     """Unnormalized log role weights over the draws.
 
-    The log weight of role ``r`` is
-    ``log_weights + log_prior[r] - log_ref_density + log_like[r]``, the first and
-    third terms the cloud's. A draw with zero refit weight, zero prior or zero
-    likelihood has log weight ``-inf``.
+    The log weight of role ``r`` is ``log_weights + log_prior_ratio[r] + log_like[r]``,
+    the first term the cloud's. A draw with zero refit weight, zero prior ratio or zero
+    likelihood has log weight ``-inf``; a refused role's row is NaN.
 
     Args:
         b: the belief.
 
     Returns:
         Log weights of shape ``(R, A)``.
-
-    Raises:
-        ValueError: if the cloud does not declare ``log_ref_density``.
     """
-    return _role_log_weights(b.atoms, b.log_prior, b.log_like)
+    return _role_log_weights(b.atoms, b.log_prior_ratio, b.log_like)
 
 
 def weights(b: Belief) -> Float[Array, "R A"]:
@@ -209,8 +246,7 @@ def mark_weights(pool: Pool) -> Float[Array, "R Am"]:
     """Normalized weights of the pool's marks, each role with its own.
 
     A mark's log weight under role ``r`` is formed like a draw's, ``log_weights +
-    log_prior[r] - log_ref_density + log_like[r]``, and each row is normalized over the
-    marks.
+    log_prior_ratio[r] + log_like[r]``, and each row is normalized over the marks.
 
     Args:
         pool: the undetected planets.
@@ -218,7 +254,7 @@ def mark_weights(pool: Pool) -> Float[Array, "R Am"]:
     Returns:
         Weights of shape ``(R, Am)``.
     """
-    log_w = _role_log_weights(pool.marks, pool.log_prior, pool.log_like)
+    log_w = _role_log_weights(pool.marks, pool.log_prior_ratio, pool.log_like)
     return jax.nn.softmax(log_w, axis=-1)
 
 
@@ -628,6 +664,9 @@ def replay_belief(
     models: tuple[AbstractObservationModel, ...],
     star,
     pool: Pool,
+    *,
+    min_n_eff,
+    max_khat,
 ) -> Belief:
     """The belief a replay holds under a role set.
 
@@ -637,14 +676,14 @@ def replay_belief(
     ``stats`` stated in ``AbstractObservationModel``. The likelihood is the same for
     every role (observation models are equal across roles), so ``log_like`` is one row
     broadcast to ``(R, A)``. The role weights are those of ``role_belief``, with
-    each role's prior taken on the refit's draws.
+    each role's prior ratio taken on the refit's draws and gated there.
 
     The belief's draws are ``Atoms``, not a ``Refit``: their gas block carries the
     applied rows, so they cannot be replayed a second time.
 
-    Open point: the role weight ``log_prior - log_ref_density`` is a ratio of point
-    densities. On a draw whose gas block is a distribution (``x_var > 0``) it is exact
-    only when every role's gas prior equals the cloud's; a role whose gas prior differs
+    Open point: the role weight ``log pi_r - log pi_0`` is a ratio of point densities.
+    On a draw whose gas block is a distribution (``x_var > 0``) it is exact only when
+    every role's gas prior equals the refit's; a role whose gas prior differs
     needs the ratio of the two priors integrated over the block, which no role prior
     expresses yet.
 
@@ -654,17 +693,18 @@ def replay_belief(
         models: the run's model table, static.
         star: a pytree of scalar leaves describing the replay's star.
         pool: the undetected planets, carried unchanged.
+        min_n_eff: the least Kish size of a role's weights (``role_belief``).
+        max_khat: the largest Pareto shape of a role's reweighted cloud.
 
     Returns:
         The belief, with the draws updated by every applied row.
 
     Raises:
-        ValueError: if the cloud declares no chart or no ``log_ref_density``, or a
-            role prior's chart differs from the cloud's.
+        ValueError: if a role prior's chart differs from that of the refit's prior.
     """
-    log_prior = _role_log_prior(r.refit.atoms, roles, star)
+    ratio = _role_log_prior_ratio(r.refit.atoms, roles, star, min_n_eff, max_khat)
     atoms, log_like = _finalized(r, models, star)
-    return Belief(atoms, log_prior, jnp.broadcast_to(log_like, log_prior.shape), pool)
+    return Belief(atoms, ratio, jnp.broadcast_to(log_like, ratio.shape), pool)
 
 
 def _finalized(
@@ -771,22 +811,19 @@ def quadrature_draws(b: Belief, floor: Float[Array, " G"], n: int = 16) -> Belie
 
     cloud = atoms.cloud
     cloud = eqx.tree_at(
-        lambda c: (c.samples, c.log_weights),
+        lambda c: (c.samples, c.log_weights, c.log_target),
         cloud,
         (
             jax.tree.map(repeat, cloud.samples),
             (cloud.log_weights[:, None] + sub_log_w).reshape(-1),
+            repeat(cloud.log_target),
         ),
     )
-    if cloud.log_ref_density is not None:
-        cloud = eqx.tree_at(
-            lambda c: c.log_ref_density, cloud, repeat(cloud.log_ref_density)
-        )
     x = x.reshape(n_draw * n_sub, n_planet, n_gas)
     split = Atoms(cloud, x, jnp.zeros_like(x), repeat(atoms.exists))
     return Belief(
         split,
-        jnp.repeat(b.log_prior, n_sub, axis=-1),
+        jnp.repeat(b.log_prior_ratio, n_sub, axis=-1),
         jnp.repeat(b.log_like, n_sub, axis=-1),
         b.pool,
     )
@@ -805,14 +842,16 @@ def select_roles(b: Belief, rows: slice) -> Belief:
         The belief of those roles, on the same draws.
     """
     pool = _pool_rows(b.pool, rows)
-    return Belief(b.atoms, b.log_prior[..., rows, :], b.log_like[..., rows, :], pool)
+    return Belief(
+        b.atoms, b.log_prior_ratio[..., rows, :], b.log_like[..., rows, :], pool
+    )
 
 
 def _pool_rows(pool: Pool, rows: slice) -> Pool:
     """The pool of some roles: its rows ``rows``, leading axes kept."""
     return Pool(
         pool.marks,
-        pool.log_prior[..., rows, :],
+        pool.log_prior_ratio[..., rows, :],
         pool.log_like[..., rows, :],
         pool.log_mass[..., rows],
     )
@@ -828,6 +867,9 @@ def planning_beliefs(
     verdict_pool: Pool,
     floor: Float[Array, " G"],
     n: int = 16,
+    *,
+    min_n_eff,
+    max_khat,
 ) -> tuple[Belief, Belief]:
     """The two beliefs a planner reads: the forecast's and the verdict's.
 
@@ -855,17 +897,24 @@ def planning_beliefs(
         verdict_pool: the undetected planets at the verdict's replay time, every role.
         floor: the abundance at which the claim steps, per gas (``quadrature_draws``).
         n: quadrature nodes per gas factor, a static planning setting.
+        min_n_eff: the least Kish size of a role's weights (``role_belief``).
+        max_khat: the largest Pareto shape of a role's reweighted cloud.
 
     Returns:
         The forecast's belief (``R = 1``) and the verdict's (``R`` the members), on
-        point draws.
+        point draws; a role the gate refused has NaN rows.
+
+    Raises:
+        ValueError: if a role prior's chart differs from that of the refit's prior.
     """
 
     def read(r, prior, name, stacked, pool):
-        log_prior = _prior_rows(r.refit.atoms, prior, star, name, stacked)
+        ratio = _prior_ratio_rows(
+            r.refit.atoms, prior, star, name, stacked, min_n_eff, max_khat
+        )
         atoms, log_like = _finalized(r, models, star)
-        log_like = jnp.broadcast_to(log_like, log_prior.shape)
-        return quadrature_draws(Belief(atoms, log_prior, log_like, pool), floor, n)
+        log_like = jnp.broadcast_to(log_like, ratio.shape)
+        return quadrature_draws(Belief(atoms, ratio, log_like, pool), floor, n)
 
     return (
         read(

@@ -12,7 +12,7 @@ from collections.abc import Callable
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
+from jaxtyping import Array, Bool, Float, Float64, Int, PRNGKeyArray, PyTree
 
 
 def _asarrays(tree):
@@ -25,57 +25,102 @@ def as_float(x) -> Float[Array, "..."]:
     return jnp.asarray(x, dtype=float)
 
 
-def _optional_array(x):
-    """``x`` as a JAX array, or ``None`` when not declared."""
-    return None if x is None else jnp.asarray(x)
+def _as_float64(x) -> Float64[Array, "..."]:
+    """``x`` as a float64 array (needs ``jax_enable_x64``)."""
+    return jnp.asarray(x, dtype=jnp.float64)
+
+
+class AbstractRolePrior(eqx.Module):
+    """A role prior: a joint density over whole draws on a declared chart.
+
+    The density is taken in the coordinates named by ``chart``. Two priors whose ratio
+    is formed agree on a chart, or the change of variables (the log Jacobian) is
+    missing from one side and the ratio is tilted. The density covers a whole draw
+    (its planets, their states and gas blocks, and which slots exist) and need not
+    factor over them, which a law over one quantity does not express.
+
+    Attributes:
+        chart: the coordinates in which the density is taken, a static label.
+    """
+
+    chart: str = eqx.field(static=True)
+
+    @abc.abstractmethod
+    def log_prob(self, atoms: "Atoms", star) -> Float[Array, " A"]:
+        """Log prior density of each draw on ``chart``.
+
+        A draw outside the prior's support returns ``-inf`` (through ``jnp.where``, so
+        the gradient stays finite), never ``log(0)``.
+
+        Args:
+            atoms: the weighted draws.
+            star: a pytree of scalar leaves describing the star.
+
+        Returns:
+            Log densities of shape ``(A,)``.
+        """
+
+    @abc.abstractmethod
+    def sample(self, key: PRNGKeyArray, star) -> "Atoms":
+        """Draw one point state of a star from the prior.
+
+        Args:
+            key: the key of the draw.
+            star: a pytree of scalar leaves describing the star.
+
+        Returns:
+            Atoms holding one draw (``A = 1``) with a point gas block (``x_var = 0``),
+            on this prior's ``chart``.
+        """
 
 
 class WeightedCloud(eqx.Module):
-    """Weighted draws from one refit; a stand-in with a sample posterior's fields.
+    """Weighted draws from one refit; a stand-in with a posterior's fields.
 
     ``samples`` is a named pytree whose leaves share the leading draw axis ``A``, every
     leaf of shape ``(A, *shape)``.
 
     Weight contract: ``log_weights`` is the log of target over proposal, where the
-    target is ``p0`` times the rows the refit represents (``Refit.row_mask``). It is
-    not a log ratio against a proposal that equals ``p0``: that reading would count
-    ``-log p0`` twice when the role weights are formed. One cloud has one row set, so
-    one mask serves all its draws; a block normalization would need one per draw. The
-    cloud comes from one refit.
+    target is the refit's prior ``prior`` times the rows the refit represents
+    (``Refit.row_mask``). One cloud has one row set, so one mask serves all its draws.
+    The cloud comes from one refit.
 
-    ``log_ref_density`` is ``log p0`` of each draw, a density on the coordinates named
-    by ``chart``. Reweighting the draws to a role prior on the same chart needs both;
-    a cloud that declares neither can be held but not reweighted.
+    ``prior`` is that refit's prior ``pi_0``, a role-prior record; it stands where a
+    posterior's fit carries its priors. Reweighting the draws to a role prior ``pi_r``
+    multiplies the weights by ``pi_r / pi_0``, both evaluated on the draws, so the two
+    priors share a chart. ``log_target`` is the log density of the refit's target at
+    each draw, prior times likelihood, normalized, on the coordinates of the draws; no
+    weight is formed from it.
 
     Attributes:
         samples: the state pytree, every leaf of shape ``(A, *shape)``.
         log_weights: log of target over proposal, shape ``(A,)``.
-        evidence: log marginal likelihood ``log Z`` of the refit, a scalar; NaN
+        log_target: log of the refit's normalized target at each draw, float64,
+            shape ``(A,)``.
+        log_evidence: log marginal likelihood ``log Z`` of the refit, a scalar; NaN
             where the refit does not estimate it (unknown, not zero).
-        log_ref_density: log of ``p0`` on ``chart``, shape ``(A,)``, or ``None`` when
-            not declared.
-        chart: the coordinates the leaves of ``samples`` are in, a static label, or
-            ``None`` when not declared.
-        epoch: the zero of every time in the draws, static, or ``None`` when not
-            declared.
+        prior: the refit's prior ``pi_0``.
 
     Raises:
-        ValueError: if ``log_ref_density`` is declared without a ``chart``.
+        ValueError: if ``log_target`` is not float64 (``jax_enable_x64`` is off) or
+            its shape differs from that of ``log_weights``.
     """
 
     samples: PyTree = eqx.field(converter=_asarrays)
     log_weights: Float[Array, " A"] = eqx.field(converter=jnp.asarray)
-    evidence: Float[Array, ""] = eqx.field(converter=as_float)
-    log_ref_density: Float[Array, " A"] | None = eqx.field(
-        converter=_optional_array, default=None
-    )
-    chart: str | None = eqx.field(static=True, default=None, kw_only=True)
-    epoch: object | None = eqx.field(static=True, default=None, kw_only=True)
+    log_target: Float64[Array, " A"] = eqx.field(converter=_as_float64)
+    log_evidence: Float[Array, ""] = eqx.field(converter=as_float)
+    prior: AbstractRolePrior
 
     def __check_init__(self):
-        """Check that a declared reference density names its chart."""
-        if self.log_ref_density is not None and self.chart is None:
-            raise ValueError("a cloud that declares log_ref_density declares its chart")
+        """Check that ``log_target`` is float64 and has one entry per draw."""
+        if self.log_target.dtype != jnp.float64:
+            raise ValueError("log_target is float64: enable jax_enable_x64")
+        if self.log_target.shape != self.log_weights.shape:
+            raise ValueError(
+                f"log_target {self.log_target.shape} and log_weights "
+                f"{self.log_weights.shape} disagree on the draws"
+            )
 
 
 class Atoms[StateT](eqx.Module):
@@ -142,8 +187,8 @@ class Pool(eqx.Module):
     Each mark is one planet (``K = 1`` in ``marks``); the marks carry the conditional
     distribution of an undetected planet and the pool carries how many there are in
     expectation. A mark's weight under role ``r`` is formed like a draw's,
-    ``log_weights + log_prior[r] - log_ref_density + log_like[r]``, normalized over the
-    marks.
+    ``log_weights + log_prior_ratio[r] + log_like[r]``, normalized over the marks, with
+    ``log_prior_ratio`` the role's prior over that of the marks' cloud.
 
     A null observation thins the pool: it lowers ``log_mass`` and adds the log
     probability of not being detected to ``log_like``. The pool at time zero (after
@@ -153,7 +198,8 @@ class Pool(eqx.Module):
 
     Attributes:
         marks: the marks, leading axis ``Am``.
-        log_prior: log prior of each mark under each role, shape ``(R, Am)``.
+        log_prior_ratio: log of each role's prior over the marks' cloud prior, per
+            mark, shape ``(R, Am)``.
         log_like: log likelihood of each mark under each role, shape ``(R, Am)``.
         log_mass: log expected number of planets, per role, shape ``(R,)``.
 
@@ -163,7 +209,7 @@ class Pool(eqx.Module):
     """
 
     marks: Atoms
-    log_prior: Float[Array, "R Am"] = eqx.field(converter=jnp.asarray)
+    log_prior_ratio: Float[Array, "R Am"] = eqx.field(converter=jnp.asarray)
     log_like: Float[Array, "R Am"] = eqx.field(converter=jnp.asarray)
     log_mass: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
 
@@ -174,11 +220,12 @@ class Pool(eqx.Module):
                 f"a mark is one planet (K = 1), not K = {self.marks.x_mean.shape[-2]}"
             )
         n_mark = self.marks.cloud.log_weights.shape[-1]
-        per_mark = (self.log_prior, self.log_like)
+        per_mark = (self.log_prior_ratio, self.log_like)
         roles = {x.shape[-2] for x in per_mark} | {self.log_mass.shape[-1]}
         if len(roles) != 1 or {x.shape[-1] for x in per_mark} != {n_mark}:
             raise ValueError(
-                f"pool fields disagree on R or Am (log_prior {self.log_prior.shape}, "
+                "pool fields disagree on R or Am (log_prior_ratio "
+                f"{self.log_prior_ratio.shape}, "
                 f"log_like {self.log_like.shape}, log_mass {self.log_mass.shape}, "
                 f"{n_mark} marks)"
             )

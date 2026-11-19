@@ -28,9 +28,9 @@ from spaceodyssey.belief import Belief, select_roles  # noqa: E402
 from spaceodyssey.claim import AbstractConjunct  # noqa: E402
 from spaceodyssey.log import execute  # noqa: E402
 from spaceodyssey.policy import AbstractPolicy  # noqa: E402
-from spaceodyssey.roles import AbstractRolePrior  # noqa: E402
 from spaceodyssey.types import (  # noqa: E402
     AbstractObservationModel,
+    AbstractRolePrior,
     Atoms,
     Pool,
     WeightedCloud,
@@ -99,6 +99,18 @@ class _Jit:
     completeness = staticmethod(eqx.filter_jit(value.completeness))
 
 
+class _Flat(AbstractRolePrior):
+    """A constant density on `chart`: the refit prior of the toy clouds, so a role's
+    prior ratio is its own log prior.
+    """
+
+    def log_prob(self, atoms, star):
+        return jnp.zeros(atoms.x_mean.shape[0])
+
+    def sample(self, key, star):
+        raise NotImplementedError("a flat prior has no sampler")
+
+
 # Toy state for the layer tests: per-draw, per-planet `hz` and `size` bits plus a gas
 # block. Builders, conjuncts, the toy prior and search, and the assertion and stacking
 # helpers are exposed through the `toy` fixture, not imported.
@@ -109,6 +121,9 @@ class _Toy:
 
     star = ()  # the toy's star is an empty pytree, never None
     jit = _Jit  # the shared compiled kernels
+    Flat = _Flat
+    # Reweighting thresholds that refuse nothing: the tests read the raw beliefs.
+    ungated: ClassVar[dict] = {"min_n_eff": 0.0, "max_khat": jnp.inf}
 
     class InHz(AbstractConjunct):
         """The `hz` bit of the toy state."""
@@ -123,13 +138,14 @@ class _Toy:
             return atoms.cloud.samples["size"]
 
     @staticmethod
-    def atoms(hz, size, w, mean=0.0, var=1.0, n_gas=2, exists=True):
+    def atoms(hz, size, w, mean=0.0, var=1.0, n_gas=2, exists=True, prior=None):
         """Atoms over draws; `hz` and `size` have shape (A, K), `w` is the weight over
         draws.
 
         `mean` and `var` are the gas block, a scalar, a (G,) vector or an (A, G) array
         shared by the K planets of a draw. `exists` broadcasts to (A, K); every slot
-        exists by default.
+        exists by default. The cloud's prior is `prior`, flat on "toy" by default, and
+        its target is a placeholder zero.
         """
         hz, size = jnp.asarray(hz, float), jnp.asarray(size, float)
         n_draw, n_planet = hz.shape
@@ -140,9 +156,9 @@ class _Toy:
         cloud = WeightedCloud(
             {"hz": hz, "size": size},
             jnp.log(jnp.asarray(w, float)),
-            jnp.nan,
             jnp.zeros(n_draw),
-            chart="toy",
+            jnp.nan,
+            _Flat("toy") if prior is None else prior,
         )
         return Atoms(
             cloud,
@@ -164,23 +180,21 @@ class _Toy:
     ):
         """A pool whose marks have the given claim bit and per-role weights (R, Am).
 
-        `mark_weights` is the marks' prior and `like` their likelihood, both linear and
-        broadcast to (R, Am); `cloud` and `ref` are the marks' cloud weight and
-        reference density, linear, (Am,).
+        `mark_weights` is the marks' role prior and `like` their likelihood, both linear
+        and broadcast to (R, Am); `cloud` and `ref` are the marks' cloud weight and the
+        density of the cloud's prior, linear, (Am,), so the role prior ratio is
+        `mark_weights / ref`.
         """
         mark_hz = jnp.asarray(mark_hz, float)[:, None]
         n_mark = mark_hz.shape[0]
         cloud = jnp.broadcast_to(jnp.asarray(cloud, float), (n_mark,))
         marks = cls.atoms(mark_hz, jnp.zeros_like(mark_hz), cloud)
-        marks = eqx.tree_at(
-            lambda a: a.cloud.log_ref_density,
-            marks,
-            jnp.broadcast_to(jnp.log(jnp.asarray(ref, float)), (n_mark,)),
-        )
         log_mass = jnp.broadcast_to(jnp.asarray(log_mass, float), (n_roles,))
-        log_prior = jnp.log(jnp.asarray(mark_weights, float))
-        log_like = jnp.broadcast_to(jnp.log(jnp.asarray(like, float)), log_prior.shape)
-        return Pool(marks, log_prior, log_like, log_mass)
+        log_ratio = jnp.log(jnp.asarray(mark_weights, float)) - jnp.log(
+            jnp.broadcast_to(jnp.asarray(ref, float), (n_mark,))
+        )
+        log_like = jnp.broadcast_to(jnp.log(jnp.asarray(like, float)), log_ratio.shape)
+        return Pool(marks, log_ratio, log_like, log_mass)
 
     @classmethod
     def empty_pool(cls, n_roles=1, n_gas=2):
@@ -220,7 +234,8 @@ class _Toy:
 
         def sample(self, key, star):
             x = self.mean + self.sd * jax.random.normal(key, (1, 1, self.n_gas))
-            return _Toy.atoms([[1.0]], [[1.0]], [1.0], x[0], 0.0, self.n_gas)
+            block = (x[0], 0.0, self.n_gas)
+            return _Toy.atoms([[1.0]], [[1.0]], [1.0], *block, prior=self)
 
     class Search(AbstractObservationModel):
         """A test search of planet 0: per day of exposure it detects the planet with

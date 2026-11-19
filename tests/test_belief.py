@@ -32,23 +32,21 @@ def _random_belief(toy):
 
 
 def test_weights_normalize_per_role(toy):
-    """Role weights are normalized exp(log_weights + log_prior - log_ref + log_like).
+    """Role weights are normalized exp(log_weights + log_prior_ratio + log_like).
 
-    Cloud weight (1, 3), reference density (1, 2). Role 0: prior (1, 1), likelihood (1,
-    1) gives (1/1, 3/2) = (1, 1.5), normalized (0.4, 0.6). Role 1: prior (3, 1),
-    likelihood (1, 2) gives (3, 3 * 2 / 2) = (3, 3), normalized (0.5, 0.5).
+    Cloud weight (1, 3), refit prior density (1, 2). Role 0: prior (1, 1), so ratio
+    (1, 1/2), likelihood (1, 1) gives (1, 3/2), normalized (0.4, 0.6). Role 1: prior
+    (3, 1), ratio (3, 1/2), likelihood (1, 2) gives (3, 3 * 2 / 2) = (3, 3), normalized
+    (0.5, 0.5).
 
-    Fails if a term enters with the wrong sign (the reference density divides), is
-    dropped, or a row is not normalized.
+    Fails if a term enters with the wrong sign, is dropped, or a row is not
+    normalized.
     """
     atoms = toy.atoms([[1.0], [0.0]], [[1.0], [1.0]], [1.0, 3.0])
-    atoms = eqx.tree_at(
-        lambda a: a.cloud.log_ref_density, atoms, jnp.log(jnp.array([1.0, 2.0]))
-    )
     b = toy.belief(atoms, n_roles=2)
-    log_prior = jnp.log(jnp.array([[1.0, 1.0], [3.0, 1.0]]))
+    log_ratio = jnp.log(jnp.array([[1.0, 1.0], [3.0, 1.0]]) / jnp.array([1.0, 2.0]))
     log_like = jnp.log(jnp.array([[1.0, 1.0], [1.0, 2.0]]))
-    b = Belief(atoms, log_prior, log_like, b.pool)
+    b = Belief(atoms, log_ratio, log_like, b.pool)
     assert_allclose(toy.jit.weights(b), [[0.4, 0.6], [0.5, 0.5]], rtol=1e-12)
 
 
@@ -263,12 +261,12 @@ def test_pool_and_belief_reject_mismatched_shapes(toy):
     silently) or a role-count mismatch surfaces only later, inside a vmap.
     """
     pool = toy.pool([1.0, 0.0], [[0.5, 0.5]], 0.0)
-    fields = [pool.log_prior, pool.log_like, pool.log_mass]
+    fields = [pool.log_prior_ratio, pool.log_like, pool.log_mass]
     two_planets = toy.atoms([[1.0, 1.0]] * 2, [[0.0, 0.0]] * 2, [1.0, 1.0])
     with pytest.raises(ValueError, match="K = 1"):
         Pool(two_planets, *fields)
     with pytest.raises(ValueError, match="disagree"):
-        Pool(pool.marks, pool.log_prior, jnp.zeros((2, 2)), pool.log_mass)
+        Pool(pool.marks, pool.log_prior_ratio, jnp.zeros((2, 2)), pool.log_mass)
     atoms = toy.atoms([[1.0]], [[1.0]], [1.0])
     with pytest.raises(ValueError, match="disagree"):
         Belief(atoms, jnp.zeros((2, 1)), jnp.zeros((2, 1)), pool)

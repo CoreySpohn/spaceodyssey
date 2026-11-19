@@ -15,9 +15,10 @@ from jax.test_util import check_grads
 from numpy.testing import assert_allclose
 
 from spaceodyssey._standin.diagnostics import mc_se
+from spaceodyssey.belief import role_belief
 from spaceodyssey.claim import AbstractConjunct, Claim
-from spaceodyssey.roles import AbstractRolePrior, Roles
-from spaceodyssey.types import Atoms, WeightedCloud
+from spaceodyssey.roles import Roles
+from spaceodyssey.types import AbstractRolePrior, Atoms, WeightedCloud
 
 STAR = ()
 PLANET = jnp.asarray(0)
@@ -57,7 +58,7 @@ class Gaussian(AbstractRolePrior):
     def sample(self, key, star):
         top = (self.upper - self.mean) / self.sd
         x = self.mean + self.sd * jax.random.truncated_normal(key, -jnp.inf, top, (1,))
-        return _atoms(x, jnp.zeros(1), jnp.zeros(1), self.chart)
+        return _atoms(x, jnp.zeros(1), self)
 
 
 class LookAlikeRatio(AbstractRolePrior):
@@ -77,24 +78,24 @@ class LookAlikeRatio(AbstractRolePrior):
         raise NotImplementedError("a likelihood-ratio member has no sampler")
 
 
-def _atoms(x, log_weights, log_ref, chart):
-    """Atoms of a 1-D cloud: one planet per draw, an empty gas block."""
+def _atoms(x, log_weights, prior):
+    """Atoms of a 1-D cloud: one planet per draw, an empty gas block, the refit's
+    prior `prior` (its target a placeholder zero).
+    """
     n = x.shape[0]
-    cloud = WeightedCloud({"x": x[:, None]}, log_weights, jnp.nan, log_ref, chart=chart)
+    cloud = WeightedCloud({"x": x[:, None]}, log_weights, jnp.zeros(n), jnp.nan, prior)
     empty = jnp.zeros((n, 1, 0))
     return Atoms(cloud, empty, empty, jnp.ones((n, 1), bool))
 
 
-def _cloud(key, n, chart="x"):
-    """Draws from g = N(0, 1.5^2), weighted to p0 = N(0, 1) on `chart`.
+def _cloud(key, n, chart="x", proposal_sd=PROPOSAL_SD):
+    """Draws from g = N(0, proposal_sd^2), weighted to p0 = N(0, 1) on `chart`.
 
-    On "y" the reference density carries the log Jacobian -x.
+    On "y" the refit's prior carries the log Jacobian -x.
     """
-    x = PROPOSAL_SD * jax.random.normal(key, (n,))
-    log_p0 = norm.logpdf(x)
-    log_weights = log_p0 - norm.logpdf(x, 0.0, PROPOSAL_SD)
-    log_ref = log_p0 - x if chart == "y" else log_p0
-    return _atoms(x, log_weights, log_ref, chart)
+    x = proposal_sd * jax.random.normal(key, (n,))
+    log_weights = norm.logpdf(x) - norm.logpdf(x, 0.0, proposal_sd)
+    return _atoms(x, log_weights, Gaussian(chart, 0.0))
 
 
 def _roles(chart="x", b_mean=0.5, upper=jnp.inf, jacobian=True):
@@ -107,7 +108,12 @@ def _roles(chart="x", b_mean=0.5, upper=jnp.inf, jacobian=True):
 def _belief(toy, atoms, roles):
     n_draws = atoms.cloud.log_weights.shape[0]
     return toy.jit.role_belief(
-        atoms, roles, jnp.zeros((2, n_draws)), STAR, toy.empty_pool(2, n_gas=0)
+        atoms,
+        roles,
+        jnp.zeros((2, n_draws)),
+        STAR,
+        toy.empty_pool(2, n_gas=0),
+        **toy.ungated,
     )
 
 
@@ -128,8 +134,8 @@ def test_reweighting_matches_the_truth(clouds, toy):
     cannot be dropped silently. 20,000 draws: se is about 0.004.
 
     Fails if the refit weight `log_weights` is dropped or enters with the wrong sign,
-    or if `log_ref_density` (log p0) enters with the wrong sign: A and p0 are not
-    constant on the support, so each error moves both roles' estimates.
+    or if the refit's prior p0 enters with the wrong sign: A and p0 are not constant on
+    the support, so each error moves both roles' estimates.
     """
     b = _belief(toy, clouds["x"], _roles())
     d = toy.jit.diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(2))
@@ -144,15 +150,16 @@ def test_reweighting_matches_the_truth(clouds, toy):
 
 
 def test_two_charts_and_a_one_sided_jacobian(clouds, toy):
-    """On y = exp(x) the reference density and the prior both carry -x, so the weights
-    and q are those of the x chart. Dropping the Jacobian from the prior only tilts
-    B = N(0.5, 1) by exp(x) to N(1.5, 1): the estimate becomes 1 - Phi(-0.5) = 0.6915,
-    far from the truth 0.3085. A prior on another chart than the cloud's raises, and so
-    does a cloud that declares no chart or no reference density.
+    """On y = exp(x) the refit's prior and the role prior both carry -x, so the
+    weights and q are those of the x chart. Dropping the Jacobian from the role prior
+    only tilts B = N(0.5, 1) by exp(x) to N(1.5, 1): the estimate becomes
+    1 - Phi(-0.5) = 0.6915, far from the truth 0.3085. A role prior on another chart
+    than the refit's prior raises, and a cloud whose target has a value per draw of
+    another count is refused.
 
-    Fails if the reference density is not subtracted (the charts then disagree), if
-    the test could not see a one-sided Jacobian, if a chart mismatch is accepted, or
-    if an undeclared chart or reference density is read as a declared one.
+    Fails if the refit's prior is not divided out (the charts then disagree), if the
+    test could not see a one-sided Jacobian, if a chart mismatch is accepted, or if a
+    target of the wrong shape is held.
     """
     on_x = toy.jit.q(_belief(toy, clouds["x"], _roles("x")), CLAIM, STAR, PLANET)
     on_y = toy.jit.q(_belief(toy, clouds["y"], _roles("y")), CLAIM, STAR, PLANET)
@@ -170,34 +177,28 @@ def test_two_charts_and_a_one_sided_jacobian(clouds, toy):
         _belief(toy, clouds["y"], mixed)
 
     cloud = clouds["x"].cloud
-    no_chart = WeightedCloud(cloud.samples, cloud.log_weights, jnp.nan)
-    no_ref = WeightedCloud(cloud.samples, cloud.log_weights, jnp.nan, chart="x")
-    for undeclared in (no_chart, no_ref):
-        atoms = eqx.tree_at(lambda a: a.cloud, clouds["x"], undeclared)
-        with pytest.raises(ValueError, match="declared"):
-            _belief(toy, atoms, _roles("x"))
-    with pytest.raises(ValueError, match="declares its chart"):
-        WeightedCloud(cloud.samples, cloud.log_weights, jnp.nan, cloud.log_ref_density)
+    with pytest.raises(ValueError, match="log_target"):
+        WeightedCloud(
+            cloud.samples, cloud.log_weights, jnp.zeros(3), jnp.nan, cloud.prior
+        )
 
 
 def test_a_hard_edged_prior_keeps_weights_and_gradients_finite(clouds, toy):
     """B = N(0.5, 1) truncated to x < 2 has zero density on part of the cloud. Its
     q is the truncated truth (Phi(1.5) - Phi(0.5)) / Phi(1.5) = 0.2590 within 3 se, the
     weights are finite and zero beyond the edge, and the gradient of q in B's mean
-    matches finite differences. One draw outside p0's support (log_weights and
-    log_ref_density both -inf) gets weight zero, not nan.
+    matches finite differences. One draw outside p0's support (p0 = N(0, 1) cut at
+    x < 8, the draw moved to x = 9, its refit weight zero) gets weight zero, not nan.
 
-    Fails if a zero prior or a zero target gives nan weights (-inf - (-inf)), or the
-    gradient through the `jnp.where` edge is nan or wrong.
+    Fails if a zero prior or a zero refit prior gives nan weights (-inf - (-inf)), or
+    the gradient through the `jnp.where` edge is nan or wrong.
     """
     atoms = clouds["x"]
-    dead = eqx.tree_at(
-        lambda a: (a.cloud.log_weights, a.cloud.log_ref_density),
-        atoms,
-        (
-            atoms.cloud.log_weights.at[0].set(-jnp.inf),
-            atoms.cloud.log_ref_density.at[0].set(-jnp.inf),
-        ),
+    x = atoms.cloud.samples["x"][:, 0]
+    dead = _atoms(
+        x.at[0].set(9.0),
+        atoms.cloud.log_weights.at[0].set(-jnp.inf),
+        Gaussian("x", 0.0, upper=8.0),
     )
 
     def q_b(mean):
@@ -207,7 +208,6 @@ def test_a_hard_edged_prior_keeps_weights_and_gradients_finite(clouds, toy):
 
     b = _belief(toy, dead, _roles(upper=2.0))
     w = toy.jit.weights(b)
-    x = atoms.cloud.samples["x"][:, 0]
     assert jnp.all(jnp.isfinite(w))
     assert jnp.all(w[:, 0] == 0.0)
     assert jnp.all(w[1, x >= 2.0] == 0.0)
@@ -248,12 +248,14 @@ def test_members_by_ratio(toy):
     row would get the same prior, or the forecast's), or Kish is inverted.
     """
     atoms = _atoms(
-        jnp.array([2.0, 0.0]), jnp.log(jnp.array([0.71, 0.29])), jnp.zeros(2), "x"
+        jnp.array([2.0, 0.0]),
+        jnp.log(jnp.array([0.71, 0.29])),
+        LookAlikeRatio("x", 1.0),
     )
     member_w = jnp.array([0.6, 1.0, 1.6])
     roles = Roles(LookAlikeRatio("x", 1.0), LookAlikeRatio("x", member_w))
     b = toy.jit.role_belief(
-        atoms, roles, jnp.zeros((4, 2)), STAR, toy.empty_pool(4, n_gas=0)
+        atoms, roles, jnp.zeros((4, 2)), STAR, toy.empty_pool(4, n_gas=0), **toy.ungated
     )
     d = toy.jit.diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(4))
     w = jnp.concatenate([jnp.ones(1), member_w])
@@ -261,3 +263,46 @@ def test_members_by_ratio(toy):
     assert_allclose(d.q, 0.71 / (0.71 + look), rtol=1e-12)
     assert_allclose(d.q[1:], [0.8032, 0.7100, 0.6048], atol=1e-3)
     assert_allclose(d.n_eff, (0.71 + look) ** 2 / (0.71**2 + look**2), rtol=1e-12)
+
+
+def test_the_gate_refuses_a_role_per_row_and_per_slice(clouds, toy):
+    """With min_n_eff = 1,000 and max_khat = 0.5 on the test-1 cloud (20,000 draws
+    from N(0, 1.5^2) weighted to p0 = N(0, 1)), the forecast N(0, 1) and the members
+    N(0.5, 1) and N(0, 1.4) are kept, N(3, 0.3) is refused on its Kish size (730) and
+    N(0, 3) on its Pareto shape (0.71, Kish 1,083). N(0, 1.4) has unbounded ratios to
+    p0 (their own shape is 1.0) but bounded weights against g (shape -1.8). Kept rows
+    equal the ungated rows; a refused row is all NaN, and so is its q. Under `vmap` over
+    this cloud and one from N(0, 0.3^2) (Kish 60 under the forecast), each slice is
+    gated on its own: the first keeps both roles, the second refuses both.
+
+    Fails if the gate ignores a threshold, reads the stored weights or the ratios alone
+    instead of the reweighted cloud, lets a refused role change another's row, or
+    refuses a whole batch for one failing slice.
+    """
+    gate = {"min_n_eff": 1000.0, "max_khat": 0.5}
+    means, sds = jnp.array([0.5, 3.0, 0.0, 0.0]), jnp.array([1.0, 0.3, 3.0, 1.4])
+    member = Gaussian("x", means, sds, jnp.full(4, jnp.inf))
+    roles = Roles(Gaussian("x", 0.0), member)
+    pool, flat = toy.empty_pool(5, n_gas=0), jnp.zeros((5, N_DRAWS))
+    gated, raw = (
+        toy.jit.role_belief(clouds["x"], roles, flat, STAR, pool, **kw)
+        for kw in (gate, toy.ungated)
+    )
+    kept = jnp.array([True, True, False, False, True])
+    assert_allclose(gated.log_prior_ratio[kept], raw.log_prior_ratio[kept], rtol=0)
+    assert jnp.all(jnp.isnan(gated.log_prior_ratio[~kept]))
+    q = toy.jit.q(gated, CLAIM, STAR, PLANET)
+    assert jnp.array_equal(jnp.isnan(q), ~kept), q
+
+    narrow = _cloud(jax.random.PRNGKey(1), N_DRAWS, proposal_sd=0.3)
+    two = _roles()
+
+    @eqx.filter_jit
+    @eqx.filter_vmap(in_axes=(0, None))
+    def per_slice(atoms, roles):
+        return role_belief(atoms, roles, flat[:2], STAR, pool_two, **gate)
+
+    pool_two = toy.empty_pool(2, n_gas=0)
+    b = per_slice(toy.stack(clouds["x"], narrow), two)
+    assert jnp.all(jnp.isfinite(b.log_prior_ratio[0]))
+    assert jnp.all(jnp.isnan(b.log_prior_ratio[1]))

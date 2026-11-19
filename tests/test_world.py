@@ -13,7 +13,7 @@ from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.design import Mode
 from spaceodyssey.log import grant_rows
 from spaceodyssey.toy import GAS_FLOOR, GaussianGasModel, StepReportModel
-from spaceodyssey.types import Action, Grant, ObservationLog, WeightedCloud
+from spaceodyssey.types import Action, Grant, ObservationLog
 from spaceodyssey.world import SealedWorld, draw_worlds, row_key, run_keys
 
 KEY = jax.random.key(0)
@@ -137,11 +137,11 @@ def test_observe_reads_the_right_star_and_unseal_gives_the_truth(toy):
     unit weight (log weight and reference density zero) even when the truth was built
     with a zero weight, and read as a belief of one role: q of (water, oxygen) is the
     truth bit (0 and 0) and q of water alone is (1, 0); the count distribution is a one
-    at the true count. A truth of two planets unseals whole. A truth with a gas
-    variance is refused, and so is a truth on no chart.
+    at the true count. A truth of two planets unseals whole, its prior kept. A truth
+    with a gas variance is refused.
 
     Fails if `observe` reads the wrong star, `unseal` keeps a weight or a variance or
-    drops a planet, or sealing skips the cloud's chart check.
+    drops a planet or the truth's prior, or sealing accepts a gas variance.
     """
     truth = _point_truth(toy, [[0.3, -0.4], [-0.3, 0.4]])
     truth = eqx.tree_at(
@@ -154,7 +154,7 @@ def test_observe_reads_the_right_star_and_unseal_gives_the_truth(toy):
 
     unsealed = world.unseal()
     assert_allclose(unsealed.cloud.log_weights, 0.0)
-    assert_allclose(unsealed.cloud.log_ref_density, 0.0)
+    assert unsealed.cloud.prior.chart == truth.cloud.prior.chart
     belief = jax.vmap(toy.belief)(unsealed)
     planet = jnp.asarray(0)
     water = Claim((GasAbove(0, GAS_FLOOR),))
@@ -171,9 +171,6 @@ def test_observe_reads_the_right_star_and_unseal_gives_the_truth(toy):
     fuzzy = eqx.tree_at(lambda a: a.x_var, truth, jnp.full((2, 1, 1, 2), 0.1))
     with pytest.raises(eqx.EquinoxRuntimeError, match="point state"):
         SealedWorld(fuzzy)
-    no_chart = WeightedCloud(truth.cloud.samples, truth.cloud.log_weights, jnp.nan)
-    with pytest.raises(ValueError, match="chart"):
-        SealedWorld(eqx.tree_at(lambda a: a.cloud, truth, no_chart))
 
 
 def _grant():

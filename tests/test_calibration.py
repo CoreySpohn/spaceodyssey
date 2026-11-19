@@ -18,9 +18,16 @@ from spaceodyssey.belief import absorb, q, replay, replay_belief
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.design import Mode, Resources
 from spaceodyssey.log import grant_rows, start_log, step
-from spaceodyssey.roles import AbstractRolePrior, Roles
+from spaceodyssey.roles import Roles
 from spaceodyssey.toy import GaussianGasModel
-from spaceodyssey.types import Action, Atoms, Grant, Refit, WeightedCloud
+from spaceodyssey.types import (
+    AbstractRolePrior,
+    Action,
+    Atoms,
+    Grant,
+    Refit,
+    WeightedCloud,
+)
 from spaceodyssey.world import draw_worlds, run_keys
 
 KEY = jax.random.key(7)
@@ -31,38 +38,40 @@ MODE = Mode(0, 0.0)
 CLAIM = Claim((GasAbove(0, 0.0),))  # x > 0
 PLANET = jnp.asarray(0)
 STAR = ()
+GATE = {"min_n_eff": 100.0, "max_khat": 0.7}  # every world passes it here
 
 
 class ExpGasPrior(AbstractRolePrior):
-    """N(mean, 1) on the gas abundance x, its density taken on the chart y = exp(x):
-    the log Jacobian -x is part of the density.
+    """N(mean, sd^2) on the gas abundance x, its density taken on the chart
+    y = exp(x): the log Jacobian -x is part of the density.
     """
 
     mean: jax.Array = eqx.field(converter=jnp.asarray)
+    sd: jax.Array = eqx.field(converter=jnp.asarray, default=1.0)
 
     def log_prob(self, atoms, star):
         x = atoms.x_mean[:, 0, 0]
-        return norm.logpdf(x, self.mean) - x
+        return norm.logpdf(x, self.mean, self.sd) - x
 
     def sample(self, key, star):
         raise NotImplementedError("read only as a weight")
 
 
-def _cloud(key, mean, sd, chart):
-    """Point draws of x from the proposal N(mean, sd^2), weighted to p0 = N(0, 1).
+def _cloud(key, mean, sd, prior):
+    """Point draws of x from the proposal N(mean, sd^2), weighted to the refit's
+    prior `prior` (no rows), which is N(prior.mean, prior.sd^2) on x.
 
-    On the chart "exp" the reference density carries the log Jacobian -x.
+    The weight is a ratio of two densities on one chart, so a Jacobian cancels in it.
     """
     x = mean + sd * jax.random.normal(key, (N_DRAW,))
-    log_p0 = norm.logpdf(x)
-    log_ref = log_p0 - x if chart == "exp" else log_p0
+    log_p0 = norm.logpdf(x, prior.mean, prior.sd)
     one = jnp.ones((N_DRAW, 1))
     cloud = WeightedCloud(
         {"hz": one, "size": one},
         log_p0 - norm.logpdf(x, mean, sd),
+        log_p0 - x if prior.chart == "exp" else log_p0,
         jnp.nan,
-        log_ref,
-        chart=chart,
+        prior,
     )
     block = x[:, None, None]
     return Atoms(cloud, block, jnp.zeros_like(block), one > 0)
@@ -101,7 +110,12 @@ def _issue(toy, roles, cloud):
         second = absorb(first, log, MODELS, STAR, jnp.asarray(2.0))
         return jnp.stack(
             [
-                q(replay_belief(r, roles, MODELS, STAR, pool), CLAIM, STAR, PLANET)[1]
+                q(
+                    replay_belief(r, roles, MODELS, STAR, pool, **GATE),
+                    CLAIM,
+                    STAR,
+                    PLANET,
+                )[1]
                 for r in (first, second)
             ]
         )
@@ -122,7 +136,7 @@ def _check(q_at, issued, truth):
     assert wrong.sum() <= ALPHA * issued.sum() + 3.0 * spread
 
 
-@pytest.mark.medium(reason="3,000 worlds on two charts, about 10 s with compiles")
+@pytest.mark.medium(reason="3,000 worlds on two clouds, about 10 s with compiles")
 def test_certificates_are_calibrated_over_worlds(toy):
     """Wrong certificates match 1 - q among the issued, with an adaptive rule.
 
@@ -131,15 +145,19 @@ def test_certificates_are_calibrated_over_worlds(toy):
     after the first row whose q reaches 0.8. With T = sum over issued (wrong - (1 - q))
     / sqrt(sum q (1 - q)), |T| < 3 and the wrong certificates number at most
     alpha times the issued plus 3 sqrt(sum q (1 - q)). Run twice: 1,000 draws from the
-    prior on x; then 1,000 draws from N(0.3, 1.3^2), weighted to the prior, with the
-    prior and the reference density both taken on y = exp(x).
+    prior on x, which is also the refit's prior; then 1,000 draws from N(1.0, 1.4^2),
+    weighted to a refit prior pi_0 = N(0.25, 1.2^2) and read under the verdict by the
+    ratio N(0, 1) / pi_0, every density taken on y = exp(x).
 
-    Fails if a Jacobian is dropped from one side, a row is counted twice, the
-    reference density enters with the wrong sign, or the refit weight is dropped:
-    each moves q away from the frequency of the claim among the issued (measured:
-    T = 11.8, -5.9, 4.9 and 22.8 for these four, against -1.5 and -0.6 here).
+    Fails if a Jacobian is dropped from one side (here from pi_0), the prior ratio
+    enters with the wrong sign, or the refit weight is dropped: each moves q away from
+    the frequency of the claim among the issued. Measured on the second run: the
+    issued fall to 513 (T = -6.0), T = 11.0 and T = 6.8 for these three, against
+    T = -1.5 and 0.1 here, about 950 issued.
     """
     same = Roles(toy.GasPrior("toy"), toy.GasPrior("toy", mean=[0.0], sd=[1.0]))
-    _check(*_issue(toy, same, _cloud(jax.random.key(1), 0.0, 1.0, "toy")))
-    on_exp = Roles(ExpGasPrior("exp", 0.0), ExpGasPrior("exp", [0.0]))
-    _check(*_issue(toy, on_exp, _cloud(jax.random.key(2), 0.3, 1.3, "exp")))
+    exact = _cloud(jax.random.key(1), 0.0, 1.0, toy.GasPrior("toy"))
+    _check(*_issue(toy, same, exact))
+    on_exp = Roles(ExpGasPrior("exp", 0.0), ExpGasPrior("exp", [0.0], [1.0]))
+    wider = _cloud(jax.random.key(2), 1.0, 1.4, ExpGasPrior("exp", 0.25, 1.2))
+    _check(*_issue(toy, on_exp, wider))
