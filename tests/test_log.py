@@ -532,3 +532,16 @@ def test_a_study_refuses_per_star_fields_that_disagree(toy):
     small = Design(design.models, design.modes, design.resources, 4)
     with pytest.raises(ValueError, match="row masks"):
         remake(jnp.zeros((2, 2)), small)
+
+
+def test_a_grant_in_a_mode_outside_the_table_is_refused(toy):
+    """A granted action whose mode is not in the design's mode table is refused.
+
+    Fails if `execute` indexes the mode table with a granted mode it has not checked,
+    so that a bad grant raises an `IndexError` or reads another mode.
+    """
+    design = _design(_step_models())
+    grant = Grant(Action([0], [3], [1.0]))
+    nothing = TablePolicy(Action(jnp.zeros(0, int), jnp.zeros(0, int), jnp.zeros(0)))
+    with pytest.raises(ValueError, match="mode table"):
+        execute(KEY, nothing, _el_world(toy), design, grant)

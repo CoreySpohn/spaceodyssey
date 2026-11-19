@@ -159,10 +159,14 @@ class SealedWorld(eqx.Module):
             buffer and zeros in the others.
 
         Raises:
-            ValueError: if a granted row's model slot is not in ``models``.
+            ValueError: if a granted row's mode is not in ``modes`` or its model slot
+                is not in ``models``.
         """
         actions = grant.actions
-        slots = [modes[int(m)].model_slot for m in jnp.ravel(actions.mode)]
+        granted = [int(m) for m in jnp.ravel(actions.mode)]
+        if any(not 0 <= m < len(modes) for m in granted):
+            raise ValueError("a grant's mode is not in the mode table")
+        slots = [modes[m].model_slot for m in granted]
         if any(not 0 <= s < len(models) for s in slots):
             raise ValueError("a grant's model slot is not in the model table")
         n_row = len(slots)
