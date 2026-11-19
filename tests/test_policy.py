@@ -899,7 +899,9 @@ def test_a_frozen_forecast_values_a_spectrum_of_a_planet_a_refit_added():
 
     Fails if a frozen forecast is never extended (its draws hold no planet, so a
     spectrum's outcome says nothing about its count: the reward is far from the
-    learning arm's), or if the extension carries the refit's rows or weights.
+    learning arm's). The search reads neither bit, so the refit's weights equal the
+    prior's here: this does not test whether the extension carries the refit's rows
+    or weights.
     """
     claim = Claim((InHz(), GasAbove(0, 0.0)))
     roles = Roles(PRIOR, _stack(PRIOR))
@@ -1091,37 +1093,39 @@ def test_a_star_whose_build_price_the_price_left_is_re_priced():
 
 
 @pytest.mark.medium(
-    reason="compiles the planner and runs a calendar of 1,460 rows, 14 s"
+    reason="compiles the planner and runs a calendar of up to 730 rows, 10 to 20 s"
 )
-@pytest.mark.parametrize("law", [BERNOULLI, POISSON])
-def test_adaptive_count_beats_static_only_on_a_bernoulli_pool(toy, law):
+@pytest.mark.parametrize(("law", "n_star"), [(BERNOULLI, 75), (POISSON, 25)])
+def test_adaptive_count_beats_static_only_on_a_bernoulli_pool(toy, law, n_star):
     """Under its own pool law, the depth-1 `Count` planner searching in 0.25-day
     chunks finds more claim-true planets than the static allocation (the time-zero
     optimum over searches of 0.25 to 4 days) when a star holds at most one undetected
-    planet, about 0.4 of 14.4 here (a Bayes-greedy search gains about 0.5 of 15 on the
-    same stars), and exactly as many under a Poisson pool, whose remainder after a
-    search does not depend on what it found. The finds are each run's expected
+    planet, 0.19 of 7.12 here (2.7 per cent; 0.43 of 14.4 at twice the stars and
+    budget, where a Bayes-greedy search gains about 0.5 of 15), and exactly as many
+    under a Poisson pool, whose remainder after a search does not depend on what it
+    found (an equality at any size and any truth, so on 25 stars and one free slot).
+    The budget is 365 days per 150 stars. The finds are each run's expected
     claim-true finds read off its log (`expected_found`), the static allocation's the
-    value it buys at time zero. One world suffices: a world's expected finds vary
-    by about 0.02 around their mean, and the gain (0.43) sits 0.2 above its lower
-    bound, 1.5 per cent of the static finds; a Poisson run's read no payload at all.
+    value it buys at time zero. One world suffices: a world's expected finds vary by
+    about 0.02 around their mean, and the gain sits 0.08 above its lower bound, 1.5
+    per cent of the static finds; a Poisson run's read no payload at all.
 
     Fails if the study's pool does not carry the truth's law (a Poisson pool over a
     Bernoulli truth plans and scores as static), or if a Poisson planner adapts to
     what its searches found.
     """
-    n_star, chunk_d = 150, 0.25
+    chunk_d, budget = 0.25, 365.0 * n_star / 150
     survey = toy.survey(
         jax.random.key(7),
         n_star,
         16,
         64,
         pool_mass=0.5,
-        budget_d=365.0,
+        budget_d=budget,
         end_d=1e4,
-        capacity=1500,
+        capacity=12 * n_star,
         pool_law=law,
-        n_slot=2 if law == BERNOULLI else 3,
+        n_slot=2,
     )
     study = survey.study
     design = eqx.tree_at(lambda d: d.keepout, study.design, no_keepout(n_star))
@@ -1162,7 +1166,7 @@ def test_adaptive_count_beats_static_only_on_a_bernoulli_pool(toy, law):
 
     reward = jax.vmap(finds)(study.pool, study.stars, jnp.arange(n_star))
     static_f = Frontier(reward, jnp.broadcast_to(grid, reward.shape), reward > -1)
-    budget_d = jnp.asarray(365.0)
+    budget_d = jnp.asarray(budget)
     lam, _, _ = solve_price(static_f, budget_d)
     bought, _ = dispatch(lam, static_f, budget_d)
     static = float(jnp.sum(jnp.where(bought, reward, 0.0)))

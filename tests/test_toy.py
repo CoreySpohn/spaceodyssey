@@ -14,9 +14,12 @@ from spaceodyssey.toy import (
     DetectionModel,
     GaussianGasModel,
     StepReportModel,
+    ToyPrior,
+    point_atoms,
 )
 from spaceodyssey.types import (
     CELL_SAMPLES,
+    POISSON,
     Action,
     binned_cells,
     planet_tracks,
@@ -298,3 +301,39 @@ def test_two_readings_of_an_uncertain_gas_are_exact(toy):
     per_row = sum(row_log_like(model, r, prior, toy.star) for r in rows)
     assert_allclose(per_row, [-2.73602], atol=1e-5)
     assert np.abs(per_row - log_like)[0] > 0.2
+
+
+def test_a_poisson_toy_prior_draws_its_own_density():
+    """`ToyPrior` under `POISSON` draws each slot-existence pattern with the
+    probability its `log_prob` gives it.
+
+    Three slots: the track with probability 0.8, and two free slots holding a Poisson
+    count of mean 0.5 lumped at 2, in a uniform subset. A pattern's probability is
+    `exp(log_prob)` of a draw with that pattern, less each planet's own term (read off
+    a one-slot prior). 4,000 draws: each of the 8 patterns' frequency is within 4
+    standard errors of it (the largest, 0.485, has an error of 0.008), and the 8
+    probabilities sum to one.
+
+    Fails if the draws and the density disagree on the count's law (the tail not
+    lumped at the free slots), on the subsets (free slots filled in order, which the
+    density gives zero), or on the track's own probability.
+    """
+    star = {"p_hz": jnp.asarray(0.4)}
+    args = ("toy", [0.8, 0.25, 0.25], 1.0, 0.5, GAS_FLOOR, GAS_PRIOR_SD)
+    prior = ToyPrior(*args, n_gas=1, pool_law=POISSON)
+    one_slot = ToyPrior("toy", [1.0], *args[2:], n_gas=1)
+    exists = np.array([[(i >> (2 - k)) & 1 for k in range(3)] for i in range(8)], bool)
+    zeros = jnp.zeros((8, 3))
+    patterns = point_atoms(zeros, zeros, jnp.full((8, 3, 1), GAS_FLOOR), exists, prior)
+    lone = point_atoms(zeros[:1, :1], zeros[:1, :1], jnp.full((1, 1, 1), GAS_FLOOR),
+                       np.ones((1, 1), bool), one_slot)  # fmt: skip
+    planet = one_slot.log_prob(lone, star)[0]
+    expected = np.exp(prior.log_prob(patterns, star) - exists.sum(1) * planet)
+    assert_allclose(expected.sum(), 1.0, rtol=1e-12)
+
+    n = 4000
+    drawn = np.asarray(prior.draws(jax.random.key(0), star, n).exists)
+    index = drawn @ np.array([4, 2, 1])
+    frequency = np.bincount(index, minlength=8) / n
+    se = np.sqrt(expected * (1 - expected) / n)
+    assert np.all(np.abs(frequency - expected) <= 4 * se + 1e-12)

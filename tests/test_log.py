@@ -802,8 +802,10 @@ def test_a_found_pool_planet_is_judged_on_a_refit_and_an_undetected_one_not_at_a
     resolution or information row.
 
     Fails if `score` judges a found planet on the time-zero refit, which holds no
-    planet in its slot (it would read q = 0 and certify a claim-true planet negative),
-    or if an undetected pool planet is certified (the draws hold nothing there).
+    planet in its slot (the found planets then get no certificate row, so the set of
+    stars with a pool-planet row is not the set the run detected; a claim-true one
+    that did get a row would be read at q = 0, and its status and `q_hi` are checked
+    too), or if an undetected pool planet is certified (the draws hold nothing there).
     """
     n_star = 8
     survey = toy.survey(
