@@ -510,8 +510,10 @@ class AbstractObservationModel(eqx.Module):
             star: a pytree of scalar leaves describing the star.
 
         Returns:
-            A pytree whose leaves have leading axis ``A``; the statistics of several
-            rows are their leafwise sum.
+            A pytree of arrays; the statistics of several rows are their leafwise
+            sum. A statistic that does not depend on the draw is held without the
+            draw axis and broadcast in ``finalize``: a replay sums every row slot of
+            the log, filled or not, so a row costs the size of its statistics.
         """
 
     @abc.abstractmethod

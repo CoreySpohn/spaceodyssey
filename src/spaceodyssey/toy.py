@@ -121,7 +121,8 @@ class GaussianGasModel(AbstractObservationModel):
         ``y``: ``"precision"`` is ``p``, ``"weighted_sum"`` ``p y``,
         ``"weighted_square_sum"`` ``p y**2`` and ``"log_norm"`` the normalizer
         ``log(p / (2 pi)) / 2`` (zero for an uncovered gas). They do not depend on the
-        draw and are broadcast to the gas block, ``(A, K, G)``.
+        draw, so they are held per planet and gas, ``(K, G)``, and a row costs the same
+        at any number of draws; ``finalize`` broadcasts them over the draws.
         """
         snr, y = payload["snr"], payload["reading"]  # (K, G)
         precision = self._precision(snr)
@@ -133,7 +134,8 @@ class GaussianGasModel(AbstractObservationModel):
             "weighted_square_sum": precision * y**2,
             "log_norm": log_norm,
         }
-        return jax.tree.map(lambda x: jnp.broadcast_to(x, atoms.x_mean.shape), per_gas)
+        block = atoms.x_mean.shape[-2:]
+        return jax.tree.map(lambda x: jnp.broadcast_to(x, block), per_gas)
 
     def finalize(self, stats, atoms, star):
         """Exact conjugate update of every draw's gas Gaussian by all summed rows.
@@ -157,7 +159,7 @@ class GaussianGasModel(AbstractObservationModel):
         )
         mean = m + v * total * residual * shrink
         updated = eqx.tree_at(lambda a: (a.x_mean, a.x_var), atoms, (mean, v * shrink))
-        return terms.sum(axis=(1, 2)), updated
+        return terms.sum(axis=(-2, -1)), updated
 
     def sample(self, key, atoms, action):
         """Readings of every planet and gas, per draw; ``(A, K, G)`` arrays."""
@@ -242,26 +244,48 @@ class StepReportModel(AbstractObservationModel):
         return jnp.stack(probs, axis=-1)
 
     def stats(self, payload, atoms, star):
-        """The row's log probability of the reported bits; a silent gas adds zero."""
+        """The row's reported bits, counted per planet and gas, ``(K, G)``.
+
+        ``"above"`` is 1 where the gas reports bit 1, ``"below"`` 1 where it reports
+        bit 0, both 0 for a silent gas. They do not depend on the draw, so a row costs
+        the same at any number of draws.
+        """
         snr, bit = payload["snr"], payload["bit"]
         reported = snr >= STEP_GATE_SNR
-        p_above = self._p_above(atoms, star)
-        p = jnp.where(bit > 0.5, p_above, 1.0 - p_above)
-        log_p = jnp.where(reported, jnp.log(p), 0.0).sum(axis=(1, 2))
-        return eqx.error_if(
-            log_p,
-            jnp.any(reported & (atoms.x_var != 0)),
-            "StepReportModel needs point gas draws (x_var = 0) for a reported gas",
-        )
+        up = bit > 0.5
+        block = atoms.x_mean.shape[-2:]
+        dtype = atoms.x_mean.dtype
+        return {
+            "above": jnp.broadcast_to(reported & up, block).astype(dtype),
+            "below": jnp.broadcast_to(reported & ~up, block).astype(dtype),
+        }
 
     def finalize(self, stats, atoms, star):
-        """The summed log probabilities, with the draws unchanged.
+        """The summed log probabilities of the reported bits, with the draws unchanged.
 
-        Rows are independent given a point draw, so their log probabilities add, and
-        a bit about a point state changes nothing in it. ``stats`` has checked the
-        draws of every reporting row.
+        Rows are independent given a point draw, so their log probabilities add:
+        ``n1 log P(x > floor) + n0 log P(x <= floor)`` per planet and gas, with a gas
+        no row reported adding exactly zero. A bit about a point state changes nothing
+        in it.
+
+        Raises:
+            EquinoxRuntimeError: if a reported gas is not a point state
+                (``x_var != 0``).
         """
-        return stats, atoms
+        above, below = stats["above"], stats["below"]
+        p_above = self._p_above(atoms, star)
+
+        def counted(n, p):
+            some = n > 0
+            return jnp.where(some, n * jnp.log(jnp.where(some, p, 1.0)), 0.0)
+
+        log_p = (counted(above, p_above) + counted(below, 1.0 - p_above)).sum((-2, -1))
+        log_p = eqx.error_if(
+            log_p,
+            jnp.any((above + below > 0) & (atoms.x_var != 0)),
+            "StepReportModel needs point gas draws (x_var = 0) for a reported gas",
+        )
+        return log_p, atoms
 
     def sample(self, key, atoms, action):
         """Bits of every planet and gas, per draw; ``(A, K, G)`` arrays."""

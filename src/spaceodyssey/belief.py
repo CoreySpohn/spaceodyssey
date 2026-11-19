@@ -477,7 +477,7 @@ class Replay(eqx.Module):
     Attributes:
         refit: the refit's draws, the rows they represent and their star.
         stats: one pytree per model slot, the summed statistics of the rows applied
-            in that slot, leaves with leading axis ``A``.
+            in that slot, shaped as the model's ``stats`` returns them.
         applied: the log rows applied, shape ``(W,)``, none of them in
             ``refit.row_mask``.
     """
@@ -564,7 +564,10 @@ def replay(
 
     Each model slot is one scan over the log's payload buffer of that slot, statically
     unrolled over ``models``; nothing switches on a traced slot. The sum is
-    commutative and does not depend on where in the log a row sits.
+    commutative and does not depend on where in the log a row sits. The scan reads the
+    log's whole capacity, so a row slot costs the size of its model's statistics: held
+    without the draw axis where they do not depend on the draw (both toy models), an
+    empty or masked slot costs a few operations, not the draws.
 
     Args:
         refit: the refit's draws, the rows they represent and their star.
