@@ -19,6 +19,7 @@ from spaceodyssey._numerics import EXACT, safe_ratio
 from spaceodyssey.claim import Claim
 from spaceodyssey.roles import Roles
 from spaceodyssey.types import (
+    ACCEPTED,
     AbstractObservationModel,
     Atoms,
     ObservationLog,
@@ -420,16 +421,16 @@ def _due(log: ObservationLog, refit: Refit, time_d) -> Bool[Array, " W"]:
     """The log rows a replay of ``refit`` applies at the query time ``time_d``.
 
     A row is due when it is real (``index < count``), released by the query time
-    (``release_d <= time_d``), accepted (``refusal == 0``), of the refit's star, and
-    not among the rows the refit represents. A row in flight stays in the log and
-    falls due once the query time reaches its release.
+    (``release_d <= time_d``), accepted (``refusal == ACCEPTED``), of the refit's
+    star, and not among the rows the refit represents. A row in flight stays in the
+    log and falls due once the query time reaches its release.
     """
     rows = log.rows
     real = jnp.arange(rows.star.shape[0]) < log.count
     return (
         real
         & (rows.release_d <= time_d)
-        & (rows.refusal == 0)
+        & (rows.refusal == ACCEPTED)
         & (rows.star == refit.star_index)
         & ~refit.row_mask
     )

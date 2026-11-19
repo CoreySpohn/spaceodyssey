@@ -35,7 +35,7 @@ from spaceodyssey.information import (
     refit_trigger,
 )
 from spaceodyssey.study import Study
-from spaceodyssey.types import ObservationLog
+from spaceodyssey.types import ACCEPTED, ObservationLog
 from spaceodyssey.world import SealedWorld
 
 
@@ -138,7 +138,7 @@ def _stage_beliefs(study: Study, log: ObservationLog, s: int):
         np.asarray(x) for x in (log.rows.star, log.rows.refusal, log.rows.release_d)
     )
     real = np.arange(star_col.shape[0]) < int(log.count)
-    mine = real & (star_col == s) & (refusal == 0)
+    mine = real & (star_col == s) & (refusal == ACCEPTED)
     times = [0.0, *sorted({float(t) for t in release_d[mine] if t > 0.0})]
 
     models, roles = study.design.models, study.roles

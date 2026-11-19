@@ -15,6 +15,8 @@ from jaxtyping import PRNGKeyArray, PyTree
 from spaceodyssey.design import Design, Mode, Resources
 from spaceodyssey.policy import AbstractPolicy, public_view
 from spaceodyssey.types import (
+    ACCEPTED,
+    OVER_BUDGET,
     AbstractObservationModel,
     Action,
     Grant,
@@ -23,13 +25,6 @@ from spaceodyssey.types import (
     spent_d,
 )
 from spaceodyssey.world import SealedWorld, row_key, run_keys
-
-ACCEPTED = 0
-"""Refusal code of an accepted row."""
-
-OVER_BUDGET = 1
-"""Refusal code of a row whose exposure exceeds the budget left: charged nothing, its
-payload zeros."""
 
 
 def grant_rows(

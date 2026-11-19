@@ -184,6 +184,14 @@ class Pool(eqx.Module):
             )
 
 
+ACCEPTED = 0
+"""Refusal code of an accepted row."""
+
+OVER_BUDGET = 1
+"""Refusal code of a row whose exposure exceeds the budget left: charged nothing, its
+payload zeros."""
+
+
 class Row(eqx.Module):
     """One released observation result.
 
@@ -197,7 +205,7 @@ class Row(eqx.Module):
         exposure_d: exposure length in days.
         charged_d: time charged against the budget in days.
         release_d: time at which the row is released, in days.
-        refusal: refusal code, zero for an accepted row.
+        refusal: refusal code, ``ACCEPTED`` or ``OVER_BUDGET``.
         model_slot: index into the run's model table of the model that inverts the
             payload.
         payload: one payload per model, each a dict of named arrays, zero-padded; only

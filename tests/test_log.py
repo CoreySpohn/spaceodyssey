@@ -17,12 +17,18 @@ from numpy.testing import assert_allclose
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.design import Design, Mode, Resources
 from spaceodyssey.information import POSITIVE, UNRESOLVED
-from spaceodyssey.log import OVER_BUDGET, execute, grant_rows, start_log, step
+from spaceodyssey.log import execute, grant_rows, start_log, step
 from spaceodyssey.policy import AbstractPolicy, TablePolicy, public_view
 from spaceodyssey.score import format_report, score
 from spaceodyssey.study import Arm, Study
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
-from spaceodyssey.types import AbstractObservationModel, Action, Grant, Refit
+from spaceodyssey.types import (
+    OVER_BUDGET,
+    AbstractObservationModel,
+    Action,
+    Grant,
+    Refit,
+)
 from spaceodyssey.world import SealedWorld, row_key, run_keys
 
 KEY = jax.random.key(0)
