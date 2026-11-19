@@ -24,14 +24,10 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float, Int
 
+from spaceodyssey._numerics import EXACT, guarded_log, safe_ratio
 from spaceodyssey.belief import Belief, count_pmf, mark_weights, pool_rate
 from spaceodyssey.claim import Claim
-from spaceodyssey.information import (
-    _log,
-    expected_log_score,
-    outcome_prob,
-    update_by_cell,
-)
+from spaceodyssey.information import expected_log_score, outcome_prob, update_by_cell
 from spaceodyssey.types import AbstractObservationModel, Action, Atoms, Pool
 
 
@@ -233,13 +229,13 @@ def thin(pool: Pool, detect_prob: Float[Array, " Am"]) -> Pool:
         The planets the observation would miss.
     """
     miss = 1.0 - detect_prob
-    kept = jnp.matmul(mark_weights(pool), miss, precision=jax.lax.Precision.HIGHEST)
+    kept = jnp.matmul(mark_weights(pool), miss, precision=EXACT)
     emptied = (kept <= 0)[:, None]
     return Pool(
         pool.marks,
         pool.log_prior,
-        jnp.where(emptied, pool.log_like, pool.log_like + _log(miss)),
-        pool.log_mass + _log(kept),
+        jnp.where(emptied, pool.log_like, pool.log_like + guarded_log(miss)),
+        pool.log_mass + guarded_log(kept),
     )
 
 
@@ -286,8 +282,7 @@ def completeness(
     """
     detect = _detect_prob(model, pool.marks, action)
     found = pool_rate(thin(pool, 1.0 - detect), claim, star)
-    rate = pool_rate(pool, claim, star)
-    return jnp.where(rate > 0, found / jnp.where(rate > 0, rate, 1.0), 0.0)
+    return safe_ratio(found, pool_rate(pool, claim, star))
 
 
 def _branches(

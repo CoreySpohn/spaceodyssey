@@ -12,12 +12,13 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float, Int
 
+from spaceodyssey._numerics import EXACT, guarded_log, safe_ratio
 from spaceodyssey._standin.diagnostics import KHAT_MAX, kish_ess, mc_se, pareto_khat
 from spaceodyssey.belief import (
     Belief,
-    _draw_joint,
-    _role_log_weights,
     chain,
+    draw_claim_mass,
+    log_weights,
     q,
     weights,
 )
@@ -90,12 +91,6 @@ def chain_gain(
     return jnp.log(after) - jnp.log(before)
 
 
-def _log(x):
-    """``ln x``, ``-inf`` at zero, with a finite derivative there."""
-    positive = x > 0
-    return jnp.where(positive, jnp.log(jnp.where(positive, x, 1.0)), -jnp.inf)
-
-
 def expected_log_score(
     pmf: Float[Array, " N"], forecast: Float[Array, " N"]
 ) -> Float[Array, ""]:
@@ -114,7 +109,9 @@ def expected_log_score(
         The expected log score in nats.
     """
     expected = forecast > 0
-    return jnp.sum(jnp.where(expected, forecast * jnp.where(expected, _log(pmf), 0), 0))
+    return jnp.sum(
+        jnp.where(expected, forecast * jnp.where(expected, guarded_log(pmf), 0), 0)
+    )
 
 
 def outcome_prob(b: Belief, cells: Float[Array, "A Y"]) -> Float[Array, "R Y"]:
@@ -127,7 +124,7 @@ def outcome_prob(b: Belief, cells: Float[Array, "A Y"]) -> Float[Array, "R Y"]:
     Returns:
         Probabilities of shape ``(R, Y)``; each row sums to one.
     """
-    return jnp.matmul(weights(b), cells, precision=jax.lax.Precision.HIGHEST)
+    return jnp.matmul(weights(b), cells, precision=EXACT)
 
 
 def update_by_cell(b: Belief, cell_prob: Float[Array, " A"]) -> Belief:
@@ -151,7 +148,7 @@ def update_by_cell(b: Belief, cell_prob: Float[Array, " A"]) -> Belief:
         The updated belief. A cell no draw of a role can give leaves that role's
         weights NaN (see ``weights``).
     """
-    return eqx.tree_at(lambda x: x.log_like, b, b.log_like + _log(cell_prob))
+    return eqx.tree_at(lambda x: x.log_like, b, b.log_like + guarded_log(cell_prob))
 
 
 def _bit(q_claim: Float[Array, "..."]) -> Float[Array, "... 2"]:
@@ -263,17 +260,13 @@ def diagnose(
     Returns:
         The diagnostics, one entry per role.
     """
-    log_w = _role_log_weights(b.atoms, b.log_prior, b.log_like)  # (R, A)
-    joint = _draw_joint(b, claim, star, planet)  # (C + 1, A)
-    h, g = joint[-1], joint[claim.given]
-    weights = jax.nn.softmax(log_w, axis=-1)
-    cond_mass = (
-        jnp.ones(log_w.shape[0])
-        if claim.given == 0
-        else jnp.matmul(weights, g, precision=jax.lax.Precision.HIGHEST)
-    )
+    log_w = log_weights(b)  # (R, A)
+    per_draw = draw_claim_mass(b, claim, star, planet)  # (C + 1, A)
+    h, g = per_draw[-1], per_draw[claim.given]
+    joint = jnp.matmul(jax.nn.softmax(log_w, axis=-1), per_draw.T, precision=EXACT)
+    cond_mass = joint[:, claim.given]  # one, to rounding, for an unconditional claim
     return Diagnostics(
-        q=q(b, claim, star, planet),
+        q=safe_ratio(joint[:, -1], cond_mass),
         mc_se=jax.vmap(mc_se, in_axes=(0, None, None))(log_w, h, g),
         khat=jax.vmap(pareto_khat)(log_w),
         n_eff=kish_ess(log_w),

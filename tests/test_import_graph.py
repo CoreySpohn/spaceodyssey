@@ -16,10 +16,11 @@ SRC = Path(__file__).parent.parent / "src" / PACKAGE
 # fails the test. `_version` is the generated version leaf. `_standin` holds local
 # stand-ins for the library functions rank 0 may import (photomancy's diagnostics): each
 # mirrors an external function, so it comes first and imports nothing in the package,
-# and it is deleted when its replacement lands. The package `__init__` comes last: it
-# may re-export any core module.
+# and it is deleted when its replacement lands. `_numerics` holds the guarded numerics
+# every module shares and imports nothing in the package either. The package
+# `__init__` comes last: it may re-export any core module.
 ORDER = [
-    "_version", "_standin",
+    "_version", "_standin", "_numerics",
     "types", "claim", "roles", "design", "belief", "information", "value",  # rank 0
     "price", "policy",  # rank 1
     "world", "log", "toy",  # rank 2
@@ -122,6 +123,7 @@ def test_the_core_imports_nothing_upward():
     }
     assert {
         "__init__.py",
+        "_numerics.py",
         "roles.py",
         "world.py",
         "toy.py",
@@ -166,6 +168,7 @@ def test_the_core_imports_nothing_upward():
         ),
         ("_standin/diagnostics.py", "from ..types import Atoms", "not earlier"),
         ("_standin/__init__.py", "from .. import belief", "not earlier"),
+        ("_numerics.py", "from spaceodyssey.types import Atoms", "not earlier"),
         ("__init__.py", "from spaceodyssey.hwo import preset", "never imports it"),
         ("cells.py", "import jax", "unranked module"),
         ("viz/plots.py", "import jax", "unranked module"),

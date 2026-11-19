@@ -29,6 +29,7 @@ import jax.numpy as jnp
 from jax.scipy.special import ndtr
 from jaxtyping import Array, Float, Int
 
+from spaceodyssey._numerics import safe_ratio
 from spaceodyssey.claim import GasAbove
 from spaceodyssey.types import AbstractObservationModel, Action, Atoms
 
@@ -102,8 +103,7 @@ class GaussianGasModel(AbstractObservationModel):
 
     def _noise_var(self, snr: Float[Array, "*s"]) -> Float[Array, "*s"]:
         """Reading variance; zero where the gas is not covered (no reading)."""
-        safe = jnp.where(snr > 0, snr, 1.0)
-        return jnp.where(snr > 0, (READING_SD_AT_UNIT_SNR / safe) ** 2, 0.0)
+        return safe_ratio(READING_SD_AT_UNIT_SNR, snr) ** 2
 
     def _precision(self, snr: Float[Array, "*s"]) -> Float[Array, "*s"]:
         """Reading precision ``1 / sigma**2``; zero where the gas is not covered."""
@@ -143,8 +143,7 @@ class GaussianGasModel(AbstractObservationModel):
         """
         m, v = atoms.x_mean, atoms.x_var
         total = stats["precision"]
-        safe = jnp.where(total > 0, total, 1.0)
-        ybar = jnp.where(total > 0, stats["weighted_sum"] / safe, 0.0)
+        ybar = safe_ratio(stats["weighted_sum"], total)
         scatter = stats["weighted_square_sum"] - stats["weighted_sum"] * ybar
         shrink = 1.0 / (1.0 + v * total)
         residual = ybar - m

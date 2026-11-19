@@ -15,6 +15,7 @@ from jax import lax
 from jax.scipy.special import gammainc
 from jaxtyping import Array, Bool, Float, Int, PyTree
 
+from spaceodyssey._numerics import EXACT, safe_ratio
 from spaceodyssey.claim import Claim
 from spaceodyssey.roles import Roles
 from spaceodyssey.types import (
@@ -94,11 +95,6 @@ def _role_log_weights(atoms: Atoms, log_prior, log_like) -> Float[Array, "R A"]:
     return jnp.where(dead, -jnp.inf, total)
 
 
-def _role_weights(atoms: Atoms, log_prior, log_like) -> Float[Array, "R A"]:
-    """Normalized weights of every role over the leading axis of ``atoms``."""
-    return jax.nn.softmax(_role_log_weights(atoms, log_prior, log_like), axis=-1)
-
-
 def role_log_weights(
     atoms: Atoms,
     roles: Roles,
@@ -154,14 +150,32 @@ def _role_log_prior(atoms: Atoms, roles: Roles, star) -> Float[Array, "R A"]:
     return jnp.concatenate([forecast[None], verdict], axis=0)
 
 
-def weights(b: Belief) -> Float[Array, "R A"]:
-    """Normalized role weights over the draws.
+def log_weights(b: Belief) -> Float[Array, "R A"]:
+    """Unnormalized log role weights over the draws.
 
-    The unnormalized log weight of role ``r`` is
-    ``log_weights + log_prior[r] - log_ref_density + log_like[r]``, and each row is
-    normalized to sum to one. A role under which every draw has log weight ``-inf``
-    cannot be normalized: its row is NaN, on purpose, and so is everything read from
-    that role (its ``q``, and its pool rate when the same holds for the marks).
+    The log weight of role ``r`` is
+    ``log_weights + log_prior[r] - log_ref_density + log_like[r]``, the first and
+    third terms the cloud's. A draw with zero refit weight, zero prior or zero
+    likelihood has log weight ``-inf``.
+
+    Args:
+        b: the belief.
+
+    Returns:
+        Log weights of shape ``(R, A)``.
+
+    Raises:
+        ValueError: if the cloud does not declare ``log_ref_density``.
+    """
+    return _role_log_weights(b.atoms, b.log_prior, b.log_like)
+
+
+def weights(b: Belief) -> Float[Array, "R A"]:
+    """Normalized role weights over the draws: ``log_weights`` normalized per role.
+
+    Each row sums to one. A role under which every draw has log weight ``-inf`` cannot
+    be normalized: its row is NaN, on purpose, and so is everything read from that
+    role (its ``q``, and its pool rate when the same holds for the marks).
 
     Args:
         b: the belief.
@@ -169,7 +183,7 @@ def weights(b: Belief) -> Float[Array, "R A"]:
     Returns:
         Weights of shape ``(R, A)``.
     """
-    return _role_weights(b.atoms, b.log_prior, b.log_like)
+    return jax.nn.softmax(log_weights(b), axis=-1)
 
 
 def mark_weights(pool: Pool) -> Float[Array, "R Am"]:
@@ -185,18 +199,8 @@ def mark_weights(pool: Pool) -> Float[Array, "R Am"]:
     Returns:
         Weights of shape ``(R, Am)``.
     """
-    return _role_weights(pool.marks, pool.log_prior, pool.log_like)
-
-
-# Full float32 precision for every product of weights: on a GPU the default precision
-# of a float32 dot or convolution can drop to TF32, about three digits.
-_EXACT = lax.Precision.HIGHEST
-
-
-def _ratio(num, den):
-    """``num / den``, defined as zero where ``den`` is zero, with finite gradients."""
-    safe = jnp.where(den > 0, den, 1.0)
-    return jnp.where(den > 0, num / safe, 0.0)
+    log_w = _role_log_weights(pool.marks, pool.log_prior, pool.log_like)
+    return jax.nn.softmax(log_w, axis=-1)
 
 
 def _conjunct_probs(atoms: Atoms, claim: Claim, star) -> Float[Array, "C A K"]:
@@ -210,8 +214,24 @@ def _conjunct_probs(atoms: Atoms, claim: Claim, star) -> Float[Array, "C A K"]:
     return jnp.where(atoms.exists, probs, jnp.zeros((), atoms.x_mean.dtype))
 
 
-def _draw_joint(b: Belief, claim: Claim, star, planet) -> Float[Array, "C1 A"]:
-    """Per draw, the probability that the first ``c`` conjuncts hold, ``c = 0 .. C``."""
+def draw_claim_mass(
+    b: Belief, claim: Claim, star, planet: Int[Array, ""]
+) -> Float[Array, "C1 A"]:
+    """Per draw, the probability that the first ``c`` conjuncts hold, ``c = 0 .. C``.
+
+    Row 0 is one; row ``C`` is the claim's probability on the draw, and row
+    ``claim.given`` its condition's. Every claim probability is these rows weighted by
+    a role.
+
+    Args:
+        b: the belief.
+        claim: the claim.
+        star: a pytree of scalar leaves describing the star.
+        planet: index of the planet along the ``K`` axis.
+
+    Returns:
+        Probabilities of shape ``(C + 1, A)``.
+    """
     probs = _conjunct_probs(b.atoms, claim, star)  # (C, A, K)
     one_planet = jnp.take(probs, planet, axis=2)  # (C, A)
     joint = jnp.cumprod(one_planet, axis=0)  # (C, A)
@@ -221,7 +241,7 @@ def _draw_joint(b: Belief, claim: Claim, star, planet) -> Float[Array, "C1 A"]:
 def _joint_mass(b: Belief, claim: Claim, star, planet) -> Float[Array, "R C1"]:
     """Probability that the first ``c`` conjuncts hold, ``c = 0 .. C``, per role."""
     return jnp.matmul(
-        weights(b), _draw_joint(b, claim, star, planet).T, precision=_EXACT
+        weights(b), draw_claim_mass(b, claim, star, planet).T, precision=EXACT
     )
 
 
@@ -245,7 +265,7 @@ def q(b: Belief, claim: Claim, star, planet: Int[Array, ""]) -> Float[Array, " R
         ``q`` per role, shape ``(R,)``.
     """
     mass = _joint_mass(b, claim, star, planet)
-    return _ratio(mass[:, -1], mass[:, claim.given])
+    return safe_ratio(mass[:, -1], mass[:, claim.given])
 
 
 def chain(b: Belief, claim: Claim, star, planet: Int[Array, ""]) -> Float[Array, "R C"]:
@@ -265,7 +285,7 @@ def chain(b: Belief, claim: Claim, star, planet: Int[Array, ""]) -> Float[Array,
         Probabilities of shape ``(R, C)``.
     """
     mass = _joint_mass(b, claim, star, planet)
-    return _ratio(mass[:, 1:], mass[:, :-1])
+    return safe_ratio(mass[:, 1:], mass[:, :-1])
 
 
 def _poisson_binomial(p: Float[Array, "A K"], n_bins: int) -> Float[Array, "A N"]:
@@ -326,7 +346,7 @@ def pool_rate(pool: Pool, claim: Claim, star) -> Float[Array, " R"]:
     if claim.given != 0:
         raise ValueError("pool_rate needs an unconditional claim (claim.given == 0)")
     p_mark = jnp.prod(_conjunct_probs(pool.marks, claim, star), axis=0)[:, 0]  # (Am,)
-    weighted = jnp.matmul(mark_weights(pool), p_mark, precision=_EXACT)  # (R,)
+    weighted = jnp.matmul(mark_weights(pool), p_mark, precision=EXACT)  # (R,)
     return jnp.exp(pool.log_mass) * weighted
 
 
@@ -362,12 +382,12 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
 
     p_draw = jnp.prod(_conjunct_probs(b.atoms, claim, star), axis=0)  # (A, K)
     per_draw = _poisson_binomial(p_draw, n_bins)  # (A, N)
-    from_draws = jnp.matmul(weights(b), per_draw, precision=_EXACT)  # (R, N)
+    from_draws = jnp.matmul(weights(b), per_draw, precision=EXACT)  # (R, N)
 
     lam = pool_rate(b.pool, claim, star)  # (R,)
     from_pool = jax.vmap(_poisson, in_axes=(0, None))(lam, n_bins)  # (R, N)
 
-    full = jax.vmap(partial(jnp.convolve, precision=_EXACT))(from_draws, from_pool)
+    full = jax.vmap(partial(jnp.convolve, precision=EXACT))(from_draws, from_pool)
     return jnp.concatenate(
         [full[:, : n_bins - 1], full[:, n_bins - 1 :].sum(1, keepdims=True)], 1
     )
