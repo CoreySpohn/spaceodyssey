@@ -106,7 +106,10 @@ def step(
     accepted: it is charged its exposure, its payload is drawn
     by the world under the model of its mode with ``row_key(key, star, count)``, and
     it is released ``mode.latency_d`` after its exposure ends. One that does not fit is
-    refused (``OVER_BUDGET``): charged nothing, its payload zeros. The payload sits in
+    refused (``OVER_BUDGET``): charged nothing, its payload zeros. A refused row still
+    starts on the calendar, so a refused row that asked to wait moves the clock to its
+    requested start: the refusal is a budget verdict made at that start, and waiting
+    costs nothing, so nothing is gained or lost. The payload sits in
     its model's buffer and the other buffers hold zeros. The model is picked by the
     mode's static slot, so nothing switches on a traced value, and under ``jax.vmap``
     over worlds (``log`` and ``world`` stacked) one program serves every world.

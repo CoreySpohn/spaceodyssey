@@ -230,7 +230,8 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
     the last exposure. The run's end, the calendar time its last row ends
     (``clock_d``), is a stage of its own at every star, marked in the information
     table's ``end`` column, so the table shows what was known at the end and what the
-    rows in flight added after it.
+    rows in flight added after it. A refused row that asked to wait moves the clock to
+    its requested start (``step``), so it moves the end stage with it.
     The certificates, the resolution and the counts are read after the last release.
 
     Args:

@@ -29,6 +29,8 @@ from spaceodyssey.types import (
     Action,
     Grant,
     Refit,
+    clock_d,
+    spent_d,
 )
 from spaceodyssey.world import SealedWorld, row_key, run_keys
 
@@ -60,9 +62,6 @@ class OrbitReport(AbstractObservationModel):
         hz = atoms.cloud.samples["hz"][:, 0]
         return jnp.stack([1.0 - hz, hz], axis=-1)
 
-    def cell_payloads(self, atoms, action):
-        return {"hz": jnp.broadcast_to(jnp.arange(2.0)[:, None], (2, 1))}
-
 
 class ExpectedReading(AbstractObservationModel):
     """The Gaussian gas model with every reading at its expected value: the true
@@ -84,9 +83,6 @@ class ExpectedReading(AbstractObservationModel):
 
     def cells(self, atoms, action):
         return self.gas.cells(atoms, action)
-
-    def cell_payloads(self, atoms, action):
-        return self.gas.cell_payloads(atoms, action)
 
 
 def _no_grant():
@@ -371,9 +367,6 @@ class Blind(AbstractObservationModel):
     def cells(self, atoms, action):
         return jnp.ones((atoms.exists.shape[0], 1))
 
-    def cell_payloads(self, atoms, action):
-        return {"value": jnp.zeros((1, *atoms.exists.shape[1:]))}
-
 
 class EchoState(eqx.Module):
     """A running checksum of every view an `Echo` has been shown."""
@@ -503,11 +496,14 @@ def test_waiting_costs_no_budget_and_releases_follow_the_calendar(toy):
     released at once (day 11). Row 1 waits 9 days, starts at day 10 and is accepted:
     the two rows charge 2 days, all of the budget, and the clock reads day 11. At day
     11 the view shows row 1 released and row 0 in flight, with the full budget
-    charged. `score` stages L at day 11 (the run's end) and E at day 21, after it.
+    charged. `score` stages L at day 11 (the run's end) and E at day 21, after it. A
+    third one-day row not before day 30 is refused (no budget left), charged nothing,
+    and still moves the clock to day 30, its requested start.
 
     Fails if a row starts at the time charged so far instead of on the calendar (row
-    1 would start at day 1), if waiting is charged (row 1 would be refused), or if
-    releases are read against charged time (row 1 would wait in flight until day 2).
+    1 would start at day 1), if waiting is charged (row 1 would be refused), if
+    releases are read against charged time (row 1 would wait in flight until day 2),
+    or if a refused row is left out of the calendar clock.
     """
     models = (OrbitReport(),)
     modes = (Mode(0, 20.0), Mode(0, 0.0))
@@ -525,6 +521,13 @@ def test_waiting_costs_no_budget_and_releases_follow_the_calendar(toy):
     assert_allclose([view.time_d, view.budget_left_d], [11.0, 0.0])
     assert list(np.asarray(view.in_flight[:2])) == [True, False]
     assert_allclose(view.log.rows.payload[0]["hz"][:2, 0], [0.0, 1.0])
+    late = Action(0, 0, 1.0, 30.0)
+    refused = eqx.filter_jit(step)(
+        run_keys(KEY)[1], log, world, models, late, modes[0], design.resources
+    )
+    assert int(refused.rows.refusal[2]) == OVER_BUDGET
+    assert_allclose([refused.rows.charged_d[2], spent_d(refused)], [0.0, 2.0])
+    assert_allclose(clock_d(refused), 30.0)
 
     claim = Claim((toy.InHz(),))
     study = _study(toy, _step_rule_cloud(toy), design, 2, claim)

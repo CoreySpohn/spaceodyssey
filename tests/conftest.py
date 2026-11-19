@@ -219,10 +219,6 @@ class _Toy:
             d = self._detect(atoms, action.exposure_d)
             return jnp.stack([1.0 - d, d], axis=-1)
 
-        def cell_payloads(self, atoms, action):
-            exposure_d = jnp.full(2, action.exposure_d)
-            return {"exposure_d": exposure_d, "detected": jnp.array([0.0, 1.0])}
-
         def stats(self, payload, atoms, star):
             d = self._detect(atoms, payload["exposure_d"])
             p = jnp.where(payload["detected"] > 0.5, d, 1.0 - d)
