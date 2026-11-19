@@ -21,6 +21,8 @@ the reading are proposed for the toy and wait on approval:
 - These models are never used for a negative certificate.
 """
 
+from typing import ClassVar
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -85,10 +87,15 @@ class GaussianGasModel(AbstractObservationModel):
     their per-row likelihoods do not add; ``stats`` and ``finalize`` carry the exact
     conjugate update for any number of rows.
 
+    The model characterizes the planets it reads; it does not search (``searches`` is
+    false), so it takes no planet out of the pool.
+
     Attributes:
         snr_one_day: S/N of each gas after one day of exposure, shape ``(G,)``.
         edges: bin edges of a reading, dex, increasing; default one edge at the floor.
     """
+
+    searches: ClassVar[bool] = False
 
     snr_one_day: Float[Array, " G"] = eqx.field(converter=jnp.asarray)
     edges: Float[Array, " E"] = eqx.field(converter=jnp.asarray, default=(GAS_FLOOR,))
@@ -196,11 +203,14 @@ class StepReportModel(AbstractObservationModel):
     restriction holds all the same.
 
     Each gas has three outcome cells: 0 no report, 1 bit 0, 2 bit 1; a row's cells are
-    the joint over planets and gases, coded by ``cell`` and ``n_cells``.
+    the joint over planets and gases, coded by ``cell`` and ``n_cells``. The report
+    characterizes the planets it reads; it does not search (``searches`` is false).
 
     Attributes:
         snr_one_day: S/N of each gas after one day of exposure, shape ``(G,)``.
     """
+
+    searches: ClassVar[bool] = False
 
     snr_one_day: Float[Array, " G"] = eqx.field(converter=jnp.asarray)
 

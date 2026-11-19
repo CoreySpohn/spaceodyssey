@@ -268,7 +268,18 @@ class AbstractObservationModel(eqx.Module):
     A model whose draws carry a distribution that several rows read (a Gaussian gas
     block with ``x_var > 0``) cannot use that form, since the rows are not independent
     given the draw; it carries conjugate statistics instead.
+
+    Each model declares ``searches``, a class constant: whether its rows detect
+    planets. Only a searching model takes planets out of the pool or has a
+    completeness; a characterization (a spectrum of known planets) leaves the pool as
+    it is.
+
+    Attributes:
+        searches: whether the model detects planets, a class constant every concrete
+            model sets.
     """
+
+    searches: eqx.AbstractClassVar[bool]
 
     @abc.abstractmethod
     def sample(self, atoms: Atoms, action: Action, key: PRNGKeyArray) -> PyTree:
@@ -317,9 +328,9 @@ class AbstractObservationModel(eqx.Module):
     def cells(self, atoms: Atoms, action: Action) -> Float[Array, "A Y"]:
         """Probability of each outcome cell under each draw.
 
-        Cell 0 is the null outcome, the row showing nothing of the draw's planets (no
-        detection, no report): on a pool's marks, every other cell is a detection.
-        A model without a closed form returns ``binned_cells``.
+        For a searching model (``searches``) cell 0 is the miss: on a pool's marks,
+        every other cell is a detection. A model without a closed form returns
+        ``binned_cells``.
 
         Args:
             atoms: the draws.

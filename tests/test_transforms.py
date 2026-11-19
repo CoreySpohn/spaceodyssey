@@ -3,6 +3,8 @@
 is differentiable.
 """
 
+from typing import ClassVar
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -37,7 +39,7 @@ from spaceodyssey.information import (
 )
 from spaceodyssey.roles import AbstractRolePrior, Roles
 from spaceodyssey.toy import GaussianGasModel
-from spaceodyssey.types import Action
+from spaceodyssey.types import AbstractObservationModel, Action
 from spaceodyssey.value import completeness, thin
 
 N_ROLES, N_DRAWS, N_PLANETS = 3, 6, 2
@@ -56,6 +58,29 @@ class Tilt(AbstractRolePrior):
 
     def sample(self, key, star):
         raise NotImplementedError("a tilt is read only as a weight")
+
+
+class Search(AbstractObservationModel):
+    """A test search that detects the first planet with probability
+    `1 - exp(-exposure_d hz)`: smooth in the exposure, so completeness has a derivative
+    in it. Cell 0 is the miss. Read only through `cells`.
+    """
+
+    searches: ClassVar[bool] = True
+
+    def cells(self, atoms, action):
+        hz = atoms.cloud.samples["hz"][:, 0]
+        d = jnp.where(atoms.exists[:, 0], 1.0 - jnp.exp(-action.exposure_d * hz), 0.0)
+        return jnp.stack([1.0 - d, d], axis=-1)
+
+    def sample(self, atoms, action, key):
+        raise NotImplementedError("read only through cells")
+
+    def stats(self, payload, atoms, star):
+        raise NotImplementedError("read only through cells")
+
+    def finalize(self, stats, atoms, star):
+        raise NotImplementedError("read only through cells")
 
 
 def _worlds(toy):
@@ -226,9 +251,9 @@ def _cases(toy):
             lambda p: uneven(p.log_mass) + uneven(mark_weights(p)),
         ),
         "completeness": (
-            lambda p, m, a: completeness(p, hz_only, star, m, a),
-            [(b0.pool, model, actions[0]), (b1.pool, model, actions[1])],
-            lambda a: a[2].exposure_d,
+            lambda p, a: completeness(p, Search(), a, hz_only, star),
+            [(b0.pool, actions[0]), (b1.pool, actions[1])],
+            lambda a: a[1].exposure_d,
             uneven,
         ),
     }

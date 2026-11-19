@@ -240,21 +240,28 @@ def thin(pool: Pool, detect_prob: Float[Array, " Am"]) -> Pool:
 def _detect_prob(
     model: AbstractObservationModel, marks: Atoms, action: Action
 ) -> Float[Array, " Am"]:
-    """Probability that an action detects each mark: every cell but the null cell 0."""
+    """Probability that an action detects each mark.
+
+    For a searching model, every cell but the miss, cell 0; zero for a model that does
+    not search.
+    """
+    if not model.searches:
+        return jnp.zeros(marks.exists.shape[0])
     return jnp.sum(model.cells(marks, action)[:, 1:], axis=-1)
 
 
 def completeness(
     pool: Pool,
-    claim: Claim,
-    star,
     model: AbstractObservationModel,
     action: Action,
+    claim: Claim,
+    star,
 ) -> Float[Array, " R"]:
     """Expected fraction of the pool's claim-true planets an action would detect.
 
-    A mark is detected when the action's outcome on it falls outside cell 0, the null
-    outcome of the cells contract. Per role ``r`` this is
+    A mark is detected when a searching model's outcome on it falls outside cell 0, the
+    miss; a model that does not search (``searches`` false) detects nothing and has
+    completeness zero. Per role ``r`` this is
     ``sum_m w_r(m) p(m) d(m) / sum_m w_r(m) p(m)``, with ``w_r`` the role's mark
     weights, ``p`` the claim probability and ``d`` the detection probability of each
     mark: the claim-true rate of the planets found (the pool thinned by the miss
@@ -263,10 +270,10 @@ def completeness(
 
     Args:
         pool: the undetected planets.
-        claim: an unconditional claim.
-        star: a pytree of scalar leaves describing the star.
         model: the observation model of the action.
         action: the action.
+        claim: an unconditional claim.
+        star: a pytree of scalar leaves describing the star.
 
     Returns:
         The completeness per role, shape ``(R,)``.

@@ -3,6 +3,7 @@ forms and the sign errors they catch.
 """
 
 import itertools
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -325,6 +326,7 @@ class Search(AbstractObservationModel):
     planet is always a miss. Read only through `cells`.
     """
 
+    searches: ClassVar[bool] = True
     hit: jax.Array = eqx.field(converter=jnp.asarray)
     other: jax.Array = eqx.field(converter=jnp.asarray)
 
@@ -341,6 +343,22 @@ class Search(AbstractObservationModel):
 
     def finalize(self, stats, atoms, star):
         raise NotImplementedError("read only through cells")
+
+
+SEARCH = (Search(hit=0.8, other=0.2),)
+LOOK = _menu([[1.0]], [[1.0]], (0,))
+
+
+def _search_pool(toy):
+    """Test 5's pool: mass 2, marks with claim bits (1, 0), weighed (0.5, 0.5) by role
+    0 and (0.2, 0.8) by role 1."""
+    return toy.pool([1.0, 0.0], [[0.5, 0.5], [0.2, 0.8]], np.log(2.0), n_roles=2)
+
+
+def _search_belief(toy, pool):
+    """A two-role belief with no draws, so every planet is in `pool`."""
+    no_draws = toy.atoms([[0.0]], [[0.0]], [1.0], 0.0, 0.0, exists=False)
+    return Belief(no_draws, np.zeros((2, 1)), np.zeros((2, 1)), pool)
 
 
 def test_count_and_thin_by_hand(toy):
@@ -360,29 +378,48 @@ def test_count_and_thin_by_hand(toy):
     reweighted (1.2 at depth 2), if a role's mass is thinned with another role's mark
     weights, or if `Count` counts from the current pool rather than from time zero.
     """
-    pool = toy.pool([1.0, 0.0], [[0.5, 0.5], [0.2, 0.8]], np.log(2.0), n_roles=2)
-    claim = Claim((toy.InHz(),))
+    pool, claim = _search_pool(toy), Claim((toy.InHz(),))
     after = thin(pool, jnp.array([0.8, 0.2]))
     assert_allclose(jnp.exp(after.log_mass), [1.0, 1.36], rtol=1e-12)
     assert_allclose(mark_weights(after)[0], [0.2, 0.8], rtol=1e-12)
     assert_allclose(pool_rate(after, claim, toy.star), [0.2, 0.08], rtol=1e-12)
     assert_allclose(pool_rate(pool, claim, toy.star), [1.0, 0.4], rtol=1e-12)
 
-    no_draws = toy.atoms([[0.0]], [[0.0]], [1.0], 0.0, 0.0, exists=False)
-    belief = Belief(no_draws, np.zeros((2, 1)), np.zeros((2, 1)), after)
+    belief = _search_belief(toy, after)
     assert_allclose(Count(pool)(belief, claim, toy.star), 0.8, rtol=1e-12)
 
-    search = Search(hit=0.8, other=0.2)
     action = Action(0, 0, 0, 1.0)
-    assert_allclose(completeness(pool, claim, toy.star, search, action), [0.8, 0.8])
+    assert_allclose(completeness(pool, SEARCH[0], action, claim, toy.star), [0.8, 0.8])
 
-    start = _one(eqx.tree_at(lambda x: x.pool, belief, pool))
-    menu = _menu([[1.0]], [[1.0]], (0,))
+    start = _one(_search_belief(toy, pool))
     for depth, found in ((1, 0.8), (2, 0.96)):
-        f = _frontier_of(
-            start, claim, toy.star, Count(_one(pool)), (search,), menu, depth
-        )
+        f = _frontier_of(start, claim, toy.star, Count(_one(pool)), SEARCH, LOOK, depth)
         assert_allclose(f.reward[0, 0], found, rtol=1e-12)
+
+
+def test_a_model_that_does_not_search_leaves_the_pool(toy):
+    """Only a searching model thins the pool. A gas reading offered at test 5's star
+    (claim-true pool rate 1.0) finds nothing: its completeness is 0 and its `Count`
+    reward is 0, while the search beside it in the same menu is worth 0.8.
+
+    Fails if a model that does not search thins the pool, for example by reading its
+    cell 0 as the miss: both readings fall below the edge with probability 0.25, so it
+    would detect 0.75 of each mark and be worth 0.75 planets.
+    """
+    pool, claim = _search_pool(toy), Claim((toy.InHz(),))
+    reading = GaussianGasModel(snr_one_day=[2.0, 2.0], edges=[0.0])
+    action = Action(0, 0, 0, 1.0)
+    assert_allclose(completeness(pool, reading, action, claim, toy.star), [0.0, 0.0])
+    f = _frontier_of(
+        _one(_search_belief(toy, pool)),
+        claim,
+        toy.star,
+        Count(_one(pool)),
+        (SEARCH[0], reading),
+        _menu([[1.0, 1.0]], [[1.0, 1.0]], (0, 1)),
+        1,
+    )
+    assert_allclose(f.reward[0], [0.8, 0.0], rtol=1e-12, atol=1e-12)
 
 
 def test_a_second_star_and_world_add_no_traces(toy):
