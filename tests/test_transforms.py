@@ -40,6 +40,7 @@ from spaceodyssey.information import (
     outcome_prob,
     refit_trigger,
     update_by_cell,
+    widen_by_mass_outside,
 )
 from spaceodyssey.log import step
 from spaceodyssey.roles import AbstractRolePrior, Roles
@@ -294,6 +295,15 @@ def _cases(toy):
             lambda c: c.q_lo + 2.0 * c.q_hi,
         ),
         "refit_trigger": (lambda d: refit_trigger(d, 0.05), [(d0,), (d1,)], None, None),
+        "widen_by_mass_outside": (
+            widen_by_mass_outside,
+            [
+                (d0.q, d0.q + 0.1, jnp.full(N_ROLES, 0.01)),
+                (d1.q, d1.q + 0.2, jnp.full(N_ROLES, 0.03)),
+            ],
+            lambda a: a[2],
+            uneven,
+        ),
         "mark_weights": (
             mark_weights,
             [(b0.pool,), (b1.pool,)],
@@ -357,6 +367,7 @@ CASES = [
     "clip_q",
     "certify",
     "refit_trigger",
+    "widen_by_mass_outside",
     "mark_weights",
     "expected_log_score",
     "outcome_prob",

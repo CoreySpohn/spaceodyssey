@@ -33,6 +33,7 @@ from spaceodyssey.information import (
     clip_q,
     diagnose,
     refit_trigger,
+    widen_by_mass_outside,
 )
 from spaceodyssey.study import Study
 from spaceodyssey.types import ACCEPTED, Atoms, ObservationLog
@@ -286,17 +287,17 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
                 }
             )  # fmt: skip
             for m in members:
-                q_m, mass = float(d.q[m]), float(d.prior_mass_outside[m])
+                q_m, mass = d.q[m], d.prior_mass_outside[m]
+                bound_lo, bound_hi = widen_by_mass_outside(q_m, q_m, mass)
                 n_eff = float(d.n_eff[m])
                 resolution.append(
                     {
-                        "star": s, "planet": k, "member": m, "q": q_m,
+                        "star": s, "planet": k, "member": m, "q": float(q_m),
                         "mc_se": float(d.mc_se[m]), "khat": float(d.khat[m]),
                         "khat_max": khat_max, "n_eff": n_eff, "resolution": 0.5 / n_eff,
                         "clipped": int(np.sum(q_whole[:, m] != q_clip[:, m])),
-                        "psi": psi[m], "prior_mass_outside": mass,
-                        "q_bound_lo": (1.0 - mass) * q_m,
-                        "q_bound_hi": (1.0 - mass) * q_m + mass,
+                        "psi": psi[m], "prior_mass_outside": float(mass),
+                        "q_bound_lo": float(bound_lo), "q_bound_hi": float(bound_hi),
                     }
                 )  # fmt: skip
                 planets.append((m, psi[m], q_whole[-1, m], applicable, true))

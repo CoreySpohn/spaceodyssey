@@ -309,6 +309,27 @@ class Certificate(eqx.Module):
     q_hi: Float[Array, ""] = eqx.field(converter=jnp.asarray)
 
 
+def widen_by_mass_outside(
+    lo: Float[Array, "..."], hi: Float[Array, "..."], mass: Float[Array, "..."]
+) -> tuple[Float[Array, "..."], Float[Array, "..."]]:
+    """An interval on a claim probability, widened by the prior mass outside the box.
+
+    The draws see a role's prior only inside the refit's box. The mass ``m`` outside
+    may hold the claim or not, so a probability ``p`` read off the draws bounds the
+    role's own to ``[(1 - m) p, (1 - m) p + m]``; an interval's ends widen to
+    ``(1 - m) lo`` and ``(1 - m) hi + m``.
+
+    Args:
+        lo: the lower ends.
+        hi: the upper ends.
+        mass: the prior mass outside the box, ``m``.
+
+    Returns:
+        The widened lower and upper ends.
+    """
+    return (1.0 - mass) * lo, (1.0 - mass) * hi + mass
+
+
 def _bounds(d: Diagnostics, z: float):
     """Per-row interval: the wider of the delta-method and Wilson (1927) intervals.
 
@@ -326,8 +347,7 @@ def _bounds(d: Diagnostics, z: float):
     half = z / (1.0 + z2n) * jnp.sqrt(p * (1.0 - p) / n + z2n / (4.0 * n))
     lo = jnp.minimum(d.q - z * d.mc_se, center - half)
     hi = jnp.maximum(d.q + z * d.mc_se, center + half)
-    m = d.prior_mass_outside
-    return (1.0 - m) * lo, (1.0 - m) * hi + m
+    return widen_by_mass_outside(lo, hi, d.prior_mass_outside)
 
 
 def _members(d: Diagnostics, z: float):
