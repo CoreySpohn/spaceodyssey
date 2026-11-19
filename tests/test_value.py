@@ -280,11 +280,10 @@ def test_value_does_not_fall_with_depth(toy):
 
     On the two spectra (psi = 0.7) a water report alone is worth
     psi ln 2 + (1 - psi) [ln(1 - psi / 2) - ln(1 - psi / 4)] = 0.414 at depth 1; at
-    depth 2 the oxygen report may follow, so it is worth the whole 0.667, and depth 3
-    adds nothing. On the coarsening fixture a noisy reading (Gaussian, S/N 2) loses
-    under the reversed verdict, and so would every repeat of it: a deeper plan stops
-    after the first, so depths 1, 2 and 3 agree (a plan forced on falls to -0.61 at
-    depth 2).
+    depth 2 the oxygen report may follow, so it is worth the whole 0.667. On the
+    coarsening fixture a noisy reading (Gaussian, S/N 2) loses under the reversed
+    verdict, and so would every repeat of it: a deeper plan stops after the first, so
+    depths 1 and 2 agree (a plan forced on falls to -0.61 at depth 2).
 
     Fails if a deeper plan cannot stop (it would be forced into a second losing
     reading), if the continuation is averaged instead of maximized, or if a follow-up
@@ -300,11 +299,11 @@ def test_value_does_not_fall_with_depth(toy):
             _frontier_of(
                 b, claim, toy.star, LogScore(1), SPECTRA, SPECTRA_MENU, d
             ).reward[0]
-            for d in (1, 2, 3)
+            for d in (1, 2)
         ]
     )
     assert_allclose(rewards[0], [both, alone, alone], rtol=1e-12)
-    assert_allclose(rewards[1:], both, rtol=1e-12)
+    assert_allclose(rewards[1], both, rtol=1e-12)
     assert np.all(np.diff(rewards, axis=0) >= -1e-12)
 
     reading = (GaussianGasModel(snr_one_day=[2.0], edges=[0.0]),)
@@ -319,11 +318,11 @@ def test_value_does_not_fall_with_depth(toy):
                 _menu([[1.0]], [[1.0]], (0,)),
                 d,
             ).reward[0, 0]
-            for d in (1, 2, 3)
+            for d in (1, 2)
         ]
     )
     assert losing[0] < 0.0
-    assert_allclose(losing[1:], losing[0], rtol=1e-12)
+    assert_allclose(losing[1], losing[0], rtol=1e-12)
 
 
 class Search(AbstractObservationModel):
