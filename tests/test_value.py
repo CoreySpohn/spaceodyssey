@@ -25,6 +25,7 @@ from spaceodyssey.belief import (
 )
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.information import claim_information
+from spaceodyssey.price import dispatch, solve_price
 from spaceodyssey.roles import Roles
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
 from spaceodyssey.types import (
@@ -606,32 +607,86 @@ def test_count_and_thin_by_hand(toy):
 
 
 def test_a_follow_up_is_charged_at_the_price(toy):
-    """A follow-up at depth 2 is worth what it adds less lam times its cost; the first
-    entry's cost stays in the frontier.
+    """A follow-up at depth 2 is taken when it adds more than lam times its cost, and
+    the frontier counts its time: the reward is the plan's whole gain and the cost the
+    first look plus the follow-up's expected time.
 
-    On test 5's star the revisit adds 0.16 planets for one day. At lam = 0 the depth-2
-    reward is test 5's 0.96. At lam = 0.1 the revisit nets 0.16 - 0.1 = 0.06, so the
-    reward is 0.86. At lam = 0.2 it would net -0.04, so the plan stops after the first
-    look and the reward is the depth-1 0.8. The cost is the one day of the first look.
+    On test 5's star the revisit adds 0.16 planets for one day. At lam = 0 and 0.1 the
+    plan revisits: reward 0.8 + 0.16 = 0.96, cost 2 days, and net of the follow-up's
+    price 0.96 and 0.86. At lam = 0.2 the revisit would net -0.04, so the plan stops
+    after the first look: reward 0.8, cost 1 day.
 
-    Fails if a follow-up is not charged (0.96 at every price), if the first entry is
-    charged as well (0.76 at lam = 0.1), if a losing follow-up is forced (0.76 at
-    lam = 0.2), or if the price is read as a Python value (a second price retraces).
+    Fails if a follow-up is not charged (it is taken at every price), if the first
+    entry is charged as well (net 0.76 at lam = 0.1), if a losing follow-up is forced
+    (0.96 and 2 days at lam = 0.2), if the follow-up's time is left out of the cost,
+    or if the price is read as a Python value (a second price retraces).
     """
     pool, claim = _search_pool(toy), Claim((toy.InHz(),))
     start = toy.split(toy.stack(_search_belief(toy, pool)))
     count = Count(toy.stack(pool))
 
-    def reward(lam):
+    def plan(lam):
         f = _frontier_of(start, claim, toy.star, count, (_search(toy),), LOOK, 2, lam)
-        assert_allclose(f.cost_d, [[1.0]])
-        return f.reward[0, 0]
+        return f.reward[0, 0], f.cost_d[0, 0]
 
-    free = reward(0.0)
+    free = plan(0.0)
     before = len(traces)
-    charged = [reward(lam) for lam in (0.1, 0.2)]
+    charged = [plan(lam) for lam in (0.1, 0.2)]
     assert len(traces) == before
-    assert_allclose([free, *charged], [0.96, 0.86, 0.8], rtol=1e-12)
+    reward, cost_d = np.asarray([free, *charged]).T
+    lam = np.array([0.0, 0.1, 0.2])
+    assert_allclose(reward, [0.96, 0.96, 0.8], rtol=1e-12)
+    assert_allclose(cost_d, [2.0, 2.0, 1.0], rtol=1e-12)
+    net = reward - lam * (cost_d - 1.0)  # less the price of the follow-up
+    assert_allclose(net, [0.96, 0.86, 0.8], rtol=1e-12)
+
+
+def test_follow_up_time_raises_the_price_and_keeps_the_budget(toy):
+    """With the follow-ups' time counted, the price clears the time the plans use.
+
+    Eight stars like test 5's, scaled by their claim-true rate R (pool mass 2 R): two
+    with R = 10 and six with R = 1.0, 0.9, ..., 0.5; one one-day search each; depth 2,
+    built at lam = 0.72; budget 6 days. A first look finds 0.8 R and a revisit 0.16 R
+    more, so the large stars revisit (1.6 > 0.72): reward 9.6 over 2 days; the small
+    ones do not (0.16 R <= 0.16): reward 0.8 R over 1 day. The dual then clears at
+    lam = 0.72 (4 days for the large stars, 1 for R = 1.0 and the tied R = 0.9 star
+    by the tie rule), the price it was built at, and the plans bought use 6 days, the
+    whole budget: their time is certain here, since a search's outcome on these
+    draws, which hold no planet, is always the miss. Pricing the first looks alone
+    (rewards net of the revisit, 8.88 for a large star, over one day) clears at
+    lam = 0.56 and buys plans that use 8 days.
+
+    Fails if the follow-up time is dropped from the spend (the price falls to 0.56
+    and the plans bought overrun the budget), or counted where no follow-up is taken.
+    """
+    rates = np.array([10.0, 10.0, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5])
+    pools = [
+        toy.pool([1.0, 0.0], [[0.5, 0.5]] * 2, np.log(2.0 * r), n_roles=2)
+        for r in rates
+    ]
+    start = toy.split(toy.stack(*[_search_belief(toy, pool) for pool in pools]))
+    count = Count(toy.stack(*pools))
+    menu = _menu(np.ones((8, 1)), (0,))
+    lam0, budget = 0.72, jnp.asarray(6.0)
+    f = _frontier_of(
+        start, Claim((toy.InHz(),)), toy.star, count, (_search(toy),), menu, 2, lam0
+    )
+    revisits = rates == 10.0
+    assert_allclose(f.cost_d[:, 0], np.where(revisits, 2.0, 1.0), rtol=1e-12)
+    assert_allclose(f.reward[:, 0], np.where(revisits, 0.96, 0.8) * rates, rtol=1e-12)
+
+    lam, _ = solve_price(f, budget)
+    bought = np.asarray(dispatch(lam, f, budget))[:, 0]
+    assert_allclose(lam, lam0, rtol=1e-12)
+    assert list(np.flatnonzero(bought)) == [0, 1, 2, 3]
+    assert_allclose(np.sum(np.asarray(f.cost_d)[bought, 0]), 6.0, rtol=1e-12)
+
+    first_looks = Frontier(f.reward - lam0 * (f.cost_d - 1.0), np.ones((8, 1)), f.mask)
+    lam_first, _ = solve_price(first_looks, budget)
+    bought_first = np.asarray(dispatch(lam_first, first_looks, budget))[:, 0]
+    assert_allclose(lam_first, 0.56, rtol=1e-12)
+    assert lam > lam_first
+    assert_allclose(np.sum(np.asarray(f.cost_d)[bought_first, 0]), 8.0, rtol=1e-12)
 
 
 def test_a_model_that_does_not_search_leaves_the_pool(toy):
@@ -684,7 +739,10 @@ def test_a_second_star_and_world_add_no_traces(toy):
         second[0], claim, toy.star, LogScore(1), SPECTRA, second[1], 2, lam=0.05
     )
     assert len(traces) == before
-    assert_allclose(f2.cost_d, [[1.0, 0.1, 1.0], [2.0] * 3])
+    exposure_d = np.array([[1.0, 0.1, 1.0], [2.0] * 3])
+    masked = ~np.asarray(f2.mask)
+    assert_allclose(np.asarray(f2.cost_d)[masked], exposure_d[masked])
+    assert np.all(np.asarray(f2.cost_d) >= exposure_d)  # follow-ups add time
     assert_allclose(f2.reward[0, 1], 0.0)  # masked
     alone = _frontier_of(
         toy.split(toy.stack(_spectra_belief(toy, 0.3))),

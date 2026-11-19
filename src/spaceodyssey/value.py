@@ -40,13 +40,16 @@ class Frontier(eqx.Module):
     menus reuse the same compiled program. Padded entries are ignored; their reward and
     cost should still be finite. The null option is implied and is not stored.
 
-    ``cost_d`` is the first action's cost alone. A reward that looks past the first
-    action was built at one price of time (``frontier``); the frontier holds it fixed,
-    so the dual and the spend see the price only through ``cost_d``.
+    An option is a plan: a first action, and the follow-ups a lookahead takes after it
+    (``frontier``). Its ``reward`` is the utility the plan is expected to add and its
+    ``cost_d`` the time it is expected to use: the first action's cost plus the
+    expected cost of the follow-ups, both at the price the plan was built at. So the
+    dual and the spend see the time a plan really uses, and ``reward - lam cost_d`` is
+    the plan's net value at that price and its tangent in the price elsewhere.
 
     Attributes:
         reward: reward of each option, shape ``(S, M)``.
-        cost_d: cost of each option in days, shape ``(S, M)``.
+        cost_d: expected time of each option in days, shape ``(S, M)``.
         mask: true where the option exists, shape ``(S, M)``.
     """
 
@@ -79,11 +82,12 @@ def value_and_spend(
 
     The spend is ``-dV_i/dlam``, taken as one forward tangent of the value itself
     (``jax.jvp``), so the two cannot drift apart. Away from a kink it is the cost of the
-    option the star chooses. At a kink, where several options (the null among them)
-    tie for the best net reward, ``max`` differentiates by averaging, so the spend is
-    the mean cost of the tied options: one point of the subdifferential, not a proof
-    that the budget clears (Boyd and Vandenberghe, Convex Optimization, sec. 3.2.3
-    and 5.1, for the pointwise maximum and the dual function).
+    option the star chooses, follow-ups included. At a kink, where several options (the
+    null among them) tie for the best net reward, ``max`` differentiates by averaging,
+    so the spend is the mean cost of the tied options: one point of the
+    subdifferential, not a proof that the budget clears (Boyd and Vandenberghe, Convex
+    Optimization, sec. 3.2.3 and 5.1, for the pointwise maximum and the dual
+    function).
 
     Args:
         lam: the price of time, reward per day, ``lam >= 0``.
@@ -443,25 +447,37 @@ def frontier(
     lam: Float[Array, ""],
     depth: int,
 ) -> Frontier:
-    """The reward and cost of each menu entry at each star.
+    """The reward and expected time of each menu entry's plan at each star.
 
     The planner's beliefs are two: the forecast's and the verdict's, each from its own
-    replay (``planning_beliefs``). The reward of entry ``m`` is
-    ``E_F[W_{depth-1}(after m)] - U``: the utility ``U`` it is expected to add, with up
-    to ``depth - 1`` further entries of the same star's menu after it, each chosen on
-    the outcomes so far to raise the utility net of its time at price ``lam`` (``lam``
-    times its cost), or none. The expectation is over the forecast's distribution of
-    each outcome cell; an outcome conditions each belief, weights and draws, by
-    ``update_by_cell`` and thins its pool by the entry's detection probability of each
-    mark (``thin``; zero for a model that does not search). The first entry's cost (its
-    exposure) is not netted: it stays in the frontier for the dual. Under ``LogScore``
-    at depth 1 the reward is the verdict gain ``E_F[ln p_gamma(N | Y) - ln
-    p_gamma(N)]``; ``lam`` enters only at ``depth > 1``.
+    replay (``planning_beliefs``). Entry ``m``'s plan is the entry and up to
+    ``depth - 1`` further entries of the same star's menu after it, each chosen on the
+    outcomes so far to raise the utility net of its time at price ``lam`` (``lam``
+    times its cost), or none. Its net value is ``E_F[W_{depth-1}(after m)] - U``, the
+    utility ``U`` it is expected to add less the price of its follow-ups. The
+    expectation is over the forecast's distribution of each outcome cell; an outcome
+    conditions each belief, weights and draws, by ``update_by_cell`` and thins its
+    pool by the entry's detection probability of each mark (``thin``; zero for a
+    model that does not search).
+
+    The frontier holds each plan's gross reward and its expected time. The expected
+    time of the follow-ups ``F_m`` is the negative slope of the net value in the price
+    (envelope theorem), taken as one forward tangent (``jax.jvp``); the reward is the
+    net value plus ``lam F_m`` and the cost the entry's exposure plus ``F_m``. So the
+    dual counts the time a plan uses, not its first action alone, and at ``lam`` the
+    frontier's net value of each option is the plan's. Under ``LogScore`` at depth 1
+    the reward is the verdict gain ``E_F[ln p_gamma(N | Y) - ln p_gamma(N)]`` and the
+    cost the exposure; ``lam`` enters only at ``depth > 1``.
+
+    An entry that ``needs_detection`` is offered only where a planet is detected: at
+    the root by the menu's ``detected``, and below it once a searching entry on the
+    path had a detection (``Menu``).
 
     The price a frontier is built at is not the price the dual then solves for. A
     planner (``PricePolicy``) passes the last solved price: one step of the fixed point
     ``lam = solve_price(frontier(..., lam, ...))``, exact at depth 1, where the reward
-    does not depend on ``lam``.
+    does not depend on ``lam``. Between the two, the frontier's options are the
+    tangents of the plans' net values at ``lam``.
 
     This is the generic bounded recursion, the reference: it evaluates
     ``(M Y) ** depth`` hypothetical belief pairs per star, so it serves small menus and
@@ -498,7 +514,8 @@ def frontier(
             included, static, at least 1.
 
     Returns:
-        The frontier: rewards (zero at masked entries), the menu's costs and mask.
+        The frontier: each plan's reward and expected time (zero and the exposure at
+        an entry not offered), and the entries offered at the root.
 
     Raises:
         ValueError: if ``depth < 1`` or a menu entry names a mode not in
@@ -509,15 +526,23 @@ def frontier(
     if any(not 0 <= m < len(mode_models) for m in menu.mode):
         raise ValueError("a menu entry's mode is not in the mode table")
 
+    lam = jnp.asarray(lam, float)
+
     def one_star(forecast, verdict, star, utility, menu, star_index):
         node = (forecast, verdict, menu.detected)
-        plan = _Plan(claim, star, utility, mode_models, menu, star_index, lam)
-        later = _expected_after(node, plan, depth - 1)
         offered = _offered(menu, menu.detected)
-        return jnp.where(offered, later - utility(forecast, verdict, claim, star), 0.0)
+        now = utility(forecast, verdict, claim, star)
+
+        def net(price):
+            plan = _Plan(claim, star, utility, mode_models, menu, star_index, price)
+            return jnp.where(offered, _expected_after(node, plan, depth - 1) - now, 0.0)
+
+        value, slope = jax.jvp(net, (lam,), (jnp.ones_like(lam),))
+        follow_d = jnp.where(offered, -slope, 0.0)
+        return value + lam * follow_d, menu.exposure_d + follow_d
 
     star_index = jnp.arange(menu.mask.shape[0])
-    reward = eqx.filter_vmap(one_star)(
+    reward, cost_d = eqx.filter_vmap(one_star)(
         forecast, verdict, star, utility, menu, star_index
     )
-    return Frontier(reward, menu.exposure_d, _offered(menu, menu.detected))
+    return Frontier(reward, cost_d, _offered(menu, menu.detected))
