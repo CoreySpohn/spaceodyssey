@@ -520,7 +520,8 @@ def frontier(
     dual counts the time a plan uses, not its first action alone, and at ``lam`` the
     frontier's net value of each option is the plan's. Under ``LogScore`` at depth 1
     the reward is the verdict gain ``E_F[ln p_gamma(N | Y) - ln p_gamma(N)]`` and the
-    cost the exposure; ``lam`` enters only at ``depth > 1``.
+    cost the exposure; ``lam`` enters only at ``depth > 1``, so the tangent is taken
+    only there.
 
     An entry is offered only where the star has reached the entry's
     ``requires_stage``: at the root the menu's ``stage``, below it the highest stage
@@ -591,8 +592,11 @@ def frontier(
             plan = _Plan(claim, star, utility, menu, outcomes, price)
             return jnp.where(offered, _expected_after(node, plan, depth - 1) - now, 0.0)
 
-        value, slope = jax.jvp(net, (lam,), (jnp.ones_like(lam),))
-        follow_d = jnp.where(offered, -slope, 0.0)
+        if depth == 1:  # no follow-up: the net value does not depend on the price
+            value, follow_d = net(lam), jnp.zeros_like(menu.exposure_d)
+        else:
+            value, slope = jax.jvp(net, (lam,), (jnp.ones_like(lam),))
+            follow_d = jnp.where(offered, -slope, 0.0)
         return value + lam * follow_d, menu.exposure_d + follow_d, offered
 
     star_index = jnp.arange(menu.mask.shape[0])
