@@ -5,8 +5,9 @@ A world holds one point state per star. Rows come out of it only through ``obser
 scorer. The noise of a row is keyed by the row's identity, never by call order.
 
 One run key serves a run: ``run_keys`` splits it into a world key, from which
-``draw_worlds`` draws the truth, and a noise key, from which every row's noise is
-folded. The two are tagged apart, so no truth shares a key with any row.
+``draw_worlds`` draws the truth, a noise key, from which every row's noise is folded,
+and a policy key, from which every decision's key is folded. The three are tagged
+apart, so no truth shares a key with any row or decision, and no row with a decision.
 """
 
 import equinox as eqx
@@ -31,23 +32,29 @@ _WORLD_KEY_TAG = 1
 """Tag folded into the run key to give the world key, so world ``i`` never shares a
 key with the rows of star ``i``."""
 
+_POLICY_KEY_TAG = 2
+"""Tag folded into the run key to give the policy key, so a decision never shares a
+key with a world or a row."""
 
-def run_keys(key: PRNGKeyArray) -> tuple[PRNGKeyArray, PRNGKeyArray]:
-    """Split a run key into its world key and its noise key.
+
+def run_keys(key: PRNGKeyArray) -> tuple[PRNGKeyArray, PRNGKeyArray, PRNGKeyArray]:
+    """Split a run key into its world key, its noise key and its policy key.
 
     ``draw_worlds`` takes the run key and draws from the world key; ``execute`` takes
-    the same run key and draws every row's noise from the noise key. Neither depends on
-    the other or on which runs first.
+    the same run key, draws every row's noise from the noise key and hands each
+    decision a key folded from the policy key. None depends on another or on which
+    runs first.
 
     Args:
         key: the run key.
 
     Returns:
-        The world key and the noise key.
+        The world key, the noise key and the policy key.
     """
     return (
         jax.random.fold_in(key, _WORLD_KEY_TAG),
         jax.random.fold_in(key, _NOISE_KEY_TAG),
+        jax.random.fold_in(key, _POLICY_KEY_TAG),
     )
 
 
@@ -225,7 +232,7 @@ def draw_worlds(
         A stack of ``n_worlds`` sealed worlds over ``S`` stars.
     """
     n_star = jax.tree.leaves(stars)[0].shape[0]
-    world_key, _ = run_keys(key)
+    world_key, _, _ = run_keys(key)
 
     def world(i):
         keys = jax.vmap(jax.random.fold_in, in_axes=(None, 0))(

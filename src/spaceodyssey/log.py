@@ -170,11 +170,14 @@ def execute(
 ) -> ObservationLog:
     """Run a policy against a sealed world until it stops.
 
-    The run key is split first (``run_keys``); the world was drawn from its world key
-    and every row's noise comes from its noise key. The grant's rows are revealed at
-    time zero and start the log. Then, on the host, the policy is shown the public view
-    of the log and its action is taken by one compiled ``step``, with the model picked
-    from the design's static mode table, until the policy returns ``None``.
+    The run key is split first (``run_keys``); the world was drawn from its world key,
+    every row's noise comes from its noise key, and each decision's key is the policy
+    key folded with the number of actions taken. The grant's rows are revealed at time
+    zero and start the log, and the policy's state starts from ``policy.init``. Then,
+    on the host, the policy is shown the public view of the log and its action is
+    taken by one compiled ``step``, with the model picked from the design's static mode
+    table, until the policy stops. The policy's state passes from one decision to the
+    next unread: the host reads only the action and the stop flag.
 
     Args:
         key: the run key.
@@ -190,13 +193,17 @@ def execute(
         ValueError: if the grant does not fit the log, or the policy asks for a mode
             not in the design or for more rows than the log holds.
     """
-    _, noise_key = run_keys(key)
+    _, noise_key, policy_key = run_keys(key)
     payload = world.reveal(noise_key, grant, design.models, design.modes)
     log = start_log(grant_rows(grant, payload, design.modes), design.capacity)
     n_granted = log.count
-    while (
-        action := policy.decide(_public_view(log, n_granted, design.resources))
-    ) is not None:
+    public = _public_view(log, n_granted, design.resources)
+    state = policy.init(public)
+    while True:
+        decision_key = jax.random.fold_in(policy_key, public.n_taken)
+        action, stop, state = policy.decide(decision_key, state, public)
+        if bool(stop):
+            return log
         mode_index = int(action.mode)
         if not 0 <= mode_index < len(design.modes):
             raise ValueError(f"mode {mode_index} is not in the design's mode table")
@@ -206,4 +213,4 @@ def execute(
         log = _step(
             noise_key, log, world, design.models, action, mode, design.resources
         )
-    return log
+        public = _public_view(log, n_granted, design.resources)

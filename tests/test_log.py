@@ -19,7 +19,7 @@ from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.design import Design, Mode, Resources
 from spaceodyssey.information import POSITIVE, UNRESOLVED
 from spaceodyssey.log import execute, grant_rows, start_log, step
-from spaceodyssey.policy import AbstractPolicy, TablePolicy, public_view
+from spaceodyssey.policy import AbstractPolicy, TablePolicy, TableState, public_view
 from spaceodyssey.score import associate_planets, format_report, score
 from spaceodyssey.study import Arm, Study
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
@@ -126,7 +126,7 @@ def _el_world(toy):
 def _empty_log(world, design):
     """A run's log before its first action, with no grant."""
     grant = _no_grant()
-    _, noise = run_keys(KEY)
+    _, noise, _ = run_keys(KEY)
     payload = world.reveal(noise, grant, design.models, design.modes)
     return start_log(grant_rows(grant, payload, design.modes), CAPACITY)
 
@@ -317,7 +317,7 @@ def test_a_table_replays_to_the_log_it_describes(toy):
     assert_allclose(rows.charged_d[:4], [1.5, 2.0, 0.5, 0.0])
     assert_allclose(rows.release_d[:4], [1.75, 3.75, 4.25, 4.0])
     assert_allclose(rows.refusal[:4], [0, 0, 0, OVER_BUDGET])
-    _, noise = run_keys(KEY)
+    _, noise, _ = run_keys(KEY)
     for i in range(3):
         action = jax.tree.map(lambda leaf, i=i: leaf[i], table)
         slot = int(rows.model_slot[i])
@@ -358,19 +358,29 @@ class Blind(AbstractObservationModel):
         return jnp.ones((atoms.exists.shape[0], 1))
 
 
+class EchoState(eqx.Module):
+    """A running checksum of every view an `Echo` has been shown."""
+
+    checksum: jax.Array = eqx.field(converter=jnp.asarray)
+
+
 class Echo(AbstractPolicy):
-    """An adaptive policy that reads every bit it is shown: it records a checksum of
-    each public view and, four times, observes star 0 or 1 by the checksum's parity.
+    """An adaptive policy that reads every bit it is shown: it folds a checksum of each
+    public view into its state and, four times, observes star 0 or 1 by the running
+    checksum's parity. It also records each checksum on the host for the test.
     """
 
     seen: list = eqx.field(default_factory=list)
 
-    def decide(self, public):
+    def init(self, public):
+        return EchoState(0)
+
+    def decide(self, key, state, public):
         leaves = jax.tree.leaves(public)
-        self.seen.append(zlib.crc32(b"".join(np.asarray(x).tobytes() for x in leaves)))
-        if int(public.n_taken) >= 4:
-            return None
-        return Action(self.seen[-1] % 2, 0, 1.0)
+        crc = zlib.crc32(b"".join(np.asarray(x).tobytes() for x in leaves))
+        self.seen.append(crc)
+        checksum = EchoState(zlib.crc32(np.asarray(state.checksum).tobytes(), crc))
+        return Action(int(checksum.checksum) % 2, 0, 1.0), public.n_taken >= 4, checksum
 
 
 def test_a_policy_cannot_read_the_truth(toy):
@@ -401,6 +411,74 @@ def test_a_policy_cannot_read_the_truth(toy):
     assert not np.array_equal(
         logs[0].rows.payload[0]["reading"], logs[1].rows.payload[0]["reading"]
     )
+
+
+def test_a_table_decides_with_a_traced_cursor(toy):
+    """A table's decision compiles once and reads its position from its state.
+
+    Under one `eqx.filter_jit`, three decisions on a two-action table return its two
+    actions in order, then stop, and the cursor counts 1, 2, 3; the three calls trace
+    once. An empty table stops at its first decision.
+
+    Fails if the table reads its position as a Python value (`int` of a traced
+    counter raises under jit, and a concrete one retraces), skips or repeats an
+    action, or stops early or late.
+    """
+    design = _design(_step_models())
+    log = _empty_log(_el_world(toy), design)
+    view = public_view(log, jnp.asarray(0), design.resources)
+    table = TablePolicy(Action([1, 0], [2, 1], [1.5, 0.5]))
+    traces = []
+
+    @eqx.filter_jit
+    def decide(state):
+        traces.append(None)
+        return table.decide(KEY, state, view)
+
+    state = table.init(view)
+    taken = []
+    for _ in range(3):
+        action, stop, state = decide(state)
+        taken.append((int(action.star), int(action.mode), bool(stop)))
+    assert taken == [(1, 2, False), (0, 1, False), (0, 1, True)]
+    assert int(state.cursor) == 3
+    assert len(traces) == 1
+    empty = TablePolicy(Action(jnp.zeros(0, int), jnp.zeros(0, int), jnp.zeros(0)))
+    assert bool(empty.decide(KEY, empty.init(view), view)[1])
+
+
+class KeyLog(AbstractPolicy):
+    """Takes three one-day looks at star 0 and records the key of each decision."""
+
+    keys: list = eqx.field(default_factory=list)
+
+    def init(self, public):
+        return TableState(0)
+
+    def decide(self, key, state, public):
+        self.keys.append(np.asarray(jax.random.key_data(key)))
+        return Action(0, 0, 1.0), public.n_taken >= 3, state
+
+
+def test_each_decision_is_keyed_from_the_policy_key(toy):
+    """Decision `i` gets the run's policy key folded with `i`, the actions taken so
+    far: four decisions (three looks and the stop) get four distinct keys, each equal
+    to `fold_in(policy_key, i)`.
+
+    Fails if `execute` hands a policy the noise or world key, one key for every
+    decision, or a key that depends on anything but the run key and the decision's
+    position.
+    """
+    policy = KeyLog()
+    execute(KEY, policy, _el_world(toy), _design(_step_models()), _no_grant())
+    _, _, policy_key = run_keys(KEY)
+    expected = [
+        jax.random.key_data(jax.random.fold_in(policy_key, i)) for i in range(4)
+    ]
+    assert len(policy.keys) == 4
+    for got, want in zip(policy.keys, expected, strict=True):
+        np.testing.assert_array_equal(got, want)
+    assert len({k.tobytes() for k in policy.keys}) == 4
 
 
 def test_a_second_world_and_star_do_not_retrace_step(toy):

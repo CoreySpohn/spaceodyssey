@@ -3,7 +3,7 @@
 A policy never sees the sealed world. It is handed a ``PublicView``, reductions of the
 log at the current time: the budget left, the rows in flight and the rows released,
 their payloads only once released. ``execute`` builds the view and asks the policy for
-an action until the policy stops.
+an action until the policy stops, threading the policy's state between decisions.
 """
 
 import abc
@@ -11,7 +11,7 @@ import abc
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float, Int
+from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray
 
 from spaceodyssey.design import Resources
 from spaceodyssey.types import Action, ObservationLog, as_float, as_index, spent_d
@@ -72,22 +72,65 @@ def public_view(
 class AbstractPolicy(eqx.Module):
     """A rule for the next action, from the public view alone.
 
+    A policy is a record and a pair of functions on it. ``init`` gives the policy's
+    state after the grant; ``decide`` takes a key, that state and the public view and
+    returns the next action, whether to stop instead, and the new state. The state is
+    a record (an ``eqx.Module``) that ``execute`` threads from one decision to the next
+    without reading it, so a policy carries what it learns between decisions in its
+    state and never in itself. ``stop`` is a traced boolean: when it is true the run
+    ends and the action is ignored.
+
     ``execute`` never reads a belief: it shows the policy the public view and takes the
-    action it returns. A policy that plans on a belief holds that belief itself and
-    keeps it current through ``absorb``, applying the rows the view shows released
-    since its last decision; it never replays rows it has not been shown.
+    action it returns. A policy that plans on a belief keeps that belief, and anything
+    it caches from it (each star's frontier, the last solved price), in its state. It
+    keeps them current through ``absorb``, applying the rows the view shows released
+    since its last decision, and never replays rows it has not been shown.
+
+    A planning policy reads the forecast and the verdict as two beliefs, each from its
+    own replay of the log. Whether the forecast's replay follows the decision time (a
+    learning forecast) or stays at time zero (a frozen forecast, the replay at
+    ``time_d = 0``, which holds the grant's rows only) is a static field of the planning
+    policy, ``forecast_updates``, its only reader. With the forecast frozen the planner
+    maximizes a frozen-forecast surrogate, which is not a martingale.
     """
 
     @abc.abstractmethod
-    def decide(self, public: PublicView) -> Action | None:
-        """The next action, or ``None`` to end the run.
+    def init(self, public: PublicView) -> eqx.Module:
+        """The policy's state after the grant.
 
         Args:
+            public: the public view of the run after the grant.
+
+        Returns:
+            The state, a record.
+        """
+
+    @abc.abstractmethod
+    def decide(
+        self, key: PRNGKeyArray, state: eqx.Module, public: PublicView
+    ) -> tuple[Action, Bool[Array, ""], eqx.Module]:
+        """The next action, whether to stop, and the new state.
+
+        Args:
+            key: the decision's key, folded from the run's policy key (``run_keys``)
+                and the number of actions taken.
+            state: the policy's state.
             public: the public view of the run.
 
         Returns:
-            The action, or ``None`` when the policy stops.
+            The action, the stop flag (when true the run ends and the action is not
+            taken) and the new state.
         """
+
+
+class TableState(eqx.Module):
+    """Where a ``TablePolicy`` is in its table.
+
+    Attributes:
+        cursor: index of the table's next action.
+    """
+
+    cursor: Int[Array, ""] = eqx.field(converter=as_index)
 
 
 class TablePolicy(AbstractPolicy):
@@ -95,7 +138,8 @@ class TablePolicy(AbstractPolicy):
 
     The table is a schedule made outside the run (an EXOSIMS, AYO or M4OPT schedule,
     or an oracle's): action ``i`` is taken as the run's ``i``-th action, whatever the
-    rows before it showed, and a refused action is not retried.
+    rows before it showed, and a refused action is not retried. The state is the index
+    of the next action, a traced counter, so a decision reads nothing concrete.
 
     Attributes:
         actions: an ``Action`` whose leaves have a leading axis over the table.
@@ -103,9 +147,17 @@ class TablePolicy(AbstractPolicy):
 
     actions: Action
 
-    def decide(self, public: PublicView) -> Action | None:
-        """The table's next action, ``None`` past its end."""
-        index = int(public.n_taken)
-        if index >= self.actions.star.shape[0]:
-            return None
-        return jax.tree.map(lambda leaf: leaf[index], self.actions)
+    def init(self, public: PublicView) -> TableState:
+        """The cursor at the table's first action."""
+        return TableState(0)
+
+    def decide(
+        self, key: PRNGKeyArray, state: TableState, public: PublicView
+    ) -> tuple[Action, Bool[Array, ""], TableState]:
+        """The table's next action; stop past its end."""
+        n_action = self.actions.star.shape[0]
+        if n_action == 0:  # a static shape: an empty table stops at once
+            return Action(0, 0, 0.0), jnp.asarray(True), state
+        index = jnp.minimum(state.cursor, n_action - 1)
+        action = jax.tree.map(lambda leaf: leaf[index], self.actions)
+        return action, state.cursor >= n_action, TableState(state.cursor + 1)
