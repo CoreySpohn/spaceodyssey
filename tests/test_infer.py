@@ -47,7 +47,9 @@ def _atoms(x, var, log_ref_density):
     x = jnp.asarray(x, float)
     n_draw = x.shape[0]
     block = jnp.broadcast_to(jnp.asarray(var, float), (n_draw,))[:, None, None]
-    cloud = WeightedCloud({"x": x}, jnp.zeros(n_draw), log_ref_density, "toy")
+    cloud = WeightedCloud(
+        {"x": x}, jnp.zeros(n_draw), 0.0, log_ref_density, chart="toy"
+    )
     return Atoms(cloud, x[:, None, None], block, jnp.ones((n_draw, 1), bool))
 
 
@@ -130,7 +132,7 @@ def test_replay_applies_each_row_outside_the_mask_once(toy):
     x ~ N(0, 1) (the refit target p0 and the role prior of the forecast and the first
     member); rows y1 = y2 = 1 with noise sd 1. The draws are the 20,000 midpoint
     quantiles of the posterior given row 1, N(0.5, 0.5), with `row_mask` holding row
-    1 and `log_weight` 0, and `log_ref_density` is log p0. Row 2 is outside. The
+    1 and `log_weights` 0, and `log_ref_density` is log p0. Row 2 is outside. The
     belief has the posterior of precision 1 + 1 + 1 = 3: mean 2/3 and variance 1/3
     under N(0, 1), and mean (1 + 1 + 1) / 3 = 1 under the member N(1, 1). Rows that
     must add nothing sit in the same log: another star's row, a refused row, a step
@@ -311,15 +313,15 @@ def test_replay_on_an_uncertain_gas_uses_the_joint_marginal(toy):
 
 
 def test_replay_refuses_what_it_cannot_replay(toy):
-    """The measure check of the role weights holds through a replay, and shapes are
+    """The chart check of the role weights holds through a replay, and shapes are
     checked.
 
-    A verdict prior on measure "y" against a cloud on "toy" raises when the belief is
+    A verdict prior on chart "y" against a cloud on "toy" raises when the belief is
     read, as do a model table whose length differs from the log's payload buffers, a
     `row_mask` whose capacity differs from the log's, a belief's updated draws passed
     as a refit, and a step report applied to a Gaussian gas, under `jit` too.
 
-    Fails if the belief is read without the measure check (a missing Jacobian goes
+    Fails if the belief is read without the chart check (a missing Jacobian goes
     unnoticed), the replay reads a payload buffer or a mask entry that does not exist,
     it replays draws that already carry the rows, or a step report on a Gaussian gas
     is summed as if the rows were independent.
@@ -329,7 +331,7 @@ def test_replay_refuses_what_it_cannot_replay(toy):
     pool = toy.empty_pool(n_roles=3)
     r = replay(refit, log, MODELS, STAR, NOW)
     on_y = Roles(ROLES.forecast, GasGaussian("y", mean=[0.0, 1.0], sd=[1.0, 1.0]))
-    with pytest.raises(ValueError, match="measure"):
+    with pytest.raises(ValueError, match="chart"):
         replay_belief(r, on_y, MODELS, STAR, pool)
     with pytest.raises(ValueError, match="payload buffers"):
         replay(refit, log, (GAS,), STAR, NOW)

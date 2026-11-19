@@ -38,7 +38,7 @@ class GasPrior(AbstractRolePrior):
         x = jax.random.normal(key, (1, 1, self.n_gas))
         one = jnp.ones((1, 1))
         cloud = WeightedCloud(
-            {"hz": one, "size": one}, jnp.zeros(1), jnp.zeros(1), "toy"
+            {"hz": one, "size": one}, jnp.zeros(1), 0.0, jnp.zeros(1), chart="toy"
         )
         return Atoms(cloud, x, jnp.zeros_like(x), one > 0)
 
@@ -115,7 +115,7 @@ def test_draw_worlds_from_a_role_prior():
     prior = GasPrior("toy")
     truth = draw_worlds(prior, STARS, KEY, 4000).unseal().atoms
     assert truth.x_mean.shape == (4000, 2, 1, 1, 2)
-    assert_allclose(truth.cloud.log_weight, 0.0)
+    assert_allclose(truth.cloud.log_weights, 0.0)
     x = np.asarray(truth.x_mean)
     assert abs(x.mean()) < 0.05 and abs(x.var() - 1.0) < 0.05
     one = jax.tree.map(lambda leaf: leaf[0, 1], truth)
@@ -156,7 +156,9 @@ def test_observe_reads_the_right_star_and_unseal_gives_a_point_belief(toy):
     the pool of an unsealed world adds expected planets.
     """
     truth = _point_truth(toy, [[0.3, -0.4], [-0.3, 0.4]])
-    truth = eqx.tree_at(lambda a: a.cloud.log_weight, truth, jnp.full((2, 1), -jnp.inf))
+    truth = eqx.tree_at(
+        lambda a: a.cloud.log_weights, truth, jnp.full((2, 1), -jnp.inf)
+    )
     world = SealedWorld(truth)
     model = GaussianGasModel(snr_one_day=[1.0e4, 1.0e4])
     for star, x in enumerate(([0.3, -0.4], [-0.3, 0.4])):

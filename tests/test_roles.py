@@ -38,7 +38,7 @@ class Above(AbstractConjunct):
 
 
 class Gaussian(AbstractRolePrior):
-    """N(mean, sd^2) on x, or its density on y = exp(x) when the measure is "y".
+    """N(mean, sd^2) on x, or its density on y = exp(x) when the chart is "y".
 
     On "y" the log Jacobian -x is added unless `jacobian` is False (the deliberate
     one-sided omission). Outside `x < upper` the density is zero.
@@ -52,14 +52,14 @@ class Gaussian(AbstractRolePrior):
     def log_prob(self, atoms, star):
         x = atoms.cloud.samples["x"][:, 0]
         log_p = norm.logpdf(x, self.mean, self.sd)
-        if self.measure == "y" and self.jacobian:
+        if self.chart == "y" and self.jacobian:
             log_p = log_p - x
         return jnp.where(x < self.upper, log_p, -jnp.inf)
 
     def sample(self, key, star):
         top = (self.upper - self.mean) / self.sd
         x = self.mean + self.sd * jax.random.truncated_normal(key, -jnp.inf, top, (1,))
-        return _atoms(x, jnp.zeros(1), jnp.zeros(1), self.measure)
+        return _atoms(x, jnp.zeros(1), jnp.zeros(1), self.chart)
 
 
 class LookAlikeRatio(AbstractRolePrior):
@@ -79,10 +79,10 @@ class LookAlikeRatio(AbstractRolePrior):
         raise NotImplementedError("a likelihood-ratio member has no sampler")
 
 
-def _atoms(x, log_weight, log_ref, measure):
+def _atoms(x, log_weights, log_ref, chart):
     """Atoms of a 1-D cloud: one planet per draw, an empty gas block."""
     n = x.shape[0]
-    cloud = WeightedCloud({"x": x[:, None]}, log_weight, log_ref, measure)
+    cloud = WeightedCloud({"x": x[:, None]}, log_weights, 0.0, log_ref, chart=chart)
     empty = jnp.zeros((n, 1, 0))
     return Atoms(cloud, empty, empty, jnp.ones((n, 1), bool))
 
@@ -95,27 +95,27 @@ def _empty_pool(n_roles):
     return Pool(marks, flat, flat, no_mass)
 
 
-def _cloud(key, n, measure="x"):
-    """Draws from g = N(0, 1.5^2), weighted to p0 = N(0, 1) on `measure`.
+def _cloud(key, n, chart="x"):
+    """Draws from g = N(0, 1.5^2), weighted to p0 = N(0, 1) on `chart`.
 
     On "y" the reference density carries the log Jacobian -x.
     """
     x = PROPOSAL_SD * jax.random.normal(key, (n,))
     log_p0 = norm.logpdf(x)
-    log_weight = log_p0 - norm.logpdf(x, 0.0, PROPOSAL_SD)
-    log_ref = log_p0 - x if measure == "y" else log_p0
-    return _atoms(x, log_weight, log_ref, measure)
+    log_weights = log_p0 - norm.logpdf(x, 0.0, PROPOSAL_SD)
+    log_ref = log_p0 - x if chart == "y" else log_p0
+    return _atoms(x, log_weights, log_ref, chart)
 
 
-def _roles(measure="x", b_mean=0.5, upper=jnp.inf, jacobian=True):
+def _roles(chart="x", b_mean=0.5, upper=jnp.inf, jacobian=True):
     """Forecast A = N(0, 1); one verdict member B = N(b_mean, 1), its leaves stacked."""
     stack = lambda v: jnp.full(1, v)  # noqa: E731
-    member = Gaussian(measure, stack(b_mean), stack(1.0), stack(upper), jacobian)
-    return Roles(Gaussian(measure, 0.0), member)
+    member = Gaussian(chart, stack(b_mean), stack(1.0), stack(upper), jacobian)
+    return Roles(Gaussian(chart, 0.0), member)
 
 
 def _belief(atoms, roles):
-    n_draws = atoms.cloud.log_weight.shape[0]
+    n_draws = atoms.cloud.log_weights.shape[0]
     return role_log_weights(atoms, roles, jnp.zeros((2, n_draws)), STAR, _empty_pool(2))
 
 
@@ -135,7 +135,7 @@ def test_reweighting_matches_the_truth(clouds):
     gives 1 - Phi(1) = 0.1587. The refit weight log p0 - log g is not constant, so it
     cannot be dropped silently. 20,000 draws: se is about 0.004.
 
-    Fails if the refit weight `log_weight` is dropped or enters with the wrong sign,
+    Fails if the refit weight `log_weights` is dropped or enters with the wrong sign,
     or if `log_ref_density` (log p0) enters with the wrong sign: A and p0 are not
     constant on the support, so each error moves both roles' estimates.
     """
@@ -155,10 +155,12 @@ def test_two_charts_and_a_one_sided_jacobian(clouds):
     """On y = exp(x) the reference density and the prior both carry -x, so the weights
     and q are those of the x chart. Dropping the Jacobian from the prior only tilts
     B = N(0.5, 1) by exp(x) to N(1.5, 1): the estimate becomes 1 - Phi(-0.5) = 0.6915,
-    far from the truth 0.3085. A prior on another measure than the cloud's raises.
+    far from the truth 0.3085. A prior on another chart than the cloud's raises, and so
+    does a cloud that declares no chart or no reference density.
 
     Fails if the reference density is not subtracted (the charts then disagree), if
-    the test could not see a one-sided Jacobian, or if a measure mismatch is accepted.
+    the test could not see a one-sided Jacobian, if a chart mismatch is accepted, or
+    if an undeclared chart or reference density is read as a declared one.
     """
     on_x = q(_belief(clouds["x"], _roles("x")), CLAIM, STAR, PLANET)
     on_y = q(_belief(clouds["y"], _roles("y")), CLAIM, STAR, PLANET)
@@ -169,18 +171,28 @@ def test_two_charts_and_a_one_sided_jacobian(clouds):
     assert jnp.abs(d.q[1] - (1.0 - ndtr(-0.5))) < 3.0 * d.mc_se[1]
     assert jnp.abs(d.q[1] - Q_B) > 20.0 * d.mc_se[1]
 
-    with pytest.raises(ValueError, match="measure"):
+    with pytest.raises(ValueError, match="chart"):
         _belief(clouds["y"], _roles("x"))
     mixed = Roles(Gaussian("y", 0.0), Gaussian("x", jnp.zeros(1), jnp.ones(1)))
     with pytest.raises(ValueError, match="verdict"):
         _belief(clouds["y"], mixed)
+
+    cloud = clouds["x"].cloud
+    no_chart = WeightedCloud(cloud.samples, cloud.log_weights, 0.0)
+    no_ref = WeightedCloud(cloud.samples, cloud.log_weights, 0.0, chart="x")
+    for undeclared in (no_chart, no_ref):
+        atoms = eqx.tree_at(lambda a: a.cloud, clouds["x"], undeclared)
+        with pytest.raises(ValueError, match="declared"):
+            _belief(atoms, _roles("x"))
+    with pytest.raises(ValueError, match="declares its chart"):
+        WeightedCloud(cloud.samples, cloud.log_weights, 0.0, cloud.log_ref_density)
 
 
 def test_a_hard_edged_prior_keeps_weights_and_gradients_finite(clouds):
     """B = N(0.5, 1) truncated to x < 2 has zero density on part of the cloud. Its
     q is the truncated truth (Phi(1.5) - Phi(0.5)) / Phi(1.5) = 0.2590 within 3 se, the
     weights are finite and zero beyond the edge, and the gradient of q in B's mean
-    matches finite differences. One draw outside p0's support (log_weight and
+    matches finite differences. One draw outside p0's support (log_weights and
     log_ref_density both -inf) gets weight zero, not nan.
 
     Fails if a zero prior or a zero target gives nan weights (-inf - (-inf)), or the
@@ -188,10 +200,10 @@ def test_a_hard_edged_prior_keeps_weights_and_gradients_finite(clouds):
     """
     atoms = clouds["x"]
     dead = eqx.tree_at(
-        lambda a: (a.cloud.log_weight, a.cloud.log_ref_density),
+        lambda a: (a.cloud.log_weights, a.cloud.log_ref_density),
         atoms,
         (
-            atoms.cloud.log_weight.at[0].set(-jnp.inf),
+            atoms.cloud.log_weights.at[0].set(-jnp.inf),
             atoms.cloud.log_ref_density.at[0].set(-jnp.inf),
         ),
     )

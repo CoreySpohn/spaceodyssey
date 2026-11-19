@@ -32,7 +32,7 @@ def _random_belief(toy):
 
 
 def test_weights_normalize_per_role(toy):
-    """Role weights are the normalized exp(log_weight + log_prior - log_ref + log_like).
+    """Role weights are normalized exp(log_weights + log_prior - log_ref + log_like).
 
     Cloud weight (1, 3), reference density (1, 2). Role 0: prior (1, 1), likelihood (1,
     1) gives (1/1, 3/2) = (1, 1.5), normalized (0.4, 0.6). Role 1: prior (3, 1),
@@ -212,7 +212,7 @@ def test_a_nonexistent_slot_changes_nothing(toy):
     given = Claim((toy.InHz(), GasAbove(0, 0.0)), given=1)
 
     a = b.atoms
-    n = a.cloud.log_weight.shape[0]
+    n = a.cloud.log_weights.shape[0]
 
     def pad(x, fill):
         x = jnp.concatenate([x, jnp.full_like(x, fill)], axis=1)  # a second slot
@@ -221,7 +221,9 @@ def test_a_nonexistent_slot_changes_nothing(toy):
     samples = {k: pad(v, 1.0) for k, v in a.cloud.samples.items()}
     exists = jnp.concatenate([jnp.ones((n, 1), bool), jnp.zeros((n, 1), bool)], 1)
     exists = jnp.concatenate([exists, jnp.zeros((1, 2), bool)], 0)
-    padded = toy.atoms(samples["hz"], samples["size"], [*np.exp(a.cloud.log_weight), 0])
+    padded = toy.atoms(
+        samples["hz"], samples["size"], [*np.exp(a.cloud.log_weights), 0]
+    )
     padded = eqx.tree_at(
         lambda p: (p.x_mean, p.x_var, p.exists),
         padded,

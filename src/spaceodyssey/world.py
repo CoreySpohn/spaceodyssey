@@ -70,11 +70,12 @@ class SealedWorld(eqx.Module):
         x_var = eqx.error_if(
             truth.x_var, truth.x_var != 0, "the truth is a point state (x_var = 0)"
         )
-        zero = jnp.zeros_like(truth.cloud.log_weight)
+        zero = jnp.zeros_like(truth.cloud.log_weights)
         self._truth = eqx.tree_at(
-            lambda a: (a.x_var, a.cloud.log_weight, a.cloud.log_ref_density),
+            lambda a: (a.x_var, a.cloud.log_weights, a.cloud.log_ref_density),
             truth,
             (x_var, zero, zero),
+            is_leaf=lambda x: x is None,
         )
 
     def observe(
@@ -166,7 +167,7 @@ class SealedWorld(eqx.Module):
             A belief whose leaves have a leading star axis.
         """
         truth = self._truth
-        lead = truth.cloud.log_weight.shape[:-1]
+        lead = truth.cloud.log_weights.shape[:-1]
         flat = jnp.zeros((*lead, 1, 1))
         no_mass = jnp.full((*lead, 1), -jnp.inf)
         pool = Pool(truth, flat, flat, no_mass)

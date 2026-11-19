@@ -20,29 +20,62 @@ def _asarrays(tree):
     return jax.tree.map(jnp.asarray, tree)
 
 
+def _as_float(x) -> Float[Array, ""]:
+    """``x`` as the default float type, never weakly typed."""
+    return jnp.asarray(x, dtype=float)
+
+
+def _optional_array(x):
+    """``x`` as a JAX array, or ``None`` when not declared."""
+    return None if x is None else jnp.asarray(x)
+
+
 class WeightedCloud(eqx.Module):
-    """Weighted draws from one refit; a stand-in mirroring the refit cloud's fields.
+    """Weighted draws from one refit; a stand-in with a sample posterior's fields.
 
-    ``samples`` is a pytree whose leaves share the leading draw axis ``A``.
+    ``samples`` is a named pytree whose leaves share the leading draw axis ``A``, every
+    leaf of shape ``(A, *shape)``.
 
-    Weight contract: ``log_weight`` is the log of target over proposal, where the
+    Weight contract: ``log_weights`` is the log of target over proposal, where the
     target is ``p0`` times the rows the refit represents (``Refit.row_mask``). It is
     not a log ratio against a proposal that equals ``p0``: that reading would count
     ``-log p0`` twice when the role weights are formed. One cloud has one row set, so
     one mask serves all its draws; a block normalization would need one per draw. The
     cloud comes from one refit.
 
+    ``log_ref_density`` is ``log p0`` of each draw, a density on the coordinates named
+    by ``chart``. Reweighting the draws to a role prior on the same chart needs both;
+    a cloud that declares neither can be held but not reweighted.
+
     Attributes:
-        samples: the state pytree, leading axis ``A``.
-        log_weight: log of target over proposal, shape ``(A,)``.
-        log_ref_density: log of ``p0`` on ``measure``, shape ``(A,)``.
-        measure: the coordinates in which densities are taken, a static label.
+        samples: the state pytree, every leaf of shape ``(A, *shape)``.
+        log_weights: log of target over proposal, shape ``(A,)``.
+        evidence: log marginal likelihood ``log Z`` of the refit, a scalar; ``0.0``
+            where the refit does not estimate it.
+        log_ref_density: log of ``p0`` on ``chart``, shape ``(A,)``, or ``None`` when
+            not declared.
+        chart: the coordinates the leaves of ``samples`` are in, a static label, or
+            ``None`` when not declared.
+        epoch: the zero of every time in the draws, static, or ``None`` when not
+            declared.
+
+    Raises:
+        ValueError: if ``log_ref_density`` is declared without a ``chart``.
     """
 
     samples: PyTree = eqx.field(converter=_asarrays)
-    log_weight: Float[Array, " A"] = eqx.field(converter=jnp.asarray)
-    log_ref_density: Float[Array, " A"] = eqx.field(converter=jnp.asarray)
-    measure: str = eqx.field(static=True)
+    log_weights: Float[Array, " A"] = eqx.field(converter=jnp.asarray)
+    evidence: Float[Array, ""] = eqx.field(converter=_as_float)
+    log_ref_density: Float[Array, " A"] | None = eqx.field(
+        converter=_optional_array, default=None
+    )
+    chart: str | None = eqx.field(static=True, default=None, kw_only=True)
+    epoch: object | None = eqx.field(static=True, default=None, kw_only=True)
+
+    def __check_init__(self):
+        """Check that a declared reference density names its chart."""
+        if self.log_ref_density is not None and self.chart is None:
+            raise ValueError("a cloud that declares log_ref_density declares its chart")
 
 
 class Atoms[StateT](eqx.Module):
@@ -57,7 +90,7 @@ class Atoms[StateT](eqx.Module):
     its state, so padding a draw changes no probability. Its state is masked, not
     read, in the values; keep it finite all the same (zeros, say), because a NaN in a
     masked branch still turns a derivative into NaN. A draw padded only to give every
-    star one shape carries zero weight (``log_weight = -inf``).
+    star one shape carries zero weight (``log_weights = -inf``).
 
     Attributes:
         cloud: the weighted draws.
@@ -107,7 +140,7 @@ class Pool(eqx.Module):
     Each mark is one planet (``K = 1`` in ``marks``); the marks carry the conditional
     distribution of an undetected planet and the pool carries how many there are in
     expectation. A mark's weight under role ``r`` is formed like a draw's,
-    ``log_weight + log_prior[r] - log_ref_density + log_like[r]``, normalized over the
+    ``log_weights + log_prior[r] - log_ref_density + log_like[r]``, normalized over the
     marks.
 
     A null observation thins the pool: it lowers ``log_mass`` and adds the log
@@ -138,7 +171,7 @@ class Pool(eqx.Module):
             raise ValueError(
                 f"a mark is one planet (K = 1), not K = {self.marks.x_mean.shape[-2]}"
             )
-        n_mark = self.marks.cloud.log_weight.shape[-1]
+        n_mark = self.marks.cloud.log_weights.shape[-1]
         per_mark = (self.log_prior, self.log_like)
         roles = {x.shape[-2] for x in per_mark} | {self.log_mass.shape[-1]}
         if len(roles) != 1 or {x.shape[-1] for x in per_mark} != {n_mark}:

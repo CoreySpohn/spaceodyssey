@@ -48,7 +48,7 @@ class Belief(eqx.Module):
 
     def __check_init__(self):
         """Check the static shapes: one ``R`` and one ``A`` across the fields."""
-        n_draw = self.atoms.cloud.log_weight.shape[-1]
+        n_draw = self.atoms.cloud.log_weights.shape[-1]
         roles = {
             self.log_prior.shape[-2],
             self.log_like.shape[-2],
@@ -63,6 +63,15 @@ class Belief(eqx.Module):
             )
 
 
+def _require_ref_density(cloud) -> None:
+    """Refuse a cloud whose reference density is not declared."""
+    if cloud.log_ref_density is None:
+        raise ValueError(
+            "a cloud without a declared log_ref_density (log p0 on its chart) cannot "
+            "be reweighted to a role"
+        )
+
+
 def _role_log_weights(atoms: Atoms, log_prior, log_like) -> Float[Array, "R A"]:
     """Unnormalized log weights of every role over the leading axis of ``atoms``.
 
@@ -70,14 +79,18 @@ def _role_log_weights(atoms: Atoms, log_prior, log_like) -> Float[Array, "R A"]:
     ``-inf``. The ``jnp.where`` keeps it there even when ``log_ref_density`` is also
     ``-inf`` (which would otherwise give ``-inf - (-inf) = nan``); the sum is linear,
     so the untaken branch passes no nan into the gradient.
+
+    Raises:
+        ValueError: if the cloud does not declare ``log_ref_density``.
     """
     cloud = atoms.cloud
+    _require_ref_density(cloud)
     dead = (
-        jnp.isneginf(cloud.log_weight)
+        jnp.isneginf(cloud.log_weights)
         | jnp.isneginf(log_prior)
         | jnp.isneginf(log_like)
     )
-    total = cloud.log_weight + log_prior - cloud.log_ref_density + log_like
+    total = cloud.log_weights + log_prior - cloud.log_ref_density + log_like
     return jnp.where(dead, -jnp.inf, total)
 
 
@@ -96,12 +109,12 @@ def role_log_weights(
     """Fill each role's prior over the draws and return the belief.
 
     The weight of role ``r`` is
-    ``log w_r = log_weight + log_prior[r] - log_ref_density + log_like[r]``: the refit
+    ``log w_r = log_weights + log_prior[r] - log_ref_density + log_like[r]``: the refit
     weight, the role prior, minus the refit target ``p0``, plus the role's likelihood.
 
-    Preconditions: ``log_weight`` is against ``p0`` times the incoming likelihood, and
+    Preconditions: ``log_weights`` is against ``p0`` times the incoming likelihood, and
     that likelihood is the same model for every role; every prior and ``p0`` share a
-    measure (checked here); the proposal covers the support of each role's prior times
+    chart (checked here); the proposal covers the support of each role's prior times
     its likelihood. A draw outside a prior's support has zero weight under that role.
 
     Args:
@@ -115,18 +128,24 @@ def role_log_weights(
         The belief with ``log_prior`` of shape ``(R, A)``, forecast in row 0.
 
     Raises:
-        ValueError: if a prior's ``measure`` differs from the cloud's.
+        ValueError: if the cloud declares no chart or no ``log_ref_density``, or a
+            prior's ``chart`` differs from the cloud's.
     """
     return Belief(atoms, _role_log_prior(atoms, roles, star), log_like, pool)
 
 
 def _role_log_prior(atoms: Atoms, roles: Roles, star) -> Float[Array, "R A"]:
-    """Every role's log prior of each draw, forecast in row 0; checks the measures."""
+    """Every role's log prior of each draw, forecast in row 0; checks the charts."""
+    if atoms.cloud.chart is None:
+        raise ValueError(
+            "a cloud without a declared chart cannot be reweighted to a role"
+        )
+    _require_ref_density(atoms.cloud)
     for name, prior in (("forecast", roles.forecast), ("verdict", roles.verdict)):
-        if prior.measure != atoms.cloud.measure:
+        if prior.chart != atoms.cloud.chart:
             raise ValueError(
-                f"the {name} prior is on measure {prior.measure!r} but the cloud is "
-                f"on {atoms.cloud.measure!r}"
+                f"the {name} prior is on chart {prior.chart!r} but the cloud is "
+                f"on {atoms.cloud.chart!r}"
             )
     forecast = roles.forecast.log_prob(atoms, star)
     verdict = eqx.filter_vmap(
@@ -139,7 +158,7 @@ def weights(b: Belief) -> Float[Array, "R A"]:
     """Normalized role weights over the draws.
 
     The unnormalized log weight of role ``r`` is
-    ``log_weight + log_prior[r] - log_ref_density + log_like[r]``, and each row is
+    ``log_weights + log_prior[r] - log_ref_density + log_like[r]``, and each row is
     normalized to sum to one. A role under which every draw has log weight ``-inf``
     cannot be normalized: its row is NaN, on purpose, and so is everything read from
     that role (its ``q``, and its pool rate when the same holds for the marks).
@@ -156,7 +175,7 @@ def weights(b: Belief) -> Float[Array, "R A"]:
 def mark_weights(pool: Pool) -> Float[Array, "R Am"]:
     """Normalized weights of the pool's marks, each role with its own.
 
-    A mark's log weight under role ``r`` is formed like a draw's, ``log_weight +
+    A mark's log weight under role ``r`` is formed like a draw's, ``log_weights +
     log_prior[r] - log_ref_density + log_like[r]``, and each row is normalized over the
     marks.
 
@@ -586,11 +605,12 @@ def replay_belief(
         The belief, with the draws updated by every applied row.
 
     Raises:
-        ValueError: if a role prior's measure differs from the cloud's.
+        ValueError: if the cloud declares no chart or no ``log_ref_density``, or a
+            role prior's chart differs from the cloud's.
     """
     atoms = r.refit.atoms
     log_prior = _role_log_prior(atoms, roles, star)
-    log_like = jnp.zeros_like(atoms.cloud.log_weight)
+    log_like = jnp.zeros_like(atoms.cloud.log_weights)
     for model, stats in zip(models, r.stats, strict=True):
         slot_log_like, atoms = model.finalize(stats, atoms, star)
         log_like = log_like + slot_log_like

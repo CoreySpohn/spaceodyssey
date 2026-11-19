@@ -72,8 +72,9 @@ class _Toy:
         cloud = WeightedCloud(
             {"hz": hz, "size": size},
             jnp.log(jnp.asarray(w, float)),
+            0.0,
             jnp.zeros(n_draw),
-            "toy",
+            chart="toy",
         )
         return Atoms(
             cloud,
@@ -121,7 +122,7 @@ class _Toy:
     @classmethod
     def belief(cls, atoms, pool=None, n_roles=1):
         """A belief with flat priors and no likelihood."""
-        n_draw = atoms.cloud.log_weight.shape[0]
+        n_draw = atoms.cloud.log_weights.shape[0]
         flat = jnp.zeros((n_roles, n_draw))
         return Belief(
             atoms, flat, flat, cls.empty_pool(n_roles) if pool is None else pool
