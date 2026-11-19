@@ -416,35 +416,49 @@ class PricePolicy(AbstractPolicy):
     time), built at several prices around the last solved one
     (``frontier_at_prices``) and, at ``depth > 1``, each first action alone. The price
     of time ``lam`` minimizes the dual over the stars' options within the budget left
-    (``solve_price``), and ``dispatch`` buys at most one option per star. Of the
-    options bought, the one with the most reward per day of its expected time runs
-    now. A star offers nothing while it is busy (a row of it in flight, or its
-    released rows not yet read), in keepout, or after the calendar's end, and an
-    option whose first action does not fit the budget left (``fits``) is not offered.
-    When nothing is bought the policy waits (an action of zero exposure,
-    ``WAITED``) for the earliest of: the next release, the next opening of a star in
-    keepout that holds an option worth its price, or, when stars wait to be read, now;
-    when there is nothing to wait for before the calendar's end, or no entry fits the
-    budget left, it stops.
+    (``solve_price``), and ``dispatch`` buys at most one option per star.
+
+    Keepout is a constraint on when an option runs, not on whether it is in the plan.
+    The price is solved over every star that is not busy (a row of it in flight, or
+    its released rows not yet read) and opens before the calendar's end: a star in
+    keepout that opens before the end stays in the price as future demand, its
+    options priced, so budget is held for it when it beats the open stars at the
+    price. Of the options bought, the one at a star open now with the most reward per
+    day of its expected time runs now. When every option bought is at a star in
+    keepout, the policy waits (an action of zero exposure, ``WAITED``) for the
+    earliest opening among those stars, or an earlier release, or, when stars wait
+    to be read, now; when nothing is bought it waits for the next release or a read
+    the same way. When there is nothing to wait for before the calendar's end, or no
+    entry fits the budget left, it stops. An option whose first action does not fit
+    the budget left (``fits``) is not offered. This formulation assumes that a
+    star's window opens before the calendar's end with the budget it was bought with
+    still left (the budget is a fraction of the calendar), and that calendar time is
+    free: there is no capacity per window, so stars bought for one window may
+    together ask for more of it than it holds. A price per window, with a capacity
+    each, is the form that would handle a saturated window.
 
     ``init`` replays every star at the time of the view, builds every star's plans in
     batches of stars, and re-solves the price ``price_rounds`` times on plans rebuilt
-    at it; a star whose granted rows found a planet its refit holds no track for
-    starts pending. ``decide`` marks the stars of the rows released since the last
-    decision pending, then reads at most ``rebuild_capacity`` stars, pending ones
-    first and then those whose price has left the range of their build factors: a
-    pending star whose rows found a new planet (``new_planets``) is refit, the
-    decision's queue in one call (``refit_stars``: the star's cloud, its new rows as
-    the term, a key folded from the decision's key and the star, and the gate's
-    thresholds), and its pool is the old one thinned by the searches the new refit
-    represents (``replay_pool``); any other
-    absorbs its rows (``absorb``); each moves to the stage its rows reached and gets
-    plans rebuilt at the last price, which becomes its build price. The gathered stars
-    are scattered back, the price is solved once on the options offered, and the
-    action chosen. The beliefs are read as two, the forecast's and the planner's
-    verdict member's (``planning_beliefs``, only that member's roles and pool rows
-    passed), gated per role: an option that comes out NaN is refused, its star
-    reported in the state and the option priced as if absent.
+    at it; a star whose granted rows found a planet its refit holds no track for, or
+    left a planner role's weights below the gate, starts pending. ``decide`` marks the
+    stars of the rows released since the last decision pending, then reads at most
+    ``rebuild_capacity`` stars, pending ones first and then those whose price has left
+    the range of their build factors. A pending star appends its released rows
+    (``absorb``) and is gated after them (``refused_after_rows``); one whose rows
+    found a new planet (``new_planets``) or left a planner role's weights below the
+    gate is refit, the decision's queue in one call (``refit_stars``: the star's
+    cloud, its new rows as the term, a key folded from the decision's key and the
+    star, the gate's thresholds, one retry at ``retry_factor`` times the proposals),
+    and its pool is the old one thinned by the searches the new refit represents
+    (``replay_pool``). A refit refused after its retry leaves the star its appended
+    replay and the reason in ``PriceState.refit_refused``. Each star read moves to the
+    stage its rows reached and gets plans rebuilt at the last price, which becomes
+    its build price. The gathered stars are scattered back, the price is solved once
+    on the options offered, and the action chosen. The beliefs are read as two, the
+    forecast's and the planner's verdict member's (``planning_beliefs``, only that
+    member's roles and pool rows passed), gated per role after their rows: an option
+    that comes out NaN is refused, its star reported in the state and the option
+    priced as if absent.
 
     The policy reads the public view only, never a world: everything it learns is in
     its state.
@@ -669,7 +683,7 @@ def _price_init(policy: PricePolicy, public: PublicView) -> PriceState:
     )(replays, stars)
     budget_d = public.budget_left_d
     busy = jnp.zeros(n_star, bool).at[log.rows.star].max(public.in_flight)
-    closed = busy | pending | ~_open_now(public, n_star)
+    closed = busy | pending | ~_reachable(public, n_star)
 
     def plans(lam):
         def one(s):
@@ -716,6 +730,23 @@ def _open_now(public: PublicView, n_star: int) -> Bool[Array, " S"]:
         public.keepout, stars, public.time_d
     )
     return is_open & (public.time_d <= public.end_d)
+
+
+def _opens_d(public: PublicView, n_star: int) -> Float[Array, " S"]:
+    """When each star next leaves keepout, at or after the view's time; inf if never."""
+    stars = jnp.arange(n_star)
+    return jax.vmap(next_open, in_axes=(None, 0, None))(
+        public.keepout, stars, public.time_d
+    )
+
+
+def _reachable(public: PublicView, n_star: int) -> Bool[Array, " S"]:
+    """The stars open now or opening before the calendar's end: the stars priced.
+
+    A star in keepout that opens before the end is future demand: its options stay in
+    the price, so budget is held for it when it beats the open stars at the price.
+    """
+    return _opens_d(public, n_star) <= public.end_d
 
 
 def _stale(policy: PricePolicy, state: PriceState) -> Bool[Array, " S"]:
@@ -820,32 +851,30 @@ def _price_decide(
     budget_d = public.budget_left_d
     in_flight = jnp.zeros(n_star, bool).at[rows.star].max(public.in_flight)
     is_open = _open_now(public, n_star)
-    usable = _usable(policy, f, in_flight | pending | ~is_open, budget_d)
+    opens_d = _opens_d(public, n_star)
+    # Priced: every star not busy that opens before the calendar's end, closed ones as
+    # future demand. Run: the best bought option at a star open now.
+    usable = _usable(
+        policy, f, in_flight | pending | ~(opens_d <= public.end_d), budget_d
+    )
     lam, bound, _ = solve_price(usable, budget_d)
     refused = refused_stars(f)
     bought, _ = dispatch(lam, usable, budget_d)
+    runnable = bought & is_open[:, None]
 
-    per_day = jnp.where(bought, safe_ratio(usable.reward, usable.cost_d), -jnp.inf)
+    per_day = jnp.where(runnable, safe_ratio(usable.reward, usable.cost_d), -jnp.inf)
     best = jnp.max(per_day, axis=-1)
     s = jnp.argmax(best)
-    entry = jnp.argmax(bought[s]) % policy.menu.mask.shape[-1]
+    entry = jnp.argmax(runnable[s]) % policy.menu.mask.shape[-1]
     run = Action(
         s, jnp.asarray(policy.menu.mode)[entry], policy.menu.exposure_d[s, entry]
     )
 
-    # What a wait could wake on: a release, a star leaving keepout that holds an option
-    # worth its price, or now, when stars wait to be read.
+    # What a wait could wake on: a release, the opening of a star in keepout holding a
+    # bought option, or now, when stars wait to be read.
     flight = jnp.where(public.in_flight, rows.release_d, jnp.inf)
     awaited = jnp.argmin(flight)
-    stars = jnp.arange(n_star)
-    exposure_d = jnp.tile(
-        policy.menu.exposure_d, (1, f.mask.shape[-1] // policy.menu.mask.shape[-1])
-    )
-    worth = f.mask & fits(exposure_d, budget_d) & (f.reward - lam * f.cost_d > 0)
-    wanted = jnp.any(worth, axis=-1) & ~in_flight & ~pending & ~is_open
-    opens_d = jax.vmap(next_open, in_axes=(None, 0, None))(
-        public.keepout, stars, time_d
-    )
+    wanted = jnp.any(bought, axis=-1) & ~is_open
     opens_d = jnp.where(wanted, opens_d, jnp.inf)
     reading_d = jnp.where(jnp.any(pending), time_d, jnp.inf)
     wake_d = jnp.min(jnp.stack([flight[awaited], jnp.min(opens_d), reading_d]))
@@ -856,7 +885,7 @@ def _price_decide(
     )
     wait = Action(wait_star, policy.menu.mode[0], 0.0, wake_d)
 
-    running = jnp.any(bought)
+    running = jnp.any(runnable)
     affordable = jnp.any(policy.menu.mask & fits(policy.menu.exposure_d, budget_d))
     waiting = ~running & affordable & (wake_d <= public.end_d)
     action = jax.tree.map(lambda a, b: jnp.where(running, a, b), run, wait)

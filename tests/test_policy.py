@@ -708,6 +708,7 @@ def _collapsing_run(min_n_eff):
     return stars, design, trace, log
 
 
+@pytest.mark.medium(reason="compiles the planner with a refit and its retry, about 6 s")
 def test_rows_that_collapse_a_cloud_refit_the_star_and_it_stays_planned_on():
     """Rows appended to a star's cloud are gated after their likelihood is added; a
     star they collapse is refit, retried with more proposals, and planned on.
@@ -806,6 +807,34 @@ def test_a_star_in_keepout_offers_nothing_and_the_planner_waits_for_it():
                   _policy(stars, short, _menu(2), DEPTH_1))  # fmt: skip
     assert list(_column(log, "star")) == [1]
     assert list(_column(log, "refusal")) == [ACCEPTED]
+
+
+def test_a_star_in_keepout_worth_more_holds_the_budget_until_it_opens():
+    """A star in keepout that opens before the calendar's end stays in the price as
+    future demand; the planner waits for it rather than spend the budget on the open
+    stars.
+
+    Three stars, all marks in the HZ, masses 2.0, 0.3 and 0.2, a search certain to
+    find an HZ planet (worth 2.0, 0.3 and 0.2), budget one day, a calendar of 365
+    days; star 0 is in keepout over days [0, 10). Priced with star 0 as future demand,
+    the price is 2.0 and only star 0 is bought; it is closed, so the planner waits for
+    day 10 and searches it there, 2.0 planets of a possible 2.0.
+
+    Fails if closed stars are dropped from the price (the price falls to 0.3, star 1
+    is searched at day 0 and the run earns 0.3), or if the planner runs a bought
+    option at a star in keepout (`step` would delay it, never wait for it).
+    """
+    stars = _stars([2.0, 0.3, 0.2], hz=(1.0,))
+    closed = np.zeros((N_STAR, 2), bool)
+    closed[0, 0] = True  # star 0 closed over days [0, 10)
+    design = _design(1.0, DetectionModel(1.0, 0.0), keepout=Keepout(closed, 10.0))
+    trace = Trace(_policy(stars, design, _menu(3), DEPTH_1))
+    log = execute(KEY, _no_grant(), _world(3, exists=False), design, trace)
+    assert_allclose(trace.states[0].lam, 2.0, rtol=1e-12)
+    assert list(_column(log, "star")) == [0, 0]
+    assert list(_column(log, "refusal")) == [WAITED, ACCEPTED]
+    assert_allclose(_column(log, "time_d"), [10.0, 10.0])
+    assert_allclose(_found(stars, log, design.models, jnp.asarray(20.0)), 2.0)
 
 
 def test_the_realized_count_is_read_against_the_truth():
