@@ -155,7 +155,7 @@ class GaussianGasModel(AbstractObservationModel):
         updated = eqx.tree_at(lambda a: (a.x_mean, a.x_var), atoms, (mean, v * shrink))
         return terms.sum(axis=(1, 2)), updated
 
-    def sample(self, atoms, action, key):
+    def sample(self, key, atoms, action):
         """Readings of every planet and gas, per draw; ``(A, K, G)`` arrays."""
         snr = jnp.broadcast_to(_snr(self.snr_one_day, action), atoms.x_mean.shape)
         sd = jnp.sqrt(atoms.x_var + self._noise_var(snr))
@@ -254,7 +254,7 @@ class StepReportModel(AbstractObservationModel):
         """
         return stats, atoms
 
-    def sample(self, atoms, action, key):
+    def sample(self, key, atoms, action):
         """Bits of every planet and gas, per draw; ``(A, K, G)`` arrays."""
         self._check_point(atoms)
         snr = jnp.broadcast_to(_snr(self.snr_one_day, action), atoms.x_mean.shape)

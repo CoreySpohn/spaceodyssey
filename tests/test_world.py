@@ -68,7 +68,7 @@ def _differ(a, b):
 
 def _observe(world, model, star, index):
     action = Action(kind=0, star=star, mode=0, exposure_d=1.0)
-    return world.observe(model, action, row_key(KEY, star, index))
+    return world.observe(row_key(KEY, star, index), model, action)
 
 
 def test_row_noise_depends_only_on_star_index_and_key(toy):
@@ -95,8 +95,8 @@ def test_row_noise_depends_only_on_star_index_and_key(toy):
     assert _differ(_observe(world, model, 0, 5), _observe(world, model, 1, 5))
     assert _differ(first[(0, 0)], first[(0, 2)])
 
-    two = draw_worlds(GasPrior("toy"), STARS, KEY, 2).unseal().atoms.x_mean
-    three = draw_worlds(GasPrior("toy"), STARS, KEY, 3).unseal().atoms.x_mean
+    two = draw_worlds(KEY, GasPrior("toy"), STARS, 2).unseal().atoms.x_mean
+    three = draw_worlds(KEY, GasPrior("toy"), STARS, 3).unseal().atoms.x_mean
     assert_array_max_ulp(two, three[:2], maxulp=4)
 
 
@@ -113,7 +113,7 @@ def test_draw_worlds_from_a_role_prior():
     worlds (the spread collapses), or the drawn truth is not on the prior's terms.
     """
     prior = GasPrior("toy")
-    truth = draw_worlds(prior, STARS, KEY, 4000).unseal().atoms
+    truth = draw_worlds(KEY, prior, STARS, 4000).unseal().atoms
     assert truth.x_mean.shape == (4000, 2, 1, 1, 2)
     assert_allclose(truth.cloud.log_weights, 0.0)
     x = np.asarray(truth.x_mean)
@@ -135,7 +135,7 @@ def test_world_keys_and_row_keys_are_distinct():
     Fails if world keys and row keys are folded without distinct tags, so world i is
     correlated with star i's row noise.
     """
-    truth = draw_worlds(GasPrior("toy"), STARS, KEY, 2).unseal().atoms.x_mean
+    truth = draw_worlds(KEY, GasPrior("toy"), STARS, 2).unseal().atoms.x_mean
     for i in range(2):
         for s in range(2):
             for star, index in ((i, s), (s, i)):
@@ -207,7 +207,7 @@ def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
     """
     world = SealedWorld(_point_truth(toy, [[0.5, 1.0], [-0.5, 1.0]]))
     grant = _grant()
-    payload = world.reveal(grant, MODELS, KEY)
+    payload = world.reveal(KEY, grant, MODELS)
     revealed = grant_rows(grant, payload)
     assert_allclose(revealed.release_d, 0.0)
     assert_allclose(revealed.charged_d, 0.0)
@@ -219,7 +219,7 @@ def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
     for i, slot in enumerate(grant.model_slot):
         action = jax.tree.map(lambda leaf, i=i: leaf[i], grant.actions)
         key = row_key(KEY, action.star, i)
-        expected = world.observe(MODELS[slot], action, key)
+        expected = world.observe(key, MODELS[slot], action)
         _assert_ulp(jax.tree.map(lambda x, i=i: x[i], revealed.payload[slot]), expected)
         for other in jax.tree.leaves(revealed.payload[1 - slot]):
             assert_allclose(other[i], 0.0)
@@ -247,16 +247,16 @@ def test_reveal_differs_between_worlds(toy):
     grant = _grant()
     a = SealedWorld(_point_truth(toy, [[0.5, 1.0], [-0.5, 1.0]]))
     b = SealedWorld(_point_truth(toy, [[0.5, 1.0], [0.5, -1.0]]))
-    payload_a, payload_b = a.reveal(grant, MODELS, KEY), b.reveal(grant, MODELS, KEY)
+    payload_a, payload_b = a.reveal(KEY, grant, MODELS), b.reveal(KEY, grant, MODELS)
     for slot in (0, 1):
         assert _differ(payload_a[slot], payload_b[slot])
     no_int = jnp.zeros(0, int)
     empty = Grant(Action(no_int, no_int, no_int, jnp.zeros(0)), model_slot=())
-    none = grant_rows(empty, a.reveal(empty, MODELS, KEY))
+    none = grant_rows(empty, a.reveal(KEY, empty, MODELS))
     assert none.star.shape == (0,)
     assert {k: v.shape for k, v in none.payload[0].items()} == {
         "snr": (0, 1, 2),
         "reading": (0, 1, 2),
     }
     with pytest.raises(ValueError, match="model table"):
-        a.reveal(grant, MODELS[:1], KEY)
+        a.reveal(KEY, grant, MODELS[:1])

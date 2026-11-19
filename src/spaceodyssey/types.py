@@ -351,13 +351,13 @@ class AbstractObservationModel(eqx.Module):
     searches: eqx.AbstractClassVar[bool]
 
     @abc.abstractmethod
-    def sample(self, atoms: Atoms, action: Action, key: PRNGKeyArray) -> PyTree:
+    def sample(self, key: PRNGKeyArray, atoms: Atoms, action: Action) -> PyTree:
         """Draw the payload an action would return, independently for each draw.
 
         Args:
+            key: the key of the row.
             atoms: the draws.
             action: the action.
-            key: the key of the row.
 
         Returns:
             The payload, a dict of named arrays with leading axis ``A``.
@@ -478,7 +478,7 @@ def binned_cells(
     keys = jax.vmap(jax.random.fold_in, in_axes=(None, 0))(
         base, jnp.arange(CELL_SAMPLES)
     )
-    payloads = jax.vmap(model.sample, in_axes=(None, None, 0))(atoms, action, keys)
+    payloads = jax.vmap(model.sample, in_axes=(0, None, None))(keys, atoms, action)
     index = jax.vmap(jax.vmap(cell))(payloads)  # (n, A)
     counts = jax.nn.one_hot(index, n_cells).sum(axis=0)
     return counts / CELL_SAMPLES

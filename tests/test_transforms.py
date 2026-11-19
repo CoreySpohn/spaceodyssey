@@ -73,7 +73,7 @@ class Search(AbstractObservationModel):
         d = jnp.where(atoms.exists[:, 0], 1.0 - jnp.exp(-action.exposure_d * hz), 0.0)
         return jnp.stack([1.0 - d, d], axis=-1)
 
-    def sample(self, atoms, action, key):
+    def sample(self, key, atoms, action):
         raise NotImplementedError("read only through cells")
 
     def stats(self, payload, atoms, star):

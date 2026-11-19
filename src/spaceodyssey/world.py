@@ -79,7 +79,7 @@ class SealedWorld(eqx.Module):
         )
 
     def observe(
-        self, model: AbstractObservationModel, action: Action, key: PRNGKeyArray
+        self, key: PRNGKeyArray, model: AbstractObservationModel, action: Action
     ) -> PyTree:
         """The payload an action returns, drawn from the true star with its model.
 
@@ -88,21 +88,21 @@ class SealedWorld(eqx.Module):
         world's. A stack of worlds is observed under ``eqx.filter_vmap``.
 
         Args:
+            key: the row's key.
             model: the model of the action's mode.
             action: the action.
-            key: the row's key.
 
         Returns:
             The payload, a dict of named arrays.
         """
         truth = jax.tree.map(lambda leaf: leaf[action.star], self._truth)
-        return jax.tree.map(lambda x: x[0], model.sample(truth, action, key))
+        return jax.tree.map(lambda x: x[0], model.sample(key, truth, action))
 
     def reveal(
         self,
+        key: PRNGKeyArray,
         grant: Grant,
         models: tuple[AbstractObservationModel, ...],
-        key: PRNGKeyArray,
     ) -> tuple[PyTree, ...]:
         """The payloads of a grant's rows, drawn from the truth.
 
@@ -113,10 +113,10 @@ class SealedWorld(eqx.Module):
         log rows from the payloads.
 
         Args:
+            key: the run key.
             grant: the grant.
             models: the model table of the run, static; ``grant.model_slot`` indexes
                 it.
-            key: the run key.
 
         Returns:
             One payload buffer per model, each a dict of arrays with a leading axis
@@ -138,7 +138,7 @@ class SealedWorld(eqx.Module):
 
         payload = []
         for slot, model in enumerate(models):
-            shapes = jax.eval_shape(self.observe, model, probe, key)
+            shapes = jax.eval_shape(self.observe, key, model, probe)
             buffer = jax.tree.map(
                 lambda x: jnp.zeros((n_row, *x.shape), x.dtype), shapes
             )
@@ -147,8 +147,8 @@ class SealedWorld(eqx.Module):
             )
             if rows.size:
                 these = jax.tree.map(lambda leaf, rows=rows: leaf[rows], actions)
-                drawn = jax.vmap(self.observe, in_axes=(None, 0, 0))(
-                    model, these, keys[rows]
+                drawn = jax.vmap(self.observe, in_axes=(0, None, 0))(
+                    keys[rows], model, these
                 )
                 buffer = jax.tree.map(
                     lambda b, d, rows=rows: b.at[rows].set(d), buffer, drawn
@@ -175,7 +175,7 @@ class SealedWorld(eqx.Module):
 
 
 def draw_worlds(
-    prior: AbstractRolePrior, stars, key: PRNGKeyArray, n_worlds: int
+    key: PRNGKeyArray, prior: AbstractRolePrior, stars, n_worlds: int
 ) -> SealedWorld:
     """Draw worlds from the truth's role prior, with a leading world axis.
 
@@ -184,9 +184,9 @@ def draw_worlds(
     drawn and shares no key with any row.
 
     Args:
+        key: the run key.
         prior: the truth's role prior.
         stars: the stars, a pytree whose leaves have a leading star axis ``S``.
-        key: the run key.
         n_worlds: number of worlds, static.
 
     Returns:

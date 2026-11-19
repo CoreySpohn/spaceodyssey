@@ -340,7 +340,7 @@ class Search(AbstractObservationModel):
         d = jnp.where(atoms.exists[:, 0], d, 0.0)
         return jnp.stack([1.0 - d, d], axis=-1)
 
-    def sample(self, atoms, action, key):
+    def sample(self, key, atoms, action):
         raise NotImplementedError("read only through cells")
 
     def stats(self, payload, atoms, star):
@@ -529,11 +529,11 @@ def test_cells_reward_matches_nested_monte_carlo(toy):
 
     action = Action(0, 0, 0, 1.0)
     n_cell = model.n_cells(atoms)
-    readings = jax.jit(jax.vmap(model.sample, in_axes=(None, None, 0)))
+    readings = jax.jit(jax.vmap(model.sample, in_axes=(0, None, None)))
     cell_of = jax.jit(jax.vmap(jax.vmap(model.cell)))
 
     inner = jax.random.split(jax.random.key(1), 2**20)
-    binned = jax.nn.one_hot(cell_of(readings(atoms, action, inner)), n_cell).mean(0)
+    binned = jax.nn.one_hot(cell_of(readings(inner, atoms, action)), n_cell).mean(0)
     h = np.asarray(hz)[:, 0] * (np.asarray(water)[:, 0] > 0)  # P(Z = 1 | draw)
     joint_g = w_verdict[:, None] * np.asarray(binned)  # (A, Y)
     post_g = (joint_g * h[:, None]).sum(0) / joint_g.sum(0)  # gamma(Z = 1 | Y)

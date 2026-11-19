@@ -101,23 +101,23 @@ def test_step_report(toy):
     below = StepReportModel(snr_one_day=[4.9, 4.9])
     at = StepReportModel(snr_one_day=[5.0, 5.0])
 
-    silent = below.sample(atoms, _action(), key)
+    silent = below.sample(key, atoms, _action())
     assert_allclose(silent["bit"], 0.0)
     assert_allclose(row_log_like(below, _first(silent), atoms, toy.star), [0.0, 0.0])
     gated = _expected_row([4.9, 4.9], 1.0, "bit")
     assert_allclose(row_log_like(below, gated, atoms, ()), 0.0)
 
-    bits = at.sample(atoms, _action(), key)["bit"][:, 0, :]
+    bits = at.sample(key, atoms, _action())["bit"][:, 0, :]
     assert_allclose(bits, [[1.0, 0.0], [1.0, 1.0]])
     # The report of draw 0 is certain under draw 0 and impossible under draw 1.
-    payload = _first(at.sample(atoms, _action(), key))
+    payload = _first(at.sample(key, atoms, _action()))
     assert_allclose(row_log_like(at, payload, atoms, toy.star), [0.0, -np.inf])
 
     fuzzy = toy.atoms([[1.0]], [[1.0]], [1.0], 0.4, 1.0, n_gas=1)
     with pytest.raises(RuntimeError, match="point gas"):
         row_log_like(at, _expected_row([5.0], 1.0, "bit"), fuzzy, toy.star)
     with pytest.raises(ValueError, match="point gas"):
-        at.sample(fuzzy, _action(), key)
+        at.sample(key, fuzzy, _action())
     with pytest.raises(ValueError, match="point gas"):
         at.cells(fuzzy, _action())
 
@@ -146,7 +146,7 @@ def test_gas_model_tends_to_the_step_rule(toy):
             for s in (5.0, 50.0, 500.0, 1.0e4)
         ]
         truth = toy.atoms([[1.0]], [[1.0]], [1.0], u, 0.0, n_gas=1)
-        bit = step.sample(truth, _action(), jax.random.key(0))["bit"][0, 0, 0]
+        bit = step.sample(jax.random.key(0), truth, _action())["bit"][0, 0, 0]
         distance = np.abs(np.asarray(p) - float(bit))
         assert np.all(np.diff(distance) <= 0) and distance[0] > 1e-3
         assert distance[-1] < 1e-6
