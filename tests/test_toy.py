@@ -14,7 +14,13 @@ from spaceodyssey.toy import (
     GaussianGasModel,
     StepReportModel,
 )
-from spaceodyssey.types import CELL_SAMPLES, AbstractObservationModel, Action
+from spaceodyssey.types import (
+    CELL_SAMPLES,
+    Action,
+    binned_cells,
+    row_log_like,
+    row_update,
+)
 
 
 def _action(exposure_d=1.0):
@@ -68,7 +74,9 @@ def test_cells_normalize_and_match_the_binned_default(model, edges_b, var, toy):
     assert model.n_cells(atoms) == edges_b**2
     for exposure in (1.0, 4.0):
         exact = model.cells(atoms, _action(exposure))
-        binned = AbstractObservationModel.cells(model, atoms, _action(exposure))
+        binned = binned_cells(
+            model, atoms, _action(exposure), model.cell, model.n_cells(atoms)
+        )
         for p in (exact, binned):
             assert_array_max_ulp(p.sum(axis=1), np.ones(4), maxulp=4)
         se = np.sqrt(exact * (1.0 - exact) / CELL_SAMPLES)
@@ -95,19 +103,19 @@ def test_step_report(toy):
 
     silent = below.sample(atoms, _action(), key)
     assert_allclose(silent["bit"], 0.0)
-    assert_allclose(below.log_like(_first(silent), atoms, toy.star), [0.0, 0.0])
+    assert_allclose(row_log_like(below, _first(silent), atoms, toy.star), [0.0, 0.0])
     gated = _expected_row([4.9, 4.9], 1.0, "bit")
-    assert_allclose(below.log_like(gated, atoms, ()), 0.0)
+    assert_allclose(row_log_like(below, gated, atoms, ()), 0.0)
 
     bits = at.sample(atoms, _action(), key)["bit"][:, 0, :]
     assert_allclose(bits, [[1.0, 0.0], [1.0, 1.0]])
     # The report of draw 0 is certain under draw 0 and impossible under draw 1.
     payload = _first(at.sample(atoms, _action(), key))
-    assert_allclose(at.log_like(payload, atoms, toy.star), [0.0, -np.inf])
+    assert_allclose(row_log_like(at, payload, atoms, toy.star), [0.0, -np.inf])
 
     fuzzy = toy.atoms([[1.0]], [[1.0]], [1.0], 0.4, 1.0, n_gas=1)
     with pytest.raises(ValueError, match="point gas"):
-        at.log_like(_expected_row([5.0], 1.0, "bit"), fuzzy, toy.star)
+        row_log_like(at, _expected_row([5.0], 1.0, "bit"), fuzzy, toy.star)
     with pytest.raises(ValueError, match="point gas"):
         at.sample(fuzzy, _action(), key)
     with pytest.raises(ValueError, match="point gas"):
@@ -132,7 +140,9 @@ def test_gas_model_tends_to_the_step_rule(toy):
     step = StepReportModel(snr_one_day=[1.0e4])
     for u in heights:
         p = [
-            above.prob(model.update(_expected_row([s], u), prior), toy.star)[0, 0]
+            above.prob(
+                row_update(model, _expected_row([s], u), prior, toy.star), toy.star
+            )[0, 0]
             for s in (5.0, 50.0, 500.0, 1.0e4)
         ]
         truth = toy.atoms([[1.0]], [[1.0]], [1.0], u, 0.0, n_gas=1)
@@ -143,14 +153,14 @@ def test_gas_model_tends_to_the_step_rule(toy):
 
 
 def test_gaussian_likelihood_and_update_describe_one_model(toy):
-    """Weighting prior draws by `log_like` gives the conjugate `update`.
+    """Weighting prior draws by `row_log_like` gives the conjugate `row_update`.
 
     Point draws at the 20,000 midpoint quantiles of N(0, 1), one reading y = 1 at S/N 5
     (sigma = 0.5): the weighted mean and variance equal the update's 0.8 and 0.2. A
-    Gaussian draw scored by `log_like` gives the marginal N(1 | 0, 1.25).
+    Gaussian draw scored by `row_log_like` gives the marginal N(1 | 0, 1.25).
 
-    Fails if `log_like` uses sigma for the variance, drops the draw's own variance, or
-    the update's gain disagrees with the likelihood it claims to integrate.
+    Fails if the likelihood uses sigma for the variance, drops the draw's own variance,
+    or the update's gain disagrees with the likelihood it claims to integrate.
     """
     n = 20_000
     x = ndtri((jnp.arange(n) + 0.5) / n)
@@ -158,12 +168,49 @@ def test_gaussian_likelihood_and_update_describe_one_model(toy):
     points = toy.atoms(ones, ones, jnp.ones(n), x[:, None], 0.0, n_gas=1)
     model = GaussianGasModel(snr_one_day=[5.0])
     row = _expected_row([5.0], 1.0)
-    w = jax.nn.softmax(model.log_like(row, points, toy.star))
+    w = jax.nn.softmax(row_log_like(model, row, points, toy.star))
     mean = jnp.sum(w * x)
     var = jnp.sum(w * (x - mean) ** 2)
-    posterior = model.update(row, _prior(toy, n_gas=1))
+    posterior = row_update(model, row, _prior(toy, n_gas=1), toy.star)
     assert_allclose(posterior.x_mean[0, 0, 0], 0.8, rtol=1e-12)
     assert_allclose(posterior.x_var[0, 0, 0], 0.2, rtol=1e-12)
     assert_allclose([mean, var], [0.8, 0.2], rtol=1e-3)
     marginal = -0.5 * (1.0 / 1.25 + np.log(2 * np.pi * 1.25))
-    assert_allclose(model.log_like(row, _prior(toy, n_gas=1), ()), [marginal])
+    assert_allclose(row_log_like(model, row, _prior(toy, n_gas=1), ()), [marginal])
+
+
+def test_two_readings_of_an_uncertain_gas_are_exact(toy):
+    """Two rows reading one Gaussian gas give the exact joint marginal and posterior.
+
+    Prior x ~ N(0, 1); readings y1 = 1 at S/N 5 (sigma 0.5, precision 4) and y2 = 0.4
+    at S/N 2.5 (sigma 1, precision 1). Jointly (y1, y2) ~ N(0, [[1.25, 1], [1, 2]]),
+    log density -2.50728; the posterior has precision 1 + 4 + 1 = 6, mean
+    (4 + 0.4) / 6 = 0.7333 and variance 1 / 6. The sum of the two rows' marginals,
+    log N(1 | 0, 1.25) + log N(0.4 | 0, 2) = -2.73602, counts the shared abundance
+    twice. Summed statistics in either order give the same result.
+
+    Fails if a model sums per-row log likelihoods on an uncertain gas, the conjugate
+    statistics drop a row's precision or reading, or the result depends on row order.
+    """
+    model = GaussianGasModel(snr_one_day=[1.0])
+    prior = _prior(toy, n_gas=1)
+    rows = [_expected_row([5.0], 1.0), _expected_row([2.5], 0.4)]
+    stats = [model.stats(r, prior, toy.star) for r in rows]
+    both = jax.tree.map(jnp.add, *stats)
+    log_like, posterior = model.finalize(both, prior, toy.star)
+
+    cov = np.array([[1.25, 1.0], [1.0, 2.0]])
+    y = np.array([1.0, 0.4])
+    joint = -0.5 * (
+        y @ np.linalg.solve(cov, y) + np.log(np.linalg.det(2 * np.pi * cov))
+    )
+    assert_allclose(joint, -2.50728, atol=1e-5)
+    assert_allclose(log_like, [joint], rtol=1e-12)
+    assert_allclose(posterior.x_mean[0, 0, 0], 4.4 / 6.0, rtol=1e-12)
+    assert_allclose(posterior.x_var[0, 0, 0], 1.0 / 6.0, rtol=1e-12)
+
+    swapped = model.finalize(jax.tree.map(jnp.add, *stats[::-1]), prior, toy.star)
+    assert_array_max_ulp(swapped[0], log_like, maxulp=4)
+    per_row = sum(row_log_like(model, r, prior, toy.star) for r in rows)
+    assert_allclose(per_row, [-2.73602], atol=1e-5)
+    assert np.abs(per_row - log_like)[0] > 0.2

@@ -15,6 +15,7 @@ from spaceodyssey.belief import Belief, chain, count_pmf, q
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.information import chain_gain, diagnose, information, log_score
 from spaceodyssey.toy import GAS_FLOOR, GAS_PRIOR_SD, GaussianGasModel
+from spaceodyssey.types import row_update
 
 PLANET = jnp.asarray(0)
 FLOOR = 0.3  # a nonzero gas floor, so its sign and its place in the indicator show
@@ -209,7 +210,7 @@ def _expected_row(snr, u):
 def _p_gas(toy, snr, y):
     """P(gas above its floor) after one reading y at S/N `snr`, from the prior."""
     prior = toy.atoms([[1.0]], [[1.0]], [1.0], GAS_FLOOR, GAS_PRIOR_SD**2, n_gas=1)
-    posterior = GAS_MODEL.update(_expected_row([snr], y), prior)
+    posterior = row_update(GAS_MODEL, _expected_row([snr], y), prior, toy.star)
     return GasAbove(0, GAS_FLOOR).prob(posterior, toy.star)[0, 0]
 
 
@@ -243,8 +244,8 @@ def test_gas_model_numbers_at_snr_5(gas_stages, toy):
     """
     stages, claim = gas_stages
     water, oxygen = _expected_row([5.0, 0.0], 1.0), _expected_row([0.0, 5.0], 1.0)
-    after_water = GAS_MODEL.update(water, stages[1].atoms)
-    after_oxygen = GAS_MODEL.update(oxygen, after_water)
+    after_water = row_update(GAS_MODEL, water, stages[1].atoms, toy.star)
+    after_oxygen = row_update(GAS_MODEL, oxygen, after_water, toy.star)
     assert_allclose(after_water.x_mean[:, 0, 0], 0.8, rtol=1e-12)
     assert_allclose(np.sqrt(after_water.x_var[:, 0, 0]), 0.447, atol=5e-4)
     assert_allclose(after_water.x_mean[:, 0, 1], 0.0)

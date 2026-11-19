@@ -6,6 +6,9 @@ row 0, the verdict members are rows 1 to ``R - 1``), ``W`` log row capacity and 
 the atoms of a pool.
 """
 
+import abc
+from collections.abc import Callable
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -198,30 +201,29 @@ class Grant(eqx.Module):
             raise ValueError("a grant has one model slot per granted action")
 
 
-CELL_SAMPLES = 4096
-"""Samples per draw in the binned default of ``AbstractObservationModel.cells``."""
-
-
 class AbstractObservationModel(eqx.Module):
-    """The contract of an observation model.
+    """The contract of an observation model, a row's payload given a draw and an action.
 
-    A model holds configuration only, never an observed datum: ``log_like`` is rebuilt
-    from a row payload each time it is called.
+    A model holds configuration only, never an observed datum; it is handed a payload
+    each time it scores one. That is a deliberate difference from a data-bearing
+    likelihood term: the log is a fixed-capacity buffer of payloads per model, scored
+    by one commutative sum per model.
+
+    A row is scored through additive sufficient statistics. ``stats`` maps one row to
+    per-draw statistics; the statistics of a model's rows are summed (leaf by leaf, in
+    any order); ``finalize`` turns the sum into the joint log marginal likelihood per
+    draw and the updated draws. The per-row log likelihood and the update by one row
+    are derived from this pair (``row_log_like``, ``row_update``), so there is one
+    scoring path.
+
+    For a model whose rows are independent given the draw, ``stats`` is the per-row log
+    likelihood and ``finalize`` returns the summed statistics with the draws unchanged.
+    A model whose draws carry a distribution that several rows read (a Gaussian gas
+    block with ``x_var > 0``) cannot use that form, since the rows are not independent
+    given the draw; it carries conjugate statistics instead.
     """
 
-    def log_like(self, payload: PyTree, atoms: Atoms, star) -> Float[Array, " A"]:
-        """Log likelihood of a row payload under each draw.
-
-        Args:
-            payload: the payload of one row, a dict of named arrays.
-            atoms: the draws.
-            star: a pytree of scalar leaves describing the star.
-
-        Returns:
-            Log likelihood per draw, shape ``(A,)``.
-        """
-        raise NotImplementedError
-
+    @abc.abstractmethod
     def sample(self, atoms: Atoms, action: Action, key: PRNGKeyArray) -> PyTree:
         """Draw the payload an action would return, independently for each draw.
 
@@ -233,22 +235,42 @@ class AbstractObservationModel(eqx.Module):
         Returns:
             The payload, a dict of named arrays with leading axis ``A``.
         """
-        raise NotImplementedError
 
-    def cell(self, payload: PyTree) -> Int[Array, ""]:
-        """Index of the outcome cell one payload falls in."""
-        raise NotImplementedError
+    @abc.abstractmethod
+    def stats(self, payload: PyTree, atoms: Atoms, star) -> PyTree:
+        """Additive sufficient statistics of one row under each draw.
 
-    def n_cells(self, atoms: Atoms) -> int:
-        """Number of outcome cells, ``Y``, fixed by the static shapes of ``atoms``."""
-        raise NotImplementedError
+        Args:
+            payload: the payload of one row, a dict of named arrays.
+            atoms: the draws.
+            star: a pytree of scalar leaves describing the star.
 
+        Returns:
+            A pytree whose leaves have leading axis ``A``; the statistics of several
+            rows are their leafwise sum.
+        """
+
+    @abc.abstractmethod
+    def finalize(
+        self, stats: PyTree, atoms: Atoms, star
+    ) -> tuple[Float[Array, " A"], Atoms]:
+        """Joint log marginal likelihood and updated draws from summed statistics.
+
+        Args:
+            stats: the leafwise sum of ``stats`` over the rows of this model.
+            atoms: the draws the rows are scored against.
+            star: a pytree of scalar leaves describing the star.
+
+        Returns:
+            The log marginal likelihood of the rows per draw, shape ``(A,)``, and the
+            draws updated by the rows.
+        """
+
+    @abc.abstractmethod
     def cells(self, atoms: Atoms, action: Action) -> Float[Array, "A Y"]:
         """Probability of each outcome cell under each draw.
 
-        The default bins ``CELL_SAMPLES`` draws of ``sample`` per draw (a Monte Carlo
-        estimate with a fixed key). A model with a closed form overrides it, and the
-        override is tested against this default.
+        A model without a closed form returns ``binned_cells``.
 
         Args:
             atoms: the draws.
@@ -257,11 +279,77 @@ class AbstractObservationModel(eqx.Module):
         Returns:
             Cell probabilities of shape ``(A, Y)``; each row sums to one.
         """
-        base = jax.random.key(0)
-        keys = jax.vmap(jax.random.fold_in, in_axes=(None, 0))(
-            base, jnp.arange(CELL_SAMPLES)
-        )
-        payloads = jax.vmap(self.sample, in_axes=(None, None, 0))(atoms, action, keys)
-        index = jax.vmap(jax.vmap(self.cell))(payloads)  # (n, A)
-        counts = jax.nn.one_hot(index, self.n_cells(atoms)).sum(axis=0)
-        return counts / CELL_SAMPLES
+
+
+def row_log_like(
+    model: AbstractObservationModel, payload: PyTree, atoms: Atoms, star
+) -> Float[Array, " A"]:
+    """Log likelihood of one row under each draw: ``finalize`` of its ``stats``.
+
+    For a draw with a distribution over the quantity read (``x_var > 0``) this is the
+    row's marginal; the marginals of several rows reading one quantity do not sum to
+    their joint likelihood. Sum the statistics instead.
+
+    Args:
+        model: the row's observation model.
+        payload: the payload of the row.
+        atoms: the draws.
+        star: a pytree of scalar leaves describing the star.
+
+    Returns:
+        Log likelihood per draw, shape ``(A,)``.
+    """
+    return model.finalize(model.stats(payload, atoms, star), atoms, star)[0]
+
+
+def row_update(
+    model: AbstractObservationModel, payload: PyTree, atoms: Atoms, star
+) -> Atoms:
+    """The draws updated by one row: the draws ``finalize`` returns for its ``stats``.
+
+    Args:
+        model: the row's observation model.
+        payload: the payload of the row.
+        atoms: the draws.
+        star: a pytree of scalar leaves describing the star.
+
+    Returns:
+        The updated draws.
+    """
+    return model.finalize(model.stats(payload, atoms, star), atoms, star)[1]
+
+
+CELL_SAMPLES = 4096
+"""Samples per draw in ``binned_cells``."""
+
+
+def binned_cells(
+    model: AbstractObservationModel,
+    atoms: Atoms,
+    action: Action,
+    cell: Callable[[PyTree], Int[Array, ""]],
+    n_cells: int,
+) -> Float[Array, "A Y"]:
+    """Outcome-cell probabilities binned from ``CELL_SAMPLES`` draws of ``sample``.
+
+    A Monte Carlo estimate with a fixed key, for a model without a closed form; a
+    closed form is tested against it.
+
+    Args:
+        model: the observation model.
+        atoms: the draws.
+        action: the action.
+        cell: the index of the outcome cell one payload falls in.
+        n_cells: the number of outcome cells, ``Y``, static.
+
+    Returns:
+        Cell probabilities of shape ``(A, Y)``; each row sums to one.
+    """
+    base = jax.random.key(0)
+    keys = jax.vmap(jax.random.fold_in, in_axes=(None, 0))(
+        base, jnp.arange(CELL_SAMPLES)
+    )
+    payloads = jax.vmap(model.sample, in_axes=(None, None, 0))(atoms, action, keys)
+    index = jax.vmap(jax.vmap(cell))(payloads)  # (n, A)
+    counts = jax.nn.one_hot(index, n_cells).sum(axis=0)
+    return counts / CELL_SAMPLES

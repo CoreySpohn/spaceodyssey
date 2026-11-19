@@ -1,9 +1,10 @@
 """Toy observation models: two gas models on the gas block.
 
 An observation model (``AbstractObservationModel``, defined in ``types``) turns an
-action on a star into a row payload (``sample``), scores a payload against every draw
-(``log_like``), and gives the distribution of a row's outcome over discrete cells
-(``cells``). The host passes the model; nothing dispatches on a traced model id.
+action on a star into a row payload (``sample``), scores rows against every draw through
+additive statistics (``stats``, ``finalize``), and gives the distribution of a row's
+outcome over discrete cells (``cells``). The host passes the model; nothing dispatches
+on a traced model id.
 
 Both toy models read the gas block of ``Atoms`` and write one payload per row, a dict of
 named ``(K, G)`` arrays: ``"snr"``, the S/N reached by every planet and gas (zero for a
@@ -77,7 +78,12 @@ class GaussianGasModel(AbstractObservationModel):
     with S/N 0 is not covered: its reading is 0 and carries no information.
 
     The outcome cells bin each reading at ``edges``; an uncovered gas has one outcome
-    (cell 0). A row's cells are the joint over planets and gases.
+    (cell 0). A row's cells are the joint over planets and gases; ``cell`` and
+    ``n_cells`` give the same coding for ``binned_cells``.
+
+    Two rows reading one gas of a draw with ``x_var > 0`` share its abundance, so
+    their per-row likelihoods do not add; ``stats`` and ``finalize`` carry the exact
+    conjugate update for any number of rows.
 
     Attributes:
         snr_one_day: S/N of each gas after one day of exposure, shape ``(G,)``.
@@ -92,44 +98,55 @@ class GaussianGasModel(AbstractObservationModel):
         safe = jnp.where(snr > 0, snr, 1.0)
         return jnp.where(snr > 0, (READING_SD_AT_UNIT_SNR / safe) ** 2, 0.0)
 
-    def log_like(self, payload, atoms, star):
-        """Log density of the readings, with each draw's gas Gaussian integrated out.
+    def _precision(self, snr: Float[Array, "*s"]) -> Float[Array, "*s"]:
+        """Reading precision ``1 / sigma**2``; zero where the gas is not covered."""
+        return jnp.where(snr > 0, (snr / READING_SD_AT_UNIT_SNR) ** 2, 0.0)
 
-        For a draw with mean ``m`` and variance ``v`` the reading is
-        ``N(y | m, v + sigma**2)``; a point state (``v = 0``) gives ``N(y | x,
-        sigma**2)``. Uncovered gases contribute zero.
+    def stats(self, payload, atoms, star):
+        """Precision-weighted sums of the readings of one row, per planet and gas.
 
-        This is the marginal of one row. Two rows of one gas on a draw with ``v > 0``
-        share the draw's abundance, so the sum of their marginals is not their joint
-        likelihood; a sum over rows is exact for point states, or for at most one row
-        per gas. ``update`` folds rows into the block one at a time.
+        With precision ``p = 1 / sigma**2`` (zero for an uncovered gas) and reading
+        ``y``: ``"precision"`` is ``p``, ``"weighted_sum"`` ``p y``,
+        ``"weighted_square_sum"`` ``p y**2`` and ``"log_norm"`` the normalizer
+        ``log(p / (2 pi)) / 2`` (zero for an uncovered gas). They do not depend on the
+        draw and are broadcast to the gas block, ``(A, K, G)``.
         """
         snr, y = payload["snr"], payload["reading"]  # (K, G)
-        var = atoms.x_var + self._noise_var(snr)
-        safe = jnp.where(snr > 0, var, 1.0)
-        terms = -0.5 * ((y - atoms.x_mean) ** 2 / safe + jnp.log(2 * jnp.pi * safe))
-        return jnp.where(snr > 0, terms, 0.0).sum(axis=(1, 2))
+        precision = self._precision(snr)
+        safe = jnp.where(snr > 0, precision, 1.0)
+        log_norm = jnp.where(snr > 0, 0.5 * jnp.log(safe / (2 * jnp.pi)), 0.0)
+        per_gas = {
+            "precision": precision,
+            "weighted_sum": precision * y,
+            "weighted_square_sum": precision * y**2,
+            "log_norm": log_norm,
+        }
+        return jax.tree.map(lambda x: jnp.broadcast_to(x, atoms.x_mean.shape), per_gas)
 
-    def update(self, payload: dict[str, Array], atoms: Atoms) -> Atoms:
-        """Conjugate update of every draw's gas Gaussian by one row.
+    def finalize(self, stats, atoms, star):
+        """Exact conjugate update of every draw's gas Gaussian by all summed rows.
 
-        With prior ``N(m, v)`` and a reading ``y`` of variance ``sigma**2``, the gain is
-        ``v / (v + sigma**2)``, the mean becomes ``m + gain * (y - m)`` and the variance
-        ``v * (1 - gain)``. An uncovered gas and a point state are unchanged.
-
-        Args:
-            payload: the payload of one row, ``(K, G)`` arrays.
-            atoms: the draws.
-
-        Returns:
-            The draws with their gas block updated.
+        With prior ``N(m, v)`` per gas and total precision ``P``, precision-weighted
+        mean ``ybar`` and scatter ``S = sum p y**2 - P ybar**2``, the log marginal of
+        the rows is ``log_norm - (S + P (ybar - m)**2 / (1 + v P)) / 2 -
+        log(1 + v P) / 2``, summed over planets and gases, and the posterior is
+        ``N(m + v P (ybar - m) / (1 + v P), v / (1 + v P))``. A point state (``v = 0``)
+        and an uncovered gas (``P = 0``) are unchanged. For one row this is
+        ``N(y | m, v + sigma**2)`` and the gain ``v / (v + sigma**2)``.
         """
-        snr, y = payload["snr"], payload["reading"]
-        precision = jnp.where(snr > 0, (snr / READING_SD_AT_UNIT_SNR) ** 2, 0.0)
-        gain = atoms.x_var * precision / (1.0 + atoms.x_var * precision)
-        mean = atoms.x_mean + gain * (y - atoms.x_mean)
-        var = atoms.x_var * (1.0 - gain)
-        return eqx.tree_at(lambda a: (a.x_mean, a.x_var), atoms, (mean, var))
+        m, v = atoms.x_mean, atoms.x_var
+        total = stats["precision"]
+        safe = jnp.where(total > 0, total, 1.0)
+        ybar = jnp.where(total > 0, stats["weighted_sum"] / safe, 0.0)
+        scatter = stats["weighted_square_sum"] - stats["weighted_sum"] * ybar
+        shrink = 1.0 / (1.0 + v * total)
+        residual = ybar - m
+        terms = stats["log_norm"] - 0.5 * (
+            scatter + total * residual**2 * shrink - jnp.log(shrink)
+        )
+        mean = m + v * total * residual * shrink
+        updated = eqx.tree_at(lambda a: (a.x_mean, a.x_var), atoms, (mean, v * shrink))
+        return terms.sum(axis=(1, 2)), updated
 
     def sample(self, atoms, action, key):
         """Readings of every planet and gas, per draw; ``(A, K, G)`` arrays."""
@@ -179,7 +196,7 @@ class StepReportModel(AbstractObservationModel):
     restriction holds all the same.
 
     Each gas has three outcome cells: 0 no report, 1 bit 0, 2 bit 1; a row's cells are
-    the joint over planets and gases.
+    the joint over planets and gases, coded by ``cell`` and ``n_cells``.
 
     Attributes:
         snr_one_day: S/N of each gas after one day of exposure, shape ``(G,)``.
@@ -202,13 +219,22 @@ class StepReportModel(AbstractObservationModel):
         probs = [GasAbove(g, GAS_FLOOR).prob(atoms, star) for g in range(n_gas)]
         return jnp.stack(probs, axis=-1)
 
-    def log_like(self, payload, atoms, star):
-        """Log probability of the reported bits; a gas below the gate adds zero."""
+    def stats(self, payload, atoms, star):
+        """The row's log probability of the reported bits; a silent gas adds zero."""
         self._check_point(atoms)
         snr, bit = payload["snr"], payload["bit"]
         p_above = self._p_above(atoms, star)
         p = jnp.where(bit > 0.5, p_above, 1.0 - p_above)
         return jnp.where(snr >= STEP_GATE_SNR, jnp.log(p), 0.0).sum(axis=(1, 2))
+
+    def finalize(self, stats, atoms, star):
+        """The summed log probabilities, with the draws unchanged.
+
+        Rows are independent given a point draw, so their log probabilities add, and
+        a bit about a point state changes nothing in it.
+        """
+        self._check_point(atoms)
+        return stats, atoms
 
     def sample(self, atoms, action, key):
         """Bits of every planet and gas, per draw; ``(A, K, G)`` arrays."""
