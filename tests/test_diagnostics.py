@@ -227,9 +227,13 @@ def test_conditional_error_and_bound(toy):
     = 431.0 and cond_mass = 0.7, but the condition-weighted draws are 250 of equal
     weight, so n_cond = 250 (not 431.0 x 0.7 = 301.7) and the bound is 250 / 254.
 
+    With no Earth-sized draw at all the condition has no mass: n_cond is 0, the
+    certificate is inapplicable and its bounds are the whole interval, 0 and 1.
+
     Fails if the conditional mc_se is not centered on q g or not divided by
-    P(given), or if the Wilson n of a conditional claim is n_eff (5000 would certify
-    on 10 draws) or n_eff * cond_mass (301.7, more draws than meet the condition).
+    P(given), if the Wilson n of a conditional claim is n_eff (5000 would certify on
+    10 draws) or n_eff * cond_mass (301.7, more draws than meet the condition), or if
+    a condition no draw meets gives a NaN n_cond (and NaN bounds).
     """
     claim = Claim((toy.InSize(), toy.InHz()), given=1)
 
@@ -258,6 +262,12 @@ def test_conditional_error_and_bound(toy):
     assert_allclose(d.cond_mass, 0.7, rtol=1e-12)
     assert_allclose(d.n_cond, 250.0, rtol=1e-10)
     assert_allclose(certify(d, ALPHA).q_lo, 250.0 / 254.0, rtol=1e-12)
+
+    d = diagnose(belief(500, 0, 0), claim, toy.star, PLANET, jnp.zeros(2))
+    assert_allclose(d.n_cond, 0.0)
+    cert = certify(d, ALPHA)
+    assert int(cert.status) == INAPPLICABLE
+    assert (float(cert.q_lo), float(cert.q_hi)) == (0.0, 1.0)
 
 
 def test_refit_trigger_reads_each_member():

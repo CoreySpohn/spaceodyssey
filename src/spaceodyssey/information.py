@@ -261,7 +261,7 @@ class Diagnostics(eqx.Module):
         n_cond: Kish size of the condition-weighted draws, the weights times each
             draw's probability of the condition (``n_eff`` for an unconditional
             claim): the effective number of conditioning draws, the ``n`` of the
-            boundary bound of ``certify``.
+            boundary bound of ``certify``; zero when no draw meets the condition.
         cond_mass: ``P(given)``; 1 for an unconditional claim.
         prior_mass_outside: the prior mass of the role outside the refit's support.
             This is a prior mass: the posterior mass outside can be larger and is not
@@ -305,12 +305,16 @@ def diagnose(
     h, g = per_draw[-1], per_draw[claim.given]
     joint = jnp.matmul(jax.nn.softmax(log_w, axis=-1), per_draw.T, precision=EXACT)
     cond_mass = joint[:, claim.given]  # one, to rounding, for an unconditional claim
+    # No draw meeting the condition leaves no conditioning draw, n_cond = 0; the Kish
+    # size of all -inf would be NaN, so the double where keeps it out of a gradient.
+    met = (cond_mass > 0)[:, None]
+    n_cond = kish_ess(jnp.where(met, log_w + guarded_log(g), log_w))
     return Diagnostics(
         q=safe_ratio(joint[:, -1], cond_mass),
         mc_se=jax.vmap(mc_se, in_axes=(0, None, None))(log_w, h, g),
         khat=jax.vmap(pareto_khat)(log_w),
         n_eff=kish_ess(log_w),
-        n_cond=kish_ess(log_w + guarded_log(g)),
+        n_cond=jnp.where(cond_mass > 0, n_cond, 0.0),
         cond_mass=cond_mass,
         prior_mass_outside=jnp.broadcast_to(prior_mass_outside, cond_mass.shape),
     )
@@ -379,8 +383,10 @@ def _bounds(d: Diagnostics, z: float):
     draws that meet the condition, the Kish size of the condition-weighted draws
     ``n_cond`` (``n_eff`` for an unconditional claim), floored at the inapplicable
     limit of one half. ``n_eff * cond_mass`` would overstate it when the weights
-    correlate with the condition. The prior
-    mass ``m`` outside the support then widens the interval to its conservative ends,
+    correlate with the condition. The interval is
+    clipped to ``[0, 1]``, where a probability lies: a member whose condition no draw
+    meets has an infinite ``mc_se`` and the bounds 0 and 1. The prior mass ``m``
+    outside the support then widens the interval to its conservative ends,
     ``(1 - m) lo`` and ``(1 - m) hi + m``.
     """
     n = jnp.maximum(d.n_cond, 0.5)
@@ -388,8 +394,8 @@ def _bounds(d: Diagnostics, z: float):
     z2n = z**2 / n
     center = (p + z2n / 2.0) / (1.0 + z2n)
     half = z / (1.0 + z2n) * jnp.sqrt(p * (1.0 - p) / n + z2n / (4.0 * n))
-    lo = jnp.minimum(d.q - z * d.mc_se, center - half)
-    hi = jnp.maximum(d.q + z * d.mc_se, center + half)
+    lo = jnp.clip(jnp.minimum(d.q - z * d.mc_se, center - half), 0.0, 1.0)
+    hi = jnp.clip(jnp.maximum(d.q + z * d.mc_se, center + half), 0.0, 1.0)
     return widen_by_mass_outside(lo, hi, d.prior_mass_outside)
 
 
