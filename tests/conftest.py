@@ -79,7 +79,6 @@ class _Toy:
             cloud,
             block(mean),
             block(var),
-            jnp.zeros(1, bool),
             jnp.broadcast_to(jnp.asarray(exists, bool), (n_draw, n_planet)),
         )
 

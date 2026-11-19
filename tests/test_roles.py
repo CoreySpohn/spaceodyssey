@@ -80,17 +80,11 @@ class LookAlikeRatio(AbstractRolePrior):
 
 
 def _atoms(x, log_weight, log_ref, measure):
-    """Atoms of a 1-D cloud: one planet per draw, an empty gas block, no rows."""
+    """Atoms of a 1-D cloud: one planet per draw, an empty gas block."""
     n = x.shape[0]
     cloud = WeightedCloud({"x": x[:, None]}, log_weight, log_ref, measure)
     empty = jnp.zeros((n, 1, 0))
-    return Atoms(
-        cloud,
-        empty,
-        empty,
-        jnp.zeros(0, bool),
-        jnp.ones((n, 1), bool),
-    )
+    return Atoms(cloud, empty, empty, jnp.ones((n, 1), bool))
 
 
 def _empty_pool(n_roles):

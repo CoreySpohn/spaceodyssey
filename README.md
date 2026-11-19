@@ -21,7 +21,6 @@ atoms = Atoms(
     cloud,
     x_mean=jnp.zeros((1, 1, 1)),
     x_var=jnp.ones((1, 1, 1)),
-    row_mask=jnp.zeros(0, dtype=bool),
     exists=jnp.ones((1, 1), dtype=bool),
 )
 assert float(GasAbove(0, 0.0).prob(atoms, ())[0, 0]) == 0.5

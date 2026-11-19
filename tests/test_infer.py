@@ -16,7 +16,7 @@ from numpy.testing import assert_allclose, assert_array_max_ulp
 from spaceodyssey.belief import absorb, infer, replay, replay_belief, weights
 from spaceodyssey.roles import AbstractRolePrior, Roles
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
-from spaceodyssey.types import Atoms, ObservationLog, Row, WeightedCloud
+from spaceodyssey.types import Atoms, ObservationLog, Refit, Row, WeightedCloud
 
 STAR = ()
 CAPACITY = 8  # W
@@ -35,20 +35,26 @@ class GasGaussian(AbstractRolePrior):
 
     def sample(self, key, star):
         x = self.mean + self.sd * jax.random.normal(key, (1,))
-        return _atoms(x, 0.0, jnp.zeros(1), jnp.zeros(CAPACITY, bool))
+        return _atoms(x, 0.0, jnp.zeros(1))
 
 
 # Forecast N(0, 1); verdict members N(0, 1) and N(1, 1).
 ROLES = Roles(GasGaussian("toy"), GasGaussian("toy", mean=[0.0, 1.0], sd=[1.0, 1.0]))
 
 
-def _atoms(x, var, log_ref_density, row_mask):
+def _atoms(x, var, log_ref_density):
     """Draws of one planet with one gas: abundance mean `x` and variance `var`."""
     x = jnp.asarray(x, float)
     n_draw = x.shape[0]
     block = jnp.broadcast_to(jnp.asarray(var, float), (n_draw,))[:, None, None]
     cloud = WeightedCloud({"x": x}, jnp.zeros(n_draw), log_ref_density, "toy")
-    return Atoms(cloud, x[:, None, None], block, row_mask, jnp.ones((n_draw, 1), bool))
+    return Atoms(cloud, x[:, None, None], block, jnp.ones((n_draw, 1), bool))
+
+
+def _refit(atoms, represented=(), star=0):
+    """A refit of star `star` whose cloud represents the log rows `represented`."""
+    mask = jnp.zeros(CAPACITY, bool).at[jnp.asarray(represented, int)].set(True)
+    return Refit(atoms, mask, star)
 
 
 def _payload(snr, value, name):
@@ -131,8 +137,8 @@ def test_replay_applies_each_row_outside_the_mask_once(toy):
     """
     n = 20_000
     x = 0.5 + jnp.sqrt(0.5) * ndtri((jnp.arange(n) + 0.5) / n)
-    mask = jnp.zeros(CAPACITY, bool).at[0].set(True)
-    atoms = _atoms(x, 0.0, norm.logpdf(x), mask)
+    atoms = _atoms(x, 0.0, norm.logpdf(x))
+    refit = _refit(atoms, [0])
     rows = [
         _row(0, _gas(2.5, 1.0), NO_STEP),  # row 1, represented by the cloud
         _row(0, _gas(2.5, 1.0), NO_STEP),  # row 2, applied
@@ -144,17 +150,15 @@ def test_replay_applies_each_row_outside_the_mask_once(toy):
     ]
     log = _log(rows, 6)
     pool = toy.empty_pool(n_roles=3)
-    star_index = jnp.asarray(0)
 
-    mean, var = _moments(INFER(ROLES, atoms, log, MODELS, STAR, star_index, pool))
+    mean, var = _moments(INFER(ROLES, refit, log, MODELS, STAR, pool))
     assert_allclose(mean, [2 / 3, 2 / 3, 1.0], rtol=1e-3)
     assert_allclose(var, [1 / 3, 1 / 3, 1 / 3], rtol=1e-3)
 
-    unmasked = eqx.tree_at(lambda a: a.row_mask, atoms, jnp.zeros(CAPACITY, bool))
-    twice = INFER(ROLES, unmasked, log, MODELS, STAR, star_index, pool)
+    twice = INFER(ROLES, _refit(atoms), log, MODELS, STAR, pool)
     assert_allclose(_moments(twice)[0][0], 0.75, rtol=1e-3)
     assert_allclose(_moments(twice)[1][0], 0.25, rtol=1e-3)
-    dropped = INFER(ROLES, atoms, _with_count(log, 1), MODELS, STAR, star_index, pool)
+    dropped = INFER(ROLES, refit, _with_count(log, 1), MODELS, STAR, pool)
     assert_allclose(_moments(dropped)[0][0], 0.5, rtol=1e-3)
     assert_allclose(_moments(dropped)[1][0], 0.5, rtol=1e-3)
 
@@ -176,7 +180,8 @@ def test_replay_is_order_free_and_absorb_equals_infer(toy):
     second row or star retraces `absorb`.
     """
     x = jnp.linspace(-1.75, 2.25, 9)
-    atoms = _atoms(x, 0.0, norm.logpdf(x), jnp.zeros(CAPACITY, bool).at[0].set(True))
+    atoms = _atoms(x, 0.0, norm.logpdf(x))
+    refit = _refit(atoms, [0])
     observed = [
         _row(0, _gas(5.0, 1.3), NO_STEP),
         _row(1, NO_GAS, _step(5.0, 1.0)),
@@ -188,11 +193,10 @@ def test_replay_is_order_free_and_absorb_equals_infer(toy):
     grant = _row(0, _gas(2.5, 0.8), NO_STEP)
     log = _log([grant, *observed], 7)
     pool = toy.empty_pool(n_roles=3)
-    star_index = jnp.asarray(0)
-    batch = INFER(ROLES, atoms, log, MODELS, STAR, star_index, pool)
+    batch = INFER(ROLES, refit, log, MODELS, STAR, pool)
 
     shuffled = _log([grant, *(observed[i] for i in (4, 2, 0, 5, 3, 1))], 7)
-    other = INFER(ROLES, atoms, shuffled, MODELS, STAR, star_index, pool)
+    other = INFER(ROLES, refit, shuffled, MODELS, STAR, pool)
     _assert_ulp(other.log_like, batch.log_like)
     _assert_ulp(weights(other), weights(batch))
 
@@ -203,7 +207,7 @@ def test_replay_is_order_free_and_absorb_equals_infer(toy):
         traces.append(None)
         return absorb(r, log, MODELS, STAR)
 
-    r = replay(ROLES, atoms, _with_count(log, 1), MODELS, STAR, star_index, pool)
+    r = replay(ROLES, refit, _with_count(log, 1), MODELS, STAR, pool)
     for count in range(2, 8):
         r = step(r, _with_count(log, count))
     held = step(r, log)
@@ -214,12 +218,12 @@ def test_replay_is_order_free_and_absorb_equals_infer(toy):
     _assert_ulp(weights(online), weights(batch))
 
     star_one = replay(
-        ROLES, atoms, _with_count(log, 3), MODELS, STAR, jnp.asarray(1), pool
+        ROLES, _refit(atoms, [0], star=1), _with_count(log, 3), MODELS, STAR, pool
     )
     star_one = step(star_one, log)
     assert len(traces) == 1
     only_its_row = _log([grant, _row(0, _gas(2.5, 0.4), NO_STEP)], 2)
-    expected = INFER(ROLES, atoms, only_its_row, MODELS, STAR, star_index, pool)
+    expected = INFER(ROLES, refit, only_its_row, MODELS, STAR, pool)
     _assert_ulp(replay_belief(star_one, MODELS, STAR).log_like, expected.log_like)
 
 
@@ -238,11 +242,10 @@ def test_infer_on_an_uncertain_gas_uses_the_joint_marginal(toy):
     against the refit's draws (the prior counted once per slot), or drops a row's
     statistics.
     """
-    atoms = _atoms([0.0, 1.0], [1.0, 0.5], jnp.zeros(2), jnp.zeros(CAPACITY, bool))
+    refit = _refit(_atoms([0.0, 1.0], [1.0, 0.5], jnp.zeros(2)))
     pool = toy.empty_pool(n_roles=3)
-    star_index = jnp.asarray(0)
     one_slot = _log([_row(0, _gas(5.0, 1.0)), _row(0, _gas(2.5, 0.4))], 2)
-    b = INFER(ROLES, atoms, one_slot, (GAS,), STAR, star_index, pool)
+    b = INFER(ROLES, refit, one_slot, (GAS,), STAR, pool)
 
     y = np.array([1.0, 0.4])
     joint = []
@@ -261,7 +264,7 @@ def test_infer_on_an_uncertain_gas_uses_the_joint_marginal(toy):
     two_slots = _log(
         [_row(0, _gas(5.0, 1.0), NO_GAS), _row(1, NO_GAS, _gas(2.5, 0.4))], 2
     )
-    split = INFER(ROLES, atoms, two_slots, (GAS, GAS), STAR, star_index, pool)
+    split = INFER(ROLES, refit, two_slots, (GAS, GAS), STAR, pool)
     assert_allclose(split.log_like, b.log_like, rtol=1e-12)
     assert_allclose(split.atoms.x_mean, b.atoms.x_mean, rtol=1e-12)
     assert_allclose(split.atoms.x_var, b.atoms.x_var, rtol=1e-12)
@@ -272,21 +275,24 @@ def test_infer_refuses_what_it_cannot_replay(toy):
     checked.
 
     A verdict prior on measure "y" against a cloud on "toy" raises, as do a model table
-    whose length differs from the log's payload buffers and a `row_mask` whose capacity
-    differs from the log's.
+    whose length differs from the log's payload buffers, a `row_mask` whose capacity
+    differs from the log's, and a belief's updated draws passed as a refit.
 
     Fails if `infer` builds role weights without the measure check (a missing Jacobian
-    goes unnoticed), or reads a payload buffer or a mask entry that does not exist.
+    goes unnoticed), reads a payload buffer or a mask entry that does not exist, or
+    replays draws that already carry the rows.
     """
-    atoms = _atoms([0.0, 1.0], 0.0, jnp.zeros(2), jnp.zeros(CAPACITY, bool))
+    refit = _refit(_atoms([0.0, 1.0], 0.0, jnp.zeros(2)))
     log = _log([_row(0, _gas(2.5, 1.0), NO_STEP)], 1)
     pool = toy.empty_pool(n_roles=3)
-    star_index = jnp.asarray(0)
     on_y = Roles(ROLES.forecast, GasGaussian("y", mean=[0.0, 1.0], sd=[1.0, 1.0]))
     with pytest.raises(ValueError, match="measure"):
-        infer(on_y, atoms, log, MODELS, STAR, star_index, pool)
+        infer(on_y, refit, log, MODELS, STAR, pool)
     with pytest.raises(ValueError, match="payload buffers"):
-        infer(ROLES, atoms, log, (GAS,), STAR, star_index, pool)
-    short = eqx.tree_at(lambda a: a.row_mask, atoms, jnp.zeros(3, bool))
+        infer(ROLES, refit, log, (GAS,), STAR, pool)
+    short = eqx.tree_at(lambda r: r.row_mask, refit, jnp.zeros(3, bool))
     with pytest.raises(ValueError, match="capacity"):
-        infer(ROLES, short, log, MODELS, STAR, star_index, pool)
+        infer(ROLES, short, log, MODELS, STAR, pool)
+    updated = infer(ROLES, refit, log, MODELS, STAR, pool).atoms
+    with pytest.raises((TypeError, AttributeError)):
+        infer(ROLES, updated, log, MODELS, STAR, pool)

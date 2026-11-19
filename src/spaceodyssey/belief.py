@@ -21,6 +21,7 @@ from spaceodyssey.types import (
     Atoms,
     ObservationLog,
     Pool,
+    Refit,
     Row,
 )
 
@@ -29,7 +30,8 @@ class Belief(eqx.Module):
     """What one role set believes about one star: draws, role weights, and the pool.
 
     Attributes:
-        atoms: the weighted draws of the refit.
+        atoms: the weighted draws; after a replay, their gas block carries the
+            applied rows.
         log_prior: log prior density of each draw under each role, shape ``(R, A)``.
         log_like: summed log likelihood of the rows each role has seen, ``(R, A)``.
         pool: the undetected planets.
@@ -336,15 +338,6 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
     )
 
 
-def _as_index(x) -> Int[Array, ""]:
-    """``x`` as the default integer type, never weakly typed.
-
-    A replay built from Python integers would otherwise hold weakly typed indices, and
-    the strongly typed ones a compiled ``absorb`` returns would trace it a second time.
-    """
-    return jnp.asarray(x, dtype=int)
-
-
 class Replay(eqx.Module):
     """The rows of one star read into one refit cloud, held as summed statistics.
 
@@ -355,20 +348,18 @@ class Replay(eqx.Module):
     current row by row equals the belief inferred from the whole log, to rounding.
 
     Attributes:
-        atoms: the refit's draws, before any row is applied.
+        refit: the refit's draws, before any row is applied, and its star.
         log_prior: log prior of each draw under each role, ``(R, A)``.
         stats: one pytree per model slot, the summed statistics of the rows applied
             in that slot, leaves with leading axis ``A``.
-        star_index: the star whose rows are applied.
         count: the number of log rows read, applied or not.
         pool: the undetected planets, carried unchanged.
     """
 
-    atoms: Atoms
+    refit: Refit
     log_prior: Float[Array, "R A"] = eqx.field(converter=jnp.asarray)
     stats: tuple[PyTree, ...]
-    star_index: Int[Array, ""] = eqx.field(converter=_as_index)
-    count: Int[Array, ""] = eqx.field(converter=_as_index)
+    count: Int[Array, ""] = eqx.field(converter=lambda x: jnp.asarray(x, dtype=int))
     pool: Pool
 
 
@@ -421,11 +412,10 @@ def _summed_stats(
 
 def replay(
     roles: Roles,
-    atoms: Atoms,
+    refit: Refit,
     log: ObservationLog,
     models: tuple[AbstractObservationModel, ...],
     star,
-    star_index: Int[Array, ""],
     pool: Pool,
 ) -> Replay:
     """Read every row of a log into a replay of one star's refit cloud.
@@ -437,11 +427,10 @@ def replay(
 
     Args:
         roles: the forecast and the stacked verdict members.
-        atoms: the refit's draws, with the rows they represent in ``row_mask``.
+        refit: the refit's draws, the rows they represent and their star.
         log: the run's log, all stars.
         models: the run's model table, static; ``Row.model_slot`` indexes it.
         star: a pytree of scalar leaves describing the star.
-        star_index: the star's index in the log's ``star`` column.
         pool: the undetected planets.
 
     Returns:
@@ -452,18 +441,18 @@ def replay(
             table and the log's payload buffers differ in number, or ``row_mask`` does
             not have the log's capacity.
     """
-    rows = log.rows
+    rows, atoms = log.rows, refit.atoms
     if len(models) != len(rows.payload):
         raise ValueError(
             f"{len(models)} models for {len(rows.payload)} payload buffers in the log"
         )
-    if atoms.row_mask.shape != rows.star.shape:
+    if refit.row_mask.shape != rows.star.shape:
         raise ValueError(
-            f"row_mask {atoms.row_mask.shape} does not match the log capacity "
+            f"row_mask {refit.row_mask.shape} does not match the log capacity "
             f"{rows.star.shape}"
         )
     index = jnp.arange(rows.star.shape[0])
-    applies = _applies(rows, index, log.count, atoms.row_mask, star_index)
+    applies = _applies(rows, index, log.count, refit.row_mask, refit.star_index)
     stats = tuple(
         _summed_stats(
             model, rows.payload[slot], applies & (rows.model_slot == slot), atoms, star
@@ -471,7 +460,7 @@ def replay(
         for slot, model in enumerate(models)
     )
     log_prior = _role_log_prior(atoms, roles, star)
-    return Replay(atoms, log_prior, stats, star_index, log.count, pool)
+    return Replay(refit, log_prior, stats, log.count, pool)
 
 
 def absorb(
@@ -502,14 +491,15 @@ def absorb(
     index = r.count
     at = jnp.minimum(index, log.rows.star.shape[0] - 1)
     row = jax.tree.map(lambda x: x[at], log.rows)
-    applies = _applies(row, index, log.count, r.atoms.row_mask[at], r.star_index)
+    refit = r.refit
+    applies = _applies(row, index, log.count, refit.row_mask[at], refit.star_index)
     stats = tuple(
         _add_stats(
             total,
             model,
             row.payload[slot],
             applies & (row.model_slot == slot),
-            r.atoms,
+            refit.atoms,
             star,
         )
         for slot, (model, total) in enumerate(zip(models, r.stats, strict=True))
@@ -540,9 +530,9 @@ def replay_belief(
 
     Returns:
         The belief, with the draws updated by every applied row and the refit's
-        ``row_mask`` and cloud.
+        cloud.
     """
-    atoms = r.atoms
+    atoms = r.refit.atoms
     log_like = jnp.zeros_like(atoms.cloud.log_weight)
     for model, stats in zip(models, r.stats, strict=True):
         slot_log_like, atoms = model.finalize(stats, atoms, star)
@@ -553,11 +543,10 @@ def replay_belief(
 
 def infer(
     roles: Roles,
-    atoms: Atoms,
+    refit: Refit,
     log: ObservationLog,
     models: tuple[AbstractObservationModel, ...],
     star,
-    star_index: Int[Array, ""],
     pool: Pool,
 ) -> Belief:
     """The belief at one star from a refit cloud and the log.
@@ -570,9 +559,8 @@ def infer(
     exact. The role weights are those of ``role_log_weights``, with every role's
     likelihood the one ``finalize`` returns. This is ``replay_belief`` of ``replay``.
 
-    Always infer from the refit's draws. The belief's draws carry a gas block updated
-    by the applied rows but keep the refit's ``row_mask``, so reading them back into
-    ``infer`` would apply those rows twice.
+    The belief's draws are ``Atoms``, not a ``Refit``: their gas block carries the
+    applied rows, so they cannot be replayed a second time.
 
     Open point: the role weight ``log_prior - log_ref_density`` is a ratio of point
     densities. On a draw whose gas block is a distribution (``x_var > 0``) it is exact
@@ -582,11 +570,10 @@ def infer(
 
     Args:
         roles: the forecast and the stacked verdict members.
-        atoms: the refit's draws, with the rows they represent in ``row_mask``.
+        refit: the refit's draws, the rows they represent and their star.
         log: the run's log, all stars; grant rows first, then observed rows.
         models: the run's model table, static; ``Row.model_slot`` indexes it.
         star: a pytree of scalar leaves describing the star.
-        star_index: the star's index in the log's ``star`` column.
         pool: the undetected planets, carried unchanged.
 
     Returns:
@@ -595,6 +582,4 @@ def infer(
     Raises:
         ValueError: as ``replay``.
     """
-    return replay_belief(
-        replay(roles, atoms, log, models, star, star_index, pool), models, star
-    )
+    return replay_belief(replay(roles, refit, log, models, star, pool), models, star)

@@ -26,11 +26,11 @@ class WeightedCloud(eqx.Module):
     ``samples`` is a pytree whose leaves share the leading draw axis ``A``.
 
     Weight contract: ``log_weight`` is the log of target over proposal, where the
-    target is ``p0`` times the rows in ``row_mask``. It is not a log ratio against a
-    proposal that equals ``p0``: that reading would count ``-log p0`` twice when the
-    role weights are formed. One cloud has one row set, so ``row_mask`` is one mask
-    for all its draws; a block normalization would need one per draw. The cloud comes
-    from one refit.
+    target is ``p0`` times the rows the refit represents (``Refit.row_mask``). It is
+    not a log ratio against a proposal that equals ``p0``: that reading would count
+    ``-log p0`` twice when the role weights are formed. One cloud has one row set, so
+    one mask serves all its draws; a block normalization would need one per draw. The
+    cloud comes from one refit.
 
     Attributes:
         samples: the state pytree, leading axis ``A``.
@@ -46,7 +46,7 @@ class WeightedCloud(eqx.Module):
 
 
 class Atoms[StateT](eqx.Module):
-    """A weighted cloud with the gas block and the rows the cloud already represents.
+    """A weighted cloud with its gas block.
 
     ``cloud.samples`` carries the state of type ``StateT``. The gas block holds, per
     draw, planet and gas, a Gaussian over the abundance: ``x_mean`` and ``x_var`` (zero
@@ -63,16 +63,42 @@ class Atoms[StateT](eqx.Module):
         cloud: the weighted draws.
         x_mean: mean abundance, shape ``(A, K, G)``.
         x_var: abundance variance, shape ``(A, K, G)``, zero for a point state.
-        row_mask: log rows the refit conditioned on, shape ``(W,)``, one set for the
-            whole cloud.
         exists: whether each planet slot of each draw holds a planet, shape ``(A, K)``.
     """
 
     cloud: WeightedCloud
     x_mean: Float[Array, "A K G"] = eqx.field(converter=jnp.asarray)
     x_var: Float[Array, "A K G"] = eqx.field(converter=jnp.asarray)
-    row_mask: Bool[Array, " W"] = eqx.field(converter=jnp.asarray)
     exists: Bool[Array, "A K"] = eqx.field(converter=jnp.asarray)
+
+
+def _as_index(x) -> Int[Array, ""]:
+    """``x`` as the default integer type, never weakly typed.
+
+    An index built from a Python integer would otherwise be weakly typed, and the
+    strongly typed copy a compiled function returns would trace that function again.
+    """
+    return jnp.asarray(x, dtype=int)
+
+
+class Refit(eqx.Module):
+    """The draws one refit returned for one star, and the log rows they represent.
+
+    The cloud's weights already carry the rows in ``row_mask``; ``replay`` applies the
+    star's other rows. A belief's draws are ``Atoms``, never a ``Refit``: their gas
+    block has been updated by the rows replayed into it, so they cannot be replayed
+    again.
+
+    Attributes:
+        atoms: the weighted draws, as the refit returned them.
+        row_mask: the log rows the refit conditioned on, shape ``(W,)``, one set for
+            the whole cloud.
+        star_index: the star's index in the log's ``star`` column.
+    """
+
+    atoms: Atoms
+    row_mask: Bool[Array, " W"] = eqx.field(converter=jnp.asarray)
+    star_index: Int[Array, ""] = eqx.field(converter=_as_index)
 
 
 class Pool(eqx.Module):
@@ -271,6 +297,13 @@ class AbstractObservationModel(eqx.Module):
     A model whose draws carry a distribution that several rows read (a Gaussian gas
     block with ``x_var > 0``) cannot use that form, since the rows are not independent
     given the draw; it carries conjugate statistics instead.
+
+    In a run's model table, every model's statistics are taken against the draws as
+    the refit returned them, while ``finalize`` runs slot by slot in table order, each
+    against the draws the slot before it returned. A model's ``stats`` must therefore
+    read nothing of a draw that a model in an earlier slot changes in ``finalize``. The
+    toy models qualify: the Gaussian model's statistics read no draw, and the step
+    report's read only point gas blocks, which no ``finalize`` changes.
     """
 
     @abc.abstractmethod
