@@ -447,13 +447,14 @@ def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
     pool is thinned by the entry's detection probability in every cell; the star
     moves to the higher of its stage and the stage the cell reaches. Every entry
     and cell is one body under ``vmap``, so a level of the lookahead traces once. A
-    cell the forecast gives no mass (a padded cell among them) adds nothing.
+    cell the forecast gives no mass (a padded cell among them) adds nothing; a
+    refused forecast (a NaN row) makes every entry NaN, never zero.
     """
     forecast, verdict, stage = node
 
     def entry(cells_f, cells_v, detect_f, detect_v, reached):
         p_cell = outcome_prob(forecast, cells_f)[0]  # (Y,), the forecast's
-        seen = p_cell > 0
+        seen = ~(p_cell <= 0)  # a refused forecast (NaN) reads NaN, not zero
         pool_f, pool_v = thin(forecast.pool, detect_f), thin(verdict.pool, detect_v)
 
         def worth_after(cf, cv, reached_y):

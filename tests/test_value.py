@@ -19,6 +19,7 @@ from spaceodyssey.belief import (
     planning_beliefs,
     q,
     replay,
+    select_roles,
 )
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.price import dispatch, solve_price
@@ -739,6 +740,45 @@ def test_a_model_that_does_not_search_leaves_the_pool(toy):
         1,
     )
     assert_allclose(f.reward[0], [0.8, 0.0], rtol=1e-12, atol=1e-12)
+
+
+def test_a_refused_forecast_reads_nan_not_zero(toy):
+    """A forecast the reweighting gate refuses (a NaN row) gives NaN rewards and NaN
+    claim-bit information, never a confident zero, while the verdict is kept.
+
+    Four point draws (`_coarsening_belief`'s), refit prior flat, both roles the gas
+    prior N(0, 1); the draws' Kish size is 4, so a gate with `min_n_eff = 5` refuses
+    the forecast's row. On test 5's search and pool, the `LogScore` utility, the
+    `LogScore` and `Count` rewards at depth 1 and 2 and `claim_information` are NaN.
+
+    Fails if a guard reads a NaN forecast as giving no mass (`forecast > 0` in
+    `expected_log_score`, `p_cell > 0` in `frontier` or `claim_information`), which
+    values a refused star at zero and so never observes it.
+    """
+    atoms = _coarsening_belief(toy).atoms
+    prior = toy.GasPrior("toy", n_gas=1)
+    roles, pool = Roles(prior, toy.stack(prior)), _search_pool(toy)
+    log_like = jnp.zeros((2, 4))
+    refused = toy.jit.role_belief(
+        atoms, roles, log_like, toy.star, pool, min_n_eff=jnp.asarray(5.0),
+        max_khat=jnp.inf,
+    )  # fmt: skip
+    kept = toy.jit.role_belief(atoms, roles, log_like, toy.star, pool, **toy.ungated)
+    forecast, verdict = select_roles(refused, slice(0, 1)), toy.split(kept)[1]
+    assert np.all(np.isnan(np.asarray(forecast.log_prior_ratio)))
+    assert np.all(np.isfinite(np.asarray(verdict.log_prior_ratio)))
+
+    claim, models = Claim((toy.InHz(),)), (_search(toy),)
+    assert np.isnan(LogScore(1)(forecast, verdict, claim, toy.star))
+    beliefs = (toy.stack(forecast), toy.stack(verdict))
+    for utility in (LogScore(1), Count(toy.stack(pool))):
+        for depth in (1, 2):
+            f = _frontier_of(beliefs, claim, toy.star, utility, models, LOOK, depth)
+            assert np.isnan(f.reward[0, 0]), (utility, depth)
+    info = toy.jit.claim_information(
+        forecast, verdict, models[0], Action(0, 0, 1.0), claim, toy.star, PLANET
+    )
+    assert np.all(np.isnan(np.asarray(info)))
 
 
 def test_a_second_star_and_world_add_no_traces(toy):

@@ -15,9 +15,14 @@ dot or convolution can drop to TF32, about three digits."""
 
 
 def guarded_log(x):
-    """``ln x``, ``-inf`` at zero, with a finite derivative there."""
+    """``ln x``, ``-inf`` at zero, with a finite derivative there.
+
+    A NaN ``x`` (an unknown, such as the mass of a refused role) gives NaN, never
+    ``-inf``: a refusal is never read as a zero.
+    """
     positive = x > 0
-    return jnp.where(positive, jnp.log(jnp.where(positive, x, 1.0)), -jnp.inf)
+    off = jnp.where(x <= 0, -jnp.inf, jnp.nan)
+    return jnp.where(positive, jnp.log(jnp.where(positive, x, 1.0)), off)
 
 
 def safe_ratio(num, den):

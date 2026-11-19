@@ -99,7 +99,8 @@ def expected_log_score(
     ``sum_n forecast(n) ln pmf(n)``, the negative cross entropy of ``forecast``
     against ``pmf`` (Cover and Thomas, Elements of Information Theory, ch. 2). An
     outcome ``forecast`` gives no mass adds nothing; an outcome it expects and ``pmf``
-    rules out gives ``-inf``.
+    rules out gives ``-inf``. A NaN in ``forecast`` (a refused role) gives NaN, never
+    a confident zero.
 
     Args:
         pmf: the distribution that is scored.
@@ -108,7 +109,7 @@ def expected_log_score(
     Returns:
         The expected log score in nats.
     """
-    expected = forecast > 0
+    expected = ~(forecast <= 0)  # a NaN forecast is expected, so the NaN propagates
     return jnp.sum(
         jnp.where(expected, forecast * jnp.where(expected, guarded_log(pmf), 0), 0)
     )
@@ -199,7 +200,8 @@ def claim_information(
     the verdict gives the forecast's own expected information, the mutual information
     of ``Z`` and ``Y`` under the forecast (Lindley 1956); a verdict's gain as the
     forecast expects it equals that mutual information only when the two agree, and
-    can be negative when they do not. A cell the forecast gives no mass adds nothing.
+    can be negative when they do not. A cell the forecast gives no mass adds nothing;
+    a refused role (a NaN row) gives NaN.
 
     The gain is on the cells the model reports. Merging cells can raise a verdict
     row, so no bound on the gain of a finer outcome follows from coarser cells.
@@ -226,7 +228,7 @@ def claim_information(
     cells_f = model.cells(forecast.atoms, action)  # (A_F, Y)
     cells_v = model.cells(verdict.atoms, action)  # (A_V, Y)
     p_cell = outcome_prob(forecast, cells_f)[0]  # (Y,), the forecast's
-    seen = p_cell > 0
+    seen = ~(p_cell <= 0)  # a refused forecast (NaN) reads NaN, not zero
     # A cell the forecast cannot give is replaced by a harmless one: its gain is
     # dropped below, and its NaN weights would otherwise reach the derivative.
     safe_f = jnp.where(seen, cells_f, 1.0)
