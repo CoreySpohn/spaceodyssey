@@ -1,0 +1,459 @@
+"""The survey loop and its score: `step`, `execute`, the policies and `score`.
+
+Milestone 1 is E and L as a scored log: a `TablePolicy` replays the stages of the E
+track as rows through `execute`, and `score` reads the information table and the
+certificates off the log against the unsealed truth.
+"""
+
+import zlib
+from typing import ClassVar
+
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import numpy as np
+from numpy.testing import assert_allclose
+
+from spaceodyssey.claim import Claim, GasAbove
+from spaceodyssey.design import Design, Mode, Resources
+from spaceodyssey.information import POSITIVE, UNRESOLVED
+from spaceodyssey.log import OVER_BUDGET, execute, grant_rows, start_log, step
+from spaceodyssey.policy import AbstractPolicy, TablePolicy, public_view
+from spaceodyssey.score import format_report, score
+from spaceodyssey.study import Arm, Study
+from spaceodyssey.toy import GaussianGasModel, StepReportModel
+from spaceodyssey.types import AbstractObservationModel, Action, Grant, Refit
+from spaceodyssey.world import SealedWorld, row_key, run_keys
+
+KEY = jax.random.key(0)
+CAPACITY = 8  # W
+COPIES = 250  # copies of each draw type: 16 x 250 = 4,000 draws for the step rule
+
+
+class OrbitReport(AbstractObservationModel):
+    """A resolved orbit: it reports each planet's `hz` bit exactly and weighs an Earth
+    size 7 to 3 against a look-alike, whatever the truth's size (the reading of the
+    size sits where its likelihood ratio is 7:3).
+    """
+
+    searches: ClassVar[bool] = False
+
+    def sample(self, key, atoms, action):
+        return {"hz": atoms.cloud.samples["hz"]}
+
+    def stats(self, payload, atoms, star):
+        hz, size = atoms.cloud.samples["hz"], atoms.cloud.samples["size"]
+        like = jnp.where(hz == payload["hz"], jnp.where(size > 0.5, 0.7, 0.3), 0.0)
+        return jnp.sum(jnp.log(like), axis=-1)
+
+    def finalize(self, stats, atoms, star):
+        return stats, atoms
+
+    def cells(self, atoms, action):
+        hz = atoms.cloud.samples["hz"][:, 0]
+        return jnp.stack([1.0 - hz, hz], axis=-1)
+
+
+class ExpectedReading(AbstractObservationModel):
+    """The Gaussian gas model with every reading at its expected value: the true
+    abundance, without noise.
+    """
+
+    searches: ClassVar[bool] = False
+    gas: GaussianGasModel
+
+    def sample(self, key, atoms, action):
+        snr = self.gas.sample(key, atoms, action)["snr"]
+        return {"snr": snr, "reading": jnp.where(snr > 0, atoms.x_mean, 0.0)}
+
+    def stats(self, payload, atoms, star):
+        return self.gas.stats(payload, atoms, star)
+
+    def finalize(self, stats, atoms, star):
+        return self.gas.finalize(stats, atoms, star)
+
+    def cells(self, atoms, action):
+        return self.gas.cells(atoms, action)
+
+
+def _no_grant():
+    no_int = jnp.zeros(0, int)
+    return Grant(Action(no_int, no_int, jnp.zeros(0)))
+
+
+def _design(models, budget_d=10.0, latency_d=0.0):
+    """One mode per model, in model order."""
+    modes = tuple(Mode(slot, latency_d) for slot in range(len(models)))
+    return Design(models, modes, Resources(budget_d), CAPACITY)
+
+
+def _study(toy, cloud, design, n_star, claim):
+    """A study whose every star starts from `cloud`, under flat roles on the toy."""
+    refits = toy.stack(
+        *[Refit(cloud, jnp.zeros(CAPACITY, bool), s) for s in range(n_star)]
+    )
+    pool = toy.stack(*[toy.empty_pool(2, 2)] * n_star)
+    prior = toy.GasPrior("toy", n_gas=2)  # flat on point gases at +-1 and on N(0, 1)
+    member = toy.GasPrior("toy", mean=[0.0], sd=[1.0], n_gas=2)
+    return Study(
+        claim, prior, prior, member, refits, pool, (), design,
+        jnp.zeros((n_star, 2)), alpha=0.05,
+    )  # fmt: skip
+
+
+def _e_track_claim(toy):
+    """Candidate (hz, size), then water and oxygen, conditioned on the candidacy."""
+    gases = (GasAbove(0, 0.0), GasAbove(1, 0.0))
+    return Claim((toy.InHz(), toy.InSize(), *gases), given=2)
+
+
+def _el_world(toy):
+    """E (star 0): an Earth-sized HZ planet with water and oxygen 1 dex above their
+    floors. L (star 1): its look-alike, the same but not Earth-sized.
+    """
+    e = toy.atoms([[1.0]], [[1.0]], [1.0], [[1.0, 1.0]], 0.0)
+    look_alike = toy.atoms([[1.0]], [[0.0]], [1.0], [[1.0, 1.0]], 0.0)
+    return SealedWorld(toy.stack(e, look_alike))
+
+
+def _empty_log(world, design):
+    """A run's log before its first action, with no grant."""
+    grant = _no_grant()
+    _, noise = run_keys(KEY)
+    payload = world.reveal(noise, grant, design.models, design.modes)
+    return start_log(grant_rows(grant, payload, design.modes), CAPACITY)
+
+
+def _stage_table():
+    """The E track as rows at both stars: the orbit, then water, then oxygen."""
+    return TablePolicy(Action([0, 1, 0, 1, 0, 1], [0, 0, 1, 1, 2, 2], [1.0] * 6))
+
+
+def _step_rule_cloud(toy):
+    """The 16 point draws over (hz, size, water, oxygen), each gas 1 dex above or
+    below its floor, `COPIES` times each, equal weights.
+    """
+    bits = np.array(np.meshgrid(*[[0.0, 1.0]] * 4, indexing="ij")).reshape(4, -1).T
+    bits = np.repeat(bits, COPIES, axis=0)
+    gases = 2.0 * bits[:, 2:] - 1.0
+    return toy.atoms(bits[:, :1], bits[:, 1:2], np.ones(len(bits)), gases, 0.0)
+
+
+def _gaussian_cloud(toy):
+    """The 4 draws over (hz, size), 1,000 times each, both gases N(0, 1) dex."""
+    bits = np.array(np.meshgrid([0.0, 1.0], [0.0, 1.0], indexing="ij")).reshape(2, -1)
+    bits = np.repeat(bits.T, 1000, axis=0)
+    return toy.atoms(bits[:, :1], bits[:, 1:], np.ones(len(bits)), 0.0, 1.0)
+
+
+def _run(toy, cloud, models):
+    """E and L through `execute` and `score` with the stage table."""
+    design = _design(models)
+    claim = _e_track_claim(toy)
+    study = _study(toy, cloud, design, 2, claim)
+    world = _el_world(toy)
+    log = execute(KEY, _stage_table(), world, design, _no_grant())
+    return log, score(log, world, study)
+
+
+def _by_star(report, star):
+    info = report.information
+    pick = np.asarray(info["star"]) == star
+    return {name: np.asarray(column)[pick] for name, column in info.items()}
+
+
+def test_milestone_1_e_and_l_as_a_scored_log(toy):
+    """Milestone 1: E and L as a scored log from a real `execute` and `score`.
+
+    Step rule (S/N 6 reports), a cloud of 4,000 point draws: E's q is 0.0625, 0.175,
+    0.35, 0.70 over the stages, its information +2.42 in total, split 0.69 + 0.34 +
+    0.69 + 0.69 over hz, size, water and oxygen; L, the look-alike with the same rows,
+    loses 1.14. E's conditional q (both gases given the candidacy) is 1, so E is
+    issued, its lower bound the Wilson bound n / (n + 4) at n = n_eff psi; L fails the
+    condition and is void. Gaussian gas model at S/N 5, readings at their expected
+    value, 4,000 draws: q is 0.0625, 0.175, 0.337, 0.649, E gains +1.03, +0.66, +0.66
+    (2.34) and L loses 0.13, 0.22, 0.64 (0.98); E's conditional q is 0.649 / 0.70 =
+    0.927 < 0.95, so E is not issued. Both runs print their tables.
+
+    Fails if `execute` drops, reorders or misroutes a row, `score` reads the wrong
+    stage, role or sign, the chain split does not sum to the information, the
+    certificate reads the joint where the condition belongs, or a void planet is
+    certified.
+    """
+    step_models = (
+        OrbitReport(),
+        StepReportModel(snr_one_day=[6.0, 0.0]),
+        StepReportModel(snr_one_day=[0.0, 6.0]),
+    )
+    log, report = _run(toy, _step_rule_cloud(toy), step_models)
+    assert int(log.count) == 6
+    e, look_alike = _by_star(report, 0), _by_star(report, 1)
+    assert_allclose(e["q_after"], [0.175, 0.35, 0.70], rtol=1e-10)
+    assert_allclose(e["q_before"][0], 0.0625, rtol=1e-10)
+    assert_allclose(look_alike["q_after"], [0.175, 0.35, 0.70], rtol=1e-10)
+    assert round(float(e["information"].sum()), 2) == 2.42
+    assert round(float(look_alike["information"].sum()), 2) == -1.14
+    ln2, ln14 = np.log(2.0), np.log(1.4)
+    assert_allclose(e["chain_gain"].sum(axis=0), [ln2, ln14, ln2, ln2], atol=1e-10)
+    assert_allclose(e["chain_gain"].sum(), np.log(0.70 / 0.0625), rtol=1e-10)
+    assert np.isnan(look_alike["chain_gain"]).all()
+
+    cert = {name: np.asarray(column) for name, column in report.certificates.items()}
+    res = {name: np.asarray(column) for name, column in report.resolution.items()}
+    assert list(cert["status"][:1]) == [POSITIVE] and not cert["void"][0]
+    assert cert["void"][1]
+    n = res["n_eff"][0] * res["psi"][0]
+    assert_allclose(n, 250 / 0.58 * 0.7, rtol=1e-10)  # 250 survivors per size bit
+    assert_allclose(cert["q_lo"][0], n / (n + 4.0), rtol=1e-10)
+    print("Step rule, S/N 6 reports, 4,000 draws\n")
+    print(format_report(report))
+
+    gaussian_models = (
+        OrbitReport(),
+        ExpectedReading(GaussianGasModel(snr_one_day=[5.0, 0.0])),
+        ExpectedReading(GaussianGasModel(snr_one_day=[0.0, 5.0])),
+    )
+    log, report = _run(toy, _gaussian_cloud(toy), gaussian_models)
+    e, look_alike = _by_star(report, 0), _by_star(report, 1)
+    assert_allclose(e["q_after"], [0.175, 0.337, 0.649], atol=5e-4)
+    assert_allclose(e["information"], [1.03, 0.66, 0.66], atol=5e-3)
+    assert_allclose(look_alike["information"], [-0.13, -0.22, -0.64], atol=5e-3)
+    assert round(float(e["information"].sum()), 2) == 2.34
+    assert round(float(look_alike["information"].sum()), 2) == -0.98
+    cert = {name: np.asarray(column) for name, column in report.certificates.items()}
+    res = {name: np.asarray(column) for name, column in report.resolution.items()}
+    assert_allclose(res["q"][0], 0.649 / 0.70, atol=1e-3)
+    assert cert["status"][0] == UNRESOLVED and cert["void"][1]
+    print(
+        "\nGaussian gas model, S/N 5, readings at their expected value, 4,000 draws\n"
+    )
+    print(format_report(report))
+
+
+def _step_models():
+    return (
+        OrbitReport(),
+        StepReportModel(snr_one_day=[6.0, 0.0]),
+        StepReportModel(snr_one_day=[0.0, 6.0]),
+    )
+
+
+def test_two_arms_with_an_empty_log_and_different_grants(toy):
+    """Two arms of one study whose policies take nothing: their logs hold only their
+    grants, and their scores differ.
+
+    Arm A is granted E's orbit, arm B its water report. Neither log holds an observed
+    row, both hold one granted row released and charged at zero, and the rows differ.
+    E's conditional q at the end is 0.25 under A (both gases at even odds) and 0.5
+    under B (water seen); the information tables are empty (no stage after the
+    grant).
+
+    Fails if a grant's rows do not enter the log at time zero, are charged, or are not
+    read at stage 0, or if an empty table of actions takes an action.
+    """
+    design = _design(_step_models())
+    study = _study(toy, _step_rule_cloud(toy), design, 1, _e_track_claim(toy))
+    world = SealedWorld(
+        toy.stack(toy.atoms([[1.0]], [[1.0]], [1.0], [[1.0, 1.0]], 0.0))
+    )
+    nothing = TablePolicy(Action(jnp.zeros(0, int), jnp.zeros(0, int), jnp.zeros(0)))
+    arms = [Arm(Grant(Action([0], [mode], [1.0])), False) for mode in (0, 1)]
+    logs = [execute(KEY, nothing, world, design, arm.grant) for arm in arms]
+    for log in logs:
+        assert int(log.count) == 1
+        assert_allclose([log.rows.time_d[0], log.rows.charged_d[0]], 0.0)
+        assert_allclose(log.rows.release_d[0], 0.0)
+    assert [int(log.rows.model_slot[0]) for log in logs] == [0, 1]
+    reports = [score(log, world, study) for log in logs]
+    for report in reports:
+        assert report.information["star"].shape == (0,)
+        assert report.information["chain_gain"].shape == (0, 4)
+    q = [float(report.resolution["q"][0]) for report in reports]
+    assert_allclose(q, [0.25, 0.5], rtol=1e-10)
+
+
+def test_a_table_replays_to_the_log_it_describes(toy):
+    """A fixed table of actions replays to its log, row for row.
+
+    Four actions (stars 1, 0, 1, 0; modes 1, 2, 0, 1; exposures 1.5, 2, 0.5, 3 days)
+    under a budget of 4.5 days and a release latency of 0.25 days. Each row starts
+    when the one before it ends (0, 1.5, 3.5), is charged its exposure and released
+    0.25 days after it; the fourth (3 days) exceeds the 0.5 days left and is refused,
+    charged nothing, its payload zeros. Each payload sits in its mode's model slot,
+    equal to the world's draw with the row's key, and the other slots hold zeros.
+    After the third row (day 4) the public view shows that row, released at day 4.25,
+    in flight with its payload hidden, and the two released rows' payloads in full.
+
+    Fails if `step` misplaces a row, its time, charge or release, reads a payload from
+    the wrong model or key, charges a refused row, or shows a policy a payload before
+    its release.
+    """
+    models = _step_models()
+    design = _design(models, budget_d=4.5, latency_d=0.25)
+    world = _el_world(toy)
+    table = Action([1, 0, 1, 0], [1, 2, 0, 1], [1.5, 2.0, 0.5, 3.0])
+    log = execute(KEY, TablePolicy(table), world, design, _no_grant())
+
+    rows = log.rows
+    assert int(log.count) == 4
+    assert_allclose(rows.star[:4], [1, 0, 1, 0])
+    assert_allclose(rows.mode[:4], [1, 2, 0, 1])
+    assert_allclose(rows.model_slot[:4], [1, 2, 0, 1])
+    assert_allclose(rows.exposure_d[:4], [1.5, 2.0, 0.5, 3.0])
+    assert_allclose(rows.time_d[:4], [0.0, 1.5, 3.5, 4.0])
+    assert_allclose(rows.charged_d[:4], [1.5, 2.0, 0.5, 0.0])
+    assert_allclose(rows.release_d[:4], [1.75, 3.75, 4.25, 4.0])
+    assert_allclose(rows.refusal[:4], [0, 0, 0, OVER_BUDGET])
+    _, noise = run_keys(KEY)
+    for i in range(3):
+        action = jax.tree.map(lambda leaf, i=i: leaf[i], table)
+        slot = int(rows.model_slot[i])
+        drawn = world.observe(row_key(noise, action.star, i), models[slot], action)
+        toy.assert_ulp(jax.tree.map(lambda x, i=i: x[i], rows.payload[slot]), drawn)
+        for other in set(range(3)) - {slot}:
+            for leaf in jax.tree.leaves(rows.payload[other]):
+                assert_allclose(leaf[i], 0.0)
+    for leaf in jax.tree.leaves(rows.payload):
+        assert_allclose(leaf[3], 0.0)
+
+    three = eqx.tree_at(lambda x: x.count, log, jnp.asarray(3))
+    view = public_view(three, jnp.asarray(0), design.resources)
+    assert_allclose(view.time_d, 4.0)
+    assert_allclose(view.budget_left_d, 0.5)
+    assert list(np.asarray(view.in_flight[:4])) == [False, False, True, False]
+    assert_allclose(view.log.rows.payload[1]["bit"][0], rows.payload[1]["bit"][0])
+    assert_allclose(view.log.rows.payload[2]["bit"][1], rows.payload[2]["bit"][1])
+    assert_allclose(rows.payload[0]["hz"][2], 1.0)  # L is in the HZ
+    assert_allclose(view.log.rows.payload[0]["hz"][2], 0.0)  # in flight: hidden
+
+
+class Blind(AbstractObservationModel):
+    """A model whose payload does not depend on the truth: every row reads zeros."""
+
+    searches: ClassVar[bool] = False
+
+    def sample(self, key, atoms, action):
+        return {"value": jnp.zeros(atoms.exists.shape)}
+
+    def stats(self, payload, atoms, star):
+        return jnp.zeros(atoms.exists.shape[0])
+
+    def finalize(self, stats, atoms, star):
+        return stats, atoms
+
+    def cells(self, atoms, action):
+        return jnp.ones((atoms.exists.shape[0], 1))
+
+
+class Echo(AbstractPolicy):
+    """An adaptive policy that reads every bit it is shown: it records a checksum of
+    each public view and, four times, observes star 0 or 1 by the checksum's parity.
+    """
+
+    seen: list = eqx.field(default_factory=list)
+
+    def decide(self, public):
+        leaves = jax.tree.leaves(public)
+        self.seen.append(zlib.crc32(b"".join(np.asarray(x).tobytes() for x in leaves)))
+        if int(public.n_taken) >= 4:
+            return None
+        return Action(self.seen[-1] % 2, 0, 1.0)
+
+
+def test_a_policy_cannot_read_the_truth(toy):
+    """Non-interference: two worlds whose rows are forced identical give a bit-identical
+    log under an adaptive policy.
+
+    The worlds differ in every abundance (E and L against two planets 0.3 dex below
+    their floors); every row is read by a model whose payload does not depend on the
+    truth, so the only way the logs could differ is a policy reading the truth. The
+    same runs with a gas model that reads the truth give different logs, so the
+    comparison can see a difference.
+
+    Fails if `execute` shows a policy anything drawn from the sealed world beyond the
+    released rows: any such bit changes a view's checksum.
+    """
+    other = toy.atoms([[0.0]], [[0.0]], [1.0], [[-0.3, -0.3]], 0.0)
+    worlds = (_el_world(toy), SealedWorld(toy.stack(other, other)))
+    blind = _design((Blind(),))
+    echoes = (Echo(), Echo())
+    pairs = zip(echoes, worlds, strict=True)
+    logs = [execute(KEY, echo, world, blind, _no_grant()) for echo, world in pairs]
+    assert len(echoes[0].seen) == 5
+    assert echoes[0].seen == echoes[1].seen
+    jax.tree.map(np.testing.assert_array_equal, logs[0], logs[1])
+
+    seeing = _design((GaussianGasModel(snr_one_day=[5.0, 5.0]),))
+    logs = [execute(KEY, Echo(), w, seeing, _no_grant()) for w in worlds]
+    assert not np.array_equal(
+        logs[0].rows.payload[0]["reading"], logs[1].rows.payload[0]["reading"]
+    )
+
+
+def test_a_second_world_and_star_do_not_retrace_step(toy):
+    """`step` compiles once for a run: a second world, a second star, a later row and
+    a refused row reuse the first program.
+
+    Fails if a row, log or action field is weakly typed or read as a Python value, so
+    that the host loop's next step traces again.
+    """
+    traces = []
+
+    @eqx.filter_jit
+    def counted(key, log, world, models, action, mode, resources):
+        traces.append(None)
+        return step(key, log, world, models, action, mode, resources)
+
+    models = _step_models()
+    design = _design(models, budget_d=2.5)
+    worlds = (_el_world(toy), SealedWorld(toy.stack(*[toy.atoms(
+        [[0.0]], [[1.0]], [1.0], [[-1.0, 1.0]], 0.0)] * 2)))  # fmt: skip
+    for world in worlds:
+        log = _empty_log(world, design)
+        for star in (0, 1, 0):
+            action = Action(star, 1, 1.0)
+            log = counted(
+                KEY, log, world, models, action, design.modes[1], design.resources
+            )
+        assert_allclose(log.rows.refusal[:3], [0, 0, OVER_BUDGET])
+    assert len(traces) == 1
+
+
+def test_two_planets_at_a_star_run_through_execute_and_score(toy):
+    """A star with two planets runs through `execute` and `score`.
+
+    Planet 0 is E and planet 1 its look-alike, at one star; every draw holds both, the
+    second a copy of the first. The stage table of star 0 (orbit, water, oxygen) gives
+    each planet three stages: planet 0 is claim-true and gains, planet 1 is a
+    look-alike and loses, with no chain split, and is void; both read the same q,
+    since every draw's two planets agree.
+
+    Fails if `unseal`, the pool of the truth or `score` assumes one planet per star, or
+    a planet slot is scored against another's truth.
+    """
+    cloud = _step_rule_cloud(toy)
+    cloud = eqx.tree_at(
+        lambda a: (a.cloud.samples, a.x_mean, a.x_var, a.exists),
+        cloud,
+        (
+            {k: jnp.repeat(v, 2, axis=1) for k, v in cloud.cloud.samples.items()},
+            jnp.repeat(cloud.x_mean, 2, axis=1),
+            jnp.repeat(cloud.x_var, 2, axis=1),
+            jnp.repeat(cloud.exists, 2, axis=1),
+        ),
+    )
+    models = _step_models()
+    design = _design(models)
+    study = _study(toy, cloud, design, 1, _e_track_claim(toy))
+    truth = toy.atoms([[1.0, 1.0]], [[1.0, 0.0]], [1.0], [[1.0, 1.0]], 0.0)
+    world = SealedWorld(toy.stack(truth))
+    table = TablePolicy(Action([0, 0, 0], [0, 1, 2], [1.0] * 3))
+    report = score(execute(KEY, table, world, design, _no_grant()), world, study)
+
+    info = {name: np.asarray(column) for name, column in report.information.items()}
+    assert list(info["planet"]) == [0, 0, 0, 1, 1, 1]
+    assert list(info["truth"]) == [True] * 3 + [False] * 3
+    assert info["information"][:3].sum() > 0 > info["information"][3:].sum()
+    assert np.isnan(info["chain_gain"][3:]).all()
+    assert_allclose(info["q_after"][:3], info["q_after"][3:], rtol=1e-12)
+    assert list(np.asarray(report.certificates["void"])) == [False, True]

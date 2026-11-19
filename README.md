@@ -6,7 +6,8 @@ the change of a log score on the count of claim-true planets.
 
 This is a from-scratch rewrite and is built layer by layer. The current layers are the types, the
 claim, the belief and the information, then the roles that reweight one cloud and the certificates
-read off their weights.
+read off their weights, the value of an observation, and the survey loop: a policy runs against a
+sealed world, and the log it leaves is scored against the unsealed truth.
 
 A gas abundance with mean 0 and variance 1 above a floor of 0 holds with probability one half:
 
