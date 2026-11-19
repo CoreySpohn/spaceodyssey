@@ -1,6 +1,6 @@
-"""Every public function of `belief` and `information`, the replay, the pool functions
-and `frontier` of `value`, under `jax.jit`, `jax.vmap` over a leading world axis, and
-`jax.grad` where it is differentiable (forward mode only for `absorb`).
+"""Every public function of `belief` and `information`, the replay, the pool functions,
+`frontier` of `value` and the survey `step`, under `jax.jit`, `jax.vmap` over a leading
+world axis, and `jax.grad` where it is differentiable (forward mode only for `absorb`).
 """
 
 import equinox as eqx
@@ -27,6 +27,7 @@ from spaceodyssey.belief import (
     weights,
 )
 from spaceodyssey.claim import Claim, GasAbove
+from spaceodyssey.design import Mode, Resources
 from spaceodyssey.information import (
     certify,
     chain_gain,
@@ -40,10 +41,12 @@ from spaceodyssey.information import (
     refit_trigger,
     update_by_cell,
 )
+from spaceodyssey.log import step
 from spaceodyssey.roles import AbstractRolePrior, Roles
 from spaceodyssey.toy import GaussianGasModel
 from spaceodyssey.types import Action, ObservationLog, Refit, Row
 from spaceodyssey.value import Count, Menu, completeness, frontier, thin
+from spaceodyssey.world import SealedWorld
 
 N_ROLES, N_DRAWS, N_PLANETS = 3, 6, 2
 CAPACITY = 4  # W of the replayed logs
@@ -169,6 +172,16 @@ def _cases(toy):
     def value(b, utility, menu):
         return frontier(b, plain, star, utility, search, menu, jnp.asarray(0.0), 1)
 
+    # `step` on two sealed worlds of one star each, taking the free slot of a log.
+    truths = [
+        SealedWorld(toy.stack(toy.atoms([[0.4, 0.8]], [[1.0, 0.0]], [1.0], m, 0.0, 1)))
+        for m in (-0.5, 0.9)
+    ]
+    keys = (jax.random.key(3), jax.random.key(4))
+
+    def take(key, lg, world, action):
+        return step(key, lg, world, gas, action, Mode(0, 0.5), Resources(10.0))
+
     return {
         "weights": (weights, [(b0,), (b1,)], lambda a: a[0].log_prior, uneven),
         "log_weights": (log_weights, [(b0,), (b1,)], lambda a: a[0].log_like, uneven),
@@ -195,6 +208,15 @@ def _cases(toy):
             [(full[0], roles), (full[1], roles1)],
             lambda a: a[0].stats[0]["weighted_sum"],
             belief_scalar,
+        ),
+        "step": (
+            take,
+            [
+                (keys[0], logs[0], truths[0], actions[0]),
+                (keys[1], logs[1], truths[1], actions[1]),
+            ],
+            None,
+            None,
         ),
         "frontier": (
             value,
@@ -345,6 +367,7 @@ CASES = [
     "replay",
     "absorb",
     "replay_belief",
+    "step",
     "frontier",
 ]
 
