@@ -111,7 +111,7 @@ def step(
 ) -> ObservationLog:
     """Take one action: draw its row from the world and write it at ``count``.
 
-    The row is ready on the calendar at the later of the action's ``not_before_d`` and
+    The row is ready on the calendar at the later of the action's ``time_d`` and
     the time the instrument is next free (``clock_d``), so waiting costs no budget; an
     observation asked for while its star is in keepout waits for the star to open
     (``next_open``). An action of zero exposure is a wait (``WAITED``): the instrument
@@ -123,7 +123,7 @@ def step(
     less ``spent_d``, by the one rule ``fits``) is accepted: it is charged its
     exposure, its payload is drawn by the world under the model of its mode with
     ``row_key(key, star, count)`` from the action at its realized start (its
-    ``not_before_d`` set to the start), and it is released ``mode.latency_d`` after
+    ``time_d`` set to the start), and it is released ``mode.latency_d`` after
     its exposure ends. One that does not fit is refused (``OVER_BUDGET``): charged
     nothing, its payload zeros. A refused row still starts on the calendar, so a
     refused row that asked to wait moves the clock to its requested start: the
@@ -152,7 +152,7 @@ def step(
     index = eqx.error_if(
         log.count, log.count >= log.rows.star.shape[0], "the log is full"
     )
-    ready_d = jnp.maximum(action.not_before_d, clock_d(log))
+    ready_d = jnp.maximum(action.time_d, clock_d(log))
     waited = action.exposure_d <= 0.0
     opens_d = jnp.where(waited, ready_d, next_open(keepout, action.star, ready_d))
     late = ~(opens_d <= resources.end_d)  # never opening is late too

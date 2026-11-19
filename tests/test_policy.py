@@ -76,8 +76,8 @@ from spaceodyssey.value import (
     LogScore,
     Menu,
     completeness,
+    expected_found,
     frontier_at_prices,
-    pool_found,
     reached_stage,
     replay_pool,
 )
@@ -195,17 +195,17 @@ def _rates(pool, refit, log, models, time_d):
 
 
 @eqx.filter_jit
-def _pool_found(stars, log, models, time_d):
+def _expected_found(stars, log, models, time_d):
     def one(pool, refit, star):
-        return pool_found(pool, refit, log, models, CLAIM, star, time_d)[0]
+        return expected_found(pool, refit, log, models, CLAIM, star, time_d)[0]
 
     return jnp.sum(jax.vmap(one)(stars.pool, stars.refits, stars.stars))
 
 
 def _found(stars, log, models, time_d):
     """Expected claim-true planets found by a run's searches over every star, under
-    the forecast (`pool_found`)."""
-    return float(_pool_found(stars, log, models, time_d))
+    the forecast (`expected_found`)."""
+    return float(_expected_found(stars, log, models, time_d))
 
 
 def _column(log, name):
@@ -683,8 +683,8 @@ def test_a_new_detection_is_refit_and_its_star_planned_on():
     # refused on the host.
     kept, status = refit_stars(
         REFITTER, _stack(refit0), due_rows(log, refit0, after)[None], _stack(STAR),
-        jax.random.key(1)[None], jnp.array([True]), log, design.models,
-        min_n_eff=5.0, max_khat=math.inf, retry_factor=8,
+        jax.random.key(1)[None], queued=jnp.array([True]), log=log,
+        models=design.models, min_n_eff=5.0, max_khat=math.inf, retry_factor=8,
     )  # fmt: skip
     assert list(np.asarray(status)) == [REFIT_REFUSED]
     assert_allclose(kept.atoms.cloud.log_weights[0], 0.0)
@@ -925,7 +925,7 @@ def test_a_star_in_keepout_worth_more_holds_the_budget_until_it_opens():
 
 def test_the_realized_count_is_read_against_the_truth():
     """`found_count` counts the claim-true planets of the truth a run's searches
-    detected, new to the time-zero refits; `pool_found` is the forecast's
+    detected, new to the time-zero refits; `expected_found` is the forecast's
     expectation.
 
     Three stars, each searched once by a search certain to find any planet; the truth
@@ -961,7 +961,7 @@ def test_the_realized_count_is_read_against_the_truth():
     end = jnp.asarray(10.0)
 
     def expected(pool, refit, star):
-        return pool_found(pool, refit, log, design.models, CLAIM, star, end)[0]
+        return expected_found(pool, refit, log, design.models, CLAIM, star, end)[0]
 
     forecast = jax.vmap(expected)(stars.pool, stars.refits, stars.stars)
     assert_allclose(forecast, [1.5, 0.5, 0.5], rtol=1e-12)
@@ -1014,7 +1014,7 @@ def test_adaptive_count_beats_static_only_on_a_bernoulli_pool(toy, law):
     planet, about 0.4 of 14.4 here (a Bayes-greedy search gains about 0.5 of 15 on the
     same stars), and exactly as many under a Poisson pool, whose remainder after a
     search does not depend on what it found. The finds are each run's expected
-    claim-true finds read off its log (`pool_found`), the static allocation's the
+    claim-true finds read off its log (`expected_found`), the static allocation's the
     value it buys at time zero. One world suffices: a world's expected finds vary
     by about 0.02 around their mean, and the gain (0.43) sits 0.2 above its lower
     bound, 1.5 per cent of the static finds; a Poisson run's read no payload at all.
@@ -1055,7 +1055,7 @@ def test_adaptive_count_beats_static_only_on_a_bernoulli_pool(toy, law):
     @eqx.filter_jit
     def expected(log):
         def one(pool, refit, star):
-            return pool_found(pool, refit, log, models, study.claim, star, end)[0]
+            return expected_found(pool, refit, log, models, study.claim, star, end)[0]
 
         return jnp.sum(jax.vmap(one)(study.pool, study.refits, study.stars))
 

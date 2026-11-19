@@ -429,15 +429,17 @@ def clock_d(log: ObservationLog) -> Float[Array, ""]:
 class Action(eqx.Module):
     """What a policy asks for: one observation of one star in one mode.
 
-    An action starts at the later of ``not_before_d`` and the time the instrument is
-    next free (``clock_d``), and later still while its star is in keepout, so a policy
-    waits by asking for a later start; waiting costs calendar time and no budget. A
-    granted action's ``not_before_d`` is ignored: the grant is released at time zero.
+    ``time_d`` is the action's start: asked for, the earliest start; realized, the
+    start itself, as a row's ``time_d`` is. An action starts at the later of
+    ``time_d`` and the time the instrument is next free (``clock_d``), and later still
+    while its star is in keepout, so a policy waits by asking for a later start;
+    waiting costs calendar time and no budget. A granted action's ``time_d`` is
+    ignored: the grant is released at time zero.
 
-    A model reads an action's start as its ``not_before_d``: ``step`` hands the world
-    the action with ``not_before_d`` set to the realized start, a replay of a real row
-    rebuilds it from the row's ``time_d``, and a planner's lookahead gives its actions
-    the planned start. A model whose rows depend on the start (a search whose
+    A model reads an action's start as its ``time_d``: ``step`` hands the world the
+    action with ``time_d`` set to the realized start, a replay of a real row rebuilds
+    it from the row's ``time_d``, and a planner's lookahead gives its actions the
+    planned start. A model whose rows depend on the start (a search whose
     detection probability follows the orbital phase or the zodi) records it in its
     payload.
 
@@ -445,24 +447,22 @@ class Action(eqx.Module):
         star: star index.
         mode: index of the observing mode in the design's mode table.
         exposure_d: requested exposure in days.
-        not_before_d: earliest calendar start, days from the start of the survey;
-            zero (as soon as the instrument is free) by default, and broadcast to the
-            shape of ``exposure_d``. Once realized, the start itself.
+        time_d: the start, days from the start of the survey: asked for, the
+            earliest start, zero (as soon as the instrument is free) by default;
+            realized, the start itself. Broadcast to the shape of ``exposure_d``.
     """
 
     star: Int[Array, ""] = eqx.field(converter=as_index)
     mode: Int[Array, ""] = eqx.field(converter=as_index)
     exposure_d: Float[Array, ""] = eqx.field(converter=as_float)
-    not_before_d: Float[Array, ""] = eqx.field(converter=as_float)
+    time_d: Float[Array, ""] = eqx.field(converter=as_float)
 
-    def __init__(self, star, mode, exposure_d, not_before_d=0.0):
-        """An action; ``not_before_d`` is broadcast to the shape of ``exposure_d``."""
+    def __init__(self, star, mode, exposure_d, time_d=0.0):
+        """An action; ``time_d`` is broadcast to the shape of ``exposure_d``."""
         self.star = star
         self.mode = mode
         self.exposure_d = as_float(exposure_d)
-        self.not_before_d = jnp.broadcast_to(
-            as_float(not_before_d), self.exposure_d.shape
-        )
+        self.time_d = jnp.broadcast_to(as_float(time_d), self.exposure_d.shape)
 
 
 class Grant(eqx.Module):

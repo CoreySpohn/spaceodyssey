@@ -120,7 +120,7 @@ class SealedWorld(eqx.Module):
 
         The host passes the model and the row's key, from ``row_key``, and writes the
         row: its times, charge and model slot are the host's bookkeeping, not the
-        world's. The action carries its realized start as ``not_before_d`` (``step``
+        world's. The action carries its realized start as ``time_d`` (``step``
         sets it), so a model whose rows depend on the time reads the start the row
         really had. A stack of worlds is observed under ``eqx.filter_vmap``.
 
@@ -167,9 +167,9 @@ class SealedWorld(eqx.Module):
         """
         # A granted row starts at time zero, whatever its action asked for.
         actions = eqx.tree_at(
-            lambda a: a.not_before_d,
+            lambda a: a.time_d,
             grant.actions,
-            jnp.zeros_like(grant.actions.not_before_d),
+            jnp.zeros_like(grant.actions.time_d),
         )
         slots = model_slots(modes, actions.mode)
         if any(not 0 <= s < len(models) for s in slots):

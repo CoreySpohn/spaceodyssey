@@ -429,7 +429,7 @@ class DetectionModel(AbstractObservationModel):
         lead = d.shape[:1]
         return {
             "exposure_d": jnp.broadcast_to(action.exposure_d, lead),
-            "time_d": jnp.broadcast_to(action.not_before_d, lead),
+            "time_d": jnp.broadcast_to(action.time_d, lead),
             "p_hz_one_day": jnp.broadcast_to(p_hz, lead),
             "p_other_one_day": jnp.broadcast_to(p_other, lead),
             "detected": detected.astype(d.dtype),

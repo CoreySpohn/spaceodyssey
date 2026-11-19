@@ -220,7 +220,7 @@ class Count(AbstractUtility):
     second look at a star counts only what the first look missed: ``thin`` has already
     taken the found planets out of the pool. A utility matters only up to a constant,
     so ``U`` is the number found since any reference time less the rate then; the
-    number a run found is ``pool_found``. The verdict is not read.
+    number a run found is ``expected_found``. The verdict is not read.
 
     Whether planning on ``Count`` can beat a static allocation depends on the pool's
     law (``Pool.law``). A Poisson pool thinned by a search is Poisson with the thinned
@@ -533,7 +533,7 @@ def replay_pool(
     return jax.lax.cond(jnp.any(found), lambda: _emptied(thinned), lambda: thinned)
 
 
-def pool_found(
+def expected_found(
     pool: Pool,
     refit: Refit,
     log: ObservationLog,
