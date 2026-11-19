@@ -15,6 +15,11 @@ budget less the spend at any interior price, and that slope never decreases.
 shapes, vmappable over worlds, and ``O(log)`` spend evaluations. ``dispatch`` turns a
 price into the options bought. Reference: Boyd and Vandenberghe, Convex Optimization,
 ch. 5.
+
+An option whose reward or cost is not finite (NaN: a role the reweighting gate refused,
+upstream) is refused, never priced: ``solve_price`` and ``dispatch`` drop it and return
+the stars that offered one, so the caller can refit them, and the other stars are priced
+as if it were absent. One refused star never stops the batch.
 """
 
 import jax
@@ -44,6 +49,20 @@ def dual(
     return lam * capacity_d + jnp.sum(values)
 
 
+def _finite(f: Frontier) -> tuple[Frontier, Bool[Array, " S"]]:
+    """The frontier with every non-finite option refused, and the stars that had one.
+
+    An offered option whose reward or cost is not finite is masked out and its entries
+    set to zero, so it is neither a breakpoint nor a choice.
+    """
+    usable = f.mask & jnp.isfinite(f.reward) & jnp.isfinite(f.cost_d)
+    refused = jnp.any(f.mask & ~usable, axis=-1)
+    clean = Frontier(
+        jnp.where(usable, f.reward, 0.0), jnp.where(usable, f.cost_d, 0.0), usable
+    )
+    return clean, refused
+
+
 def _with_null(f: Frontier):
     """Reward, cost and mask with the null option prepended as column zero."""
     reward = jnp.pad(f.reward, ((0, 0), (1, 0)))
@@ -70,8 +89,12 @@ def _candidates(f: Frontier) -> Float[Array, " P"]:
 
 def solve_price(
     f: Frontier, capacity_d: Float[Array, ""]
-) -> tuple[Float[Array, ""], Float[Array, ""]]:
+) -> tuple[Float[Array, ""], Float[Array, ""], Bool[Array, " S"]]:
     """Minimize the dual over ``lam >= 0``.
+
+    Only finite options are priced: an option whose reward or cost is not finite is
+    refused (the stars that offered one are returned), and the price and the bound are
+    those of the frontier without it.
 
     The sorted breakpoints ``p_0 = 0 <= p_1 <= ...`` split the prices into intervals
     on which ``D`` is linear with slope ``capacity_d - spend``, the spend read at a
@@ -88,10 +111,12 @@ def solve_price(
         capacity_d: the time budget in days.
 
     Returns:
-        The minimizing price and the dual at it. The latter is the relaxation bound: no
-        schedule within the budget earns more. When the budget cannot all be used
-        profitably the price is zero.
+        The minimizing price; the dual at it, the relaxation bound: no schedule of the
+        finite options within the budget earns more; and the refused stars, true for a
+        star with an offered option that is not finite, shape ``(S,)``. When the budget
+        cannot all be used profitably the price is zero.
     """
+    f, refused = _finite(f)
     prices = jnp.sort(_candidates(f))
     after = jnp.concatenate([prices[1:], 2.0 * prices[-1:] + 1.0])
     probe = 0.5 * (prices + after)
@@ -108,13 +133,16 @@ def solve_price(
     n_price = prices.shape[0]
     first, _ = jax.lax.fori_loop(0, n_price.bit_length(), halve, (0, n_price - 1))
     lam = prices[first]
-    return lam, dual(lam, f, capacity_d)
+    return lam, dual(lam, f, capacity_d), refused
 
 
 def dispatch(
     lam: Float[Array, ""], f: Frontier, capacity_d: Float[Array, ""]
-) -> Bool[Array, "S M"]:
+) -> tuple[Bool[Array, "S M"], Bool[Array, " S"]]:
     """The options bought at price ``lam`` with budget ``capacity_d``.
+
+    An option whose reward or cost is not finite is refused, never bought; the stars
+    that offered one are returned beside the purchase, as by ``solve_price``.
 
     Each star takes an option of best net reward ``r - lam c``, the null option
     included. A star whose best is unique takes it. Where several options tie, the star
@@ -134,8 +162,10 @@ def dispatch(
         capacity_d: the time budget in days.
 
     Returns:
-        True for each bought option, at most one per star, shape ``(S, M)``.
+        True for each bought option, at most one per star, shape ``(S, M)``, and the
+        refused stars, shape ``(S,)``.
     """
+    f, refused = _finite(f)
     reward, cost, mask = _with_null(f)
     dtype = jnp.result_type(reward.dtype, cost.dtype, float)
     reward, cost = reward.astype(dtype), cost.astype(dtype)
@@ -160,4 +190,4 @@ def dispatch(
     left = capacity_d - jnp.sum(base_cost)
     _, choice = jax.lax.scan(upgrade, left, (tied, cost, base, base_cost))
     bought = choice[:, None] == jnp.arange(cost.shape[-1])
-    return bought[:, 1:]
+    return bought[:, 1:], refused

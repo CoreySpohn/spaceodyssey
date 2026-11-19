@@ -701,15 +701,15 @@ def test_follow_up_time_raises_the_price_and_keeps_the_budget(toy):
     assert_allclose(f.cost_d[:, 0], np.where(revisits, 2.0, 1.0), rtol=1e-12)
     assert_allclose(f.reward[:, 0], np.where(revisits, 0.96, 0.8) * rates, rtol=1e-12)
 
-    lam, _ = solve_price(f, budget)
-    bought = np.asarray(dispatch(lam, f, budget))[:, 0]
+    lam, _, _ = solve_price(f, budget)
+    bought = np.asarray(dispatch(lam, f, budget)[0])[:, 0]
     assert_allclose(lam, lam0, rtol=1e-12)
     assert list(np.flatnonzero(bought)) == [0, 1, 2, 3]
     assert_allclose(np.sum(np.asarray(f.cost_d)[bought, 0]), 6.0, rtol=1e-12)
 
     first_looks = Frontier(f.reward - lam0 * (f.cost_d - 1.0), np.ones((8, 1)), f.mask)
-    lam_first, _ = solve_price(first_looks, budget)
-    bought_first = np.asarray(dispatch(lam_first, first_looks, budget))[:, 0]
+    lam_first, _, _ = solve_price(first_looks, budget)
+    bought_first = np.asarray(dispatch(lam_first, first_looks, budget)[0])[:, 0]
     assert_allclose(lam_first, 0.56, rtol=1e-12)
     assert lam > lam_first
     assert_allclose(np.sum(np.asarray(f.cost_d)[bought_first, 0]), 8.0, rtol=1e-12)

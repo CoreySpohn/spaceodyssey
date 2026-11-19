@@ -16,8 +16,10 @@ from spaceodyssey.value import Frontier, value_and_spend
 
 
 def _plan(f, capacity_d):
-    lam, bound = solve_price(f, capacity_d)
-    return lam, bound, dispatch(lam, f, capacity_d)
+    lam, bound, refused = solve_price(f, capacity_d)
+    bought, refused_too = dispatch(lam, f, capacity_d)
+    assert refused.shape == refused_too.shape
+    return lam, bound, bought
 
 
 plan = eqx.filter_jit(_plan)
@@ -159,6 +161,36 @@ def test_the_dual_bounds_every_schedule(reward, cost, capacity_d):
     assert np.all(bought.sum(axis=1) <= 1)
     assert cost_d[bought].sum() <= capacity_d * (1 + 1e-12)
     assert reward[bought].sum() <= bound + 1e-12
+
+
+def test_a_star_with_a_nan_option_is_refused_and_the_rest_priced_without_it():
+    """Three stars, the middle one's options NaN (a refused role upstream): it is
+    returned as refused, buys nothing, and the other two are priced, bounded and
+    dispatched exactly as the two-star frontier without it. A star with one NaN option
+    keeps its finite one.
+
+    Fails if a NaN option reaches the breakpoints or the spend (the price and the bound
+    turn NaN and nothing is bought at any star), or if a refused star is not reported.
+    """
+    reward = [[1.0, 1.5], [np.nan, np.nan], [0.8, 0.2]]
+    cost_d = [[1.0, 2.0], [1.0, 0.5], [1.0, 0.1]]
+    capacity_d = jnp.asarray(2.0)
+    lam, bound, refused = solve_price(_frontier(reward, cost_d), capacity_d)
+    bought, refused_too = dispatch(lam, _frontier(reward, cost_d), capacity_d)
+    keep = [0, 2]
+    two = _frontier(np.asarray(reward)[keep], np.asarray(cost_d)[keep])
+    lam2, bound2, bought2 = plan(two, capacity_d)
+    assert np.isfinite(lam) and np.isfinite(bound)
+    assert_allclose([lam, bound], [lam2, bound2], rtol=1e-12)
+    assert np.array_equal(np.asarray(bought)[keep], bought2)
+    assert not np.any(np.asarray(bought)[1])
+    assert list(np.asarray(refused)) == list(np.asarray(refused_too)) == [0, 1, 0]
+
+    partial = [[1.0, 1.5], [np.nan, 0.9], [0.8, 0.2]]
+    lam, _, refused = solve_price(_frontier(partial, cost_d), capacity_d)
+    bought, _ = dispatch(lam, _frontier(partial, cost_d), capacity_d)
+    assert list(np.asarray(refused)) == [0, 1, 0]
+    assert np.isfinite(lam) and not np.asarray(bought)[1, 0]
 
 
 def test_a_discrete_exposure_menu_reaches_the_ayo_limit():
