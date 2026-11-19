@@ -10,7 +10,7 @@ from numpy.testing import assert_allclose, assert_array_max_ulp
 from spaceodyssey.belief import count_pmf, q
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.toy import GAS_FLOOR, GaussianGasModel, StepReportModel
-from spaceodyssey.types import Action, Grant
+from spaceodyssey.types import Action, Grant, ObservationLog, grant_rows
 from spaceodyssey.world import SealedWorld, draw_worlds, row_key
 
 KEY = jax.random.key(0)
@@ -41,7 +41,7 @@ def _differ(a, b):
 
 def _observe(world, model, star, index):
     action = Action(kind=0, star=star, mode=0, exposure_d=1.0)
-    return world.observe(model, action, row_key(KEY, star, index)).payload[0]
+    return world.observe(model, action, row_key(KEY, star, index))
 
 
 def test_row_noise_depends_only_on_star_index_and_key(toy):
@@ -127,9 +127,10 @@ def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
     """Granted rows are drawn as `observe` draws them, released at time zero, free.
 
     Granted row i equals `observe` under the model in its slot with key row_key(key,
-    star, i), to ULPs; it is released at 0 and charged 0, keeps its action's star, mode
-    and exposure, carries its model slot, and its other model slot is zero. The step row
-    (S/N 3 x 2 = 6) reports the true bits of star 1, (0, 1).
+    star, i), to ULPs; its log row is released at 0 and charged 0, keeps its action's
+    star, mode and exposure, carries its model slot, and its other model slot is zero.
+    The step row (S/N 3 x 2 = 6) reports the true bits of star 1, (0, 1). The rows fill
+    the head of a log of capacity 5 with count 3.
 
     Fails if a granted row is released late or charged, its noise is keyed by anything
     but (star, row index, key), its payload lands in the wrong model slot, or the grant
@@ -137,10 +138,11 @@ def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
     """
     world = SealedWorld(_point_truth(toy, [[0.5, 1.0], [-0.5, 1.0]]))
     grant = _grant()
-    revealed = world.reveal(grant, MODELS, KEY)
+    payload = world.reveal(grant, MODELS, KEY)
+    revealed = grant_rows(grant, payload)
     assert_allclose(revealed.release_d, 0.0)
     assert_allclose(revealed.charged_d, 0.0)
-    assert_allclose(revealed.start_d, 0.0)
+    assert_allclose(revealed.time_d, 0.0)
     assert_allclose(revealed.exposure_d, [4.0, 1.0, 2.0])
     assert_allclose(revealed.star, [1, 0, 1])
     assert_allclose(revealed.mode, [2, 0, 0])
@@ -148,12 +150,20 @@ def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
     for i, slot in enumerate(grant.model):
         action = jax.tree.map(lambda leaf, i=i: leaf[i], grant.actions)
         key = row_key(KEY, action.star, i)
-        expected = world.observe(MODELS[slot], action, key).payload[0]
+        expected = world.observe(MODELS[slot], action, key)
         _assert_ulp(jax.tree.map(lambda x, i=i: x[i], revealed.payload[slot]), expected)
         for other in jax.tree.leaves(revealed.payload[1 - slot]):
             assert_allclose(other[i], 0.0)
     assert_allclose(revealed.payload[1]["snr"][0, 0], [6.0, 6.0])
     assert_allclose(revealed.payload[1]["bit"][0, 0], [0.0, 1.0])
+
+    pad = jax.tree.map(lambda x: jnp.zeros((2, *x.shape[1:]), x.dtype), revealed)
+    log = ObservationLog(
+        jax.tree.map(lambda x, z: jnp.concatenate([x, z]), revealed, pad), count=3
+    )
+    assert log.rows.star.shape == (5,) and int(log.count) == 3
+    with pytest.raises(ValueError, match="capacity"):
+        ObservationLog(eqx.tree_at(lambda r: r.star, log.rows, jnp.zeros(4, int)), 3)
 
 
 def test_reveal_differs_between_worlds(toy):
@@ -168,12 +178,12 @@ def test_reveal_differs_between_worlds(toy):
     grant = _grant()
     a = SealedWorld(_point_truth(toy, [[0.5, 1.0], [-0.5, 1.0]]))
     b = SealedWorld(_point_truth(toy, [[0.5, 1.0], [0.5, -1.0]]))
-    rows_a, rows_b = a.reveal(grant, MODELS, KEY), b.reveal(grant, MODELS, KEY)
+    payload_a, payload_b = a.reveal(grant, MODELS, KEY), b.reveal(grant, MODELS, KEY)
     for slot in (0, 1):
-        assert _differ(rows_a.payload[slot], rows_b.payload[slot])
+        assert _differ(payload_a[slot], payload_b[slot])
     no_int = jnp.zeros(0, int)
     empty = Grant(Action(no_int, no_int, no_int, jnp.zeros(0)), model=())
-    none = a.reveal(empty, MODELS, KEY)
+    none = grant_rows(empty, a.reveal(empty, MODELS, KEY))
     assert none.star.shape == (0,)
     assert {k: v.shape for k, v in none.payload[0].items()} == {
         "snr": (0, 1, 2),

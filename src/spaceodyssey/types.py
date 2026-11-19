@@ -135,10 +135,13 @@ class Pool(eqx.Module):
 class Row(eqx.Module):
     """One released observation result.
 
+    The log is a ``Row`` stacked along a leading axis (``ObservationLog``), so its
+    columns are these fields.
+
     Attributes:
         star: star index.
         mode: observing mode index.
-        start_d: start time in days.
+        time_d: start time, days from the start of the survey.
         exposure_d: exposure length in days.
         charged_d: time charged against the budget in days.
         release_d: time at which the row is released, in days.
@@ -150,7 +153,7 @@ class Row(eqx.Module):
 
     star: Int[Array, ""] = eqx.field(converter=jnp.asarray)
     mode: Int[Array, ""] = eqx.field(converter=jnp.asarray)
-    start_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
+    time_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
     exposure_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
     charged_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
     release_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
@@ -159,6 +162,30 @@ class Row(eqx.Module):
     payload: tuple[PyTree, ...] = eqx.field(
         converter=lambda p: tuple(_asarrays(x) for x in p)
     )
+
+
+class ObservationLog(eqx.Module):
+    """The rows of one run, at a fixed capacity ``W``.
+
+    Row ``i`` is real when ``i < count``; the rows past ``count`` are padding, zeros.
+    Grant rows come first (rows ``0`` to ``G - 1``), then the observed rows.
+
+    Attributes:
+        rows: a ``Row`` whose leaves have leading axis ``W``.
+        count: the number of real rows.
+
+    Raises:
+        ValueError: if the leaves of ``rows`` disagree on ``W``.
+    """
+
+    rows: Row
+    count: Int[Array, ""] = eqx.field(converter=jnp.asarray)
+
+    def __check_init__(self):
+        """Check the static shapes: one capacity ``W`` across the columns."""
+        capacity = {jnp.shape(x)[0] for x in jax.tree.leaves(self.rows)}
+        if len(capacity) != 1:
+            raise ValueError(f"log columns disagree on the capacity W: {capacity}")
 
 
 class Action(eqx.Module):
@@ -199,6 +226,35 @@ class Grant(eqx.Module):
         """Check that every granted row has one model slot."""
         if jnp.shape(self.actions.star) != (len(self.model),):
             raise ValueError("a grant has one model slot per granted action")
+
+
+def grant_rows(grant: Grant, payload: tuple[PyTree, ...]) -> Row:
+    """The log rows of a grant: released at time zero and charged nothing.
+
+    Each row keeps its action's star, mode and exposure and carries its model slot.
+
+    Args:
+        grant: the grant.
+        payload: one payload buffer per model, leading axis over the granted rows, as
+            ``SealedWorld.reveal`` returns them.
+
+    Returns:
+        The granted rows, stacked along a leading axis.
+    """
+    actions = grant.actions
+    zero_d = jnp.zeros_like(actions.exposure_d)
+    zero_i = jnp.zeros_like(actions.star)
+    return Row(
+        star=actions.star,
+        mode=actions.mode,
+        time_d=zero_d,
+        exposure_d=actions.exposure_d,
+        charged_d=zero_d,
+        release_d=zero_d,
+        refusal=zero_i,
+        model=jnp.asarray(grant.model, dtype=zero_i.dtype).reshape(zero_i.shape),
+        payload=payload,
+    )
 
 
 class AbstractObservationModel(eqx.Module):

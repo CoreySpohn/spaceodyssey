@@ -10,10 +10,10 @@ from collections.abc import Callable
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import ArrayLike, Int, PRNGKeyArray
+from jaxtyping import ArrayLike, Int, PRNGKeyArray, PyTree
 
 from spaceodyssey.belief import Belief
-from spaceodyssey.types import AbstractObservationModel, Action, Atoms, Grant, Pool, Row
+from spaceodyssey.types import AbstractObservationModel, Action, Atoms, Grant, Pool
 
 
 def row_key(
@@ -71,15 +71,12 @@ class SealedWorld(eqx.Module):
 
     def observe(
         self, model: AbstractObservationModel, action: Action, key: PRNGKeyArray
-    ) -> Row:
-        """The row an action returns: the model's payload drawn from the true star.
+    ) -> PyTree:
+        """The payload an action returns, drawn from the true star with its model.
 
-        The host passes the model and the row's key, from ``row_key``. The row is
-        written in its own model's frame: ``model`` is 0 and ``payload`` has one entry.
-        Its times are placeholders: ``start_d`` and ``release_d`` are 0 and
-        ``charged_d`` is the exposure. The host's ``step`` sets the times and the model
-        slot (moving the payload into that slot) when it writes the row to the log. A
-        stack of worlds is observed under ``eqx.filter_vmap``.
+        The host passes the model and the row's key, from ``row_key``, and writes the
+        row: its times, charge and model slot are the host's bookkeeping, not the
+        world's. A stack of worlds is observed under ``eqx.filter_vmap``.
 
         Args:
             model: the model of the action's mode.
@@ -87,38 +84,24 @@ class SealedWorld(eqx.Module):
             key: the row's key.
 
         Returns:
-            The row.
+            The payload, a dict of named arrays.
         """
         truth = jax.tree.map(lambda leaf: leaf[action.star], self._truth)
-        payload = jax.tree.map(lambda x: x[0], model.sample(truth, action, key))
-        zero_d = jnp.zeros_like(action.exposure_d)
-        zero_i = jnp.zeros_like(action.star)
-        return Row(
-            star=action.star,
-            mode=action.mode,
-            start_d=zero_d,
-            exposure_d=action.exposure_d,
-            charged_d=action.exposure_d,
-            release_d=zero_d,
-            refusal=zero_i,
-            model=zero_i,
-            payload=(payload,),
-        )
+        return jax.tree.map(lambda x: x[0], model.sample(truth, action, key))
 
     def reveal(
         self,
         grant: Grant,
         models: tuple[AbstractObservationModel, ...],
         key: PRNGKeyArray,
-    ) -> Row:
-        """The rows of a grant, drawn from the truth, released at time zero.
+    ) -> tuple[PyTree, ...]:
+        """The payloads of a grant's rows, drawn from the truth.
 
         Granted row ``i`` is drawn exactly as ``observe`` draws it, with the model in
         its slot and the key ``row_key(key, star, i)``: granted row ``i`` is row ``i``
-        of the log, so the host numbers its observed rows after the grant. Each row is
-        released at time zero and charged nothing, keeps the exposure of its action,
-        and carries its model slot, with its payload in that slot and the other slots
-        zero. The rows of each model are drawn together under ``jax.vmap``.
+        of the log, so the host numbers its observed rows after the grant. The rows of
+        each model are drawn together under ``jax.vmap``. ``grant_rows`` builds the
+        log rows from the payloads.
 
         Args:
             grant: the grant.
@@ -126,7 +109,9 @@ class SealedWorld(eqx.Module):
             key: the run key.
 
         Returns:
-            The granted rows, stacked along a leading axis.
+            One payload buffer per model, each a dict of arrays with a leading axis
+            over the granted rows; row ``i`` holds its payload in its own model's
+            buffer and zeros in the others.
 
         Raises:
             ValueError: if a model slot of the grant is not in ``models``.
@@ -141,36 +126,23 @@ class SealedWorld(eqx.Module):
         # One unbatched action, to read each model's payload shape (also for no rows).
         probe = jax.tree.map(lambda x: jnp.zeros(x.shape[1:], x.dtype), actions)
 
-        def draw(model, action, k):
-            return self.observe(model, action, k).payload[0]
-
         payload = []
         for slot, model in enumerate(models):
-            shapes = jax.eval_shape(draw, model, probe, key)
+            shapes = jax.eval_shape(self.observe, model, probe, key)
             buffer = jax.tree.map(
                 lambda x: jnp.zeros((n_row, *x.shape), x.dtype), shapes
             )
             rows = jnp.asarray([i for i, s in enumerate(grant.model) if s == slot], int)
             if rows.size:
                 these = jax.tree.map(lambda leaf, rows=rows: leaf[rows], actions)
-                drawn = jax.vmap(draw, in_axes=(None, 0, 0))(model, these, keys[rows])
+                drawn = jax.vmap(self.observe, in_axes=(None, 0, 0))(
+                    model, these, keys[rows]
+                )
                 buffer = jax.tree.map(
                     lambda b, d, rows=rows: b.at[rows].set(d), buffer, drawn
                 )
             payload.append(buffer)
-        zero_d = jnp.zeros_like(actions.exposure_d)
-        zero_i = jnp.zeros_like(actions.star)
-        return Row(
-            star=actions.star,
-            mode=actions.mode,
-            start_d=zero_d,
-            exposure_d=actions.exposure_d,
-            charged_d=zero_d,
-            release_d=zero_d,
-            refusal=zero_i,
-            model=jnp.asarray(grant.model, dtype=zero_i.dtype).reshape(n_row),
-            payload=tuple(payload),
-        )
+        return tuple(payload)
 
     def unseal(self) -> Belief:
         """The truth as a belief with one role: one draw of weight one, an empty pool.
