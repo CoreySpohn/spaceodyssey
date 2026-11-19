@@ -12,6 +12,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from numpy.testing import assert_allclose
 
 from spaceodyssey.claim import Claim, GasAbove
@@ -19,7 +20,7 @@ from spaceodyssey.design import Design, Mode, Resources
 from spaceodyssey.information import POSITIVE, UNRESOLVED
 from spaceodyssey.log import execute, grant_rows, start_log, step
 from spaceodyssey.policy import AbstractPolicy, TablePolicy, public_view
-from spaceodyssey.score import format_report, score
+from spaceodyssey.score import associate_planets, format_report, score
 from spaceodyssey.study import Arm, Study
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
 from spaceodyssey.types import (
@@ -434,8 +435,9 @@ def test_two_planets_at_a_star_run_through_execute_and_score(toy):
     look-alike and loses, with no chain split, and is void; both read the same q,
     since every draw's two planets agree.
 
-    Fails if `unseal`, the pool of the truth or `score` assumes one planet per star, or
-    a planet slot is scored against another's truth.
+    Fails if `unseal`, the pool of the truth or `score` assumes one planet per star, a
+    planet slot is scored against another's truth, or the association of the truth's
+    planets with the draws' slots is not the identity or accepts a mismatch of slots.
     """
     cloud = _step_rule_cloud(toy)
     cloud = eqx.tree_at(
@@ -463,3 +465,8 @@ def test_two_planets_at_a_star_run_through_execute_and_score(toy):
     assert np.isnan(info["chain_gain"][3:]).all()
     assert_allclose(info["q_after"][:3], info["q_after"][3:], rtol=1e-12)
     assert list(np.asarray(report.certificates["void"])) == [False, True]
+
+    at_star = jax.tree.map(lambda leaf: leaf[0], world.unseal())
+    assert list(np.asarray(associate_planets(at_star, cloud))) == [0, 1]
+    with pytest.raises(ValueError, match="planet slots"):
+        associate_planets(at_star, _step_rule_cloud(toy))

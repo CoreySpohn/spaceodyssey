@@ -18,7 +18,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array
+from jaxtyping import Array, Int
 
 from spaceodyssey._standin.diagnostics import khat_threshold
 from spaceodyssey.belief import Belief, absorb, draw_claim_mass, replay, replay_belief
@@ -35,7 +35,7 @@ from spaceodyssey.information import (
     refit_trigger,
 )
 from spaceodyssey.study import Study
-from spaceodyssey.types import ACCEPTED, ObservationLog
+from spaceodyssey.types import ACCEPTED, Atoms, ObservationLog
 from spaceodyssey.world import SealedWorld
 
 
@@ -97,12 +97,16 @@ _replay_belief = eqx.filter_jit(replay_belief)
 
 
 @eqx.filter_jit
-def _reading(b, truth, claim, star, planet, outside, alpha, khat_max):
-    """What ``score`` reads off one stage's belief about one planet, every role."""
+def _reading(b, truth, claim, star, planet, truth_planet, outside, alpha, khat_max):
+    """What ``score`` reads off one stage's belief about one planet, every role.
+
+    ``planet`` is the planet's slot in the draws and ``truth_planet`` its slot in the
+    truth (``associate_planets``).
+    """
     whole = Claim(claim.conjuncts)
     q_whole = diagnose(b, whole, star, planet, outside)
     d = diagnose(b, claim, star, planet, outside)
-    true_mass = draw_claim_mass(truth, claim, star, planet)[:, 0]
+    true_mass = draw_claim_mass(truth, claim, star, truth_planet)[:, 0]
     return {
         "q": q_whole.q,
         "q_clipped": clip_q(q_whole.q, 0.5 / q_whole.n_eff),
@@ -152,6 +156,35 @@ def _stage_beliefs(study: Study, log: ObservationLog, s: int):
     return times, beliefs
 
 
+def associate_planets(truth: Atoms, draws: Atoms) -> Int[Array, " K"]:
+    """The slot in the draws that stands for each planet of the truth, at one star.
+
+    Planets are associated by truth label: planet ``k`` of the truth is planet ``k`` of
+    every draw, so the association is the identity. That is a declared simplification.
+    It holds when the draws are built on the truth's slots, as in a constructed study;
+    the draws of a real refit label their planets by the fit, and a study of them
+    replaces this function with a rule that matches each planet of the truth to a slot
+    of the draws (by orbit, say). ``score`` reads the association only from here.
+
+    Args:
+        truth: the truth at one star, one draw of ``K`` planet slots.
+        draws: the draws at the star.
+
+    Returns:
+        The draws' slot of each planet of the truth, shape ``(K,)``.
+
+    Raises:
+        ValueError: if the truth and the draws hold different numbers of planet
+            slots.
+    """
+    n_slot = draws.exists.shape[-1]
+    if truth.exists.shape[-1] != n_slot:
+        raise ValueError(
+            f"the truth holds {truth.exists.shape[-1]} planet slots, the draws {n_slot}"
+        )
+    return jnp.arange(n_slot)
+
+
 def _truth_belief(truth, pool, n_role: int) -> Belief:
     """The truth as a belief of every role, its pool shaped like the run's and empty.
 
@@ -173,9 +206,9 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
 
     Each star's rows are replayed through the study's roles, stage by stage (stage 0
     the grant, then one stage per release time of the star's accepted rows), and each
-    planet the truth holds is scored at every stage by every verdict member. The truth
-    is associated with the draws by planet slot: planet ``k`` of the truth is planet
-    ``k`` of every draw. The certificates and the refit trigger gate the Pareto shape
+    planet the truth holds is scored at every stage by every verdict member, each
+    planet read from the slot of the draws that ``associate_planets`` gives it. The
+    certificates and the refit trigger gate the Pareto shape
     at ``khat_threshold`` of the refit's draw count. All rows are read, those still in
     flight when the run ended included.
 
@@ -188,17 +221,11 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
         The report.
 
     Raises:
-        ValueError: if the truth and the refits hold different numbers of planet
-            slots.
+        ValueError: if the planets of the truth cannot be associated with the draws'
+            slots (``associate_planets``).
     """
     truth = world.unseal()
     claim = study.claim
-    n_slot = study.refits.atoms.exists.shape[-1]
-    if truth.exists.shape[-1] != n_slot:
-        raise ValueError(
-            f"the truth holds {truth.exists.shape[-1]} planet slots, "
-            f"the refits {n_slot}"
-        )
     n_star, n_role = study.prior_mass_outside.shape
     khat_max = khat_threshold(study.refits.atoms.cloud.log_weights.shape[-1])
     members = range(1, n_role)
@@ -207,12 +234,22 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
     for s in range(n_star):
         times, beliefs = _stage_beliefs(study, log, s)
         star, outside = _star(study.stars, s), study.prior_mass_outside[s]
-        truth_b = _truth_belief(_star(truth, s), _star(study.pool, s), n_role)
+        truth_s = _star(truth, s)
+        slots = associate_planets(truth_s, _star(study.refits, s).atoms)
+        truth_b = _truth_belief(truth_s, _star(study.pool, s), n_role)
         for k in np.flatnonzero(np.asarray(truth.exists[s, 0])):
-            planet = jnp.asarray(k)
+            planet, truth_planet = slots[k], jnp.asarray(k)
             stages = [
                 _reading(
-                    b, truth_b, claim, star, planet, outside, study.alpha, khat_max
+                    b,
+                    truth_b,
+                    claim,
+                    star,
+                    planet,
+                    truth_planet,
+                    outside,
+                    study.alpha,
+                    khat_max,
                 )
                 for b in beliefs
             ]
