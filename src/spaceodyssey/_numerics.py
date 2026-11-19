@@ -21,6 +21,11 @@ def guarded_log(x):
 
 
 def safe_ratio(num, den):
-    """``num / den``, zero where ``den`` is not positive, with a finite gradient."""
+    """``num / den``, zero where ``den`` is zero or negative, with a finite gradient.
+
+    A NaN ``den`` (an unknown, such as the mass of a refused role) gives NaN, never
+    zero.
+    """
     positive = den > 0
-    return jnp.where(positive, num / jnp.where(positive, den, 1.0), 0.0)
+    unknown = jnp.where(jnp.isnan(den), jnp.nan, 0.0)
+    return jnp.where(positive, num / jnp.where(positive, den, 1.0), unknown)

@@ -305,16 +305,18 @@ def diagnose(
     h, g = per_draw[-1], per_draw[claim.given]
     joint = jnp.matmul(jax.nn.softmax(log_w, axis=-1), per_draw.T, precision=EXACT)
     cond_mass = joint[:, claim.given]  # one, to rounding, for an unconditional claim
-    # No draw meeting the condition leaves no conditioning draw, n_cond = 0; the Kish
-    # size of all -inf would be NaN, so the double where keeps it out of a gradient.
+    # No draw meeting the condition leaves no conditioning draw, n_cond = 0 (NaN for a
+    # refused role, whose mass is NaN); the Kish size of all -inf would be NaN, so the
+    # double where keeps it out of a gradient.
     met = (cond_mass > 0)[:, None]
+    unknown = jnp.where(jnp.isnan(cond_mass), jnp.nan, 0.0)
     n_cond = kish_ess(jnp.where(met, log_w + guarded_log(g), log_w))
     return Diagnostics(
         q=safe_ratio(joint[:, -1], cond_mass),
         mc_se=jax.vmap(mc_se, in_axes=(0, None, None))(log_w, h, g),
         khat=jax.vmap(pareto_khat)(log_w),
         n_eff=kish_ess(log_w),
-        n_cond=jnp.where(cond_mass > 0, n_cond, 0.0),
+        n_cond=jnp.where(cond_mass > 0, n_cond, unknown),
         cond_mass=cond_mass,
         prior_mass_outside=jnp.broadcast_to(prior_mass_outside, cond_mass.shape),
     )
