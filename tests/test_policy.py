@@ -40,6 +40,7 @@ from spaceodyssey.design import (
 from spaceodyssey.log import execute, grant_rows, start_log
 from spaceodyssey.policy import (
     REFIT_GATE,
+    REFIT_NEW_PLANET,
     AbstractPolicy,
     PlannerSettings,
     PricePolicy,
@@ -781,25 +782,31 @@ def test_rows_that_collapse_a_cloud_refit_the_star_and_it_stays_planned_on():
     assert np.all(hz[weights > 0] == 1.0)  # every draw of weight holds an HZ planet
 
 
+@pytest.mark.medium(reason="compiles the planner with a refit and its retry, about 6 s")
 def test_a_refit_refused_after_its_retry_is_reported_and_the_star_kept():
     """A refit the gate refuses again on its retry leaves the star its old cloud, the
-    reason reported, the star refused, and its pool with the searches taken.
+    reason reported, the star refused, and its pool with the searches taken; it is
+    refit again at the next decisions, up to `refit_attempts` refusals in a row.
 
     `_collapsing_run` with a gate of 50 draws: the retry's cloud (about 43) is refused
-    too. The star keeps its time-zero refit and the row appended, so its roles read
-    NaN: it is reported refused (`PriceState.refused`) with the reason `REFIT_GATE`
-    (`PriceState.refit_refused`), and it is not searched again. Its pool is not
-    frozen at time zero: it holds the search taken, so the forecast counts 0.9 planets
-    found there and 0.1 left.
+    too, at each of the three attempts (`PriceState.refused_refits`), the planner
+    waiting at the star between them. The star keeps its time-zero refit and the row
+    appended, so its roles read NaN: it is reported refused (`PriceState.refused`)
+    with the reason `REFIT_GATE` (`PriceState.refit_refused`), and it is not searched
+    again. Its pool is not frozen at time zero: it holds the search taken, so the
+    forecast counts 0.9 planets found there and 0.1 left.
 
     Fails if a refused refit hands the planner a NaN cloud or a cloud the gate refused
-    (it would be read as a refit landed), if the reason is lost, or if the star is
-    planned on a cloud the gate refused (a second search).
+    (it would be read as a refit landed), if the reason is lost, if the star is
+    planned on a cloud the gate refused (a second search), or if the attempts are not
+    bounded.
     """
     stars, design, trace, log = _collapsing_run(50.0)
-    assert list(_column(log, "star")) == [0]
+    assert list(_column(log, "star")) == [0, 0, 0]
+    assert list(_column(log, "refusal")) == [ACCEPTED, WAITED, WAITED]
     last = trace.states[-1]
     assert list(np.asarray(last.refits)) == [0]
+    assert list(np.asarray(last.refused_refits)) == [3]
     assert list(np.asarray(last.refit_refused)) == [REFIT_GATE]
     assert list(np.asarray(last.refused)) == [True]
     assert not bool(last.replay.refit.row_mask[0, 0])
@@ -808,6 +815,71 @@ def test_a_refit_refused_after_its_retry_is_reported_and_the_star_kept():
     assert_allclose(_found(stars, log, design.models, end), 0.9, rtol=1e-12)
     rate = _rates(last.pool, last.replay.refit, log, design.models, end)[1]
     assert_allclose(rate, [0.1], rtol=1e-10)
+
+
+class RefusedRefitter(ToyRefitter):
+    """`ToyRefitter` whose clouds come back refused (NaN weights) or, with
+    `collapse`, landed on one draw: a cloud a planner role's gate refuses."""
+
+    collapse: bool = eqx.field(static=True, default=False)
+
+    def refit(self, refit, term, key, *, min_n_eff, max_khat, proposal_factor=1):
+        gate = {"min_n_eff": min_n_eff, "max_khat": max_khat}
+        new = super().refit(refit, term, key, **gate, proposal_factor=proposal_factor)
+        n_draw = new.atoms.cloud.log_weights.shape[0]
+        one = jnp.where(jnp.arange(n_draw) == 0, 0.0, -jnp.inf)
+        weights = one if self.collapse else jnp.full(n_draw, jnp.nan)
+        return eqx.tree_at(lambda r: r.atoms.cloud.log_weights, new, weights)
+
+
+@pytest.mark.medium(reason="compiles the planner with two refitters, about 5 s each")
+def test_a_refused_refit_is_reported_and_refit_again():
+    """Every refused refit records its reason, and the star is refit again at the next
+    decision, up to `refit_attempts` refusals in a row.
+
+    `test_a_new_detection_is_refit_and_its_star_planned_on`'s star (no planet in its
+    four draws, a pool of mass 2) and world (a planet out of the HZ the search finds),
+    a gate of two draws. The first search finds a planet new to the cloud.
+
+    - A refitter whose clouds the gate refuses: the refit is refused after its retry
+      (`REFIT_NEW_PLANET`). The star keeps its cloud and stays planned on its pool and
+      tracks, never refused; it stays pending and is refit again at the next two
+      decisions (the planner waits at it), refused each time, then searched again.
+    - A refitter whose clouds land on one draw: the refit lands (counted in
+      `refits`) but leaves the planner's roles below the gate, a refusal recorded as
+      `REFIT_GATE`; the star is refused and refit again twice, then left.
+
+    Fails if a refused refit is not queued again (the dead end: a new planet's star
+    whose refit is refused is never refit unless new rows arrive, and a star the gate
+    refused never gets them), if a landed refit that the planner's gate refuses
+    records no reason, or if the attempts are not bounded.
+    """
+    stars = _stars([2.0])
+    design = _design(3.0, DetectionModel(0.8, 1.0))
+    settings = PlannerSettings(2.0, math.inf, 1, member=0)
+    for collapse, reason in ((False, REFIT_NEW_PLANET), (True, REFIT_GATE)):
+        refitter = RefusedRefitter(PRIOR, collapse=collapse)
+        trace = Trace(_policy(stars, design, _menu(1), settings, refitter))
+        log = execute(KEY, _no_grant(), _world(1, hz=0.0), design, trace)
+        why = [int(s.refit_refused[0]) for s in trace.states]
+        in_row = [int(s.refused_refits[0]) for s in trace.states]
+        pending = [bool(s.pending[0]) for s in trace.states]
+        refused = [bool(s.refused[0]) for s in trace.states]
+        first = why.index(reason)
+        assert in_row[first : first + 3] == [1, 2, 3], collapse
+        assert pending[first : first + 3] == [True, True, False], collapse
+        assert set(why[first:]) == {reason}, collapse
+        refusal = list(_column(log, "refusal"))
+        assert refusal[:3] == [ACCEPTED, WAITED, WAITED], collapse
+        last = trace.states[-1]
+        if collapse:
+            assert refused[first:] == [True] * (len(refused) - first)
+            assert refusal == [ACCEPTED, WAITED, WAITED]
+            assert list(np.asarray(last.refits)) == [3]
+        else:
+            assert not any(refused)
+            assert refusal == [ACCEPTED, WAITED, WAITED, ACCEPTED, ACCEPTED]
+            assert list(np.asarray(last.refits)) == [0]
 
 
 @pytest.mark.medium(reason="compiles a LogScore planner per forecast mode, ~9 s each")
@@ -894,26 +966,41 @@ def test_a_star_in_keepout_offers_nothing_and_the_planner_waits_for_it():
     assert list(_column(log, "refusal")) == [ACCEPTED]
 
 
+class OpensAt(DetectionModel):
+    """`DetectionModel` from day `from_d` on, and blind before it: a search whose
+    outcomes follow the time it starts."""
+
+    from_d: float = 10.0
+
+    def _probs(self, action):
+        p_hz, p_other = super()._probs(action)
+        late = action.time_d >= self.from_d
+        return jnp.where(late, p_hz, 0.0), jnp.where(late, p_other, 0.0)
+
+
 @pytest.mark.medium(reason="compiles the planner's init and decide over keepout, ~7 s")
 def test_a_star_in_keepout_worth_more_holds_the_budget_until_it_opens():
     """A star in keepout that opens before the calendar's end stays in the price as
-    future demand; the planner waits for it rather than spend the budget on the open
-    stars.
+    future demand, planned to start when it opens; the planner waits for it rather
+    than spend the budget on the open stars.
 
     Three stars, all marks in the HZ, masses 2.0, 0.3 and 0.2, a search certain to
-    find an HZ planet (worth 2.0, 0.3 and 0.2), budget one day, a calendar of 365
-    days; star 0 is in keepout over days [0, 10). Priced with star 0 as future demand,
-    the price is 2.0 and only star 0 is bought; it is closed, so the planner waits for
-    day 10 and searches it there, 2.0 planets of a possible 2.0.
+    find an HZ planet from day 10 on and blind before it, budget one day, a calendar
+    of 365 days; star 0 is in keepout over days [0, 10). Star 0 is planned at its
+    opening, day 10, where its search is worth 2.0; the open stars' searches now are
+    worth nothing. The price is 2.0 and only star 0 is bought; it is closed, so the
+    planner waits for day 10 and searches it there, 2.0 planets of a possible 2.0.
 
-    Fails if closed stars are dropped from the price (the price falls to 0.3, star 1
-    is searched at day 0 and the run earns 0.3), or if the planner runs a bought
-    option at a star in keepout (`step` would delay it, never wait for it).
+    Fails if closed stars are dropped from the price (nothing is worth its price and
+    the run earns nothing), if a star in keepout is planned at the decision's time
+    (its search is valued blind, worth nothing, and the run earns nothing), or if the
+    planner runs a bought option at a star in keepout (`step` would delay it, never
+    wait for it).
     """
     stars = _stars([2.0, 0.3, 0.2], hz=(1.0,))
     closed = np.zeros((N_STAR, 2), bool)
     closed[0, 0] = True  # star 0 closed over days [0, 10)
-    design = _design(1.0, DetectionModel(1.0, 0.0), keepout=Keepout(closed, 10.0))
+    design = _design(1.0, OpensAt(1.0, 0.0), keepout=Keepout(closed, 10.0))
     trace = Trace(_policy(stars, design, _menu(3), DEPTH_1))
     log = execute(KEY, _no_grant(), _world(3, exists=False), design, trace)
     assert_allclose(trace.states[0].lam, 2.0, rtol=1e-12)

@@ -293,6 +293,13 @@ class PlannerSettings(eqx.Module):
         retry_factor: the proposal factor of the one retry of a refit the gate
             refused (``refit_stars``), static: the retry draws this many times the
             refitter's proposals.
+        refit_attempts: the most decisions in a row that refit a star whose refits
+            are refused, static: a star refused fewer times stays pending and is refit
+            again at the next decision with that decision's key; one refused this
+            many times is left refused (``PriceState.refit_refused``).
+        max_cells: the most outcome cells a menu entry keeps in the lookahead
+            (``frontier``), static; None keeps them all. A star whose entry has more
+            possible cells is refused, never valued on a part of them.
     """
 
     min_n_eff: Float[Array, ""] = eqx.field(converter=as_float)
@@ -308,6 +315,8 @@ class PlannerSettings(eqx.Module):
     retry_factor: int = eqx.field(static=True)
     refit_capacity: int = eqx.field(static=True)
     refit_batch: int = eqx.field(static=True)
+    refit_attempts: int = eqx.field(static=True)
+    max_cells: int | None = eqx.field(static=True)
 
     def __init__(
         self,
@@ -325,6 +334,8 @@ class PlannerSettings(eqx.Module):
         retry_factor: int = 8,
         refit_capacity: int = 1,
         refit_batch: int = 1,
+        refit_attempts: int = 3,
+        max_cells: int | None = None,
     ):
         """Settings; the thresholds, the depth and the member are required."""
         self.min_n_eff = min_n_eff
@@ -340,6 +351,8 @@ class PlannerSettings(eqx.Module):
         self.retry_factor = int(retry_factor)
         self.refit_capacity = min(int(refit_capacity), self.rebuild_capacity)
         self.refit_batch = int(refit_batch)
+        self.refit_attempts = int(refit_attempts)
+        self.max_cells = None if max_cells is None else int(max_cells)
 
     def __check_init__(self):
         """Check the static settings, and that no threshold is NaN."""
@@ -358,11 +371,14 @@ class PlannerSettings(eqx.Module):
             self.retry_factor,
             self.refit_capacity,
             self.refit_batch,
+            self.refit_attempts,
+            1 if self.max_cells is None else self.max_cells,
         )
         if min(counts) < 1 or self.member < 0:
             raise ValueError(
                 "depth, price_rounds, star_batch, rebuild_capacity, retry_factor, "
-                "refit_capacity and refit_batch are at least 1, member at least 0"
+                "refit_capacity, refit_batch, refit_attempts and max_cells are at "
+                "least 1, member at least 0"
             )
         if self.price_factors.ndim != 1 or self.price_factors.shape[0] < 1:
             raise ValueError("price_factors is a nonempty vector")
@@ -386,6 +402,8 @@ class PriceState(eqx.Module):
         frontier: each star's options, its plans built at the price factors and, at
             ``depth > 1``, its entries alone (``_star_plans``), unmasked.
         built_lam: the price each star's plans were built at.
+        planned_d: the start each star's plans were built for: the time it was read,
+            or, for a star in keepout then, the time it opens.
         lam: the last solved price of time, reward per day.
         bound: the dual at ``lam``: no schedule of the offered plans, at most one per
             star, earns more within the budget left.
@@ -397,16 +415,23 @@ class PriceState(eqx.Module):
             waiting among them): busy, offering nothing, until a decision reads them.
         seen: the log rows released by the last decision, ``(W,)``.
         refits: the refits that landed at each star in the run, ``(S,)``.
-        refit_refused: why each star's last refit was refused after its retry
-            (``REFIT_NEW_PLANET`` or ``REFIT_GATE``), 0 when its last refit landed or
-            none was refused, ``(S,)``. A star refused for a new planet keeps its old
-            cloud, the planet untracked and its detection unscored: it is planned on
-            its pool and its tracks, and the refit is queued again when its next rows
-            are read. A star refused at the gate keeps its old cloud and its rows, so
-            the role the gate refused reads NaN and the star is reported in
-            ``refused``, its options priced as if absent. Either way its pool keeps
-            every search taken (``replay_pool`` reads the log), so the planets it found
-            stay found and its expected planets stay in the forecast.
+        refit_refused: why each star's last refit was refused (``REFIT_NEW_PLANET``
+            or ``REFIT_GATE``), 0 when its last refit landed or none was refused,
+            ``(S,)``. A refit is refused when the gate refuses it after its retry, and
+            also when it lands but a planner role still fails the gate on it
+            (``REFIT_GATE``): every refusal records its reason. A star refused for a
+            new planet keeps its old cloud, the planet untracked and its detection
+            unscored, and is planned on its pool and its tracks meanwhile; a star
+            refused at the gate keeps its cloud, so the role the gate refused reads
+            NaN and the star is reported in ``refused``, its options priced as if
+            absent. Either way its pool keeps every search taken (``replay_pool``
+            reads the log), so the planets it found stay found and its expected
+            planets stay in the forecast, and the star stays pending and is refit
+            again at the next decision until it has been refused
+            ``PlannerSettings.refit_attempts`` times in a row (``refused_refits``);
+            it is then left as it is.
+        refused_refits: the refits refused in a row at each star, ``(S,)``; a refit
+            that lands and passes the gate resets it.
     """
 
     replay: Replay
@@ -415,6 +440,7 @@ class PriceState(eqx.Module):
     stage: Int[Array, " S"] = eqx.field(converter=as_index)
     frontier: Frontier
     built_lam: Float[Array, " S"] = eqx.field(converter=as_float)
+    planned_d: Float[Array, " S"] = eqx.field(converter=as_float)
     lam: Float[Array, ""] = eqx.field(converter=as_float)
     bound: Float[Array, ""] = eqx.field(converter=as_float)
     refused: Bool[Array, " S"] = eqx.field(converter=jnp.asarray)
@@ -422,6 +448,7 @@ class PriceState(eqx.Module):
     seen: Bool[Array, " W"] = eqx.field(converter=jnp.asarray)
     refits: Int[Array, " S"] = eqx.field(converter=as_index)
     refit_refused: Int[Array, " S"] = eqx.field(converter=as_index)
+    refused_refits: Int[Array, " S"] = eqx.field(converter=as_index)
 
 
 class PricePolicy(AbstractPolicy):
@@ -429,10 +456,11 @@ class PricePolicy(AbstractPolicy):
 
     Each star offers plans (``frontier``: a first action and up to ``depth - 1``
     follow-ups at the star, each chosen on the outcomes so far, all at the decision's
-    time), built at several prices around the last solved one
-    (``frontier_at_prices``) and, at ``depth > 1``, each first action alone. The price
-    of time ``lam`` minimizes the dual over the stars' options within the budget left
-    (``solve_price``), and ``dispatch`` buys at most one option per star.
+    time, or at its opening for a star in keepout), built at several prices around
+    the last solved one (``frontier_at_prices``) and, at ``depth > 1``, each first
+    action alone. The price of time ``lam`` minimizes the dual over the stars' options
+    within the budget left (``solve_price``), and ``dispatch`` buys at most one option
+    per star.
 
     Keepout is a constraint on when an option runs, not on whether it is in the plan.
     The price is solved over every star that is not busy (a row of it in flight, or
@@ -458,8 +486,9 @@ class PricePolicy(AbstractPolicy):
     at it; a star whose granted rows found a planet its refit holds no track for, or
     left a planner role's weights below the gate, starts pending. ``decide`` marks the
     stars of the rows released since the last decision pending, then reads at most
-    ``rebuild_capacity`` stars, pending ones first and then those whose price has left
-    the range of their build factors. A pending star appends its released rows
+    ``rebuild_capacity`` stars, pending ones first and then the stale ones: those
+    whose price has left the range of their build factors, and those in keepout whose
+    plans start before they open. A pending star appends its released rows
     (``absorb``) and is gated after them (``refused_after_rows``); one whose rows
     found a new planet (``new_planets``) or left a planner role's weights below the
     gate is refit, the decision's queue in one call (``refit_stars``: the star's
@@ -467,14 +496,19 @@ class PricePolicy(AbstractPolicy):
     star, the gate's thresholds, one retry at ``retry_factor`` times the proposals),
     and its pool is the old one thinned by the searches the new refit represents
     (``replay_pool``). A refit refused after its retry leaves the star its appended
-    replay and the reason in ``PriceState.refit_refused``. Each star read moves to the
+    replay, and one that lands but leaves a planner role below the gate keeps its new
+    cloud; either way the reason is in ``PriceState.refit_refused`` and the star stays
+    pending, to be refit again at the next decision, up to
+    ``PlannerSettings.refit_attempts`` refusals in a row. Each star read moves to the
     stage its rows reached and gets plans rebuilt at the last price, which becomes
-    its build price. The gathered stars are scattered back, the price is solved once
-    on the options offered, and the action chosen. The beliefs are read as two, the
-    forecast's and the planner's verdict member's (``planning_beliefs``, only that
-    member's roles and pool rows passed), gated per role after their rows: an option
-    that comes out NaN is refused, its star reported in the state and the option
-    priced as if absent.
+    its build price. A star in keepout is planned to start when it opens, not at the
+    decision's time, and a star that has entered keepout since its plans were built
+    is read again as stale, so its plans start when it next opens. The gathered stars
+    are scattered back, the price is solved once on the options offered, and the
+    action chosen. The beliefs are read as two, the forecast's and the planner's
+    verdict member's (``planning_beliefs``, only that member's roles and pool rows
+    passed), gated per role after their rows: an option that comes out NaN is
+    refused, its star reported in the state and the option priced as if absent.
 
     The policy reads the public view only, never a world: everything it learns is in
     its state.
@@ -552,16 +586,18 @@ def _star_plans(
     log: ObservationLog,
     time_d: Float[Array, ""],
     lam: Float[Array, ""],
+    plan_d: Float[Array, ""],
 ) -> tuple[Int[Array, ""], tuple[Array, Array, Array]]:
     """Star ``s``'s stage and its options: reward, cost and mask, a frontier row each.
 
-    ``pool`` is the star's pool at ``time_d``. The frontier is formed once every star
-    is in. Option ``p M + m`` is entry ``m``'s plan built at ``lam`` times factor
-    ``p``; at ``depth > 1`` the last ``M`` options are the entries alone, no follow-up
-    (the plans at an infinite price), so the time left can always be spent on single
-    actions even when the last price, and so every factor of it, was zero.
-    ``option % M`` is the entry either way. Every action is planned to start at
-    ``time_d``.
+    ``pool`` is the star's pool at ``time_d``, the time the log is read. The frontier
+    is formed once every star is in. Option ``p M + m`` is entry ``m``'s plan built at
+    ``lam`` times factor ``p``; at ``depth > 1`` the last ``M`` options are the
+    entries alone, no follow-up (the plans at an infinite price), so the time left can
+    always be spent on single actions even when the last price, and so every factor of
+    it, was zero. ``option % M`` is the entry either way. Every action is planned to
+    start at ``plan_d``: ``time_d`` for a star open then, its opening for a star in
+    keepout (``_plan_d``).
     """
     settings = policy.settings
     star = _pick(policy.stars, s)
@@ -600,12 +636,26 @@ def _star_plans(
 
     args = (one(forecast_b), one(verdict_b), policy.claim, one(star), policy.utility)
     args = (*args, policy.mode_models, one_star)
-    where = {"star_index": s[None], "time_d": time_d}
+    where = {
+        "star_index": s[None],
+        "time_d": plan_d,
+        "max_cells": settings.max_cells,
+    }
     f = frontier_at_prices(*args, lam * _factors(policy), settings.depth, **where)
     if settings.depth > 1:
         alone = frontier(*args, lam, 1, **where)
         f = jax.tree.map(lambda a, b: jnp.concatenate([a, b], -1), f, alone)
     return stage, (f.reward[0], f.cost_d[0], f.mask[0])
+
+
+def _plan_d(public: PublicView, opens_d: Float[Array, " S"]) -> Float[Array, " S"]:
+    """When each star's plans start: now if it is open, else when it opens.
+
+    A star in keepout is planned at its opening (``_opens_d``), where a model whose
+    outcomes follow the time reads it; one that never opens before the calendar's end
+    is not priced and is planned now.
+    """
+    return jnp.where(opens_d <= public.end_d, opens_d, public.time_d)
 
 
 def _usable(
@@ -659,17 +709,29 @@ def _append(policy, r, s, log, time_d):
 
 
 def _read_star(
-    policy, fresh_s, landed_s, absorbed_s, pool_s, frozen_s, s, key, log, time_d, lam
+    policy,
+    fresh_s,
+    landed_s,
+    absorbed_s,
+    pool_s,
+    frozen_s,
+    s,
+    key,
+    log,
+    time_d,
+    lam,
+    plan_d,
 ):
     """Star ``s`` read afresh at ``time_d``: refit or absorbed, its stage and plans.
 
     A star whose refit landed takes its new refit ``fresh_s`` (``refit_stars``),
     replayed to ``time_d``, and its pool becomes the old one thinned by the searches the
-    new refit represents; any other, a refused refit among them, keeps its replay with
-    the released rows appended (``absorbed_s``) and its pool. A frozen forecast
+    new refit represents; whether a planner role still fails the gate on it is
+    returned (``_collapsed``). Any other, a refused refit among them, keeps its replay
+    with the released rows appended (``absorbed_s``) and its pool. A frozen forecast
     ``frozen_s`` (None when the forecast learns) gains each planet the refit added, at
     its time-zero belief (``AbstractRefitter.add_tracks``, with ``key``), replayed at
-    time zero. Its plans are rebuilt at ``lam``.
+    time zero. Its plans are rebuilt at ``lam``, to start at ``plan_d``.
     """
     star = _pick(policy.stars, s)
     models = policy.models
@@ -692,9 +754,16 @@ def _read_star(
 
         frozen_s = jax.lax.cond(jnp.any(added), extend, lambda _: frozen_s, None)
     forecast = replay_s if frozen_s is None else frozen_s
+    failed = jax.lax.cond(
+        landed_s,
+        lambda: _collapsed(policy, replay_s, s),
+        lambda: jnp.asarray(False),
+    )
     pool_now = _pool_now(policy, pool_s, replay_s, log, time_d)
-    stage, f = _star_plans(policy, forecast, replay_s, pool_now, s, log, time_d, lam)
-    return replay_s, pool_s, frozen_s, stage, f
+    stage, f = _star_plans(
+        policy, forecast, replay_s, pool_now, s, log, time_d, lam, plan_d
+    )
+    return replay_s, pool_s, frozen_s, stage, f, failed
 
 
 @eqx.filter_jit
@@ -716,12 +785,13 @@ def _price_init(policy: PricePolicy, public: PublicView) -> PriceState:
     budget_d = public.budget_left_d
     busy = jnp.zeros(n_star, bool).at[log.rows.star].max(public.in_flight)
     closed = busy | pending | ~_reachable(public, n_star)
+    plan_d = _plan_d(public, _opens_d(public, n_star))
 
     def plans(lam):
         def one(s):
             r = _pick(replays, s)
             pool = _pool_now(policy, _pick(policy.pool, s), r, log, time_d)
-            return _star_plans(policy, r, r, pool, s, log, time_d, lam)
+            return _star_plans(policy, r, r, pool, s, log, time_d, lam, plan_d[s])
 
         return jax.lax.map(one, stars, batch_size=policy.settings.star_batch)
 
@@ -745,6 +815,7 @@ def _price_init(policy: PricePolicy, public: PublicView) -> PriceState:
         stage=stage,
         frontier=f,
         built_lam=jnp.full(n_star, built),
+        planned_d=plan_d,
         lam=lam,
         bound=bound,
         refused=refused,
@@ -752,6 +823,7 @@ def _price_init(policy: PricePolicy, public: PublicView) -> PriceState:
         seen=released,
         refits=jnp.zeros(n_star, int),
         refit_refused=jnp.zeros(n_star, int),
+        refused_refits=jnp.zeros(n_star, int),
     )
 
 
@@ -781,13 +853,22 @@ def _reachable(public: PublicView, n_star: int) -> Bool[Array, " S"]:
     return _opens_d(public, n_star) <= public.end_d
 
 
-def _stale(policy: PricePolicy, state: PriceState) -> Bool[Array, " S"]:
-    """The stars whose build price the last solved price has left the factors' range."""
+def _stale(
+    policy: PricePolicy, state: PriceState, public: PublicView, opens_d
+) -> Bool[Array, " S"]:
+    """The stars whose plans must be rebuilt though no row of theirs is new.
+
+    A star whose build price the last solved price has left the factors' range, and a
+    star in keepout whose plans start before it opens (planned while it was open, or
+    for an earlier opening): its plans are rebuilt to start when it opens.
+    """
+    closed = (opens_d > public.time_d) & (opens_d <= public.end_d)
+    late = closed & (state.planned_d < opens_d)
     if policy.settings.depth == 1:  # static: a plan does not depend on the price
-        return jnp.zeros_like(state.pending)
+        return late
     factors = policy.settings.price_factors
     low, high = jnp.min(factors) * state.built_lam, jnp.max(factors) * state.built_lam
-    return ~((state.lam >= low) & (state.lam <= high))
+    return late | ~((state.lam >= low) & (state.lam <= high))
 
 
 @eqx.filter_jit
@@ -801,9 +882,13 @@ def _price_decide(
     released = real_rows(log) & (rows.release_d <= time_d)
     new = released & ~state.seen & (rows.refusal == ACCEPTED)
     pending = state.pending | jnp.zeros(n_star, bool).at[rows.star].max(new)
+    is_open = _open_now(public, n_star)
+    opens_d = _opens_d(public, n_star)
+    plan_d = _plan_d(public, opens_d)
 
     # Gather the stars to read, pending first, then stale, lowest index first.
-    rank = jnp.where(pending, 0, jnp.where(_stale(policy, state), 1, 2))
+    stale = _stale(policy, state, public, opens_d)
+    rank = jnp.where(pending, 0, jnp.where(stale, 1, 2))
     picks = jnp.argsort(rank * n_star + jnp.arange(n_star))[
         : policy.settings.rebuild_capacity
     ]
@@ -876,17 +961,20 @@ def _price_decide(
             frozen_s,
             state.stage[s],
             (row.reward, row.cost_d, row.mask),
+            jnp.asarray(False),
         )
         args = (_pick(fresh, i), landed[i], _pick(absorbed, i), pool_s, frozen_s, s)
-        added_key = jax.random.fold_in(jax.random.fold_in(key, s), 1)
+        # Its own key: the refit's retry already folds 1 into the star's key.
+        added_key = jax.random.fold_in(jax.random.fold_in(key, s), 2)
+        read = (added_key, log, time_d, state.lam, plan_d[s])
         return jax.lax.cond(
             chosen[i],
-            lambda _: _read_star(policy, *args, added_key, log, time_d, state.lam),
+            lambda _: _read_star(policy, *args, *read),
             lambda _: kept,
             None,
         )
 
-    replay_c, pool_c, frozen_c, stage_c, f_c = jax.lax.map(
+    replay_c, pool_c, frozen_c, stage_c, f_c, failed = jax.lax.map(
         one, jnp.arange(picks.shape[0])
     )
 
@@ -904,20 +992,33 @@ def _price_decide(
     built_lam = state.built_lam.at[picks].set(
         jnp.where(chosen, state.lam, state.built_lam[picks])
     )
-    pending = pending.at[picks].set(pending[picks] & ~chosen)
+    planned_d = state.planned_d.at[picks].set(
+        jnp.where(chosen, plan_d[picks], state.planned_d[picks])
+    )
+    # A refit refused, after its retry or by a planner role's gate once landed, is
+    # recorded with its reason and refit again at the next decision, up to
+    # `refit_attempts` in a row.
+    refused_now = (status == REFIT_REFUSED) | failed
+    why = jnp.where(status == REFIT_REFUSED, reason, REFIT_GATE)
+    in_row = jnp.where(
+        refused_now,
+        state.refused_refits[picks] + 1,
+        jnp.where(landed, 0, state.refused_refits[picks]),
+    )
+    again = refused_now & (in_row < settings.refit_attempts)
+    pending = pending.at[picks].set((pending[picks] & ~chosen) | again)
     refits = state.refits.at[picks].add(landed.astype(int))
     refit_refused = state.refit_refused.at[picks].set(
         jnp.where(
-            status == REFIT_REFUSED,
-            reason,
+            refused_now,
+            why,
             jnp.where(status == REFIT_KEPT, state.refit_refused[picks], 0),
         )
     )
+    refused_refits = state.refused_refits.at[picks].set(in_row)
 
     budget_d = public.budget_left_d
     in_flight = jnp.zeros(n_star, bool).at[rows.star].max(public.in_flight)
-    is_open = _open_now(public, n_star)
-    opens_d = _opens_d(public, n_star)
     # Priced: every star not busy that opens before the calendar's end, closed ones as
     # future demand. Run: the best bought option at a star open now.
     usable = _usable(
@@ -962,6 +1063,7 @@ def _price_decide(
         stage=stage,
         frontier=f,
         built_lam=built_lam,
+        planned_d=planned_d,
         lam=lam,
         bound=bound,
         refused=refused,
@@ -969,5 +1071,6 @@ def _price_decide(
         seen=released,
         refits=refits,
         refit_refused=refit_refused,
+        refused_refits=refused_refits,
     )
     return action, ~running & ~waiting, new_state
