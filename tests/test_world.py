@@ -5,15 +5,45 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.scipy.stats import norm
 from numpy.testing import assert_allclose, assert_array_max_ulp
 
 from spaceodyssey.belief import count_pmf, q
 from spaceodyssey.claim import Claim, GasAbove
+from spaceodyssey.roles import AbstractRolePrior
 from spaceodyssey.toy import GAS_FLOOR, GaussianGasModel, StepReportModel
-from spaceodyssey.types import Action, Grant, ObservationLog, grant_rows
+from spaceodyssey.types import (
+    Action,
+    Atoms,
+    Grant,
+    ObservationLog,
+    WeightedCloud,
+    grant_rows,
+)
 from spaceodyssey.world import SealedWorld, draw_worlds, row_key
 
 KEY = jax.random.key(0)
+STARS = jnp.arange(2)  # two stars, described by their index alone
+
+
+class GasPrior(AbstractRolePrior):
+    """One planet in the toy box (hz = size = 1) whose gases are iid N(0, 1)."""
+
+    n_gas: int = eqx.field(static=True, default=2)
+
+    def log_prob(self, atoms, star):
+        return norm.logpdf(atoms.x_mean).sum(axis=(1, 2))
+
+    def sample(self, key, star):
+        x = jax.random.normal(key, (1, 1, self.n_gas))
+        one = jnp.ones((1, 1))
+        cloud = WeightedCloud(
+            {"hz": one, "size": one}, jnp.zeros(1), jnp.zeros(1), "toy"
+        )
+        no_rows = jnp.zeros((1, 1), bool)
+        return Atoms(
+            cloud, jnp.zeros_like(x, int), x, jnp.zeros_like(x), no_rows, one > 0
+        )
 
 
 def _stack(trees):
@@ -68,12 +98,52 @@ def test_row_noise_depends_only_on_star_index_and_key(toy):
     assert _differ(_observe(world, model, 0, 5), _observe(world, model, 1, 5))
     assert _differ(first[(0, 0)], first[(0, 2)])
 
-    def prior(key):
-        return _point_truth(toy, jax.random.normal(key, (2, 2)))
-
-    two = draw_worlds(prior, KEY, 2).unseal().atoms.x_mean
-    three = draw_worlds(prior, KEY, 3).unseal().atoms.x_mean
+    two = draw_worlds(GasPrior("toy"), STARS, KEY, 2).unseal().atoms.x_mean
+    three = draw_worlds(GasPrior("toy"), STARS, KEY, 3).unseal().atoms.x_mean
     assert_array_max_ulp(two, three[:2], maxulp=4)
+
+
+def test_draw_worlds_from_a_role_prior():
+    """Worlds come from the truth's role prior, one point draw per star.
+
+    4,000 worlds of two stars under iid N(0, 1) gases: the leading axes are (world,
+    star), every truth is one draw of weight one, and the 16,000 abundances have mean
+    within 0.05 of 0 and variance within 0.05 of 1 (about 4 standard errors). The
+    prior record that drew them scores them: its `log_prob` of the unsealed truth is
+    the N(0, 1) log density summed over the gases.
+
+    Fails if `draw_worlds` ignores the prior's sampler, reuses one key across stars or
+    worlds (the spread collapses), or the drawn truth is not on the prior's terms.
+    """
+    prior = GasPrior("toy")
+    truth = draw_worlds(prior, STARS, KEY, 4000).unseal().atoms
+    assert truth.x_mean.shape == (4000, 2, 1, 1, 2)
+    assert_allclose(truth.cloud.log_weight, 0.0)
+    x = np.asarray(truth.x_mean)
+    assert abs(x.mean()) < 0.05 and abs(x.var() - 1.0) < 0.05
+    one = jax.tree.map(lambda leaf: leaf[0, 1], truth)
+    expected = norm.logpdf(one.x_mean).sum()
+    assert_allclose(prior.log_prob(one, STARS[1]), [expected], rtol=1e-12)
+
+
+def test_world_keys_and_row_keys_are_distinct():
+    """World i's truth at star s shares no key with the noise of any row.
+
+    Without a tag, star s of world i and row (star i, index s) fold the same numbers
+    into the run key. The prior draws its gases as N(0, 1) of its key and the gas model
+    draws its noise as N(0, 1) of the row key, with the same shape, so a shared key
+    shows as equal numbers. For every world i and star s in {0, 1}, the truth differs
+    from the standard normal of row_key(key, i, s) and of row_key(key, s, i).
+
+    Fails if world keys and row keys are folded without distinct tags, so world i is
+    correlated with star i's row noise.
+    """
+    truth = draw_worlds(GasPrior("toy"), STARS, KEY, 2).unseal().atoms.x_mean
+    for i in range(2):
+        for s in range(2):
+            for star, index in ((i, s), (s, i)):
+                noise = jax.random.normal(row_key(KEY, star, index), (1, 1, 2))
+                assert not np.allclose(truth[i, s], noise)
 
 
 def test_observe_reads_the_right_star_and_unseal_gives_a_point_belief(toy):

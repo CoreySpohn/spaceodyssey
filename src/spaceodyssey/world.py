@@ -5,15 +5,21 @@ A world holds one point state per star. Rows come out of it only through ``obser
 scorer. The noise of a row is keyed by the row's identity, never by call order.
 """
 
-from collections.abc import Callable
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jaxtyping import ArrayLike, Int, PRNGKeyArray, PyTree
 
 from spaceodyssey.belief import Belief
+from spaceodyssey.roles import AbstractRolePrior
 from spaceodyssey.types import AbstractObservationModel, Action, Atoms, Grant, Pool
+
+_ROW_KEY_TAG = 0
+"""Tag folded into the run key before a row's identity."""
+
+_WORLD_KEY_TAG = 1
+"""Tag folded into the run key before a world's identity, so world ``i`` never shares a
+key with the rows of star ``i``."""
 
 
 def row_key(
@@ -22,7 +28,8 @@ def row_key(
     """The key of one row, folded from the run key, the star and the row's index.
 
     The noise of a row depends on these three only, so the same row built in any order
-    draws the same noise.
+    draws the same noise. A row tag is folded in first, so no row shares a key with a
+    world drawn from the same run key.
 
     Args:
         key: the run key.
@@ -32,7 +39,8 @@ def row_key(
     Returns:
         The row's key.
     """
-    return jax.random.fold_in(jax.random.fold_in(key, star), index)
+    tagged = jax.random.fold_in(key, _ROW_KEY_TAG)
+    return jax.random.fold_in(jax.random.fold_in(tagged, star), index)
 
 
 class SealedWorld(eqx.Module):
@@ -163,20 +171,30 @@ class SealedWorld(eqx.Module):
 
 
 def draw_worlds(
-    truth_prior: Callable[[PRNGKeyArray], Atoms], key: PRNGKeyArray, n_worlds: int
+    prior: AbstractRolePrior, stars, key: PRNGKeyArray, n_worlds: int
 ) -> SealedWorld:
-    """Draw worlds from a truth prior, with a leading world axis.
+    """Draw worlds from the truth's role prior, with a leading world axis.
 
-    World ``i`` is drawn with ``fold_in(key, i)``, so it does not depend on how many
-    worlds are drawn.
+    Star ``s`` of world ``i`` is ``prior.sample`` with the key folded from the run key,
+    a world tag, ``i`` and ``s``, so world ``i`` does not depend on how many worlds are
+    drawn and shares no key with any row.
 
     Args:
-        truth_prior: a function from a key to one truth (see ``SealedWorld``).
-        key: the base key.
+        prior: the truth's role prior.
+        stars: the stars, a pytree whose leaves have a leading star axis ``S``.
+        key: the run key.
         n_worlds: number of worlds, static.
 
     Returns:
-        A stack of ``n_worlds`` sealed worlds.
+        A stack of ``n_worlds`` sealed worlds over ``S`` stars.
     """
-    keys = jax.vmap(jax.random.fold_in, in_axes=(None, 0))(key, jnp.arange(n_worlds))
-    return SealedWorld(jax.vmap(truth_prior)(keys))
+    n_star = jax.tree.leaves(stars)[0].shape[0]
+    tagged = jax.random.fold_in(key, _WORLD_KEY_TAG)
+
+    def world(i):
+        keys = jax.vmap(jax.random.fold_in, in_axes=(None, 0))(
+            jax.random.fold_in(tagged, i), jnp.arange(n_star)
+        )
+        return jax.vmap(prior.sample)(keys, stars)
+
+    return SealedWorld(jax.vmap(world)(jnp.arange(n_worlds)))
