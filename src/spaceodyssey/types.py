@@ -106,10 +106,12 @@ class Atoms[StateT](eqx.Module):
 
 
 def as_index(x) -> Int[Array, "..."]:
-    """``x`` as the default integer type, never weakly typed.
+    """``x`` as the default integer type, never weakly typed, in any shape.
 
     An index built from a Python integer would otherwise be weakly typed, and the
     strongly typed copy a compiled function returns would trace that function again.
+    Every integer field a host loop feeds back into compiled code converts with this,
+    and every such float field with ``as_float``.
     """
     return jnp.asarray(x, dtype=int)
 
@@ -202,14 +204,14 @@ class Row(eqx.Module):
             the payload in ``model_slot`` is meaningful.
     """
 
-    star: Int[Array, ""] = eqx.field(converter=jnp.asarray)
-    mode: Int[Array, ""] = eqx.field(converter=jnp.asarray)
-    time_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
-    exposure_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
-    charged_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
-    release_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
-    refusal: Int[Array, ""] = eqx.field(converter=jnp.asarray)
-    model_slot: Int[Array, ""] = eqx.field(converter=jnp.asarray)
+    star: Int[Array, ""] = eqx.field(converter=as_index)
+    mode: Int[Array, ""] = eqx.field(converter=as_index)
+    time_d: Float[Array, ""] = eqx.field(converter=as_float)
+    exposure_d: Float[Array, ""] = eqx.field(converter=as_float)
+    charged_d: Float[Array, ""] = eqx.field(converter=as_float)
+    release_d: Float[Array, ""] = eqx.field(converter=as_float)
+    refusal: Int[Array, ""] = eqx.field(converter=as_index)
+    model_slot: Int[Array, ""] = eqx.field(converter=as_index)
     payload: tuple[PyTree, ...] = eqx.field(
         converter=lambda p: tuple(_asarrays(x) for x in p)
     )
@@ -230,7 +232,7 @@ class ObservationLog(eqx.Module):
     """
 
     rows: Row
-    count: Int[Array, ""] = eqx.field(converter=jnp.asarray)
+    count: Int[Array, ""] = eqx.field(converter=as_index)
 
     def __check_init__(self):
         """Check the static shapes: one capacity ``W`` across the columns."""
@@ -248,9 +250,9 @@ class Action(eqx.Module):
         exposure_d: requested exposure in days.
     """
 
-    star: Int[Array, ""] = eqx.field(converter=jnp.asarray)
-    mode: Int[Array, ""] = eqx.field(converter=jnp.asarray)
-    exposure_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
+    star: Int[Array, ""] = eqx.field(converter=as_index)
+    mode: Int[Array, ""] = eqx.field(converter=as_index)
+    exposure_d: Float[Array, ""] = eqx.field(converter=as_float)
 
 
 class Grant(eqx.Module):

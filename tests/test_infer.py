@@ -87,7 +87,8 @@ def _log(rows, count):
 
 
 def _with_count(log, count):
-    return eqx.tree_at(lambda x: x.count, log, jnp.asarray(count))
+    """The log with another count, built through its converter (a strong integer)."""
+    return ObservationLog(log.rows, count)
 
 
 def _moments(b):
