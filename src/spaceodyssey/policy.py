@@ -273,12 +273,19 @@ class PlannerSettings(eqx.Module):
         price_rounds: how many times the time-zero price is re-solved on plans rebuilt
             at it, static; one at ``depth = 1``.
         star_batch: stars priced at once when every star is priced (at time zero),
-            and stars refit at once in a decision's refit queue (``refit_stars``),
             static: a memory bound.
         rebuild_capacity: the most stars a decision reads afresh (a refit, the rows
             released at them, or a re-price), static: a decision gathers at most this
-            many and the rest wait their turn, so a decision's cost is bounded by it
-            (under ``vmap`` over worlds every gathered slot is computed).
+            many and the rest wait their turn, so a decision's cost is bounded by it.
+            Worlds run one at a time (``execute`` runs one); under ``vmap`` over
+            worlds every gathered slot, and every refit slot, would be computed.
+        refit_capacity: the most refits a decision runs, static, at most
+            ``rebuild_capacity``: the gathered stars queued for a refit fill this many
+            slots and only those slots are refit; a queued star beyond them is not
+            read this decision and stays pending, first in line for the next.
+        refit_batch: refit slots mapped at once (``refit_stars``), static: one maps
+            them one at a time, so an empty slot costs nothing; more maps them under
+            ``vmap``, where every slot of a chunk is refit.
         forecast_updates: whether the forecast's draws learn from the released rows,
             static. When false they stay at the replay at time zero, a frozen-forecast
             surrogate that is not a martingale; the pool follows the searches taken
@@ -299,6 +306,8 @@ class PlannerSettings(eqx.Module):
     rebuild_capacity: int = eqx.field(static=True)
     forecast_updates: bool = eqx.field(static=True)
     retry_factor: int = eqx.field(static=True)
+    refit_capacity: int = eqx.field(static=True)
+    refit_batch: int = eqx.field(static=True)
 
     def __init__(
         self,
@@ -314,6 +323,8 @@ class PlannerSettings(eqx.Module):
         rebuild_capacity: int = 2,
         forecast_updates: bool = True,
         retry_factor: int = 8,
+        refit_capacity: int = 1,
+        refit_batch: int = 1,
     ):
         """Settings; the thresholds, the depth and the member are required."""
         self.min_n_eff = min_n_eff
@@ -327,6 +338,8 @@ class PlannerSettings(eqx.Module):
         self.rebuild_capacity = int(rebuild_capacity)
         self.forecast_updates = bool(forecast_updates)
         self.retry_factor = int(retry_factor)
+        self.refit_capacity = min(int(refit_capacity), self.rebuild_capacity)
+        self.refit_batch = int(refit_batch)
 
     def __check_init__(self):
         """Check the static settings, and that no threshold is NaN."""
@@ -343,11 +356,13 @@ class PlannerSettings(eqx.Module):
             self.star_batch,
             self.rebuild_capacity,
             self.retry_factor,
+            self.refit_capacity,
+            self.refit_batch,
         )
         if min(counts) < 1 or self.member < 0:
             raise ValueError(
-                "depth, price_rounds, star_batch, rebuild_capacity and retry_factor "
-                "are at least 1, member at least 0"
+                "depth, price_rounds, star_batch, rebuild_capacity, retry_factor, "
+                "refit_capacity and refit_batch are at least 1, member at least 0"
             )
         if self.price_factors.ndim != 1 or self.price_factors.shape[0] < 1:
             raise ValueError("price_factors is a nonempty vector")
@@ -812,21 +827,43 @@ def _price_decide(
 
     absorbed, reason = jax.lax.map(append, jnp.arange(picks.shape[0]))
     queued = reason > 0
+
+    # Refit: the queued stars fill the refit slots, queued first, and only those slots
+    # are refit; a queued star left over is not read now and stays pending.
+    n_pick = picks.shape[0]
+    slots = jnp.argsort(jnp.where(queued, 0, 1) * n_pick + jnp.arange(n_pick))[
+        : settings.refit_capacity
+    ]
+    deferred = queued & ~jnp.zeros(n_pick, bool).at[slots].set(True)
     old = absorbed.refit
-    fresh, status = refit_stars(
-        policy.refitter,
-        old,
-        jax.vmap(lambda r: due_rows(log, r, time_d))(old),
-        _pick(policy.stars, picks),
-        jax.vmap(jax.random.fold_in, in_axes=(None, 0))(key, picks),
-        queued,
-        log,
-        models,
-        min_n_eff=settings.min_n_eff,
-        max_khat=settings.max_khat,
-        retry_factor=settings.retry_factor,
+
+    def refit_slots():
+        slot_old = _pick(old, slots)
+        slot_star = picks[slots]
+        fresh_s, status_s = refit_stars(
+            policy.refitter,
+            slot_old,
+            jax.vmap(lambda r: due_rows(log, r, time_d))(slot_old),
+            _pick(policy.stars, slot_star),
+            jax.vmap(jax.random.fold_in, in_axes=(None, 0))(key, slot_star),
+            queued[slots],
+            log,
+            models,
+            min_n_eff=settings.min_n_eff,
+            max_khat=settings.max_khat,
+            retry_factor=settings.retry_factor,
+            batch_size=settings.refit_batch,
+        )
+        fresh = jax.tree.map(lambda f, part: f.at[slots].set(part), old, fresh_s)
+        return fresh, jnp.zeros(n_pick, int).at[slots].set(status_s)
+
+    fresh, status = jax.lax.cond(
+        jnp.any(queued),
+        refit_slots,
+        lambda: (old, jnp.full(n_pick, REFIT_KEPT, int)),
     )
     landed = (status == REFIT_LANDED) | (status == REFIT_RETRIED)
+    chosen = chosen & ~deferred
 
     def one(i):
         s = picks[i]

@@ -693,6 +693,31 @@ def test_a_new_detection_is_refit_and_its_star_planned_on():
         PlannerSettings(math.nan, math.inf, 1, member=0)
 
 
+@pytest.mark.medium(reason="compiles the planner over a grant and its refit, ~5 s")
+def test_queued_refits_beyond_the_refit_slots_wait_their_turn():
+    """Two stars whose granted searches found planets new to their clouds are pending
+    from the start, and a decision gathers both, but with one refit slot only the
+    first is refit and read; the second stays pending, unread, and is refit at the
+    next decision.
+
+    Fails if a decision refits more stars than its refit slots, or if a queued star
+    left out of them is read on its old cloud (no longer pending, never refit).
+    """
+    stars = _stars([2.0, 2.0])
+    design = _design(3.0, DetectionModel(0.8, 1.0))
+    one = jnp.zeros(2, int)
+    grant = Grant(Action(jnp.arange(2), one, jnp.ones(2)))
+    settings = PlannerSettings(
+        0.0, math.inf, 1, member=0, rebuild_capacity=2, refit_capacity=1
+    )
+    trace = Trace(_policy(stars, design, _menu(2), settings))
+    execute(KEY, grant, _world(2, hz=0.0), design, trace)
+    pending = [list(np.asarray(s.pending)) for s in trace.states[:3]]
+    refits = [list(np.asarray(s.refits)) for s in trace.states[:3]]
+    assert pending == [[True, True], [False, True], [False, False]]
+    assert refits == [[0, 0], [1, 0], [1, 1]]
+
+
 LOW = ToyPrior("toy", [1.0], 0.4, 0.5, 0.0, 1.0, n_gas=1)  # in the HZ one time in five
 
 
@@ -900,7 +925,8 @@ def test_a_star_in_keepout_worth_more_holds_the_budget_until_it_opens():
 
 def test_the_realized_count_is_read_against_the_truth():
     """`found_count` counts the claim-true planets of the truth a run's searches
-    detected, new to the time-zero refits; `pool_found` is the forecast's expectation.
+    detected, new to the time-zero refits; `pool_found` is the forecast's
+    expectation.
 
     Three stars, each searched once by a search certain to find any planet; the truth
     holds a planet at each: in the HZ at stars 0 and 2, out of it at star 1. Star 2's
