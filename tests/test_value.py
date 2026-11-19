@@ -27,9 +27,11 @@ from spaceodyssey.roles import Roles
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
 from spaceodyssey.types import (
     Action,
+    Atoms,
     ObservationLog,
     Refit,
     Row,
+    WeightedCloud,
 )
 from spaceodyssey.value import (
     Count,
@@ -378,20 +380,19 @@ def test_a_frozen_forecast_plans_on_its_own_replay(toy):
     now = toy.jit.replay(refit, log, models, toy.star, jnp.asarray(1.0))
     pool0, pool = toy.empty_pool(2, 1), toy.empty_pool(2, 1)
     pool = eqx.tree_at(lambda p: p.log_mass, pool, jnp.array([-1.0, -2.0]))
+    claim = Claim((GasAbove(0, 0.0),))
     forecast, verdict = toy.jit.planning_beliefs(
-        frozen, now, roles, models, toy.star, pool0, pool, jnp.zeros(1), **toy.ungated
+        frozen, now, roles, models, toy.star, pool0, pool, claim, **toy.ungated
     )
     assert_allclose(forecast.pool.log_mass, [-np.inf])  # the pool at time zero
     assert_allclose(verdict.pool.log_mass, [-2.0])  # the verdict's row of the pool now
 
-    claim = Claim((GasAbove(0, 0.0),))
     p_water = float(norm.cdf(0.8 / np.sqrt(0.2)))
-    for b, mean in ((forecast, 0.0), (verdict, 0.8)):  # split into point draws
-        assert_allclose(b.atoms.x_var, 0.0)
-        w = np.asarray(toy.jit.weights(b))[
-            0
-        ]  # the mean to quadrature error; q below exact
-        assert_allclose(w @ np.asarray(b.atoms.x_mean)[:, 0, 0], mean, atol=5e-3)
+    for b, mean in ((forecast, 0.0), (verdict, 0.8)):  # on quadrature nodes
+        nodes = b.atoms.nodes
+        omega = np.asarray(nodes.weights)[0, 0, 0]
+        # the mean to quadrature error; q below exact
+        assert_allclose(omega @ np.asarray(nodes.x)[0, 0, 0], mean, atol=5e-3)
     assert_allclose(q(forecast, claim, toy.star, PLANET), [0.5], rtol=1e-12)
     assert_allclose(q(verdict, claim, toy.star, PLANET), [p_water], rtol=1e-12)
     expected = 0.5 * np.log(1.0 - p_water) + 0.5 * np.log(p_water)
@@ -449,8 +450,8 @@ GAS_BLOCKS = ((0.0, 1.0), (0.8, 0.2), (0.3, 0.1), (0.8, 0.2))
 
 
 @eqx.filter_jit
-@eqx.filter_vmap(in_axes=(0, None, 0, None, None))
-def _gas_planning_beliefs(refit, log, time_d, roles, pool):
+@eqx.filter_vmap(in_axes=(0, None, 0, None, None, None))
+def _gas_planning_beliefs(refit, log, time_d, roles, pool, claim):
     models = (GaussianGasModel(snr_one_day=[5.0]),)
     now = replay(refit, log, models, (), time_d)
     return planning_beliefs(
@@ -461,7 +462,7 @@ def _gas_planning_beliefs(refit, log, time_d, roles, pool):
         (),
         pool,
         pool,
-        jnp.zeros(1),
+        claim,
         min_n_eff=0.0,
         max_khat=jnp.inf,
     )
@@ -504,10 +505,10 @@ def test_a_binned_gas_reading_is_valued_exactly(toy):
     )
     prior = toy.GasPrior("toy", n_gas=1)
     times = jnp.asarray([t for _, _, t, _ in GAS_STARS])
-    beliefs = _gas_planning_beliefs(
-        refits, log, times, Roles(prior, toy.stack(prior)), toy.empty_pool(2, 1)
-    )
     claim = Claim((GasAbove(0, 0.0),))
+    beliefs = _gas_planning_beliefs(
+        refits, log, times, Roles(prior, toy.stack(prior)), toy.empty_pool(2, 1), claim
+    )
     models = (GaussianGasModel(snr_one_day=[5.0]),)
     exposure_d = np.array([[e] for _, _, _, e in GAS_STARS])
     menu = _menu(exposure_d, (0,))
@@ -527,6 +528,124 @@ def test_a_binned_gas_reading_is_valued_exactly(toy):
         assert np.all(np.asarray(f.reward[:, 0]) <= bound)
     assert_allclose(_binned_reading_oracle(0.0, 1.0, 0.5, 1)[0], closed, rtol=1e-5)
     assert round(float(_binned_reading_oracle(0.0, 1.0, 0.5, 1)[1]), 4) == 0.3733
+
+
+def _product_grid(b):
+    """The belief on the product grid of its factors' nodes: one point draw per draw
+    and choice of a node in every factor, weighted by the draw's weight times the
+    chosen nodes' weights. The reference the per-factor nodes stand for.
+    """
+    nodes = jax.tree.map(np.asarray, b.atoms.nodes)
+    n_draw, n_planet, n_gas, n_node = nodes.x.shape
+    n_factor = n_planet * n_gas
+    codes = np.array(list(itertools.product(range(n_node), repeat=n_factor)))
+    factor = np.arange(n_factor)
+    x = nodes.x.reshape(n_draw, n_factor, n_node)[:, factor, codes]  # (A, C, F)
+    omega = nodes.weights.reshape(n_draw, n_factor, n_node)[:, factor, codes]
+    n_sub = codes.shape[0]
+
+    def repeat(leaf):
+        return np.repeat(np.asarray(leaf), n_sub, axis=0)
+
+    cloud = b.atoms.cloud
+    log_w = np.asarray(cloud.log_weights)[:, None] + np.log(omega).sum(-1)
+    cloud = WeightedCloud(
+        jax.tree.map(repeat, cloud.samples),
+        log_w.reshape(-1),
+        repeat(cloud.log_target),
+        cloud.log_evidence,
+        cloud.prior,
+    )
+    x = x.reshape(n_draw * n_sub, n_planet, n_gas)
+    atoms = Atoms(cloud, x, np.zeros_like(x), repeat(b.atoms.exists))
+    return Belief(
+        atoms,
+        np.repeat(b.log_prior_ratio, n_sub, axis=-1),
+        np.repeat(b.log_like, n_sub, axis=-1),
+        b.pool,
+    )
+
+
+def _two_planet_two_gas_belief(toy, n_draw, seed=0):
+    """`n_draw` draws of two planets with two uncertain gases each, two roles."""
+    rng = np.random.default_rng(seed)
+    hz = rng.uniform(0.2, 1.0, (n_draw, 2))
+    mean = rng.normal(0.0, 0.7, (n_draw, 2, 2))
+    var = rng.uniform(0.2, 1.5, (n_draw, 2, 2))
+    atoms = toy.atoms(hz, np.ones_like(hz), np.ones(n_draw), n_gas=2)
+    block = (jnp.asarray(mean), jnp.asarray(var))
+    atoms = eqx.tree_at(lambda a: (a.x_mean, a.x_var), atoms, block)
+    log_prior = rng.normal(0.0, 0.5, (2, n_draw))
+    return Belief(atoms, log_prior, np.zeros((2, n_draw)), toy.empty_pool(2, 2))
+
+
+TWO_GASES = (
+    GaussianGasModel(snr_one_day=[3.0, 2.0]),
+    StepReportModel(snr_one_day=[6.0, 6.0]),
+)
+
+
+def test_per_factor_nodes_equal_the_product_grid(toy):
+    """With two planets and two uncertain gases, the per-factor nodes give the
+    frontier's rewards and costs and the claim-bit information of the product grid of
+    the same nodes, to rounding.
+
+    Three draws, four factors of two nodes each (one on each side of the floor), so
+    the product grid holds 3 x 2**4 = 48 point draws; the claim is (HZ, water, oxygen) and the forecast and
+    the verdict differ. Depth 2 on a Gaussian reading of both gases (16 cells) and a
+    step report of both (81 cells, three bins per factor), each follow-up updating the
+    nodes the first outcome moved; the claim-bit information of the Gaussian reading.
+
+    Fails if an outcome updates a factor's nodes without the draw's weight (or the
+    draw's weight without the nodes), mixes the bins of two factors, carries the
+    nodes' weights from one level to the next wrongly, or codes the cells in another
+    order than the model's joint.
+    """
+    claim = Claim((toy.InHz(), GasAbove(0, 0.0), GasAbove(1, 0.0)))
+    b = toy.jit.quadrature_draws(
+        _two_planet_two_gas_belief(toy, 3), claim, 2, TWO_GASES
+    )
+    grid = _product_grid(b)
+    assert grid.atoms.x_mean.shape[0] == 48
+    menu = _menu([[1.0, 1.0]], (0, 1))
+    per_factor, product = (
+        _frontier_of(
+            toy.split(toy.stack(x)), claim, toy.star, LogScore(2), TWO_GASES, menu, 2,
+            lam=0.05,
+        )
+        for x in (b, grid)
+    )  # fmt: skip
+    assert_allclose(per_factor.reward, product.reward, rtol=1e-10)
+    assert_allclose(per_factor.cost_d, product.cost_d, rtol=1e-10)
+    info = [
+        toy.jit.claim_information(
+            *toy.split(x), TWO_GASES[0], Action(0, 0, 1.0), claim, toy.star, PLANET
+        )
+        for x in (b, grid)
+    ]
+    assert_allclose(info[0], info[1], rtol=1e-10)
+
+
+@pytest.mark.medium(reason="the smoke size, 4,000 draws on 16 nodes, depth 2, 3 s")
+def test_two_planets_and_two_gases_plan_at_the_smoke_size(toy):
+    """Two planets with two uncertain gases each, 4,000 draws on 16 nodes per factor:
+    a depth-2 frontier of a Gaussian reading of both gases runs within memory, and
+    reading the gases is worth something.
+
+    The product grid of these nodes would hold 4,000 x 16**4 = 2.6e8 draws per star.
+
+    Fails if the quadrature forms the product grid of the factors' nodes, or if a
+    lookahead level holds every grandchild belief at once (both run out of memory).
+    """
+    claim = Claim((toy.InHz(), GasAbove(0, 0.0), GasAbove(1, 0.0)))
+    big = toy.jit.quadrature_draws(
+        _two_planet_two_gas_belief(toy, 4000), claim, 16, TWO_GASES
+    )
+    f = _frontier_of(
+        toy.split(toy.stack(big)), claim, toy.star, LogScore(2), TWO_GASES,
+        _menu([[1.0, 0.5]], (0, 0)), 2,
+    )  # fmt: skip
+    assert np.all(np.isfinite(f.reward)) and np.all(np.asarray(f.reward) > 0.0)
 
 
 def test_a_spectrum_waits_for_a_detection(toy):

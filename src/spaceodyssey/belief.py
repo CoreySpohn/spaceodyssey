@@ -7,7 +7,6 @@ belief off it under a role set. A planner reads two beliefs, the forecast's and 
 verdict's, each off its own replay (``planning_beliefs``).
 """
 
-import itertools
 import math
 
 import equinox as eqx
@@ -18,15 +17,16 @@ from jax import lax
 from jax.scipy.special import gammainc, ndtr, ndtri
 from jaxtyping import Array, Bool, Float, Int, PyTree
 
-from spaceodyssey._numerics import EXACT, guarded_log, safe_ratio
+from spaceodyssey._numerics import EXACT, safe_ratio
 from spaceodyssey._standin.diagnostics import kish_ess, pareto_khat
-from spaceodyssey.claim import Claim
+from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.roles import Roles
 from spaceodyssey.types import (
     ACCEPTED,
     AbstractObservationModel,
     AbstractRolePrior,
     Atoms,
+    GasNodes,
     ObservationLog,
     Pool,
     Refit,
@@ -719,15 +719,20 @@ def _finalized(
     return atoms, log_like
 
 
-def _floor_nodes(
-    mean: Float[Array, "A F"],
-    var: Float[Array, "A F"],
-    floor: Float[Array, " F"],
-    n: int,
-) -> tuple[Float[Array, "A F n"], Float[Array, "A F n"]]:
-    """Nodes and log weights of each factor ``N(mean, var)`` split at its floor.
+MAX_NODES = 2**22
+"""The most quadrature nodes one belief may carry, ``A K G n`` (``quadrature_draws``):
+about 32 MiB per float64 array, and a planner's cells hold ``M B`` times that."""
 
-    ``n / 2`` Gauss-Legendre nodes on the CDF scale below the floor and ``n / 2``
+
+def _floor_nodes(
+    mean: Float[Array, "*f"],
+    var: Float[Array, "*f"],
+    split: Float[Array, "*f"],
+    n: int,
+) -> tuple[Float[Array, "*f n"], Float[Array, "*f n"]]:
+    """Nodes and weights of each factor ``N(mean, var)`` split at ``split``.
+
+    ``n / 2`` Gauss-Legendre nodes on the CDF scale below the split and ``n / 2``
     above it: on each side the probability ``u`` runs over the side's mass, and the
     node is ``mean + sd Phi^-1(u)``, read from the near tail of each side so that no
     probability is taken as one minus a small number. A point factor (``var = 0``)
@@ -738,95 +743,123 @@ def _floor_nodes(
     fraction, w = (1.0 + t) / 2.0, w / 2.0  # on (0, 1), summing to one
     spread = var > 0
     sd = jnp.sqrt(jnp.where(spread, var, 1.0))
-    z = jnp.where(spread, (floor - mean) / sd, 0.0)
-    nodes, log_w = [], []
+    z = jnp.where(spread, (split - mean) / sd, 0.0)
+    nodes, weights = [], []
     for mass, sign in ((ndtr(z), 1.0), (ndtr(-z), -1.0)):
         live = mass > 0
         u = jnp.where(live, mass, 1.0)[..., None] * fraction
         x = mean[..., None] + sign * sd[..., None] * ndtri(u)
         nodes.append(jnp.where((live & spread)[..., None], x, mean[..., None]))
-        log_w.append(guarded_log(mass[..., None] * w))
-    return jnp.concatenate(nodes, -1), jnp.concatenate(log_w, -1)
+        weights.append(mass[..., None] * w)
+    return jnp.concatenate(nodes, -1), jnp.concatenate(weights, -1)
 
 
-def quadrature_draws(b: Belief, floor: Float[Array, " G"], n: int = 16) -> Belief:
-    """The belief on point draws: each draw's gas block split into quadrature sub-draws.
+def _split_points(
+    atoms: Atoms, claim: Claim, models: tuple[AbstractObservationModel, ...]
+) -> Float[Array, "A K G"]:
+    """Where each factor's quadrature splits: the claim's floor of its gas.
 
-    Every factor of the block, one planet and one gas ``N(m, v)``, is split into ``n``
-    point nodes, ``n / 2`` Gauss-Legendre nodes on the CDF scale below the gas's floor
-    and ``n / 2`` above it, ``x = m + sqrt(v) Phi^-1(u)`` with weight ``omega``; a
-    draw becomes the product grid of its factors' nodes, each sub-draw weighted by its
-    draw's weight times the product of its nodes' ``omega``. The sub-draws keep their
-    draw's state, prior and likelihood rows, and the pool is unchanged. The mass on
-    each side of the floor is exact, so a claim that steps at the floor keeps its
-    probability, and the integrand of every outcome is smooth on each side.
+    A gas the claim does not read splits at the step of a model that steps in the
+    abundance (``gas_step``), or else at each factor's mean. A model's step on a gas
+    the claim reads must equal the claim's floor there (checked; the floor may be
+    traced, so the check runs under ``jit`` too).
+    """
+    floors = {}
+    for conjunct in claim.conjuncts:
+        if isinstance(conjunct, GasAbove):
+            if conjunct.gas in floors:
+                raise ValueError(
+                    f"the claim reads gas {conjunct.gas} twice; one quadrature split "
+                    "per gas cannot serve two floors"
+                )
+            floors[conjunct.gas] = conjunct.floor
+    steps = {m.gas_step for m in models if m.gas_step is not None}
+    if len(steps) > 1:
+        raise ValueError(f"models step at different abundances {sorted(steps)}")
+    step = steps.pop() if steps else None
+    n_gas = atoms.x_mean.shape[-1]
+    if any(not 0 <= g < n_gas for g in floors):
+        raise ValueError(f"the claim reads a gas outside the block of {n_gas}")
+    dtype = atoms.x_mean.dtype
+    columns = []
+    for g in range(n_gas):
+        if g in floors:
+            floor = jnp.asarray(floors[g], dtype)
+            if step is not None:
+                floor = eqx.error_if(
+                    floor,
+                    floor != step,
+                    "a model's step in the abundance differs from the claim's floor",
+                )
+            columns.append(jnp.broadcast_to(floor, atoms.x_mean.shape[:-1]))
+        elif step is not None:
+            columns.append(jnp.full(atoms.x_mean.shape[:-1], step, dtype))
+        else:
+            columns.append(atoms.x_mean[..., g])
+    return jnp.stack(columns, axis=-1)
 
-    On point draws a planner's update by an outcome cell is exact reweighting
-    (``update_by_cell``): the cells of rows are independent given a point draw. The
-    error of the split is that of the quadrature; at 16 nodes a lookahead value of a
-    gas reading is within about half a percent of a dense quadrature.
 
-    The split multiplies the draws by ``n ** (K G)``, the factors of a point block
-    included (their nodes coincide). That serves the toy (one planet, one or two
-    gases). A planner on many factors carries the quadrature per factor instead, node
-    weights of shape ``(A, K, G, n)`` with per-factor cells, to stay linear in ``n``.
+def quadrature_draws(
+    b: Belief,
+    claim: Claim,
+    n: int = 16,
+    models: tuple[AbstractObservationModel, ...] = (),
+) -> Belief:
+    """The belief with each draw's gas block on quadrature nodes, factor by factor.
+
+    Every factor of the block, one planet and one gas ``N(m, v)``, is carried by ``n``
+    point nodes: ``n / 2`` Gauss-Legendre nodes on the CDF scale below the split and
+    ``n / 2`` above it, ``x = m + sqrt(v) Phi^-1(u)`` with weight ``omega``. The split
+    of a gas is the floor of the claim's ``GasAbove`` on it, so a claim that steps at
+    the floor keeps its probability (the mass on each side is exact) and the
+    integrand of every outcome is smooth on each side; a gas the claim does not read
+    splits at the step of a model in ``models`` (``gas_step``), or at the factor's
+    mean. Given a draw the factors are independent, so the nodes are held per factor
+    (``Atoms.nodes``, ``(A, K, G, n)``) and stand for the product grid of ``n ** (K
+    G)`` points without forming it: the draws, their weights and the pool are
+    unchanged, and the cost is linear in ``n K G``. A point factor's nodes coincide.
+
+    On these nodes a planner's update by an outcome cell is exact reweighting of the
+    draws and the nodes (``update_by_cell``): the cells of rows are independent given
+    the points. The error is that of the quadrature: at 16 nodes a lookahead value of
+    a gas reading is within about half a percent of a dense quadrature for a prior
+    probability of the claim between 0.04 and 0.96.
+
+    Every factor is carried, read or not: the cost is linear in the factors, and which
+    gases a model covers is a traced value (its S/N per gas), not a static one.
 
     Args:
         b: the belief, one star (no leading star axis).
-        floor: the abundance at which the claim steps, per gas (the floor of its
-            ``GasAbove``); a model whose cells step in the abundance (a step report)
-            needs the same point. For a gas the claim does not read any value serves.
+        claim: the claim; the floor of each of its ``GasAbove`` conjuncts is the split
+            of that gas, one per gas.
         n: nodes per factor, static: even, or 1 to leave the draws as they are (for
             a belief whose blocks are already point states).
+        models: the models a planner reads, static; one that steps in the abundance
+            (``gas_step``) must step at the claim's floor of every gas the claim
+            reads, and sets the split of the others.
 
     Returns:
-        The belief over ``A n ** (K G)`` point sub-draws, those of draw ``a`` at
-        ``a n ** (K G)`` onward.
+        The belief with ``atoms.nodes`` set.
 
     Raises:
-        ValueError: if ``n`` is neither 1 nor a positive even number.
+        ValueError: if ``n`` is neither 1 nor a positive even number, if the claim
+            reads one gas twice or a gas outside the block, if models step at
+            different abundances, or if the nodes would exceed ``MAX_NODES``.
+        EquinoxRuntimeError: if a model's step differs from the claim's floor.
     """
     if n == 1:
         return b
     if n < 2 or n % 2:
         raise ValueError(f"n is 1 or a positive even number, not {n}")
     atoms = b.atoms
-    n_draw, n_planet, n_gas = atoms.x_mean.shape
-    n_factor = n_planet * n_gas
-    floor = jnp.broadcast_to(jnp.asarray(floor, atoms.x_mean.dtype), (n_planet, n_gas))
-    nodes, log_w = _floor_nodes(
-        atoms.x_mean.reshape(n_draw, n_factor),
-        atoms.x_var.reshape(n_draw, n_factor),
-        floor.reshape(n_factor),
-        n,
-    )
-    codes = np.array(list(itertools.product(range(n), repeat=n_factor)))  # (C, F)
-    factor = np.arange(n_factor)
-    x = nodes[:, factor, codes]  # (A, C, F)
-    sub_log_w = log_w[:, factor, codes].sum(-1)  # (A, C)
-    n_sub = codes.shape[0]
-
-    def repeat(leaf):
-        return jnp.repeat(leaf, n_sub, axis=0)
-
-    cloud = atoms.cloud
-    cloud = eqx.tree_at(
-        lambda c: (c.samples, c.log_weights, c.log_target),
-        cloud,
-        (
-            jax.tree.map(repeat, cloud.samples),
-            (cloud.log_weights[:, None] + sub_log_w).reshape(-1),
-            repeat(cloud.log_target),
-        ),
-    )
-    x = x.reshape(n_draw * n_sub, n_planet, n_gas)
-    split = Atoms(cloud, x, jnp.zeros_like(x), repeat(atoms.exists))
-    return Belief(
-        split,
-        jnp.repeat(b.log_prior_ratio, n_sub, axis=-1),
-        jnp.repeat(b.log_like, n_sub, axis=-1),
-        b.pool,
-    )
+    if atoms.x_mean.size * n > MAX_NODES:
+        raise ValueError(
+            f"{atoms.x_mean.shape} factors of {n} nodes exceed MAX_NODES = {MAX_NODES}"
+        )
+    split = _split_points(atoms, claim, models)
+    nodes = GasNodes(*_floor_nodes(atoms.x_mean, atoms.x_var, split, n))
+    atoms = Atoms(atoms.cloud, atoms.x_mean, atoms.x_var, atoms.exists, nodes)
+    return Belief(atoms, b.log_prior_ratio, b.log_like, b.pool)
 
 
 def select_roles(b: Belief, rows: slice) -> Belief:
@@ -865,7 +898,7 @@ def planning_beliefs(
     star,
     forecast_pool: Pool,
     verdict_pool: Pool,
-    floor: Float[Array, " G"],
+    claim: Claim,
     n: int = 16,
     *,
     min_n_eff,
@@ -882,9 +915,9 @@ def planning_beliefs(
     ``forecast_pool`` and the verdict rows 1 on of ``verdict_pool``, so a frozen
     forecast holds the pool at time zero while real nulls thin the verdict's. Each
     belief carries its own draws, so a gas block the verdict's rows update never
-    reaches the forecast. Each is then split into point sub-draws at the claim's
-    floors (``quadrature_draws``), on which a hypothetical outcome updates the belief
-    exactly by reweighting.
+    reaches the forecast. Each is then put on quadrature nodes split at the claim's
+    floors (``quadrature_draws``, with ``models`` for their steps), on which a
+    hypothetical outcome updates the belief exactly by reweighting.
 
     Args:
         forecast: the forecast's replay.
@@ -895,17 +928,20 @@ def planning_beliefs(
         forecast_pool: the undetected planets at the forecast's replay time, every
             role (a frozen forecast's is the pool at time zero).
         verdict_pool: the undetected planets at the verdict's replay time, every role.
-        floor: the abundance at which the claim steps, per gas (``quadrature_draws``).
+        claim: the claim; its ``GasAbove`` floors split the quadrature
+            (``quadrature_draws``).
         n: quadrature nodes per gas factor, a static planning setting.
         min_n_eff: the least Kish size of a role's weights (``role_belief``).
         max_khat: the largest Pareto shape of a role's reweighted cloud.
 
     Returns:
         The forecast's belief (``R = 1``) and the verdict's (``R`` the members), on
-        point draws; a role the gate refused has NaN rows.
+        quadrature nodes; a role the gate refused has NaN rows.
 
     Raises:
-        ValueError: if a role prior's chart differs from that of the refit's prior.
+        ValueError: if a role prior's chart differs from that of the refit's prior, or
+            the quadrature refuses the claim, the models or the size
+            (``quadrature_draws``).
     """
 
     def read(r, prior, name, stacked, pool):
@@ -914,7 +950,7 @@ def planning_beliefs(
         )
         atoms, log_like = _finalized(r, models, star)
         log_like = jnp.broadcast_to(log_like, ratio.shape)
-        return quadrature_draws(Belief(atoms, ratio, log_like, pool), floor, n)
+        return quadrature_draws(Belief(atoms, ratio, log_like, pool), claim, n, models)
 
     return (
         read(

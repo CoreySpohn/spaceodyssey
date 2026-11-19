@@ -93,6 +93,7 @@ class _Jit:
     replay_belief = staticmethod(eqx.filter_jit(belief.replay_belief))
     role_belief = staticmethod(eqx.filter_jit(belief.role_belief))
     planning_beliefs = staticmethod(eqx.filter_jit(belief.planning_beliefs))
+    quadrature_draws = staticmethod(eqx.filter_jit(belief.quadrature_draws))
     mark_weights = staticmethod(eqx.filter_jit(belief.mark_weights))
     claim_information = staticmethod(eqx.filter_jit(information.claim_information))
     thin = staticmethod(eqx.filter_jit(value.thin))

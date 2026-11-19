@@ -30,7 +30,11 @@ from spaceodyssey._numerics import EXACT, guarded_log, safe_ratio
 from spaceodyssey.belief import Belief, count_pmf, mark_weights, pool_rate
 from spaceodyssey.claim import Claim
 from spaceodyssey.information import (
+    OutcomeCells,
+    cell_probs,
     expected_log_score,
+    mask_cells,
+    outcome_cells,
     outcome_prob,
     require_point_draws,
     update_by_cell,
@@ -348,14 +352,16 @@ def _entries(menu: Menu, mode: int, star_index) -> tuple[list[int], Action]:
 class _Outcomes(eqx.Module):
     """Every menu entry's outcome cells at one star, read once at the root.
 
-    On point draws an outcome changes only the weights and the pool, never the draws
-    or the marks, so each entry's cells and detection probabilities are the same at
-    every node of the lookahead. Cells are padded with zero-probability cells to the
-    widest entry's ``Y``, so the entries of every mode share one shape.
+    On point states an outcome changes only the weights (of the draws and of their gas
+    nodes) and the pool, never a draw, a node or a mark, so each entry's cells per
+    draw and node and its detection probabilities are the same at every node of the
+    lookahead; only their mixture over the node weights moves. Cells are padded with
+    zero-probability cells to the widest entry's ``Y``, and bins with zero-probability
+    bins to the widest ``B``, so the entries of every mode share one shape.
 
     Attributes:
-        forecast: cell probabilities under the forecast's draws, ``(M, A_F, Y)``.
-        verdict: cell probabilities under the verdict's draws, ``(M, A_V, Y)``.
+        forecast: the cells on the forecast's draws, leading axis ``M``.
+        verdict: the cells on the verdict's draws, leading axis ``M``.
         detect_forecast: detection probability of the forecast pool's marks,
             ``(M, Am)``; zero for a model that does not search.
         detect_verdict: the same for the verdict's pool, ``(M, Am)``.
@@ -363,11 +369,26 @@ class _Outcomes(eqx.Module):
             ``stage`` for every cell but cell 0, and 0 there.
     """
 
-    forecast: Float[Array, "M AF Y"]
-    verdict: Float[Array, "M AV Y"]
+    forecast: OutcomeCells
+    verdict: OutcomeCells
     detect_forecast: Float[Array, "M AmF"]
     detect_verdict: Float[Array, "M AmV"]
     reached: Int[Array, "M Y"]
+
+
+def _pad_cells(cells: OutcomeCells, n_cell: int, n_bin: int) -> OutcomeCells:
+    """Cells padded to ``n_cell`` cells (impossible ones) and ``n_bin`` bins."""
+
+    def pad(x, axis, width):
+        widths = [(0, 0)] * x.ndim
+        widths[axis] = (0, width - x.shape[axis])
+        return jnp.pad(x, widths)
+
+    return OutcomeCells(
+        pad(cells.draw, -1, n_cell),
+        pad(cells.node, -1, n_bin),
+        pad(cells.codes, -3, n_cell),
+    )
 
 
 def _outcomes(forecast, verdict, mode_models, menu, star_index) -> _Outcomes:
@@ -380,39 +401,39 @@ def _outcomes(forecast, verdict, mode_models, menu, star_index) -> _Outcomes:
 
         def one(action, model=model):
             return (
-                model.cells(forecast.atoms, action),
-                model.cells(verdict.atoms, action),
+                outcome_cells(forecast, model, action),
+                outcome_cells(verdict, model, action),
                 _detect_prob(model, forecast.pool.marks, action),
                 _detect_prob(model, verdict.pool.marks, action),
             )
 
         cells_f, cells_v, detect_f, detect_v = jax.vmap(one)(actions)
-        n_cell = cells_f.shape[-1]
+        n_cell = cells_f.draw.shape[-1]
         reached = jnp.where(jnp.arange(n_cell) > 0, model.stage, 0)
+        reached = jnp.broadcast_to(reached, (len(entries), n_cell))
         order += entries
-        parts.append((cells_f, cells_v, detect_f, detect_v, reached, n_cell))
-    width = max(part[-1] for part in parts)
-
-    def pad(x):
-        return jnp.pad(x, [(0, 0)] * (x.ndim - 1) + [(0, width - x.shape[-1])])
-
+        parts.append((cells_f, cells_v, detect_f, detect_v, reached))
+    n_cell = max(part[0].draw.shape[-1] for part in parts)
+    n_bin = max(part[0].node.shape[-1] for part in parts)
     back = jnp.asarray(sorted(range(len(order)), key=order.__getitem__))
-    cells_f, cells_v, detect_f, detect_v, reached = (
-        jnp.concatenate(column)[back]
-        for column in zip(
-            *[
-                (pad(f), pad(v), df, dv, pad(jnp.broadcast_to(d, (f.shape[0], n))))
-                for f, v, df, dv, d, n in parts
-            ],
-            strict=True,
+
+    def column(i, pad=lambda x: x):
+        return jax.tree.map(
+            lambda *x: jnp.concatenate(x)[back], *[pad(part[i]) for part in parts]
         )
-    )
-    return _Outcomes(cells_f, cells_v, detect_f, detect_v, reached)
+
+    def cells(i):
+        return column(i, lambda c: _pad_cells(c, n_cell, n_bin))
+
+    def reach(x):
+        return jnp.pad(x, [(0, 0), (0, n_cell - x.shape[-1])])
+
+    return _Outcomes(cells(0), cells(1), column(2), column(3), column(4, reach))
 
 
-def _after(b: Belief, pool: Pool, cell_prob: Float[Array, " A"]) -> Belief:
+def _after(b: Belief, pool: Pool, cells: OutcomeCells, cell) -> Belief:
     """A belief after a hypothetical outcome: its pool thinned, its weights updated."""
-    return update_by_cell(eqx.tree_at(lambda x: x.pool, b, pool), cell_prob)
+    return update_by_cell(eqx.tree_at(lambda x: x.pool, b, pool), cells, cell)
 
 
 def _charge(plan, stage) -> Float[Array, " M"]:
@@ -441,38 +462,82 @@ def _worth(node, plan, depth: int) -> Float[Array, ""]:
 def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
     """``E_F[W_depth(node after m)]`` for each entry ``m``, over the forecast's cells.
 
-    The cells are the root's (``_Outcomes``): on point draws an outcome changes only
-    the weights and the pool. After entry ``m`` with outcome in cell ``y`` each belief
-    is reweighted by its draws' probability of the cell (``update_by_cell``) and its
-    pool is thinned by the entry's detection probability in every cell; the star
-    moves to the higher of its stage and the stage the cell reaches. Every entry
-    and cell is one body under ``vmap``, so a level of the lookahead traces once. A
-    cell the forecast gives no mass (a padded cell among them) adds nothing; a
-    refused forecast (a NaN row) makes every entry NaN, never zero.
+    The cells per draw and node are the root's (``_Outcomes``); their mixture over the
+    node weights is read at each node. After entry ``m`` with outcome in cell ``y``
+    each belief is reweighted by its draws' and nodes' probability of the cell
+    (``update_by_cell``) and its pool is thinned by the entry's detection probability
+    in every cell; the star moves to the higher of its stage and the stage the cell
+    reaches. Every entry and cell is one body, so a level of the lookahead traces
+    once: under ``vmap`` at the last level, and as a loop (``lax.map``) above it, so
+    the beliefs held at once are one node's children, not the whole level, and memory
+    stays at ``M Y`` beliefs whatever the depth. A cell the forecast gives no mass (a
+    padded cell among them) adds nothing; a refused forecast (a NaN row) makes every
+    entry NaN, never zero.
     """
     forecast, verdict, stage = node
 
     def entry(cells_f, cells_v, detect_f, detect_v, reached):
-        p_cell = outcome_prob(forecast, cells_f)[0]  # (Y,), the forecast's
+        p_cell = outcome_prob(forecast, cell_probs(forecast, cells_f))[0]  # (Y,)
         seen = ~(p_cell <= 0)  # a refused forecast (NaN) reads NaN, not zero
         pool_f, pool_v = thin(forecast.pool, detect_f), thin(verdict.pool, detect_v)
+        safe_f, safe_v = mask_cells(cells_f, seen), mask_cells(cells_v, seen)
 
-        def worth_after(cf, cv, reached_y):
+        def worth_after(cell, reached_y):
             after = (
-                _after(forecast, pool_f, cf),
-                _after(verdict, pool_v, cv),
+                _after(forecast, pool_f, safe_f, cell),
+                _after(verdict, pool_v, safe_v, cell),
                 jnp.maximum(stage, reached_y),
             )
             return _worth(after, plan, depth)
 
-        safe_f, safe_v = (jnp.where(seen, c, 1.0) for c in (cells_f, cells_v))
-        worth = jax.vmap(worth_after, in_axes=(1, 1, 0))(safe_f, safe_v, reached)
+        worth = each(
+            worth_after, jnp.arange(p_cell.shape[0]), reached, batch_size=batch
+        )
         return jnp.sum(jnp.where(seen, p_cell * worth, 0.0))
 
     o = plan.outcomes
-    return jax.vmap(entry)(
-        o.forecast, o.verdict, o.detect_forecast, o.detect_verdict, o.reached
+    batch = _batch(node, o, depth)
+
+    def each(fn, *xs, batch_size):
+        if batch_size is None:
+            return jax.vmap(fn)(*xs)
+        return jax.lax.map(lambda x: fn(*x), xs, batch_size=batch_size)
+
+    return each(
+        entry,
+        o.forecast,
+        o.verdict,
+        o.detect_forecast,
+        o.detect_verdict,
+        o.reached,
+        batch_size=None if batch is None else 1,
     )
+
+
+_LEVEL_ELEMENTS = 2**25
+"""Most belief elements one level of the lookahead holds at once (about 256 MiB of
+float64 per array); above it the levels over the last are loops (``_batch``)."""
+
+
+def _batch(node, outcomes: _Outcomes, depth: int) -> int | None:
+    """How many cells of a node a level above the last evaluates at once.
+
+    None (all of them, under ``vmap``) at the last level, and wherever the whole
+    level's children fit ``_LEVEL_ELEMENTS``; otherwise the entries run one at a time
+    and the cells in batches that fit. Static: read from shapes.
+    """
+    if depth == 0:
+        return None
+    n_entry, n_cell = outcomes.reached.shape
+    fan = n_entry * n_cell  # children of one node
+    child = sum(
+        (b.atoms.x_mean.size if b.atoms.nodes is None else b.atoms.nodes.x.size)
+        + b.log_like.size
+        for b in node[:2]
+    )
+    if fan * fan * child <= _LEVEL_ELEMENTS:
+        return None
+    return max(1, _LEVEL_ELEMENTS // (fan * child))
 
 
 class _Plan(eqx.Module):
@@ -536,11 +601,13 @@ def frontier(
 
     This is the generic bounded recursion, the reference: it evaluates
     ``(M Y) ** depth`` hypothetical belief pairs per star, so it serves small menus and
-    shallow depths. The beliefs hold point draws (``planning_beliefs`` splits an
-    uncertain gas block into quadrature sub-draws, ``quadrature_draws``); given a point
-    draw the outcomes of rows are independent, so every entry's cells are read once at
-    the root and a hypothetical outcome updates a belief exactly by reweighting. A
-    belief with an uncertain block is refused (``require_point_draws``).
+    shallow depths. The beliefs hold point states (``planning_beliefs`` puts an
+    uncertain gas block on quadrature nodes per factor, ``quadrature_draws``); given a
+    point the outcomes of rows are independent, so every entry's cells per draw and
+    node are read once at the root and a hypothetical outcome updates a belief exactly
+    by reweighting its draws and nodes (``update_by_cell``), at a cost linear in the
+    nodes per factor. A belief with an uncertain block not on nodes is refused
+    (``require_point_draws``).
 
     A limit of the hypothetical update: a planet a hypothetical search finds is not
     spawned as a track (that takes a refit), so it leaves the count; value a search

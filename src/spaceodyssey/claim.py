@@ -33,7 +33,8 @@ class GasAbove(AbstractConjunct):
     The abundance of each draw and planet is Gaussian, so the probability is
     ``Phi((x_mean - floor) / sqrt(x_var))``. A point state (``x_var = 0``) gives the
     strict indicator ``x_mean > floor``: 0 at ``x_mean == floor``, where the limit
-    ``x_var -> 0`` is 0.5.
+    ``x_var -> 0`` is 0.5. A block on quadrature nodes (``Atoms.nodes``) gives the
+    weight of the nodes above the floor.
 
     Attributes:
         gas: index of the gas in the gas block, static.
@@ -45,6 +46,10 @@ class GasAbove(AbstractConjunct):
 
     def prob(self, atoms, star):
         """Probability of exceeding the floor; the indicator for a point state."""
+        if atoms.nodes is not None:  # static: the block is its nodes
+            above = atoms.nodes.x[:, :, self.gas] > self.floor
+            weight = atoms.nodes.weights[:, :, self.gas]
+            return jnp.sum(jnp.where(above, weight, 0.0), axis=-1)
         mean = atoms.x_mean[:, :, self.gas]
         var = atoms.x_var[:, :, self.gas]
         spread = var > 0

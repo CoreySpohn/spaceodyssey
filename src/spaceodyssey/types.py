@@ -8,6 +8,7 @@ the atoms of a pool.
 
 import abc
 from collections.abc import Callable
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -123,12 +124,38 @@ class WeightedCloud(eqx.Module):
             )
 
 
+class GasNodes(eqx.Module):
+    """Quadrature nodes of a gas block: each factor a weighted set of point abundances.
+
+    A factor is one planet and one gas of one draw. Given the draw the factors are
+    independent, so each carries its own nodes, and the block is their product without
+    ever forming it: ``n`` nodes per factor stand for ``n ** (K G)`` points of the
+    block. A planner's hypothetical outcome reweights the nodes of each factor it reads
+    (``update_by_cell``).
+
+    The weights are held linear, not as logs: a planner reweights and sums them at
+    every node of its lookahead, and the sums need no exponential.
+
+    Attributes:
+        x: the abundance at each node, shape ``(A, K, G, n)``.
+        weights: the weight of each node, normalized per factor (each factor's weights
+            sum to one), shape ``(A, K, G, n)``.
+    """
+
+    x: Float[Array, "A K G n"] = eqx.field(converter=jnp.asarray)
+    weights: Float[Array, "A K G n"] = eqx.field(converter=jnp.asarray)
+
+
 class Atoms[StateT](eqx.Module):
     """A weighted cloud with its gas block.
 
     ``cloud.samples`` carries the state of type ``StateT``. The gas block holds, per
     draw, planet and gas, a Gaussian over the abundance: ``x_mean`` and ``x_var`` (zero
-    variance is a point state).
+    variance is a point state). A planner's draws may carry the block on quadrature
+    nodes instead (``nodes``, set by ``quadrature_draws``); every reader of the gas
+    block then reads the nodes (``GasAbove`` does; a model's cells are read at each
+    node through ``gas_cells``), and ``x_mean`` and ``x_var`` keep the block the nodes
+    were built from.
 
     ``K`` is the number of planets one draw can hold; a draw with fewer is padded, and
     ``exists`` marks its real slots. A slot that does not exist is claim-false whatever
@@ -142,12 +169,15 @@ class Atoms[StateT](eqx.Module):
         x_mean: mean abundance, shape ``(A, K, G)``.
         x_var: abundance variance, shape ``(A, K, G)``, zero for a point state.
         exists: whether each planet slot of each draw holds a planet, shape ``(A, K)``.
+        nodes: the gas block on quadrature nodes, or None (the block is ``x_mean`` and
+            ``x_var``).
     """
 
     cloud: WeightedCloud
     x_mean: Float[Array, "A K G"] = eqx.field(converter=jnp.asarray)
     x_var: Float[Array, "A K G"] = eqx.field(converter=jnp.asarray)
     exists: Bool[Array, "A K"] = eqx.field(converter=jnp.asarray)
+    nodes: GasNodes | None = None
 
 
 def as_index(x) -> Int[Array, "..."]:
@@ -399,10 +429,15 @@ class AbstractObservationModel(eqx.Module):
     difference from a data-bearing likelihood term: the log is a fixed-capacity buffer
     of payloads per model, scored by one commutative sum per model.
 
-    A planner reads cells on point draws only (``x_var = 0``; ``quadrature_draws``
-    splits an uncertain gas block into point sub-draws first). Given a point draw the
-    cells of every row are independent, so the probability of a cell under each draw
-    is the exact update of the weights by that outcome and no payload is needed.
+    A planner reads cells on point states only: a draw's gas block is a point
+    (``x_var = 0``) or carried on quadrature nodes (``quadrature_draws``), each node a
+    point. Given a point the cells of every row are independent, so the probability of
+    a cell is the exact update by that outcome and no payload is needed. A model whose
+    cells read the gas block says so through ``gas_cells``: each factor's (one planet,
+    one gas) probability of each of its bins, read at each node, with ``cells`` their
+    joint; the planner then updates each factor's nodes by its own bin, which keeps the
+    cost linear in the nodes per factor. A model whose cells read no gas (a search)
+    returns None there and is read through ``cells`` alone.
 
     A row is scored through additive sufficient statistics. ``stats`` maps one row to
     per-draw statistics; the statistics of a model's rows are summed (leaf by leaf, in
@@ -435,15 +470,22 @@ class AbstractObservationModel(eqx.Module):
     spectrum needs a detection), so stages are ordered and a star's stage only rises.
     A model whose outcomes open nothing reaches stage 0.
 
+    A model whose cells step in the abundance (a one-bit report of a gas above its
+    floor) declares the step, ``gas_step``, so the quadrature splits the block there
+    (``quadrature_draws``); a model whose cells are smooth in it leaves it None.
+
     Attributes:
         searches: whether the model detects planets, a class constant every concrete
             model sets.
         stage: the stage a positive outcome reaches, a class constant every concrete
             model sets.
+        gas_step: the abundance at which the cells step, a class constant; None (the
+            default) for cells smooth in the abundance or that do not read it.
     """
 
     searches: eqx.AbstractClassVar[bool]
     stage: eqx.AbstractClassVar[int]
+    gas_step: ClassVar[float | None] = None
 
     @abc.abstractmethod
     def sample(self, key: PRNGKeyArray, atoms: Atoms, action: Action) -> PyTree:
@@ -503,6 +545,25 @@ class AbstractObservationModel(eqx.Module):
         Returns:
             Cell probabilities of shape ``(A, Y)``; each row sums to one.
         """
+
+    def gas_cells(self, atoms: Atoms, action: Action) -> Float[Array, "A K G B"] | None:
+        """Each gas factor's probability of each of its bins, on point gas blocks.
+
+        A model whose cells read the gas block returns them, and its ``cells`` is
+        their joint: the probability of cell ``y`` is the product over the factors
+        (planets, then gases, flattened) of each factor's probability of its bin, the
+        cell index mixed radix in the bins, the first factor most significant. The
+        default, None, is a model whose cells read no gas.
+
+        Args:
+            atoms: the draws, point gas blocks.
+            action: the action.
+
+        Returns:
+            Bin probabilities of shape ``(A, K, G, B)``, each factor's summing to one;
+            or None.
+        """
+        return None
 
 
 def row_log_like(

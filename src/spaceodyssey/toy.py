@@ -177,8 +177,8 @@ class GaussianGasModel(AbstractObservationModel):
         n_planet, n_gas = atoms.x_mean.shape[-2:]
         return (self.edges.shape[0] + 1) ** (n_planet * n_gas)
 
-    def cells(self, atoms, action):
-        """Closed form: each bin is a difference of normal CDFs of the reading."""
+    def gas_cells(self, atoms, action):
+        """Each reading's bins, differences of normal CDFs; one for an uncovered gas."""
         snr = jnp.broadcast_to(_snr(self.snr_one_day, action), atoms.x_mean.shape)
         covered = (snr > 0)[..., None]
         sd = jnp.sqrt(atoms.x_var + self._noise_var(snr))
@@ -188,8 +188,11 @@ class GaussianGasModel(AbstractObservationModel):
             [jnp.zeros_like(cdf[..., :1]), cdf, jnp.ones_like(cdf[..., :1])], axis=-1
         )
         n_bin = self.edges.shape[0] + 1
-        factors = jnp.where(covered, jnp.diff(cdf, axis=-1), jnp.eye(n_bin)[0])
-        return _joint(factors)
+        return jnp.where(covered, jnp.diff(cdf, axis=-1), jnp.eye(n_bin)[0])
+
+    def cells(self, atoms, action):
+        """Closed form: the joint of the readings' bins (``gas_cells``)."""
+        return _joint(self.gas_cells(atoms, action))
 
 
 class StepReportModel(AbstractObservationModel):
@@ -219,6 +222,7 @@ class StepReportModel(AbstractObservationModel):
 
     searches: ClassVar[bool] = False
     stage: ClassVar[int] = 0
+    gas_step: ClassVar[float | None] = GAS_FLOOR  # the bit steps at the floor
 
     snr_one_day: Float[Array, " G"] = eqx.field(converter=jnp.asarray)
 
@@ -280,11 +284,15 @@ class StepReportModel(AbstractObservationModel):
         n_planet, n_gas = atoms.x_mean.shape[-2:]
         return 3 ** (n_planet * n_gas)
 
-    def cells(self, atoms, action):
-        """Closed form: the bit follows the probability of the gas above its floor."""
+    def gas_cells(self, atoms, action):
+        """Each gas's report: silent below the gate, else the bit above the floor."""
         self._check_point(atoms)
         snr = jnp.broadcast_to(_snr(self.snr_one_day, action), atoms.x_mean.shape)
         p = self._p_above(atoms, ())
         reported = jnp.stack([jnp.zeros_like(p), 1.0 - p, p], axis=-1)
         silent = jnp.eye(3)[0]
-        return _joint(jnp.where((snr >= STEP_GATE_SNR)[..., None], reported, silent))
+        return jnp.where((snr >= STEP_GATE_SNR)[..., None], reported, silent)
+
+    def cells(self, atoms, action):
+        """Closed form: the joint of the reports (``gas_cells``)."""
+        return _joint(self.gas_cells(atoms, action))

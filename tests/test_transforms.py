@@ -32,6 +32,7 @@ from spaceodyssey.belief import (
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.design import Mode, Resources
 from spaceodyssey.information import (
+    cell_probs,
     certify,
     chain_gain,
     claim_information,
@@ -40,6 +41,8 @@ from spaceodyssey.information import (
     expected_log_score,
     information,
     log_score,
+    mask_cells,
+    outcome_cells,
     outcome_prob,
     refit_trigger,
     update_by_cell,
@@ -141,12 +144,17 @@ def _cases(toy):
     cells = [model.cells(b.atoms, a) for b, a in zip((b0, b1), actions, strict=True)]
     detect = (jnp.array([0.3, 0.9, 0.1]), jnp.array([0.6, 0.2, 0.5]))
 
-    # The planner reads point draws: the frontier, the cell update and the claim-bit
-    # information run on the blocks' means, and the split is its own case.
+    # The planner reads point states: the frontier runs on the blocks' means, the cell
+    # update and the claim-bit information on quadrature nodes, and the split is its
+    # own case.
     point = [
         eqx.tree_at(lambda b: b.atoms.x_var, b, 0.0 * b.atoms.x_var) for b in (b0, b1)
     ]
-    floor = jnp.zeros(1)
+    on_nodes = [quadrature_draws(b, claim, 4) for b in (b0, b1)]
+    node_cells = [
+        outcome_cells(b, model, a) for b, a in zip(on_nodes, actions, strict=True)
+    ]
+    keep = (jnp.arange(9) % 2 == 0, jnp.arange(9) < 5)
 
     # Replays: two logs of one structure, a gas row per slot, released over time.
     gas = (model,)
@@ -178,7 +186,14 @@ def _cases(toy):
         return a[1].rows.payload[0]["reading"]
 
     def belief_scalar(b):
-        return uneven(weights(b)) + uneven(b.atoms.x_mean) + uneven(b.atoms.x_var)
+        out = uneven(weights(b)) + uneven(b.atoms.x_mean) + uneven(b.atoms.x_var)
+        if b.atoms.nodes is not None:
+            nodes = b.atoms.nodes
+            out = out + uneven(nodes.x) + uneven(nodes.weights)
+        return out
+
+    def cells_scalar(c):
+        return uneven(c.draw) + uneven(c.node)
 
     # One star per world for `frontier`, valued by `Count` on a search.
     search = (toy.Search(hit=0.6, other=0.1),)
@@ -231,7 +246,7 @@ def _cases(toy):
         ),
         "planning_beliefs": (
             lambda frozen, now: planning_beliefs(
-                frozen, now, roles, gas, star, b0.pool, b1.pool, floor, 4, **toy.ungated
+                frozen, now, roles, gas, star, b0.pool, b1.pool, claim, 4, **toy.ungated
             ),
             [(early[0], full[0]), (early[1], full[1])],
             lambda a: a[1].stats[0]["weighted_sum"],
@@ -247,7 +262,7 @@ def _cases(toy):
             None,
         ),
         "quadrature_draws": (
-            lambda b: quadrature_draws(b, floor, 4),
+            lambda b: quadrature_draws(b, claim, 4),
             [(b0,), (b1,)],
             lambda a: a[0].atoms.x_mean,
             belief_scalar,
@@ -355,17 +370,38 @@ def _cases(toy):
             lambda a: a[0].log_prior_ratio,
             uneven,
         ),
+        "outcome_cells": (
+            lambda b, a: outcome_cells(b, model, a),
+            [(on_nodes[0], actions[0]), (on_nodes[1], actions[1])],
+            lambda a: a[0].atoms.nodes.x,
+            cells_scalar,
+        ),
+        "cell_probs": (
+            cell_probs,
+            [(on_nodes[0], node_cells[0]), (on_nodes[1], node_cells[1])],
+            lambda a: a[0].atoms.nodes.weights,
+            uneven,
+        ),
+        "mask_cells": (
+            mask_cells,
+            [(node_cells[0], keep[0]), (node_cells[1], keep[1])],
+            lambda a: a[0].node,
+            cells_scalar,
+        ),
         "update_by_cell": (
             update_by_cell,
-            [(point[0], cells[0][:, 1]), (point[1], cells[1][:, 2])],
-            lambda a: a[1],
+            [
+                (on_nodes[0], node_cells[0], jnp.asarray(1)),
+                (on_nodes[1], node_cells[1], jnp.asarray(5)),
+            ],
+            lambda a: a[1].node,
             belief_scalar,
         ),
         "claim_information": (
             lambda b, m, a, k: claim_information(*toy.split(b), m, a, claim, star, k),
             [
-                (point[0], model, actions[0], planets[0]),
-                (point[1], model, actions[1], planets[1]),
+                (on_nodes[0], model, actions[0], planets[0]),
+                (on_nodes[1], model, actions[1], planets[1]),
             ],
             lambda a: a[0].log_prior_ratio,
             uneven,
@@ -407,6 +443,9 @@ CASES = [
     "mark_weights",
     "expected_log_score",
     "outcome_prob",
+    "outcome_cells",
+    "cell_probs",
+    "mask_cells",
     "update_by_cell",
     "claim_information",
     "thin",
