@@ -3,7 +3,7 @@
 A utility scores a belief about one star (``LogScore``, ``Count``). ``frontier`` turns a
 menu of actions into the reward of each: the utility it is expected to add, averaged
 over the outcome cells the forecast expects, with up to ``depth - 1`` further actions at
-the same star after it.
+the same star after it, each charged at the price of time.
 
 The planner prices exposure time at ``lam`` (reward per day). Each star offers a padded
 menu of options, each with a reward and a cost in days, and always the null option
@@ -36,6 +36,10 @@ class Frontier(eqx.Module):
     Menus are padded to a shared ``M`` with ``mask``, so stars and worlds with shorter
     menus reuse the same compiled program. Padded entries are ignored; their reward and
     cost should still be finite. The null option is implied and is not stored.
+
+    ``cost_d`` is the first action's cost alone. A reward that looks past the first
+    action was built at one price of time (``frontier``); the frontier holds it fixed,
+    so the dual and the spend see the price only through ``cost_d``.
 
     Attributes:
         reward: reward of each option, shape ``(S, M)``.
@@ -311,21 +315,22 @@ def _branches(
     return jnp.concatenate(cells)[back], jnp.concatenate(detect)[back]
 
 
-def _worth(b, claim, star, utility, branches, mask, depth: int) -> Float[Array, ""]:
+def _worth(b, claim, star, utility, branches, charge, depth: int) -> Float[Array, ""]:
     """The utility of ``b`` with up to ``depth`` more actions, each chosen to raise it.
 
-    ``W_0 = U`` and ``W_k(b) = max(U(b), max_m E_F[W_{k-1}(b after m)])``: stopping is
-    always an option, so ``W_k`` never falls below ``W_{k-1}``.
+    ``W_0 = U`` and ``W_k(b) = max(U(b), max_m (E_F[W_{k-1}(b after m)] - charge_m))``,
+    with ``charge_m`` the price of entry ``m``'s time (infinite for a masked entry):
+    stopping is always an option, so ``W_k`` never falls below ``W_{k-1}``.
     """
     now = utility(b, claim, star)
     if depth == 0:
         return now
-    later = _expected_after(b, claim, star, utility, branches, mask, depth - 1)
-    return jnp.maximum(now, jnp.max(jnp.where(mask, later, -jnp.inf)))
+    later = _expected_after(b, claim, star, utility, branches, charge, depth - 1)
+    return jnp.maximum(now, jnp.max(later - charge))
 
 
 def _expected_after(
-    b, claim, star, utility, branches, mask, depth: int
+    b, claim, star, utility, branches, charge, depth: int
 ) -> Float[Array, " M"]:
     """``E_F[W_depth(b after m)]`` for each entry ``m``, over the forecast's cells.
 
@@ -338,12 +343,12 @@ def _expected_after(
         p_cell = outcome_prob(b, cells)[0]  # (Y,), the forecast's
         seen = p_cell > 0
         thinned = eqx.tree_at(lambda x: x.pool, b, thin(b.pool, detect))
-        worth = jax.vmap(
-            lambda c: _worth(
-                update_by_cell(thinned, c), claim, star, utility, branches, mask, depth
-            ),
-            in_axes=1,
-        )(jnp.where(seen, cells, 1.0))
+
+        def worth_after(c):
+            after = update_by_cell(thinned, c)
+            return _worth(after, claim, star, utility, branches, charge, depth)
+
+        worth = jax.vmap(worth_after, in_axes=1)(jnp.where(seen, cells, 1.0))
         return jnp.sum(jnp.where(seen, p_cell * worth, 0.0))
 
     return jax.vmap(entry)(*branches)
@@ -356,19 +361,26 @@ def frontier(
     utility: AbstractUtility,
     models: tuple[AbstractObservationModel, ...],
     menu: Menu,
+    lam: Float[Array, ""],
     depth: int,
 ) -> Frontier:
     """The reward and cost of each menu entry at each star.
 
     The reward of entry ``m`` is ``E_F[W_{depth-1}(b after m)] - U(b)``: the utility
     ``U`` it is expected to add, with up to ``depth - 1`` further entries of the same
-    star's menu after it, each chosen on the outcomes so far to raise the utility, or
-    none. The expectation is over the forecast's (row 0) distribution of each outcome
-    cell; an outcome updates every role by ``update_by_cell`` and thins the pool by the
-    entry's detection probability of each mark (``thin``). The cost is the first
-    entry's alone: the later entries are not charged, so a reward at ``depth > 1`` is
-    what the first entry makes possible, not a priced plan. Under ``LogScore`` at depth
-    1 the reward is the verdict gain ``E_F[ln p_gamma(N | Y) - ln p_gamma(N)]``.
+    star's menu after it, each chosen on the outcomes so far to raise the utility net
+    of its time at price ``lam`` (``lam`` times its cost), or none. The expectation is
+    over the forecast's (row 0) distribution of each outcome cell; an outcome updates
+    every role by ``update_by_cell`` and thins the pool by the entry's detection
+    probability of each mark (``thin``; zero for a model that does not search). The
+    first entry's cost is not netted: it stays in the frontier for the dual. Under
+    ``LogScore`` at depth 1 the reward is the verdict gain
+    ``E_F[ln p_gamma(N | Y) - ln p_gamma(N)]``; ``lam`` enters only at ``depth > 1``.
+
+    The price a frontier is built at is not the price the dual then solves for. A
+    planner (``PricePolicy``) passes the last solved price: one step of the fixed point
+    ``lam = solve_price(frontier(..., lam, ...))``, exact at depth 1, where the reward
+    does not depend on ``lam``.
 
     This is the generic bounded recursion, the reference: it evaluates
     ``(M Y) ** depth`` hypothetical beliefs per star, so it serves small menus and
@@ -393,6 +405,8 @@ def frontier(
         utility: the utility.
         models: the model table, static; ``menu.model`` indexes it.
         menu: the menu of each star.
+        lam: the price of the follow-up entries' time, reward per day, a scalar shared
+            by the stars, ``lam >= 0``.
         depth: the number of entries a plan may take at the star, the first one
             included, static, at least 1.
 
@@ -409,7 +423,8 @@ def frontier(
 
     def one_star(b, star, utility, menu):
         branches = _branches(b, models, menu)
-        later = _expected_after(b, claim, star, utility, branches, menu.mask, depth - 1)
+        charge = jnp.where(menu.mask, lam * menu.cost_d, jnp.inf)
+        later = _expected_after(b, claim, star, utility, branches, charge, depth - 1)
         return jnp.where(menu.mask, later - utility(b, claim, star), 0.0)
 
     reward = eqx.filter_vmap(one_star)(belief, star, utility, menu)

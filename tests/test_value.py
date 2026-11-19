@@ -142,9 +142,15 @@ PLANET = jnp.asarray(0)
 
 
 @eqx.filter_jit
-def _frontier_of(belief, claim, star, utility, models, menu, depth):
+def _traced_frontier(belief, claim, star, utility, models, menu, lam, depth):
     traces.append(None)
-    return frontier(belief, claim, star, utility, models, menu, depth)
+    return frontier(belief, claim, star, utility, models, menu, lam, depth)
+
+
+def _frontier_of(belief, claim, star, utility, models, menu, depth, lam=0.0):
+    """`frontier` under one jit, with the price an array so it is traced."""
+    lam = jnp.asarray(lam, float)
+    return _traced_frontier(belief, claim, star, utility, models, menu, lam, depth)
 
 
 def _one(x):
@@ -397,6 +403,34 @@ def test_count_and_thin_by_hand(toy):
         assert_allclose(f.reward[0, 0], found, rtol=1e-12)
 
 
+def test_a_follow_up_is_charged_at_the_price(toy):
+    """A follow-up at depth 2 is worth what it adds less lam times its cost; the first
+    entry's cost stays in the frontier.
+
+    On test 5's star the revisit adds 0.16 planets for one day. At lam = 0 the depth-2
+    reward is test 5's 0.96. At lam = 0.1 the revisit nets 0.16 - 0.1 = 0.06, so the
+    reward is 0.86. At lam = 0.2 it would net -0.04, so the plan stops after the first
+    look and the reward is the depth-1 0.8. The cost is the one day of the first look.
+
+    Fails if a follow-up is not charged (0.96 at every price), if the first entry is
+    charged as well (0.76 at lam = 0.1), if a losing follow-up is forced (0.76 at
+    lam = 0.2), or if the price is read as a Python value (a second price retraces).
+    """
+    pool, claim = _search_pool(toy), Claim((toy.InHz(),))
+    start, count = _one(_search_belief(toy, pool)), Count(_one(pool))
+
+    def reward(lam):
+        f = _frontier_of(start, claim, toy.star, count, SEARCH, LOOK, 2, lam)
+        assert_allclose(f.cost_d, [[1.0]])
+        return f.reward[0, 0]
+
+    free = reward(0.0)
+    before = len(traces)
+    charged = [reward(lam) for lam in (0.1, 0.2)]
+    assert len(traces) == before
+    assert_allclose([free, *charged], [0.96, 0.86, 0.8], rtol=1e-12)
+
+
 def test_a_model_that_does_not_search_leaves_the_pool(toy):
     """Only a searching model thins the pool. A gas reading offered at test 5's star
     (claim-true pool rate 1.0) finds nothing: its completeness is 0 and its `Count`
@@ -424,8 +458,8 @@ def test_a_model_that_does_not_search_leaves_the_pool(toy):
 
 def test_a_second_star_and_world_add_no_traces(toy):
     """`frontier` traces once per structure: two worlds of two stars, with other
-    weights, menu exposures, costs and masks, run one program, and a star's rewards do
-    not depend on the stars stacked beside it.
+    weights, menu exposures, costs, masks and price, run one program, and a star's
+    rewards do not depend on the stars stacked beside it.
 
     Fails if the menu, its mask or a cell count is read as a Python value, if the
     depth or the model table is traced, or if a star's recursion reads another star's
@@ -443,7 +477,9 @@ def test_a_second_star_and_world_add_no_traces(toy):
     second = world((0.4, 0.9), [[1.0, 0.1, 1.0], [2.0] * 3], [[1, 0, 1], [1, 1, 0]])
     f1 = _frontier_of(first[0], claim, toy.star, LogScore(1), SPECTRA, first[1], 2)
     before = len(traces)
-    f2 = _frontier_of(second[0], claim, toy.star, LogScore(1), SPECTRA, second[1], 2)
+    f2 = _frontier_of(
+        second[0], claim, toy.star, LogScore(1), SPECTRA, second[1], 2, lam=0.05
+    )
     assert len(traces) == before
     assert_allclose(f2.cost_d, [[2.0, 0.2, 2.0], [4.0] * 3])
     assert_allclose(f2.reward[0, 1], 0.0)  # masked
