@@ -29,9 +29,11 @@ from spaceodyssey.price import dispatch, solve_price
 from spaceodyssey.roles import Roles
 from spaceodyssey.toy import DetectionModel, GaussianGasModel, StepReportModel
 from spaceodyssey.types import (
+    BERNOULLI,
     Action,
     Atoms,
     ObservationLog,
+    Pool,
     Refit,
     Row,
     WeightedCloud,
@@ -41,6 +43,7 @@ from spaceodyssey.value import (
     Frontier,
     LogScore,
     Menu,
+    found_prob,
     frontier,
     value_and_spend,
 )
@@ -875,6 +878,39 @@ def test_count_and_thin_by_hand(toy):
     for depth, found in ((1, 0.8), (2, 0.96)):
         f = _frontier_of(start, claim, toy.star, Count(), (_search(toy),), LOOK, depth)
         assert_allclose(f.reward[0, 0], found, rtol=1e-12)
+
+
+def test_a_bernoulli_pool_thins_to_its_posterior_and_counts_one_planet(toy):
+    """Test 5's marks and search on a Bernoulli pool, a planet with probability 0.5.
+
+    Role 0: dbar = 0.5, so the search finds the planet with probability 0.5 x 0.5 =
+    0.25 and a miss leaves it present with 0.5 x 0.5 / (1 - 0.25) = 1/3, the marks
+    reweighted to (0.2, 0.8) as under the Poisson law. Role 1: dbar = 0.32, found with
+    0.16, present after a miss with 0.34 / 0.84. The count is one planet or none:
+    claim-true with 0.5 x 0.5 = 0.25 under role 0 (0.1 under role 1) at time zero,
+    1/3 x 0.2 after the miss, and never two.
+
+    Fails if a Bernoulli pool is thinned as a Poisson one (a mass of 0.25 after the
+    miss, not 1/3), if its count is Poisson (mass above one planet), or if the found
+    probability drops the planet's presence or the role's own mark weights.
+    """
+    poisson = toy.pool([1.0, 0.0], [[0.5, 0.5], [0.2, 0.8]], np.log(0.5), n_roles=2)
+    pool = Pool(
+        poisson.marks, poisson.log_prior_ratio, poisson.log_like, poisson.log_mass,
+        BERNOULLI,
+    )  # fmt: skip
+    detect = jnp.array([0.8, 0.2])
+    after = toy.jit.thin(pool, detect)
+    assert_allclose(jnp.exp(after.log_mass), [1 / 3, 0.34 / 0.84], rtol=1e-12)
+    assert_allclose(toy.jit.mark_weights(after)[0], [0.2, 0.8], rtol=1e-12)
+    assert_allclose(eqx.filter_jit(found_prob)(pool, detect), [0.25, 0.16], rtol=1e-12)
+
+    claim = Claim((toy.InHz(),))
+    no_draws = toy.atoms(np.zeros((1, 0)), np.zeros((1, 0)), [1.0])
+    pmf = toy.jit.count_pmf(toy.belief(no_draws, pool, n_roles=2), claim, toy.star, 2)
+    assert_allclose(pmf, [[0.75, 0.25, 0.0], [0.9, 0.1, 0.0]], atol=1e-12)
+    pmf = toy.jit.count_pmf(toy.belief(no_draws, after, n_roles=2), claim, toy.star, 1)
+    assert_allclose(pmf[0], [1 - 0.2 / 3, 0.2 / 3], rtol=1e-12)
 
 
 def test_a_follow_up_is_charged_at_the_price(toy):

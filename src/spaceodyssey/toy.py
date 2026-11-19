@@ -33,7 +33,7 @@ from typing import ClassVar
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jax.scipy.special import logsumexp, ndtr
+from jax.scipy.special import gammainc, gammaln, logsumexp, ndtr
 from jax.scipy.stats import norm
 from jaxtyping import Array, Float, Int
 
@@ -50,6 +50,8 @@ from spaceodyssey.design import Design, Keepout, Mode, Resources
 from spaceodyssey.roles import Roles
 from spaceodyssey.study import Study
 from spaceodyssey.types import (
+    BERNOULLI,
+    POISSON,
     AbstractObservationModel,
     AbstractRefitter,
     AbstractRolePrior,
@@ -520,20 +522,31 @@ def point_atoms(hz, size, x, exists, prior: AbstractRolePrior) -> Atoms:
 class ToyPrior(AbstractRolePrior):
     """A role prior over whole draws of the toy state, each planet a point state.
 
-    Slot ``k`` holds a planet with probability ``p_exist[k]``; a planet is in the
-    habitable zone with probability ``hz_scale`` times the star's ``"p_hz"`` (clipped to
-    ``[0, 1]``), Earth-sized with ``p_size``, and each of its ``n_gas`` gases is
+    Slot 0 holds a planet with probability ``p_exist[0]``. The other slots, the free
+    slots, hold the undetected planets by ``pool_law``: under ``BERNOULLI`` (the
+    default) slot ``k`` holds a planet with probability ``p_exist[k]``,
+    independently, so one free slot is the Bernoulli pool law, at most one planet;
+    under ``POISSON`` the free slots hold ``N`` planets, ``N`` Poisson of mean
+    ``sum(p_exist[1:])`` with the mass at ``N >= K - 1`` lumped at ``K - 1`` (the
+    Poisson pool law truncated at the free slots), in a subset of the free slots drawn
+    uniformly: the slots are exchangeable, so which slot a search detects says nothing
+    about the planets in the others beyond their count. A planet is in the
+    habitable zone with probability ``hz_scale`` times the star's ``"p_hz"`` (clipped
+    to ``[0, 1]``), Earth-sized with ``p_size``, and each of its ``n_gas`` gases is
     ``N(gas_mean_dex, gas_sd_dex**2)``, independently. Draws with fewer slots than
     ``p_exist`` (the marks of a pool, one planet each) read the first slots' terms.
     The star is a pytree holding ``"p_hz"``.
 
     Attributes:
-        p_exist: each slot's probability of holding a planet, shape ``(K,)``.
+        p_exist: each slot's probability of holding a planet, shape ``(K,)``; under
+            ``POISSON`` the free slots' entries sum to the mean count.
         hz_scale: the scale of the star's habitable-zone probability.
         p_size: the probability that a planet is Earth-sized.
         gas_mean_dex: the mean of each gas, dex.
         gas_sd_dex: the spread of each gas, dex.
         n_gas: the number of gases, static.
+        pool_law: the law of the free slots' planets, ``BERNOULLI`` or ``POISSON``
+            (``Pool.law``), static.
     """
 
     p_exist: Float[Array, " K"] = eqx.field(converter=jnp.asarray)
@@ -542,6 +555,12 @@ class ToyPrior(AbstractRolePrior):
     gas_mean_dex: Float[Array, ""] = eqx.field(converter=jnp.asarray)
     gas_sd_dex: Float[Array, ""] = eqx.field(converter=jnp.asarray)
     n_gas: int = eqx.field(static=True)
+    pool_law: str = eqx.field(static=True, default=BERNOULLI)
+
+    def __check_init__(self):
+        """Check the free slots' law."""
+        if self.pool_law not in (BERNOULLI, POISSON):
+            raise ValueError(f"the pool law is {BERNOULLI!r} or {POISSON!r}")
 
     def _p_hz(self, star) -> Float[Array, ""]:
         """The habitable-zone probability at the star."""
@@ -560,7 +579,23 @@ class ToyPrior(AbstractRolePrior):
         slot = jnp.where(
             atoms.exists, guarded_log(p_exist) + planet, guarded_log(1.0 - p_exist)
         )
-        return slot.sum(-1)
+        if self.pool_law == BERNOULLI or n_slot == 1:  # static
+            return slot.sum(-1)
+        # Poisson: the free slots' count, lumped at K - 1, over its equally likely
+        # subsets of the free slots.
+        free = atoms.exists[..., 1:]
+        n_free = n_slot - 1
+        count = jnp.sum(free, axis=-1)
+        mean = jnp.sum(self.p_exist[1:])
+        log_mean = guarded_log(mean)
+        head = -mean + jnp.where(count > 0, count * log_mean, 0.0) - gammaln(count + 1)
+        tail = guarded_log(gammainc(jnp.asarray(n_free, mean.dtype), mean))
+        log_count = jnp.where(count < n_free, head, tail)
+        log_subsets = (
+            gammaln(n_free + 1.0) - gammaln(count + 1.0) - gammaln(n_free - count + 1.0)
+        )
+        planets = jnp.where(free, planet[..., 1:], 0.0).sum(-1)
+        return slot[..., 0] + log_count - log_subsets + planets
 
     def sample(self, key, star):
         """One point draw of the star (``A = 1``)."""
@@ -580,6 +615,14 @@ class ToyPrior(AbstractRolePrior):
         k_exist, k_hz, k_size, k_gas = jax.random.split(key, 4)
         shape = (n_draw, self.p_exist.shape[-1])
         exists = jax.random.bernoulli(k_exist, self.p_exist, shape)
+        if self.pool_law == POISSON and shape[1] > 1:  # static
+            mean = jnp.sum(self.p_exist[1:])
+            count = jax.random.poisson(jax.random.fold_in(k_exist, 1), mean, shape[:1])
+            order = jax.random.uniform(
+                jax.random.fold_in(k_exist, 2), (n_draw, shape[1] - 1)
+            )
+            free = jnp.argsort(jnp.argsort(order, axis=-1), axis=-1) < count[:, None]
+            exists = jnp.concatenate([exists[:, :1], free], axis=-1)
         hz = jax.random.bernoulli(k_hz, self._p_hz(star), shape) & exists
         size = jax.random.bernoulli(k_size, self.p_size, shape) & exists
         x = self.gas_mean_dex + self.gas_sd_dex * jax.random.normal(
@@ -766,15 +809,20 @@ def toy_survey(
     capacity: int,
     n_slot: int = 2,
     n_grant: int = 0,
+    pool_law: str = BERNOULLI,
 ) -> ToySurvey:
     """A toy survey of many stars, built in one place for the tests and the scripts.
 
     Each star has a known planet, the track in slot 0, and ``pool_mass`` undetected
     planets in expectation, which the truth holds in the free slots ``1 .. n_slot -
-    1``, each with probability ``pool_mass / (n_slot - 1)``: the truth's pool count is
-    binomial where the forecast's is Poisson, of the same mean, so every expected count
-    the planner forecasts (a search's finds above all) is the truth's. A planet is in
-    the habitable zone with the star's ``"p_hz"`` (uniform on ``[0.2, 0.6]`` over the
+    1`` by the study's pool law (``pool_law``), the planner's own: under
+    ``BERNOULLI`` (one free slot) a planet with probability ``pool_mass``, at most
+    one; under ``POISSON`` a Poisson count of mean ``pool_mass``, lumped at the
+    ``n_slot - 1`` free slots, in exchangeable slots (``ToyPrior``). The pool's law is
+    the truth's, so the study is well specified: the planner's forecast of the pool is
+    the law the worlds are drawn from, up to the marks' Monte Carlo error and, under
+    ``POISSON``, the lumped mass ``P(N > n_slot - 1)``. A planet is in the habitable
+    zone with the star's ``"p_hz"`` (uniform on ``[0.2, 0.6]`` over the
     stars), Earth-sized half the time, and has one gas ``N(GAS_FLOOR,
     GAS_PRIOR_SD**2)``. That is the truth's prior (``ToyPrior``), from which the worlds
     are drawn. Each star's refit holds ``n_draw`` point draws of equal weight of the
@@ -802,32 +850,39 @@ def toy_survey(
         n_star: the number of stars, ``S``.
         n_draw: the draws of each star's refit, ``A``.
         n_mark: the marks of each star's pool.
-        pool_mass: the expected number of undetected planets at each star, below
-            ``n_slot - 1`` (a free slot certain to hold a planet would leave every
-            refit draw, whose free slots are empty, outside the prior).
+        pool_mass: the expected number of undetected planets at each star; below 1
+            under ``BERNOULLI`` (a free slot certain to hold a planet would leave
+            every refit draw, whose free slots are empty, outside the prior).
         budget_d: the survey's budget, days.
         end_d: the calendar's end, days.
         capacity: the log's row capacity ``W``.
-        n_slot: the planet capacity of a star, ``K``: the track and the free slots.
+        n_slot: the planet capacity of a star, ``K``: the track and the free slots;
+            2 under ``BERNOULLI``.
         n_grant: the number of stars with an archival search.
+        pool_law: the law of the undetected planets, the pool's and the truth's
+            (``Pool.law``), static.
 
     Returns:
         The survey.
 
     Raises:
-        ValueError: if the free slots cannot hold the pool's mean count.
+        ValueError: if the free slots cannot hold the pool's law.
     """
-    if n_slot < 2 or not 0.0 <= pool_mass < n_slot - 1:
+    bernoulli = pool_law == BERNOULLI
+    if (
+        n_slot < 2
+        or pool_mass < 0.0
+        or (bernoulli and not (n_slot == 2 and pool_mass < 1.0))
+    ):
         raise ValueError(
-            f"{n_slot - 1} free slots cannot hold a pool of mass {pool_mass}"
+            f"{n_slot - 1} free slots cannot hold a {pool_law} pool of mass {pool_mass}"
         )
     p_exist = [1.0] + [pool_mass / (n_slot - 1)] * (n_slot - 1)
-    truth = ToyPrior("toy", p_exist, 1.0, 0.5, GAS_FLOOR, GAS_PRIOR_SD, n_gas=1)
+    law = {"n_gas": 1, "pool_law": pool_law}
+    truth = ToyPrior("toy", p_exist, 1.0, 0.5, GAS_FLOOR, GAS_PRIOR_SD, **law)
     members = (
-        ToyPrior("toy", p_exist, 0.8, 0.5, GAS_FLOOR, 0.8 * GAS_PRIOR_SD, n_gas=1),
-        ToyPrior(
-            "toy", p_exist, 1.2, 0.5, GAS_FLOOR + 0.2, 1.2 * GAS_PRIOR_SD, n_gas=1
-        ),
+        ToyPrior("toy", p_exist, 0.8, 0.5, GAS_FLOOR, 0.8 * GAS_PRIOR_SD, **law),
+        ToyPrior("toy", p_exist, 1.2, 0.5, GAS_FLOOR + 0.2, 1.2 * GAS_PRIOR_SD, **law),
     )
     verdict = jax.tree.map(lambda *x: jnp.stack(x), *members)
     roles = Roles(truth, verdict)
@@ -853,6 +908,7 @@ def toy_survey(
             star,
             min_n_eff=0.0,
             max_khat=float("inf"),
+            law=pool_law,
         )
         return refit, pool
 

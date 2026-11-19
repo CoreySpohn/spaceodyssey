@@ -553,7 +553,11 @@ def _star_plans(
     stage = reached_stage(log, policy.models, s, time_d)
     roles, rows = _planner_roles(policy)
     pool = Pool(
-        pool.marks, pool.log_prior_ratio[rows], pool.log_like[rows], pool.log_mass[rows]
+        pool.marks,
+        pool.log_prior_ratio[rows],
+        pool.log_like[rows],
+        pool.log_mass[rows],
+        pool.law,
     )
     forecast_b, verdict_b = planning_beliefs(
         forecast,

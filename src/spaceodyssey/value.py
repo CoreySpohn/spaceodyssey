@@ -28,7 +28,13 @@ import numpy as np
 from jaxtyping import Array, Bool, Float, Int, PyTree
 
 from spaceodyssey._numerics import EXACT, TIE_ULPS, guarded_log, safe_ratio
-from spaceodyssey.belief import Belief, count_pmf, mark_weights, pool_rate
+from spaceodyssey.belief import (
+    Belief,
+    count_pmf,
+    detected_slots,
+    mark_weights,
+    pool_rate,
+)
 from spaceodyssey.claim import Claim
 from spaceodyssey.information import (
     OutcomeCells,
@@ -42,6 +48,7 @@ from spaceodyssey.information import (
 )
 from spaceodyssey.types import (
     ACCEPTED,
+    BERNOULLI,
     AbstractObservationModel,
     Action,
     Atoms,
@@ -49,6 +56,7 @@ from spaceodyssey.types import (
     Pool,
     Refit,
     as_index,
+    planet_tracks,
     real_rows,
 )
 
@@ -213,6 +221,15 @@ class Count(AbstractUtility):
     taken the found planets out of the pool. A utility matters only up to a constant,
     so ``U`` is the number found since any reference time less the rate then; the
     number a run found is ``pool_found``. The verdict is not read.
+
+    Whether planning on ``Count`` can beat a static allocation depends on the pool's
+    law (``Pool.law``). A Poisson pool thinned by a search is Poisson with the thinned
+    rate whatever the search found, so a detection carries no information about the
+    other planets at the star: the value of every later action is a function of the
+    actions taken, not of their outcomes, and the best adaptive policy is the best
+    open-loop one, the static allocation. A Bernoulli pool holds at most one planet: a
+    detection empties it, so the planner stops searching a star whose planet it found
+    and spends the time where its planet is still missing.
     """
 
     def __call__(self, forecast, verdict, claim, star):
@@ -293,32 +310,70 @@ def _offered(menu: Menu, stage: Int[Array, "..."]) -> Bool[Array, "... M"]:
 def thin(pool: Pool, detect_prob: Float[Array, " Am"]) -> Pool:
     """The pool after an observation that would detect each mark with ``detect_prob``.
 
-    The planets an observation misses are the pool thinned by the miss probability
-    ``1 - d`` (a Poisson process thinned independently is a Poisson process). Role
-    ``r``'s expected number is multiplied by ``1 - dbar_r``, with ``dbar_r`` the
-    detection probability averaged under that role's own mark weights, and each mark's
-    likelihood by ``1 - d``. The planets found leave the pool, whatever the observation
-    shows; they become tracks only through a refit.
+    By the pool's law (``Pool.law``). A Poisson pool's planets an observation misses
+    are the pool thinned by the miss probability ``1 - d`` (a Poisson process thinned
+    independently is a Poisson process), whatever the observation found: role ``r``'s
+    expected number is multiplied by ``1 - dbar_r``, with ``dbar_r`` the detection
+    probability averaged under that role's own mark weights. A Bernoulli pool is the
+    pool given that the observation missed its planet: present with probability
+    ``rho (1 - dbar) / (1 - rho dbar)`` (the planets found leave either pool; a
+    Bernoulli pool whose planet was found is empty, which ``replay_pool`` reads off a
+    row and the lookahead takes as an outcome of its own). Either way each mark's
+    likelihood is multiplied by ``1 - d``. The planets found become tracks only
+    through a refit.
 
     A role whose every mark is detected with certainty is left with an empty pool
     (``log_mass = -inf``) and its mark weights as they were, so its rate is zero, not
-    NaN. ``thin(pool, 1 - d)`` is the pool of the planets found.
+    NaN.
 
     Args:
         pool: the undetected planets.
         detect_prob: probability that the observation detects each mark, ``(Am,)``.
 
     Returns:
-        The planets the observation would miss.
+        The planets the observation missed.
     """
     miss = 1.0 - detect_prob
     kept = jnp.matmul(mark_weights(pool), miss, precision=EXACT)
-    emptied = (kept <= 0)[:, None]
-    return Pool(
-        pool.marks,
-        pool.log_prior_ratio,
-        jnp.where(emptied, pool.log_like, pool.log_like + guarded_log(miss)),
-        pool.log_mass + guarded_log(kept),
+    emptied = kept <= 0
+    log_mass = pool.log_mass + guarded_log(kept)
+    if pool.law == BERNOULLI:  # static: the planet's posterior given the miss
+        rho = jnp.exp(pool.log_mass)
+        still = jnp.log1p(-jnp.where(emptied, 0.0, rho * (1.0 - kept)))
+        log_mass = jnp.where(emptied, -jnp.inf, log_mass - still)
+    return eqx.tree_at(
+        lambda p: (p.log_like, p.log_mass),
+        pool,
+        (
+            jnp.where(
+                emptied[:, None], pool.log_like, pool.log_like + guarded_log(miss)
+            ),
+            log_mass,
+        ),
+    )
+
+
+def found_prob(pool: Pool, detect_prob: Float[Array, " Am"]) -> Float[Array, " R"]:
+    """Probability, per role, that an observation finds a Bernoulli pool's planet.
+
+    ``rho dbar``: the planet is present (``rho = exp(log_mass)``) and detected
+    (``dbar``, the detection probability averaged under the role's mark weights).
+
+    Args:
+        pool: the undetected planets, a ``BERNOULLI`` pool.
+        detect_prob: probability that the observation detects each mark, ``(Am,)``.
+
+    Returns:
+        The probability per role, shape ``(R,)``.
+    """
+    found = jnp.matmul(mark_weights(pool), detect_prob, precision=EXACT)
+    return jnp.exp(pool.log_mass) * found
+
+
+def _emptied(pool: Pool) -> Pool:
+    """The pool with no planet left, every role: a Bernoulli pool's planet found."""
+    return eqx.tree_at(
+        lambda p: p.log_mass, pool, jnp.full_like(pool.log_mass, -jnp.inf)
     )
 
 
@@ -364,7 +419,10 @@ def completeness(
         The completeness per role, shape ``(R,)``.
     """
     detect = _detect_prob(model, pool.marks, action)
-    found = pool_rate(thin(pool, 1.0 - detect), claim, star)
+    # The expected number found is linear in the pool, the same under either law: the
+    # Poisson thinning by the detection probability is the pool of the planets found.
+    poisson = Pool(pool.marks, pool.log_prior_ratio, pool.log_like, pool.log_mass)
+    found = pool_rate(thin(poisson, 1.0 - detect), claim, star)
     return safe_ratio(found, pool_rate(pool, claim, star))
 
 
@@ -425,16 +483,19 @@ def replay_pool(
     Every accepted row of a searching model at the refit's star, released by
     ``time_d`` and not among the rows the refit represents (``Refit.row_mask``; the
     refit's pool already carries those), thins the pool by its probability of missing
-    each mark (``thin``), whatever it found: a Poisson process of undetected planets
-    thinned by a search is the planets it missed, a Poisson process whose law does not
-    depend on what was found (the finds become tracks only through a refit). So the
-    pool depends on which searches were taken, never on their payloads, and thinning
-    by several rows is thinning once by the product of their miss probabilities, in
-    any order: this replays the whole log, as ``replay`` does, and a planner calls it
-    afresh at each time rather than absorbing rows into it. Each row is read as its
-    action at its realized start (``Row.time_d``), as it was taken. Rows in flight,
-    refused rows, waits and rows of a model that does not search leave the pool as it
-    is.
+    each mark (``thin``). For a Poisson pool that holds whatever the rows found: a
+    Poisson process of undetected planets thinned by a search is the planets it
+    missed, a Poisson process whose law does not depend on what was found (the finds
+    become tracks only through a refit). So a Poisson pool depends on which searches
+    were taken, never on their payloads. A Bernoulli pool reads them: a row that
+    detected a planet in a slot the refit holds no track for (``detected_slots``) found
+    the pool's one planet, and the pool is empty after it; otherwise the rows missed
+    it. Thinning by several rows is thinning once by the product of their miss
+    probabilities, in any order: this replays the whole log, as ``replay`` does, and a
+    planner calls it afresh at each time rather than absorbing rows into it. Each row
+    is read as its action at its realized start (``Row.time_d``), as it was taken. Rows
+    in flight, refused rows, waits and rows of a model that does not search leave the
+    pool as it is.
 
     Args:
         pool: the refit's pool, every role, as the refit returned it.
@@ -464,7 +525,12 @@ def replay_pool(
         )  # (W, Am)
         keep = (due & (rows.model_slot == slot))[:, None]
         miss = miss * jnp.prod(jnp.where(keep, 1.0 - detect, 1.0), axis=0)
-    return thin(pool, 1.0 - miss)
+    thinned = thin(pool, 1.0 - miss)
+    if pool.law != BERNOULLI:  # static: a Poisson pool reads no payload
+        return thinned
+    n_slot = refit.atoms.exists.shape[-1]
+    found = detected_slots(log, due, models, n_slot) & ~planet_tracks(refit.atoms)
+    return jax.lax.cond(jnp.any(found), lambda: _emptied(thinned), lambda: thinned)
 
 
 def pool_found(
@@ -480,7 +546,10 @@ def pool_found(
 
     The claim-true rate of the refit's pool less that of the pool its searches
     released by ``time_d`` left (``replay_pool``): what ``Count`` values, read off the
-    log. It reads no payload, so it is a forecast of the finds, not the finds; the
+    log. For a Poisson pool it reads no payload; a Bernoulli pool reads whether a
+    search found its planet, and the drop is then its whole rate. Either way it is the
+    forecast's expectation of the claim-true finds given what it reads (its mean over
+    the outcomes is the expected finds of the searches taken), not the finds; the
     planets a run really found are read against the truth (``score.found_count``).
 
     Args:
@@ -595,11 +664,6 @@ def _outcomes(forecast, verdict, mode_models, menu, star_index, time_d) -> _Outc
     return _Outcomes(cells(0), cells(1), column(2), column(3), column(4, reach))
 
 
-def _after(b: Belief, pool: Pool, cells: OutcomeCells, cell) -> Belief:
-    """A belief after a hypothetical outcome: its pool thinned, its weights updated."""
-    return update_by_cell(eqx.tree_at(lambda x: x.pool, b, pool), cells, cell)
-
-
 def _charge(plan, stage) -> Float[Array, " M"]:
     """The price of each entry's time at a node, infinite where it is not offered."""
     offered = _offered(plan.menu, stage)
@@ -648,10 +712,14 @@ def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
     each belief is reweighted by its draws' and nodes' probability of the cell
     (``update_by_cell``) and its pool is thinned by the entry's detection probability
     in every cell; the star moves to the higher of its stage and the stage the cell
-    reaches. Every entry and cell is one body, so a level of the lookahead traces
-    once: under ``vmap`` at the last level, and as a loop (``lax.map``) above it, so
-    the beliefs held at once are one node's children, not the whole level, and memory
-    stays at ``M Y`` beliefs whatever the depth. A cell the forecast gives no mass (a
+    reaches. A Bernoulli pool's planet found is an outcome of its own, independent of
+    the draws' cells: with the forecast's probability that the entry finds it
+    (``found_prob``) both pools are empty, and otherwise both are the pools given the
+    miss (``thin``); a Poisson pool is thinned in every outcome, whatever it found.
+    Every entry and cell is one body, so a level of the lookahead traces once: under
+    ``vmap`` at the last level, and as a loop (``lax.map``) above it, so the beliefs
+    held at once are one node's children, not the whole level, and memory stays at
+    ``M Y`` beliefs whatever the depth. A cell the forecast gives no mass (a
     padded cell among them) adds nothing; a refused forecast (a NaN row) makes every
     entry NaN, never zero.
     """
@@ -662,14 +730,28 @@ def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
         seen = ~(p_cell <= 0)  # a refused forecast (NaN) reads NaN, not zero
         pool_f, pool_v = thin(forecast.pool, detect_f), thin(verdict.pool, detect_v)
         safe_f, safe_v = mask_cells(cells_f, seen), mask_cells(cells_v, seen)
+        bernoulli = forecast.pool.law == BERNOULLI  # static
+        if bernoulli:  # the pool's planet found is an outcome of its own
+            found = found_prob(forecast.pool, detect_f)[0]
+            gone_f, gone_v = _emptied(forecast.pool), _emptied(verdict.pool)
 
         def worth_after(cell, reached_y):
-            after = (
-                _after(forecast, pool_f, safe_f, cell),
-                _after(verdict, pool_v, safe_v, cell),
-                jnp.maximum(stage, reached_y),
-            )
-            return _worth(after, plan, depth)
+            after_f = update_by_cell(forecast, safe_f, cell)
+            after_v = update_by_cell(verdict, safe_v, cell)
+            stage_y = jnp.maximum(stage, reached_y)
+
+            def worth(pool_f, pool_v):
+                node = (
+                    eqx.tree_at(lambda b: b.pool, after_f, pool_f),
+                    eqx.tree_at(lambda b: b.pool, after_v, pool_v),
+                    stage_y,
+                )
+                return _worth(node, plan, depth)
+
+            missed = worth(pool_f, pool_v)
+            if not bernoulli:
+                return missed
+            return (1.0 - found) * missed + found * worth(gone_f, gone_v)
 
         worth = each(
             worth_after, jnp.arange(p_cell.shape[0]), reached, batch_size=batch

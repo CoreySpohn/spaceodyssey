@@ -60,7 +60,9 @@ from spaceodyssey.toy import (
 )
 from spaceodyssey.types import (
     ACCEPTED,
+    BERNOULLI,
     OVER_BUDGET,
+    POISSON,
     WAITED,
     Action,
     Grant,
@@ -70,14 +72,16 @@ from spaceodyssey.types import (
 )
 from spaceodyssey.value import (
     Count,
+    Frontier,
     LogScore,
     Menu,
+    completeness,
     frontier_at_prices,
     pool_found,
     reached_stage,
     replay_pool,
 )
-from spaceodyssey.world import SealedWorld, run_keys
+from spaceodyssey.world import SealedWorld, draw_worlds, run_keys
 
 KEY = jax.random.key(0)
 CAPACITY = 12
@@ -865,6 +869,7 @@ def test_a_star_in_keepout_offers_nothing_and_the_planner_waits_for_it():
     assert list(_column(log, "refusal")) == [ACCEPTED]
 
 
+@pytest.mark.medium(reason="compiles the planner's init and decide over keepout, ~7 s")
 def test_a_star_in_keepout_worth_more_holds_the_budget_until_it_opens():
     """A star in keepout that opens before the calendar's end stays in the price as
     future demand; the planner waits for it rather than spend the budget on the open
@@ -970,3 +975,89 @@ def test_a_star_whose_build_price_the_price_left_is_re_priced():
     assert_allclose(reward[1][:2], 1.6, rtol=1e-12)
     assert_allclose(reward[1][2, 2], 1.0, rtol=1e-12)
     assert_allclose(reward[2], 1.6, rtol=1e-12)
+
+
+@pytest.mark.medium(
+    reason="compiles the planner and runs a calendar of 1,460 rows, 14 s"
+)
+@pytest.mark.parametrize("law", [BERNOULLI, POISSON])
+def test_adaptive_count_beats_static_only_on_a_bernoulli_pool(toy, law):
+    """Under its own pool law, the depth-1 `Count` planner searching in 0.25-day
+    chunks finds more claim-true planets than the static allocation (the time-zero
+    optimum over searches of 0.25 to 4 days) when a star holds at most one undetected
+    planet, about 0.4 of 14.4 here (a Bayes-greedy search gains about 0.5 of 15 on the
+    same stars), and exactly as many under a Poisson pool, whose remainder after a
+    search does not depend on what it found. The finds are each run's expected
+    claim-true finds read off its log (`pool_found`), the static allocation's the
+    value it buys at time zero. One world suffices: a world's expected finds vary
+    by about 0.02 around their mean, and the gain (0.43) sits 0.2 above its lower
+    bound, 1.5 per cent of the static finds; a Poisson run's read no payload at all.
+
+    Fails if the study's pool does not carry the truth's law (a Poisson pool over a
+    Bernoulli truth plans and scores as static), or if a Poisson planner adapts to
+    what its searches found.
+    """
+    n_star, chunk_d = 150, 0.25
+    survey = toy.survey(
+        jax.random.key(7),
+        n_star,
+        16,
+        64,
+        pool_mass=0.5,
+        budget_d=365.0,
+        end_d=1e4,
+        capacity=1500,
+        pool_law=law,
+        n_slot=2 if law == BERNOULLI else 3,
+    )
+    study = survey.study
+    design = eqx.tree_at(lambda d: d.keepout, study.design, no_keepout(n_star))
+    models = design.models
+
+    def planner(exposure_d):
+        n_entry = len(exposure_d)
+        exposure_d = jnp.broadcast_to(jnp.asarray(exposure_d), (n_star, n_entry))
+        menu = Menu(exposure_d, jnp.ones(exposure_d.shape, bool), (0,) * n_entry)
+        settings = PlannerSettings(0.0, math.inf, 1, member=0)
+        return PricePolicy(
+            study.refits, study.pool, study.stars, study.roles, study.claim, Count(),
+            models, mode_models(design), menu, study.refitter, settings,
+        )  # fmt: skip
+
+    end = jnp.asarray(1e9)
+
+    @eqx.filter_jit
+    def expected(log):
+        def one(pool, refit, star):
+            return pool_found(pool, refit, log, models, study.claim, star, end)[0]
+
+        return jnp.sum(jax.vmap(one)(study.pool, study.refits, study.stars))
+
+    key = jax.random.key(2026)
+    world = jax.tree.map(lambda x: x[0], draw_worlds(key, study.truth, study.stars, 1))
+    # The static allocation: each star's expected finds after a search of 0.25 to 4
+    # days, water-filled over the budget at one price.
+    search, grid = mode_models(design)[0], jnp.asarray(chunk_d * np.arange(1, 17))
+
+    @eqx.filter_jit
+    def finds(pool, star, s):
+        def at(t):
+            gain = completeness(pool, search, Action(s, 0, t), study.claim, star)
+            return gain[0] * pool_rate(pool, study.claim, star)[0]
+
+        return jax.vmap(at)(grid)
+
+    reward = jax.vmap(finds)(study.pool, study.stars, jnp.arange(n_star))
+    static_f = Frontier(reward, jnp.broadcast_to(grid, reward.shape), reward > -1)
+    budget_d = jnp.asarray(365.0)
+    lam, _, _ = solve_price(static_f, budget_d)
+    bought, _ = dispatch(lam, static_f, budget_d)
+    static = float(jnp.sum(jnp.where(bought, reward, 0.0)))
+
+    log = execute(key, survey.grant, world, design, planner([chunk_d]))
+    found = float(expected(log))
+    gain = found - static
+    if law == BERNOULLI:
+        assert 0.015 * static < gain < 0.05 * static
+    else:
+        assert_allclose(found, static, rtol=1e-9)

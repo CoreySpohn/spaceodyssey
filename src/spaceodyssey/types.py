@@ -231,6 +231,14 @@ class Refit(eqx.Module):
     star_index: Int[Array, ""] = eqx.field(converter=as_index)
 
 
+POISSON = "poisson"
+"""A pool law: the number of undetected planets is Poisson, mean ``exp(log_mass)``."""
+
+BERNOULLI = "bernoulli"
+"""A pool law: at most one undetected planet, present with probability
+``exp(log_mass)``."""
+
+
 class Pool(eqx.Module):
     """The undetected planets at a star, per role.
 
@@ -239,6 +247,16 @@ class Pool(eqx.Module):
     expectation. A mark's weight under role ``r`` is formed like a draw's,
     ``log_weights + log_prior_ratio[r] + log_like[r]``, normalized over the marks, with
     ``log_prior_ratio`` the role's prior over that of the marks' cloud.
+
+    The law of the number of planets is static (``law``): ``POISSON``, a Poisson count
+    of mean ``exp(log_mass)``, or ``BERNOULLI``, at most one planet, present with
+    probability ``exp(log_mass)`` (so ``log_mass <= 0``). The expected number is
+    ``exp(log_mass)`` either way; the laws differ in what a search's outcome says
+    about the planets left. A Poisson pool thinned by a search is the planets it
+    missed, Poisson with the thinned rate whatever it found, so its update reads no
+    payload; a Bernoulli pool whose planet is found is empty, and one that a search
+    missed holds its planet with the posterior probability
+    ``rho (1 - dbar) / (1 - rho dbar)`` (``value.thin``, ``value.replay_pool``).
 
     A null observation thins the pool: it lowers ``log_mass`` and adds the log
     probability of not being detected to ``log_like``. The pool at time zero (after
@@ -252,19 +270,24 @@ class Pool(eqx.Module):
             mark, shape ``(R, Am)``.
         log_like: log likelihood of each mark under each role, shape ``(R, Am)``.
         log_mass: log expected number of planets, per role, shape ``(R,)``.
+        law: the law of the number of planets, ``POISSON`` (the default) or
+            ``BERNOULLI``, static.
 
     Raises:
-        ValueError: if a mark holds more than one planet, or the fields disagree on
-            the number of roles or marks.
+        ValueError: if a mark holds more than one planet, the fields disagree on the
+            number of roles or marks, or the law is neither.
     """
 
     marks: Atoms
     log_prior_ratio: Float[Array, "R Am"] = eqx.field(converter=jnp.asarray)
     log_like: Float[Array, "R Am"] = eqx.field(converter=jnp.asarray)
     log_mass: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
+    law: str = eqx.field(static=True, default=POISSON)
 
     def __check_init__(self):
-        """Check the static shapes: one planet per mark, one ``R`` and one ``Am``."""
+        """Check the law and the shapes: one planet per mark, one ``R`` and ``Am``."""
+        if self.law not in (POISSON, BERNOULLI):
+            raise ValueError(f"the pool law is {POISSON!r} or {BERNOULLI!r}")
         if self.marks.x_mean.shape[-2] != 1:
             raise ValueError(
                 f"a mark is one planet (K = 1), not K = {self.marks.x_mean.shape[-2]}"

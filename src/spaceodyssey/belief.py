@@ -23,6 +23,8 @@ from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.roles import Roles
 from spaceodyssey.types import (
     ACCEPTED,
+    BERNOULLI,
+    POISSON,
     AbstractObservationModel,
     AbstractRefitter,
     AbstractRolePrior,
@@ -305,6 +307,7 @@ def role_pool(
     *,
     min_n_eff,
     max_khat,
+    law: str = POISSON,
 ) -> Pool:
     """The pool of a role set over the marks of one refit, each role's prior filled in.
 
@@ -323,6 +326,7 @@ def role_pool(
         star: a pytree of scalar leaves describing the star.
         min_n_eff: the least Kish size of a role's mark weights.
         max_khat: the largest Pareto shape of a role's reweighted marks.
+        law: the law of the number of planets (``Pool.law``), static.
 
     Returns:
         The pool, forecast in row 0.
@@ -333,7 +337,7 @@ def role_pool(
     log_mass = jnp.asarray(log_mass)
     empty = jnp.isneginf(log_mass)
     ratio = _role_log_prior_ratio(marks, roles, star, min_n_eff, max_khat, empty)
-    return Pool(marks, ratio, log_like, log_mass)
+    return Pool(marks, ratio, log_like, log_mass, law)
 
 
 def log_weights(b: Belief) -> Float[Array, "R A"]:
@@ -543,11 +547,13 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Array:
     """Distribution of the number of claim-true planets at a star, per role.
 
     The count is the sum of two independent parts: the draws' planets (a
-    Poisson-binomial per draw, mixed with the role weights) and the pool (a Poisson
-    count with mean ``exp(log_mass) * pbar``, where ``pbar`` is the claim probability
-    averaged over the marks with the role's own mark weights). Only slots that exist
-    are counted, among the draws' planets and the marks. Mass at or beyond
-    ``n_max`` is lumped into the last bin, so each axis has ``n_max + 1`` bins.
+    Poisson-binomial per draw, mixed with the role weights) and the pool, by its law
+    (``Pool.law``): a Poisson count with mean ``exp(log_mass) * pbar``, or, for a
+    Bernoulli pool, one planet with probability ``exp(log_mass) * pbar``, where
+    ``pbar`` is the claim probability averaged over the marks with the role's own mark
+    weights. Only slots that exist are counted, among the draws' planets and the
+    marks. Mass at or beyond ``n_max`` is lumped into the last bin, so each axis has
+    ``n_max + 1`` bins.
 
     A conditional claim (``claim.given > 0``, condition ``C``, claim ``Z``, with ``Z``
     holding only where ``C`` does) counts two things: ``N``, the planets for which
@@ -556,7 +562,9 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Array:
     planet ``k`` adds one to ``F`` with probability ``c_k - z_k`` and one to ``N`` with
     ``z_k``, with ``c_k = P(C)`` and ``z_k = P(C, Z)`` on the draw; the pool adds the
     independent Poisson counts ``F ~ Poisson(Lam (cbar - zbar))`` and
-    ``N ~ Poisson(Lam zbar)`` (a Poisson process marked by the claim):
+    ``N ~ Poisson(Lam zbar)`` (a Poisson process marked by the claim); a Bernoulli
+    pool adds one to ``F`` with probability ``rho (cbar - zbar)`` and one to ``N`` with
+    ``rho zbar``:
 
         P(F = f, N = n) = sum_a w_a [PB2_a * Pool2](f, n),
 
@@ -569,7 +577,8 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Array:
     unchanged).
 
     Independence between the pool and the draws' planets is exact only for an
-    unpruned Poisson process.
+    unpruned Poisson process, or for a Bernoulli pool whose planet is apart from the
+    draws' slots.
 
     Args:
         b: the belief.
@@ -590,17 +599,41 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Array:
     if claim.given == 0:
         per_draw = _poisson_binomial(p_draw, n_bins)  # (A, N)
         from_draws = jnp.matmul(weights(b), per_draw, precision=EXACT)  # (R, N)
-        from_pool = jax.vmap(_poisson, in_axes=(0, None))(rates[:, -1], n_bins)
+        if b.pool.law == BERNOULLI:  # static
+            from_pool = _bernoulli(rates[:, -1], n_bins)
+        else:
+            from_pool = jax.vmap(_poisson, in_axes=(0, None))(rates[:, -1], n_bins)
         return _add_counts(from_draws, from_pool)
 
     p_cond = jnp.prod(probs[: claim.given], axis=0)  # (A, K)
     per_draw = _pair_poisson_binomial(p_cond - p_draw, p_draw, n_bins)  # (A, N, N)
     from_draws = jnp.einsum("ra,afn->rfn", weights(b), per_draw, precision=EXACT)
+    failed_rate = rates[:, claim.given] - rates[:, -1]
+    if b.pool.law == BERNOULLI:  # static: one planet, in at most one of the counts
+        p_f, p_n = failed_rate, rates[:, -1]
+        from_pool = jnp.zeros((rates.shape[0], n_bins, n_bins), rates.dtype)
+        if n_bins == 1:
+            from_pool = jnp.ones_like(from_pool)
+        else:
+            from_pool = from_pool.at[:, 0, 0].set(1.0 - p_f - p_n)
+            from_pool = from_pool.at[:, 1, 0].set(p_f).at[:, 0, 1].set(p_n)
+        return _add_pair_counts(from_draws, from_pool)
     poisson = jax.vmap(_poisson, in_axes=(0, None))
-    failed = poisson(rates[:, claim.given] - rates[:, -1], n_bins)  # (R, N)
+    failed = poisson(failed_rate, n_bins)  # (R, N)
     true = poisson(rates[:, -1], n_bins)
     from_pool = failed[:, :, None] * true[:, None, :]
     return _add_pair_counts(from_draws, from_pool)
+
+
+def _bernoulli(p: Float[Array, " R"], n_bins: int) -> Float[Array, "R N"]:
+    """One planet with probability ``p``: the pmf of its count on ``n_bins`` bins.
+
+    With one bin (``n_max = 0``) all mass is in it.
+    """
+    if n_bins == 1:
+        return jnp.ones((p.shape[0], 1), p.dtype)
+    pmf = jnp.zeros((p.shape[0], n_bins), p.dtype)
+    return pmf.at[:, 0].set(1.0 - p).at[:, 1].set(p)
 
 
 def _pair_poisson_binomial(
@@ -1352,6 +1385,7 @@ def _pool_rows(pool: Pool, rows: slice) -> Pool:
         pool.log_prior_ratio[..., rows, :],
         pool.log_like[..., rows, :],
         pool.log_mass[..., rows],
+        pool.law,
     )
 
 
