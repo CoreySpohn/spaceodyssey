@@ -317,6 +317,8 @@ class AbstractObservationModel(eqx.Module):
     def cells(self, atoms: Atoms, action: Action) -> Float[Array, "A Y"]:
         """Probability of each outcome cell under each draw.
 
+        Cell 0 is the null outcome, the row showing nothing of the draw's planets (no
+        detection, no report): on a pool's marks, every other cell is a detection.
         A model without a closed form returns ``binned_cells``.
 
         Args:
