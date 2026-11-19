@@ -6,6 +6,8 @@ which every diagnostic treats as absent) and two roles, and the kernels run thro
 shared compiled wrappers (`toy.jit`), so the file compiles each kernel once.
 """
 
+import math
+
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
@@ -208,6 +210,54 @@ def test_pareto_khat_without_a_tail(toy):
     assert np.all(np.isneginf(khat[:4]))
     assert float(khat[4]) < 0.0
     assert np.all(np.isnan(khat[5:]))
+
+
+def _max_bound(log_w):
+    """The Pareto max bound on the tail index, in NumPy: the largest log weight over
+    the cutoff, over -log(1 - 0.001^(1/n)) for n exceedances not tied with it."""
+    n_tail = math.ceil(min(log_w.size / 5.0, 3.0 * math.sqrt(log_w.size)))
+    desc = np.sort(log_w)[::-1]
+    tail, cut = desc[:n_tail], desc[n_tail]
+    tied = tail - cut <= 64 * np.finfo(float).eps * np.maximum(1.0, np.abs(tail))
+    n_fit = int(np.sum(~tied))
+    return (desc[0] - cut) / -math.log1p(-(1e-3 ** (1.0 / n_fit)))
+
+
+def test_pareto_khat_is_capped_by_the_largest_weight(toy):
+    """Bounded weights whose tail cutoff falls inside a near-plateau pass; a heavy tail
+    behind a plateau is still refused (the photomancy ruling of the bounded-weight
+    k-hat, mirrored here).
+
+    1,000 draws, weights uniform on [0.05, 0.67] with 30 percent on a plateau at 0.67
+    (jitter 1e-4) and 3 percent above it, uniform on [0.67, 1]: Kish 840, max over mean
+    2.2. The 95-draw tail's cutoff sits in the plateau, so its exceedances span
+    decades and the fit alone reads a heavy shape; the largest weight, 1.5 times the
+    cutoff, bounds a Pareto index at (lw_max - lw_cut) / -log(1 - 0.001^(1/95)) =
+    0.148, which k-hat now reports, below the 0.667 gate at 1,000 draws. Pareto
+    weights of index 0.8 floored at their 0.95 quantile (jitter 1e-4) throw a largest
+    weight far above the cutoff: the bound is 1.68 and they stay refused.
+
+    Fails if the cap is missing (the plateau is refused), if it uses the wrong level
+    or exponent (the bound differs), or if it is a mean of the log exceedances, which
+    the plateau dilutes (the heavy tail would pass).
+    """
+    rng = np.random.default_rng(0)
+    w = rng.uniform(0.05, 0.67, size=1000)
+    u = rng.uniform(size=1000)
+    w[u < 0.3] = 0.67 * (1.0 + 1e-4 * rng.standard_normal(np.sum(u < 0.3)))
+    w[u > 0.97] = rng.uniform(0.67, 1.0, size=np.sum(u > 0.97))
+    plateau = np.log(w)
+    rng = np.random.default_rng(0)
+    heavy = -0.8 * np.log(rng.uniform(size=1000))
+    floor = -0.8 * math.log(0.05)
+    low = heavy < floor
+    heavy[low] = floor + np.log1p(1e-4 * np.abs(rng.standard_normal(np.sum(low))))
+
+    khat = toy.jit.pareto_khat(np.stack([plateau, heavy]))
+    assert_allclose(khat[0], _max_bound(plateau), rtol=1e-12)
+    assert_allclose(khat[0], 0.148, atol=1e-3)
+    assert float(khat[0]) <= khat_threshold(1000)
+    assert float(khat[1]) > khat_threshold(1000)
 
 
 def test_constant_weights_certify(toy):

@@ -25,6 +25,10 @@ _PRIOR_SHAPE = 0.5
 # Fewest exceedances a generalized-Pareto fit is attempted on (as in Vehtari et al.).
 _MIN_EXCEEDANCES = 5
 
+# Level of the upper confidence bound that the largest exceedance puts on a Pareto
+# tail index: the bound is below the true index with this probability.
+_MAX_BOUND_LEVEL = 1e-3
+
 # Two log weights within this many float epsilons (relative, floored at one) are tied.
 _TIE_ULPS = 64
 
@@ -108,6 +112,16 @@ def pareto_khat(log_w: Float[Array, " A"]) -> Float[Array, ""]:
     the fit. ``NaN`` means the fit failed or is impossible (fewer than five
     exceedances, or no finite weight) and fails every gate.
 
+    The fitted shape is capped by the bound that the largest weight puts on a Pareto
+    tail: with ``n`` exceedances, cutoff ``u`` and largest weight ``w_max``, a tail of
+    index ``k`` gives ``w_max / u <= r`` with probability ``(1 - r**(-1/k))**n``, so
+    ``log(w_max / u) / -log(1 - 0.001**(1/n))`` is a 99.9 percent upper bound on the
+    index. The cap matters when the cutoff falls inside a cluster of nearly equal
+    weights: the exceedances then span many decades and the fit alone reads a heavy
+    tail on bounded weights. The cap tests a Pareto tail in the weights themselves; a
+    heavy component whose scale is far below the cutoff can pass, and carries a
+    correspondingly small share of the total weight.
+
     Args:
         log_w: log weights of one cloud, unnormalized, shape ``(A,)``.
 
@@ -130,6 +144,11 @@ def pareto_khat(log_w: Float[Array, " A"]) -> Float[Array, ""]:
     x = jnp.where(exceeds, jnp.exp(tail - top[0]) - jnp.exp(cutoff - top[0]), 0.0)
     n_fit = jnp.sum(exceeds)
     khat = _gpd_shape(jnp.sort(x), n_fit)
+    # A Pareto tail of index k puts the largest of n_fit exceedances at or below r
+    # times the cutoff with probability (1 - r**(-1/k))**n_fit, so the observed
+    # maximum bounds the index from above. A cutoff of -inf leaves the shape as fitted.
+    level = _MAX_BOUND_LEVEL ** (1.0 / jnp.maximum(n_fit, 1))
+    khat = jnp.minimum(khat, (top[0] - cutoff) / -jnp.log1p(-level))
     return jnp.select(
         [~jnp.any(finite), flat | (n_fit == 0), n_fit < _MIN_EXCEEDANCES],
         [jnp.nan, -jnp.inf, jnp.nan],
