@@ -753,7 +753,8 @@ def test_a_refused_forecast_reads_nan_not_zero(toy):
 
     Fails if a guard reads a NaN forecast as giving no mass (`forecast > 0` in
     `expected_log_score`, `p_cell > 0` in `frontier` or `claim_information`), which
-    values a refused star at zero and so never observes it.
+    values a refused star at zero and so never observes it, or if the log of a NaN
+    mass is read as `-inf` (a refused pool row would thin to an empty pool).
     """
     atoms = _coarsening_belief(toy).atoms
     prior = toy.GasPrior("toy", n_gas=1)
@@ -779,6 +780,12 @@ def test_a_refused_forecast_reads_nan_not_zero(toy):
         forecast, verdict, models[0], Action(0, 0, 1.0), claim, toy.star, PLANET
     )
     assert np.all(np.isnan(np.asarray(info)))
+    # A refused pool row thins to an unknown mass, not to an empty pool.
+    nan_row = eqx.tree_at(
+        lambda p: p.log_prior_ratio, pool, pool.log_prior_ratio.at[0].set(np.nan)
+    )
+    thinned = toy.jit.thin(nan_row, jnp.array([0.8, 0.2]))
+    assert np.isnan(thinned.log_mass[0]) and np.isfinite(thinned.log_mass[1])
 
 
 def test_a_second_star_and_world_add_no_traces(toy):
