@@ -248,7 +248,7 @@ class _Toy:
 
         def run(world, design):
             recording = _Recording(policy)
-            log = execute(key, recording, world, design, grant)
+            log = execute(key, grant, world, design, recording)
             return recording.seen, log
 
         (seen_a, log_a), (seen_b, log_b) = (run(world, blind) for world in worlds)

@@ -165,7 +165,7 @@ def _run(toy, cloud, models):
     claim = _e_track_claim(toy)
     study = _study(toy, cloud, design, 2, claim)
     world = _el_world(toy)
-    log = execute(KEY, _stage_table(), world, design, _no_grant())
+    log = execute(KEY, _no_grant(), world, design, _stage_table())
     return log, score(log, world, study)
 
 
@@ -283,7 +283,7 @@ def test_two_arms_with_an_empty_log_and_different_grants(toy):
     )
     nothing = TablePolicy(Action(jnp.zeros(0, int), jnp.zeros(0, int), jnp.zeros(0)))
     arms = [Arm(Grant(Action([0], [mode], [1.0]))) for mode in (0, 1)]
-    logs = [execute(KEY, nothing, world, design, arm.grant) for arm in arms]
+    logs = [execute(KEY, arm.grant, world, design, nothing) for arm in arms]
     for log in logs:
         assert int(log.count) == 1
         assert_allclose([log.rows.time_d[0], log.rows.charged_d[0]], 0.0)
@@ -317,7 +317,7 @@ def test_a_table_replays_to_the_log_it_describes(toy):
     design = _design(models, budget_d=4.5, latency_d=0.25)
     world = _el_world(toy)
     table = Action([1, 0, 1, 0], [1, 2, 0, 1], [1.5, 2.0, 0.5, 3.0])
-    log = execute(KEY, TablePolicy(table), world, design, _no_grant())
+    log = execute(KEY, _no_grant(), world, design, TablePolicy(table))
 
     rows = log.rows
     assert int(log.count) == 4
@@ -481,7 +481,7 @@ def test_each_decision_is_keyed_from_the_policy_key(toy):
     position.
     """
     policy = KeyLog()
-    execute(KEY, policy, _el_world(toy), _design(_step_models()), _no_grant())
+    execute(KEY, _no_grant(), _el_world(toy), _design(_step_models()), policy)
     _, _, policy_key = run_keys(KEY)
     expected = [
         jax.random.key_data(jax.random.fold_in(policy_key, i)) for i in range(4)
@@ -512,7 +512,7 @@ def test_waiting_costs_no_budget_and_releases_follow_the_calendar(toy):
     design = Design(models, modes, Resources(2.0), CAPACITY)
     table = TablePolicy(Action([0, 1], [0, 1], [1.0, 1.0], [0.0, 10.0]))
     world = _el_world(toy)
-    log = execute(KEY, table, world, design, _no_grant())
+    log = execute(KEY, _no_grant(), world, design, table)
     rows = log.rows
     assert int(log.count) == 2
     assert_allclose(rows.time_d[:2], [0.0, 10.0])
@@ -593,7 +593,7 @@ def test_two_planets_at_a_star_run_through_execute_and_score(toy):
     truth = toy.atoms([[1.0, 1.0]], [[1.0, 0.0]], [1.0], [[1.0, 1.0]], 0.0)
     world = SealedWorld(toy.stack(truth))
     table = TablePolicy(Action([0, 0, 0], [0, 1, 2], [1.0] * 3))
-    report = score(execute(KEY, table, world, design, _no_grant()), world, study)
+    report = score(execute(KEY, _no_grant(), world, design, table), world, study)
 
     info = {name: np.asarray(column) for name, column in report.information.items()}
     assert list(info["planet"]) == [0, 0, 0, 1, 1, 1]
@@ -626,7 +626,7 @@ def test_rows_in_flight_at_the_end_are_scored_after_a_marked_end(toy):
     study = _study(toy, _step_rule_cloud(toy), design, 2, _e_track_claim(toy))
     world = _el_world(toy)
     table = TablePolicy(Action([0, 0], [0, 1], [1.0, 1.0]))
-    report = score(execute(KEY, table, world, design, _no_grant()), world, study)
+    report = score(execute(KEY, _no_grant(), world, design, table), world, study)
 
     e = _by_star(report, 0)
     assert_allclose(e["time_d"], [1.5, 2.0, 2.5])
@@ -675,4 +675,4 @@ def test_a_grant_in_a_mode_outside_the_table_is_refused(toy):
     grant = Grant(Action([0], [3], [1.0]))
     nothing = TablePolicy(Action(jnp.zeros(0, int), jnp.zeros(0, int), jnp.zeros(0)))
     with pytest.raises(ValueError, match="mode table"):
-        execute(KEY, nothing, _el_world(toy), design, grant)
+        execute(KEY, grant, _el_world(toy), design, nothing)

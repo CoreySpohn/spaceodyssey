@@ -6,13 +6,12 @@ configuration.
 """
 
 import equinox as eqx
-import jax.numpy as jnp
 from jaxtyping import Array, Float, PyTree
 
 from spaceodyssey.claim import Claim
 from spaceodyssey.design import Design
 from spaceodyssey.roles import AbstractRolePrior, Roles
-from spaceodyssey.types import Grant, Pool, Refit
+from spaceodyssey.types import Grant, Pool, Refit, as_float
 
 
 class Arm(eqx.Module):
@@ -85,7 +84,7 @@ class Study(eqx.Module):
         self.pool = pool
         self.stars = stars
         self.design = design
-        self.prior_mass_outside = jnp.asarray(prior_mass_outside, float)
+        self.prior_mass_outside = as_float(prior_mass_outside)
         self.alpha = float(alpha)
 
     def __check_init__(self):

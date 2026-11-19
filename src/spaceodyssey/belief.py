@@ -26,6 +26,7 @@ from spaceodyssey.types import (
     ObservationLog,
     Pool,
     Refit,
+    real_rows,
 )
 
 
@@ -427,9 +428,8 @@ def _due(log: ObservationLog, refit: Refit, time_d) -> Bool[Array, " W"]:
     log and falls due once the query time reaches its release.
     """
     rows = log.rows
-    real = jnp.arange(rows.star.shape[0]) < log.count
     return (
-        real
+        real_rows(log)
         & (rows.release_d <= time_d)
         & (rows.refusal == ACCEPTED)
         & (rows.star == refit.star_index)

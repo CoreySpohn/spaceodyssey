@@ -12,7 +12,7 @@ import jax.numpy as jnp
 from jax import lax
 from jaxtyping import PRNGKeyArray, PyTree
 
-from spaceodyssey.design import Design, Mode, Resources
+from spaceodyssey.design import Design, Mode, Resources, model_slots
 from spaceodyssey.policy import AbstractPolicy, public_view
 from spaceodyssey.types import (
     ACCEPTED,
@@ -48,7 +48,7 @@ def grant_rows(
     actions = grant.actions
     zero_d = jnp.zeros_like(actions.exposure_d)
     zero_i = jnp.zeros_like(actions.star)
-    slots = [modes[int(m)].model_slot for m in jnp.ravel(actions.mode)]
+    slots = model_slots(modes, actions.mode)
     return Row(
         star=actions.star,
         mode=actions.mode,
@@ -166,10 +166,10 @@ _public_view = eqx.filter_jit(public_view)
 
 def execute(
     key: PRNGKeyArray,
-    policy: AbstractPolicy,
+    grant: Grant,
     world: SealedWorld,
     design: Design,
-    grant: Grant,
+    policy: AbstractPolicy,
 ) -> ObservationLog:
     """Run a policy against a sealed world until it stops.
 
@@ -182,12 +182,15 @@ def execute(
     table, until the policy stops. The policy's state passes from one decision to the
     next unread: the host reads only the action and the stop flag.
 
+    The arguments follow ``step``: the key, the state the run starts from (the
+    grant), the world, the design and what chooses the actions.
+
     Args:
         key: the run key.
-        policy: the policy.
+        grant: the rows given at time zero.
         world: the sealed world, one world (no world axis).
         design: the run's design.
-        grant: the rows given at time zero.
+        policy: the policy.
 
     Returns:
         The run's log.

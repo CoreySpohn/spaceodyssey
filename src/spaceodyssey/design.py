@@ -10,7 +10,8 @@ no kernel takes a ``Design``.
 """
 
 import equinox as eqx
-from jaxtyping import Array, Float
+import numpy as np
+from jaxtyping import Array, Float, Int
 
 from spaceodyssey.types import AbstractObservationModel, as_float
 
@@ -81,3 +82,22 @@ def mode_models(design: Design) -> tuple[AbstractObservationModel, ...]:
         One model per mode, in mode order; ``Menu.mode`` indexes it.
     """
     return tuple(design.models[mode.model_slot] for mode in design.modes)
+
+
+def model_slots(modes: tuple[Mode, ...], mode: Int[Array, "..."]) -> list[int]:
+    """The model slot of each mode in ``mode``, read from the one mode table.
+
+    Args:
+        modes: the design's mode table, static.
+        mode: concrete mode indices, any shape; read in order.
+
+    Returns:
+        The model slot of each mode, in order.
+
+    Raises:
+        ValueError: if a mode is not in the mode table.
+    """
+    indices = [int(m) for m in np.ravel(mode)]
+    if any(not 0 <= m < len(modes) for m in indices):
+        raise ValueError("a mode is not in the mode table")
+    return [modes[m].model_slot for m in indices]

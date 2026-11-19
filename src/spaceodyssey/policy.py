@@ -20,6 +20,7 @@ from spaceodyssey.types import (
     as_float,
     as_index,
     clock_d,
+    real_rows,
     spent_d,
 )
 
@@ -59,7 +60,7 @@ def public_view(
     """
     rows = log.rows
     time_d = clock_d(log)
-    real = jnp.arange(rows.star.shape[0]) < log.count
+    real = real_rows(log)
     released = real & (rows.release_d <= time_d)
 
     def hide(x):

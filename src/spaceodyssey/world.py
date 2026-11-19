@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import ArrayLike, Int, PRNGKeyArray, PyTree
 
-from spaceodyssey.design import Mode
+from spaceodyssey.design import Mode, model_slots
 from spaceodyssey.roles import AbstractRolePrior
 from spaceodyssey.types import (
     AbstractObservationModel,
@@ -170,10 +170,7 @@ class SealedWorld(eqx.Module):
                 is not in ``models``.
         """
         actions = grant.actions
-        granted = [int(m) for m in jnp.ravel(actions.mode)]
-        if any(not 0 <= m < len(modes) for m in granted):
-            raise ValueError("a grant's mode is not in the mode table")
-        slots = [modes[m].model_slot for m in granted]
+        slots = model_slots(modes, actions.mode)
         if any(not 0 <= s < len(models) for s in slots):
             raise ValueError("a grant's model slot is not in the model table")
         n_row = len(slots)

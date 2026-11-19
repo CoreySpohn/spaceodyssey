@@ -250,6 +250,18 @@ class ObservationLog(eqx.Module):
             raise ValueError(f"log columns disagree on the capacity W: {capacity}")
 
 
+def real_rows(log: ObservationLog) -> Bool[Array, " W"]:
+    """Which rows of a log are real: those before ``count``, the rest padding.
+
+    Args:
+        log: the log.
+
+    Returns:
+        True for each real row, shape ``(W,)``.
+    """
+    return jnp.arange(log.rows.star.shape[0]) < log.count
+
+
 def spent_d(log: ObservationLog) -> Float[Array, ""]:
     """The time a run has charged against its budget so far, days.
 
@@ -261,8 +273,7 @@ def spent_d(log: ObservationLog) -> Float[Array, ""]:
     Returns:
         The charged time of the rows before ``count``.
     """
-    real = jnp.arange(log.rows.charged_d.shape[0]) < log.count
-    return jnp.sum(jnp.where(real, log.rows.charged_d, 0.0))
+    return jnp.sum(jnp.where(real_rows(log), log.rows.charged_d, 0.0))
 
 
 def clock_d(log: ObservationLog) -> Float[Array, ""]:
@@ -280,8 +291,7 @@ def clock_d(log: ObservationLog) -> Float[Array, ""]:
         The calendar time the rows before ``count`` end.
     """
     rows = log.rows
-    real = jnp.arange(rows.charged_d.shape[0]) < log.count
-    ends = jnp.where(real, rows.time_d + rows.charged_d, 0.0)
+    ends = jnp.where(real_rows(log), rows.time_d + rows.charged_d, 0.0)
     return jnp.max(ends, initial=0.0)
 
 

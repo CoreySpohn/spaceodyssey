@@ -38,7 +38,7 @@ from spaceodyssey.information import (
     widen_by_mass_outside,
 )
 from spaceodyssey.study import Study
-from spaceodyssey.types import ACCEPTED, Atoms, ObservationLog, clock_d
+from spaceodyssey.types import ACCEPTED, Atoms, ObservationLog, clock_d, real_rows
 from spaceodyssey.world import SealedWorld
 
 
@@ -154,8 +154,7 @@ def _stage_beliefs(study: Study, log: ObservationLog, s: int, end_d: float):
     star_col, refusal, release_d = (
         np.asarray(x) for x in (log.rows.star, log.rows.refusal, log.rows.release_d)
     )
-    real = np.arange(star_col.shape[0]) < int(log.count)
-    mine = real & (star_col == s) & (refusal == ACCEPTED)
+    mine = np.asarray(real_rows(log)) & (star_col == s) & (refusal == ACCEPTED)
     releases = sorted({float(t) for t in release_d[mine] if t > 0.0})
     end = next((t for t in releases if math.isclose(t, end_d, rel_tol=1e-12)), end_d)
     times = [0.0, *sorted({*releases, end} if end > 0.0 else releases)]
