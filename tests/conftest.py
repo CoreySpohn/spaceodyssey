@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import zlib
 from typing import ClassVar
 
 import equinox as eqx
@@ -23,6 +24,8 @@ if TYPECHECK:
 
 from spaceodyssey.belief import Belief  # noqa: E402
 from spaceodyssey.claim import AbstractConjunct  # noqa: E402
+from spaceodyssey.log import execute  # noqa: E402
+from spaceodyssey.policy import AbstractPolicy  # noqa: E402
 from spaceodyssey.roles import AbstractRolePrior  # noqa: E402
 from spaceodyssey.types import (  # noqa: E402
     AbstractObservationModel,
@@ -43,6 +46,23 @@ if importlib.util.find_spec("hwoutils.internal_refs") is not None:
 settings.register_profile("quick", max_examples=25, deadline=None)
 settings.register_profile("nightly", max_examples=200, deadline=None)
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "quick"))
+
+
+class _Recording(AbstractPolicy):
+    """A policy that records a checksum of everything it is handed at each decision
+    (the key, its state and the public view) and then defers to `inner`.
+    """
+
+    inner: AbstractPolicy
+    seen: list = eqx.field(default_factory=list)
+
+    def init(self, public):
+        return self.inner.init(public)
+
+    def decide(self, key, state, public):
+        leaves = [jax.random.key_data(key), *jax.tree.leaves((state, public))]
+        self.seen.append(zlib.crc32(b"".join(np.asarray(x).tobytes() for x in leaves)))
+        return self.inner.decide(key, state, public)
 
 
 # Toy state for the layer tests: per-draw, per-planet `hz` and `size` bits plus a gas
@@ -185,6 +205,29 @@ class _Toy:
 
         def finalize(self, stats, atoms, star):
             raise NotImplementedError("read only through cells")
+
+    @staticmethod
+    def assert_non_interference(key, policy, worlds, blind, seeing, grant):
+        """Swapped-truth non-interference of any policy.
+
+        The two `worlds` hold different truths. Under the design `blind`, whose models
+        draw payloads that do not depend on the truth, their rows are forced identical,
+        so the policy must be handed bit-identical keys, states and public views at
+        every decision (checksummed as it is called) and write bit-identical logs; any
+        difference is the policy reading the truth. Under the design `seeing`, whose
+        models read the truth, the views must differ, so the comparison can see one.
+        """
+
+        def run(world, design):
+            recording = _Recording(policy)
+            log = execute(key, recording, world, design, grant)
+            return recording.seen, log
+
+        (seen_a, log_a), (seen_b, log_b) = (run(world, blind) for world in worlds)
+        assert len(seen_a) > 1
+        assert seen_a == seen_b
+        jax.tree.map(np.testing.assert_array_equal, log_a, log_b)
+        assert run(worlds[0], seeing)[0] != run(worlds[1], seeing)[0]
 
     @staticmethod
     def stack(*trees):

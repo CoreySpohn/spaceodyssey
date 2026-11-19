@@ -367,31 +367,37 @@ class EchoState(eqx.Module):
 class Echo(AbstractPolicy):
     """An adaptive policy that reads every bit it is shown: it folds a checksum of each
     public view into its state and, four times, observes star 0 or 1 by the running
-    checksum's parity. It also records each checksum on the host for the test.
+    checksum's parity.
     """
-
-    seen: list = eqx.field(default_factory=list)
 
     def init(self, public):
         return EchoState(0)
 
     def decide(self, key, state, public):
         leaves = jax.tree.leaves(public)
-        crc = zlib.crc32(b"".join(np.asarray(x).tobytes() for x in leaves))
-        self.seen.append(crc)
-        checksum = EchoState(zlib.crc32(np.asarray(state.checksum).tobytes(), crc))
-        return Action(int(checksum.checksum) % 2, 0, 1.0), public.n_taken >= 4, checksum
+        view = b"".join(np.asarray(x).tobytes() for x in leaves)
+        checksum = zlib.crc32(view, int(state.checksum))
+        action = Action(checksum % 2, 0, 1.0)
+        return action, public.n_taken >= 4, EchoState(checksum)
 
 
-def test_a_policy_cannot_read_the_truth(toy):
-    """Non-interference: two worlds whose rows are forced identical give a bit-identical
-    log under an adaptive policy.
+@pytest.mark.parametrize(
+    "policy",
+    [
+        pytest.param(Echo(), id="adaptive"),
+        pytest.param(TablePolicy(Action([0, 1, 1, 0], [0] * 4, [1.0] * 4)), id="table"),
+    ],
+)
+def test_a_policy_cannot_read_the_truth(toy, policy):
+    """Non-interference: two worlds whose rows are forced identical give identical
+    keys, states and views to the policy and a bit-identical log.
 
     The worlds differ in every abundance (E and L against two planets 0.3 dex below
     their floors); every row is read by a model whose payload does not depend on the
     truth, so the only way the logs could differ is a policy reading the truth. The
-    same runs with a gas model that reads the truth give different logs, so the
-    comparison can see a difference.
+    same runs with a gas model that reads the truth show the policy different views,
+    so the comparison can see a difference. The check is one helper, run here on an
+    adaptive policy and on a table.
 
     Fails if `execute` shows a policy anything drawn from the sealed world beyond the
     released rows: any such bit changes a view's checksum.
@@ -399,18 +405,8 @@ def test_a_policy_cannot_read_the_truth(toy):
     other = toy.atoms([[0.0]], [[0.0]], [1.0], [[-0.3, -0.3]], 0.0)
     worlds = (_el_world(toy), SealedWorld(toy.stack(other, other)))
     blind = _design((Blind(),))
-    echoes = (Echo(), Echo())
-    pairs = zip(echoes, worlds, strict=True)
-    logs = [execute(KEY, echo, world, blind, _no_grant()) for echo, world in pairs]
-    assert len(echoes[0].seen) == 5
-    assert echoes[0].seen == echoes[1].seen
-    jax.tree.map(np.testing.assert_array_equal, logs[0], logs[1])
-
     seeing = _design((GaussianGasModel(snr_one_day=[5.0, 5.0]),))
-    logs = [execute(KEY, Echo(), w, seeing, _no_grant()) for w in worlds]
-    assert not np.array_equal(
-        logs[0].rows.payload[0]["reading"], logs[1].rows.payload[0]["reading"]
-    )
+    toy.assert_non_interference(KEY, policy, worlds, blind, seeing, _no_grant())
 
 
 def test_a_table_decides_with_a_traced_cursor(toy):
