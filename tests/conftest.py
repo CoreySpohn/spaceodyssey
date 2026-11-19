@@ -96,6 +96,7 @@ class _Jit:
     quadrature_draws = staticmethod(eqx.filter_jit(belief.quadrature_draws))
     mark_weights = staticmethod(eqx.filter_jit(belief.mark_weights))
     claim_information = staticmethod(eqx.filter_jit(information.claim_information))
+    outcome_cells = staticmethod(eqx.filter_jit(information.outcome_cells))
     thin = staticmethod(eqx.filter_jit(value.thin))
     completeness = staticmethod(eqx.filter_jit(value.completeness))
 

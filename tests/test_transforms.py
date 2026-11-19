@@ -150,9 +150,10 @@ def _cases(toy):
     point = [
         eqx.tree_at(lambda b: b.atoms.x_var, b, 0.0 * b.atoms.x_var) for b in (b0, b1)
     ]
-    on_nodes = [quadrature_draws(b, claim, 4) for b in (b0, b1)]
+    on_nodes = [toy.jit.quadrature_draws(b, claim, 4) for b in (b0, b1)]
     node_cells = [
-        outcome_cells(b, model, a) for b, a in zip(on_nodes, actions, strict=True)
+        toy.jit.outcome_cells(b, model, a)
+        for b, a in zip(on_nodes, actions, strict=True)
     ]
     keep = (jnp.arange(9) % 2 == 0, jnp.arange(9) < 5)
 
