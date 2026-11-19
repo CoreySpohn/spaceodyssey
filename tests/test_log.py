@@ -184,7 +184,8 @@ def test_milestone_1_e_and_l_as_a_scored_log(toy):
     0.69 + 0.34 + 0.69 + 0.69 over hz, size, water and oxygen; L, the look-alike
     with the same rows, loses 1.14. E's conditional q (both gases given the
     candidacy) is 1, so E is issued, its lower bound the Wilson bound n / (n + 4) at
-    n = n_eff psi; L fails the condition and is void. Gaussian gas model at S/N 5,
+    n = 250, the Kish size of the condition-weighted draws: 250 / 254 = 0.9843. L
+    fails the condition and is void. Gaussian gas model at S/N 5,
     readings at their expected value, 4,000 draws: q is 0.0625, 0.175, 0.337, 0.649,
     E gains +1.03, +0.66, +0.66 (2.34) and L loses 0.13, 0.22, 0.64 (0.98); E's
     conditional q is 0.649 / 0.70 = 0.927 < 0.95, so E is not issued. Both runs print
@@ -192,7 +193,8 @@ def test_milestone_1_e_and_l_as_a_scored_log(toy):
 
     Fails if `execute` drops, reorders or misroutes a row, `score` reads the wrong
     stage, role or sign, the chain split does not sum to the information, the
-    certificate reads the joint where the condition belongs, or a void planet is
+    certificate reads the joint where the condition belongs or counts more
+    conditioning draws than the condition-weighted Kish size, or a void planet is
     certified.
     """
     step_models = (
@@ -221,9 +223,13 @@ def test_milestone_1_e_and_l_as_a_scored_log(toy):
     res = {name: np.asarray(column) for name, column in report.resolution.items()}
     assert list(cert["status"][:1]) == [POSITIVE] and not cert["void"][0]
     assert cert["void"][1]
-    n = res["n_eff"][0] * res["psi"][0]
-    assert_allclose(n, 250 / 0.58 * 0.7, rtol=1e-10)  # 250 survivors per size bit
-    assert_allclose(cert["q_lo"][0], n / (n + 4.0), rtol=1e-10)
+    # 500 draws survive the rows (250 per size bit, weights 0.7 and 0.3): n_eff is
+    # 250^2 / (250 x 0.58) = 431.0, but the Wilson n is the Kish size of the
+    # condition-weighted draws, the 250 equal Earth-sized ones: q_lo = 250 / 254.
+    assert_allclose(res["n_eff"][0], 250 / 0.58, rtol=1e-10)
+    assert_allclose(res["n_cond"][0], 250.0, rtol=1e-10)
+    assert_allclose(cert["q_lo"][0], 250.0 / 254.0, rtol=1e-10)
+    assert round(float(cert["q_lo"][0]), 4) == 0.9843
     print("Step rule, S/N 6 reports, 4,000 draws\n")
     print(format_report(report))
 

@@ -63,8 +63,10 @@ class Report(eqx.Module):
             candidacy range over the members, ``psi_lo`` and ``psi_hi``.
         resolution: one entry per star, planet and member, at the last stage: the
             claim's ``q``, its ``mc_se``, ``khat`` against ``khat_max``, ``n_eff``, the
-            clip ``resolution`` ``1 / (2 n_eff)`` and the number of stages whose whole
-            claim ``q`` it ``clipped``, the condition mass ``psi``, and the member's
+            Kish size of the condition-weighted draws ``n_cond`` (the ``n`` of the
+            certificate's Wilson bound), the clip ``resolution`` ``1 / (2 n_eff)``
+            and the number of stages whose whole claim ``q`` it ``clipped``, the
+            condition mass ``psi``, and the member's
             ``prior_mass_outside`` ``m`` with the hard bound it puts on ``q``,
             ``[(1 - m) q, (1 - m) q + m]`` (``q_bound_lo``, ``q_bound_hi``).
         counts: one entry per member: the predicted applicable count ``sum psi``
@@ -89,7 +91,7 @@ _CERTIFICATES = (
     "psi_hi",
 )  # fmt: skip
 _RESOLUTION = (
-    "star", "planet", "member", "q", "mc_se", "khat", "khat_max", "n_eff",
+    "star", "planet", "member", "q", "mc_se", "khat", "khat_max", "n_eff", "n_cond",
     "resolution", "clipped", "psi", "prior_mass_outside", "q_bound_lo", "q_bound_hi",
 )  # fmt: skip
 _COUNTS = (
@@ -315,7 +317,8 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
                     {
                         "star": s, "planet": k, "member": m, "q": float(q_m),
                         "mc_se": float(d.mc_se[m]), "khat": float(d.khat[m]),
-                        "khat_max": khat_max, "n_eff": n_eff, "resolution": 0.5 / n_eff,
+                        "khat_max": khat_max, "n_eff": n_eff,
+                        "n_cond": float(d.n_cond[m]), "resolution": 0.5 / n_eff,
                         "clipped": int(np.sum(q_whole[:, m] != q_clip[:, m])),
                         "psi": psi[m], "prior_mass_outside": float(mass),
                         "q_bound_lo": float(bound_lo), "q_bound_hi": float(bound_hi),

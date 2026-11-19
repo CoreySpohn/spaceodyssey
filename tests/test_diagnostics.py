@@ -56,7 +56,9 @@ def _diag(q, n_eff, khat=0.0, cond_mass=1.0, outside=0.0):
     """Diagnostics for the forecast (row 0, q = 0.5) and the members in `q`.
 
     Every draw agrees for a member at q = 0 or 1, so its mc_se is zero; otherwise
-    the standard error is the binomial one at n_eff.
+    the standard error is the binomial one at n_eff. The draws have unit weights and
+    a condition that each draw meets or not, so the Kish size of the
+    condition-weighted draws is the count of draws that meet it, n_eff * cond_mass.
     """
     member = jnp.asarray(q, float)
     q_all = jnp.concatenate([jnp.full(1, 0.5), member])
@@ -68,6 +70,7 @@ def _diag(q, n_eff, khat=0.0, cond_mass=1.0, outside=0.0):
         jnp.sqrt(q_all * (1.0 - q_all) / n),
         full(khat),
         n,
+        n * full(cond_mass),
         full(cond_mass),
         full(outside),
     )
@@ -96,10 +99,11 @@ def test_certify_at_the_boundary(diag, status):
     """Unanimous draws (mc_se = 0) at alpha = 0.05 and z = 2: only n_eff = 5000
     certifies (bounds in the next test), and the negative side is symmetric. A NaN
     khat is unresolved; a condition mass of 5e-5, below 1 / (2 * 5000), is
-    inapplicable; a condition mass of 2e-3 leaves 10 effective draws, whose Wilson
-    bound 10 / 14 = 0.714 is unresolved; a prior mass 0.06 outside the support
-    lowers the bound below 0.95. Members at 0.97 and 0.92 are unresolved though 0.97
-    alone certifies. The forecast (row 0, q = 0.5) never blocks a certificate.
+    inapplicable; a condition mass of 2e-3 leaves 5000 x 2e-3 = 10 conditioning
+    draws, whose Wilson bound 10 / 14 = 0.714 is unresolved; a prior mass 0.06
+    outside the support lowers the bound below 0.95. Members at 0.97 and 0.92 are
+    unresolved though 0.97 alone certifies. The forecast (row 0, q = 0.5) never
+    blocks a certificate.
 
     Fails if the interval is the delta-method one alone (it certifies at n_eff = 5
     once every draw agrees), if a NaN khat passes the tail gate, if the condition or
@@ -214,20 +218,27 @@ def test_conditional_error_and_bound(toy):
     """Unit weights, claim (size, hz) given size. 1000 draws, 200 Earth-sized, 150 of
     them in the HZ: q = 0.75, cond_mass = 0.2 and mc_se is the binomial error on the
     200 conditioning draws, sqrt(0.75 * 0.25 / 200) = 0.0306. With 10 Earth-sized
-    draws out of 5000, all in the HZ, q = 1 but the Wilson bound at n = 10 is
-    10 / 14 = 0.714: unresolved, and the interval straddles 0.95 so a refit triggers.
+    draws out of 5000, all in the HZ, q = 1 but the Wilson bound at n = 10 (the Kish
+    size of the 10 equal condition-weighted draws) is 10 / 14 = 0.714: unresolved,
+    and the interval straddles 0.95 so a refit triggers.
+
+    Weights that correlate with the condition: 500 draws, all in the HZ, 250
+    Earth-sized at weight 0.7 and 250 not at weight 0.3. n_eff = 250^2 / (250 x 0.58)
+    = 431.0 and cond_mass = 0.7, but the condition-weighted draws are 250 of equal
+    weight, so n_cond = 250 (not 431.0 x 0.7 = 301.7) and the bound is 250 / 254.
 
     Fails if the conditional mc_se is not centered on q g or not divided by
     P(given), or if the Wilson n of a conditional claim is n_eff (5000 would certify
-    on 10 draws).
+    on 10 draws) or n_eff * cond_mass (301.7, more draws than meet the condition).
     """
     claim = Claim((toy.InSize(), toy.InHz()), given=1)
 
-    def belief(n, n_size, n_both):
+    def belief(n, n_size, n_both, w=None):
         draw = jnp.arange(n)
         size = (draw < n_size).astype(float)[:, None]
         hz = (draw < n_both).astype(float)[:, None]
-        return toy.belief(toy.atoms(hz, size, jnp.ones(n)), n_roles=2)
+        w = jnp.ones(n) if w is None else w
+        return toy.belief(toy.atoms(hz, size, w), n_roles=2)
 
     d = diagnose(belief(1000, 200, 150), claim, toy.star, PLANET, jnp.zeros(2))
     assert_allclose(d.q, 0.75, rtol=1e-12)
@@ -235,10 +246,18 @@ def test_conditional_error_and_bound(toy):
     assert_allclose(d.mc_se, np.sqrt(0.75 * 0.25 / 200), rtol=1e-10)
 
     d = diagnose(belief(5000, 10, 10), claim, toy.star, PLANET, jnp.zeros(2))
+    assert_allclose(d.n_cond, 10.0, rtol=1e-10)
     cert = certify(d, ALPHA)
     assert int(cert.status) == UNRESOLVED
     assert_allclose(cert.q_lo, 10.0 / 14.0, rtol=1e-12)
     assert bool(refit_trigger(d, ALPHA))
+
+    w = jnp.where(jnp.arange(500) < 250, 0.7, 0.3)
+    d = diagnose(belief(500, 250, 500, w), claim, toy.star, PLANET, jnp.zeros(2))
+    assert_allclose(d.n_eff, 250**2 / (250 * 0.58), rtol=1e-10)
+    assert_allclose(d.cond_mass, 0.7, rtol=1e-12)
+    assert_allclose(d.n_cond, 250.0, rtol=1e-10)
+    assert_allclose(certify(d, ALPHA).q_lo, 250.0 / 254.0, rtol=1e-12)
 
 
 def test_refit_trigger_reads_each_member():

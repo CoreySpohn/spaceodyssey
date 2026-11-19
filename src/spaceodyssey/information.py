@@ -244,7 +244,10 @@ class Diagnostics(eqx.Module):
             claim, the error of the ratio ``P(claim and given) / P(given)``.
         khat: Pareto shape of the weight tail; ``-inf`` when the weights have no
             tail (constant weights), NaN when the fit failed.
-        n_eff: Kish size of the role weights; a warning, and the cap ``n`` in the
+        n_eff: Kish size of the role weights; a warning, and the clip resolution.
+        n_cond: Kish size of the condition-weighted draws, the weights times each
+            draw's probability of the condition (``n_eff`` for an unconditional
+            claim): the effective number of conditioning draws, the ``n`` of the
             boundary bound of ``certify``.
         cond_mass: ``P(given)``; 1 for an unconditional claim.
         prior_mass_outside: the prior mass of the role outside the refit's support.
@@ -256,6 +259,7 @@ class Diagnostics(eqx.Module):
     mc_se: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
     khat: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
     n_eff: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
+    n_cond: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
     cond_mass: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
     prior_mass_outside: Float[Array, " R"] = eqx.field(converter=jnp.asarray)
 
@@ -293,6 +297,7 @@ def diagnose(
         mc_se=jax.vmap(mc_se, in_axes=(0, None, None))(log_w, h, g),
         khat=jax.vmap(pareto_khat)(log_w),
         n_eff=kish_ess(log_w),
+        n_cond=kish_ess(log_w + guarded_log(g)),
         cond_mass=cond_mass,
         prior_mass_outside=jnp.broadcast_to(prior_mass_outside, cond_mass.shape),
     )
@@ -358,12 +363,14 @@ def _bounds(d: Diagnostics, z: float):
 
     The Wilson interval stays inside ``(0, 1)`` when every draw agrees, which is where
     the delta-method error is exactly zero. Its ``n`` is the effective number of
-    draws that meet the condition, ``n_eff * cond_mass`` (``n_eff`` for an
-    unconditional claim), floored at the inapplicable limit of one half. The prior
+    draws that meet the condition, the Kish size of the condition-weighted draws
+    ``n_cond`` (``n_eff`` for an unconditional claim), floored at the inapplicable
+    limit of one half. ``n_eff * cond_mass`` would overstate it when the weights
+    correlate with the condition. The prior
     mass ``m`` outside the support then widens the interval to its conservative ends,
     ``(1 - m) lo`` and ``(1 - m) hi + m``.
     """
-    n = jnp.maximum(d.n_eff * d.cond_mass, 0.5)
+    n = jnp.maximum(d.n_cond, 0.5)
     p = jnp.clip(d.q, 0.0, 1.0)
     z2n = z**2 / n
     center = (p + z2n / 2.0) / (1.0 + z2n)
@@ -398,7 +405,8 @@ def certify(
     - unresolved otherwise.
 
     Each member's interval is the wider of ``q -+ z mc_se`` and the Wilson score
-    interval at ``n = n_eff * cond_mass``, then widened by the member's prior mass
+    interval at ``n = n_cond``, the Kish size of the condition-weighted draws, then
+    widened by the member's prior mass
     outside the support. The forecast (row 0) is not a member.
 
     Args:
