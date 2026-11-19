@@ -460,8 +460,8 @@ GAS_BLOCKS = (
 
 
 @eqx.filter_jit
-@eqx.filter_vmap(in_axes=(0, None, 0, None, None, None))
-def _gas_planning_beliefs(refit, log, time_d, roles, pool, claim):
+@eqx.filter_vmap(in_axes=(0, None, 0, None, None, None, None))
+def _gas_planning_beliefs(refit, log, time_d, roles, pool, claim, n):
     models = (GaussianGasModel(snr_one_day=[5.0]),)
     now = replay(refit, log, models, (), time_d)
     return planning_beliefs(
@@ -473,6 +473,7 @@ def _gas_planning_beliefs(refit, log, time_d, roles, pool, claim):
         pool,
         pool,
         claim,
+        n,
         min_n_eff=0.0,
         max_khat=jnp.inf,
     )
@@ -520,8 +521,9 @@ def test_a_binned_gas_reading_is_valued_exactly(toy):
     prior = toy.GasPrior("toy", n_gas=1)
     times = jnp.asarray([t for _, _, t, _ in GAS_STARS])
     claim = Claim((GasAbove(0, 0.0),))
+    roles = Roles(prior, toy.stack(prior))
     beliefs = _gas_planning_beliefs(
-        refits, log, times, Roles(prior, toy.stack(prior)), toy.empty_pool(2, 1), claim
+        refits, log, times, roles, toy.empty_pool(2, 1), claim, 24
     )
     models = (GaussianGasModel(snr_one_day=[5.0]),)
     exposure_d = np.array([[e] for _, _, _, e in GAS_STARS])
@@ -542,6 +544,44 @@ def test_a_binned_gas_reading_is_valued_exactly(toy):
         assert np.all(np.asarray(f.reward[:, 0]) <= bound)
     assert_allclose(_binned_reading_oracle(0.0, 1.0, 0.5, 1)[0], closed, rtol=1e-5)
     assert round(float(_binned_reading_oracle(0.0, 1.0, 0.5, 1)[1]), 4) == 0.3733
+
+
+@pytest.mark.medium(reason="compiles the planning beliefs at three node counts, 5 s")
+def test_the_quadrature_converges_in_its_nodes_at_high_snr(toy):
+    """At S/N 50 the binned reading's value converges in the number of nodes.
+
+    One draw, water N(0, 1) (claim probability 0.5), one `GaussianGasModel` reading
+    binned at the floor at S/N 50 (100 days at S/N 5 per day), `LogScore`, depth 1,
+    against the dense oracle (`_binned_reading_oracle`, 0.6115 nats). The reading
+    resolves structure within about 0.4 sd of the floor, so the error depends on the
+    nodes there: 16 nodes (two near the floor on each side) overvalue it by 5.4
+    percent, 24 (three) are within 0.6 percent and 48 (six) within 0.02 percent.
+
+    Fails if the nodes near the floor stop growing with `n` (the error at 48 nodes
+    would stay at 5 percent), or if the graded quadrature misplaces them.
+    """
+    z, zd = jnp.zeros(2, int), jnp.zeros(2)
+    payload = {"snr": jnp.full((2, 1, 1), 5.0), "reading": jnp.zeros((2, 1, 1))}
+    rows = Row(z, z, zd, zd + 1.0, zd, zd, z, z, (payload,))
+    log = ObservationLog(rows, 0)
+    refit = toy.stack(Refit(toy.atoms([[1.0]], [[1.0]], [1.0], 0.0, 1.0, n_gas=1),
+                            jnp.zeros(2, bool), 0))  # fmt: skip
+    prior = toy.GasPrior("toy", n_gas=1)
+    roles, claim = Roles(prior, toy.stack(prior)), Claim((GasAbove(0, 0.0),))
+    models = (GaussianGasModel(snr_one_day=[5.0]),)
+    exact = _binned_reading_oracle(0.0, 1.0, 2.5 / 50.0, 1)[0]
+    assert round(float(exact), 4) == 0.6115
+    errors = []
+    for n in (16, 24, 48):
+        beliefs = _gas_planning_beliefs(
+            refit, log, jnp.zeros(1), roles, toy.empty_pool(2, 1), claim, n
+        )
+        f = _frontier_of(
+            beliefs, claim, toy.star, LogScore(1), models, _menu([[100.0]], (0,)), 1
+        )
+        errors.append(float(f.reward[0, 0]) / exact - 1.0)
+    assert errors[0] > 0.04
+    assert abs(errors[1]) < 6e-3 and abs(errors[2]) < 2e-4
 
 
 def _product_grid(b):

@@ -736,10 +736,16 @@ the near block's end, whichever is further)."""
 
 
 def _block_counts(h: int) -> tuple[int, int, int]:
-    """Nodes in the near, graded and far blocks of a side of ``h`` nodes."""
+    """Nodes in the near, graded and far blocks of a side of ``h`` nodes.
+
+    The near block grows with ``h`` (a quarter of the side, at least two), so the
+    quadrature converges in ``n``: at a moderate claim probability the near block spans
+    about 0.4 sd, which a reading resolves once its S/N is above about 20, and a fixed
+    two nodes there leave an error that more nodes elsewhere never remove.
+    """
     if h < 4:
         return 0, 0, h
-    near = 2 if h >= 6 else 1
+    near = max(2, h // 4) if h >= 6 else 1
     graded = (h - near) // 2
     return near, graded, h - near - graded
 
@@ -760,7 +766,8 @@ def _floor_nodes(
     ``2 a``. Near certainty the posterior of every outcome cell is concentrated on the
     minority side and within about the minority mass of the floor on the dominant
     side: a uniform block over the dominant side puts no node there, the near block
-    puts two, and the graded block carries the nodes from that scale out to the bulk.
+    puts a quarter of the side's nodes (at least two), and the graded block carries the
+    nodes from that scale out to the bulk.
     With fewer than 4 nodes per side, one uniform block.
 
     The node is ``mean -/+ sd Phi^-1(p)`` with ``p`` the probability beyond the node
@@ -878,9 +885,11 @@ def quadrature_draws(
     On these nodes a planner's update by an outcome cell is exact reweighting of the
     draws and the nodes (``update_by_cell``): the cells of rows are independent given
     the points. The error is that of the quadrature: at the default 24 nodes the
-    lookahead value of a reading binned at the floor is within 0.8 percent of a dense
+    lookahead value of a reading binned at the floor is within 0.9 percent of a dense
     quadrature at depth 1 and 2, for a prior probability of the claim from 1e-6 to
-    1 - 1e-6 and S/N 2 to 20 (3 percent at 16 nodes, 0.6 percent at 32). A bin edge
+    1 - 1e-6 and S/N 2 to 50; within 0.3 percent at 32 nodes and 0.06 percent at 48 or
+    more. At 16 nodes (two near the floor) it is 2.7 percent to S/N 20 and 5.4 percent
+    at S/N 50. A bin edge
     away from the split is not graded for: an edge 0.3 or 0.5 dex from the floor
     measured 1.4 to 2.2 percent at 24 nodes near certainty.
 
