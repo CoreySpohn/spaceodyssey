@@ -1,13 +1,13 @@
-"""Toy observation laws: two gas laws on the gas block.
+"""Toy observation models: two gas models on the gas block.
 
-An observation law (``AbstractObservationLaw``, defined in ``types``) turns an action
-on a star into a row payload (``sample``), scores a payload against every draw
+An observation model (``AbstractObservationModel``, defined in ``types``) turns an
+action on a star into a row payload (``sample``), scores a payload against every draw
 (``log_like``), and gives the distribution of a row's outcome over discrete cells
-(``cells``). The host passes the law module; nothing dispatches on a traced law id.
+(``cells``). The host passes the model; nothing dispatches on a traced model id.
 
-Both toy laws read the gas block of ``Atoms`` and write one payload per row, a dict of
+Both toy models read the gas block of ``Atoms`` and write one payload per row, a dict of
 named ``(K, G)`` arrays: ``"snr"``, the S/N reached by every planet and gas (zero for a
-gas the mode does not cover), and the reading (``"reading"`` for the Gaussian law,
+gas the mode does not cover), and the reading (``"reading"`` for the Gaussian model,
 ``"bit"`` for the step report).
 
 Toy constants. The floor, the width of the verdict's gas prior and the linear shape of
@@ -17,7 +17,7 @@ the reading are proposed for the toy and wait on approval:
 - ``GAS_PRIOR_SD``: 1 dex. The verdict's gas prior is ``N(GAS_FLOOR, GAS_PRIOR_SD**2)``,
   so a gas starts at even odds of being above its floor.
 - The reading is linear at every S/N; there is no separate shape below detection.
-- These laws are never used for a negative certificate.
+- These models are never used for a negative certificate.
 """
 
 import equinox as eqx
@@ -27,7 +27,7 @@ from jax.scipy.special import ndtr
 from jaxtyping import Array, Float, Int
 
 from spaceodyssey.claim import GasAbove
-from spaceodyssey.types import AbstractObservationLaw, Action, Atoms
+from spaceodyssey.types import AbstractObservationModel, Action, Atoms
 
 GAS_FLOOR = 0.0
 """Abundance floor of every gas in the toy, dex (a toy constant)."""
@@ -68,7 +68,7 @@ def _cell_index(codes: Int[Array, "K G"], n_bin: int) -> Int[Array, ""]:
     return jnp.sum(flat * powers)
 
 
-class GaussianGasLaw(AbstractObservationLaw):
+class GaussianGasModel(AbstractObservationModel):
     """A linear Gaussian reading of every gas abundance.
 
     The reading is ``y = x + eps`` with ``eps ~ N(0, sigma**2)`` and
@@ -164,14 +164,14 @@ class GaussianGasLaw(AbstractObservationLaw):
         return _joint(factors)
 
 
-class StepReportLaw(AbstractObservationLaw):
+class StepReportModel(AbstractObservationModel):
     """A one-bit report per gas, given at or above S/N ``STEP_GATE_SNR``.
 
     Below the gate nothing is reported; at or above it, whether the gas is above its
     floor. The report is exact: at or above the gate the bit is ``x > GAS_FLOOR`` for
     the true abundance ``x``.
 
-    The law applies only to point gas blocks (``x_var = 0``). On a Gaussian block two
+    The model applies only to point gas blocks (``x_var = 0``). On a Gaussian block two
     rows of one gas report the same bit, so their likelihoods are not independent and
     their sum would count the bit twice; the block after a bit is a truncated Gaussian,
     which ``Atoms`` cannot hold. Every method raises ``ValueError`` when the gas
@@ -194,7 +194,7 @@ class StepReportLaw(AbstractObservationLaw):
         except jax.errors.ConcretizationTypeError:
             return  # traced: the docstring states the restriction
         if spread:
-            raise ValueError("StepReportLaw needs point gas draws (x_var = 0)")
+            raise ValueError("StepReportModel needs point gas draws (x_var = 0)")
 
     def _p_above(self, atoms, star) -> Float[Array, "A K G"]:
         """Probability of each draw's gas being above the floor."""

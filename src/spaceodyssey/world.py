@@ -1,7 +1,7 @@
 """The sealed world: the truth that rows are drawn from, kept out of every belief.
 
 A world holds one point state per star. Rows come out of it only through ``observe``
-(an action under a law) and ``reveal`` (a grant); ``unseal`` hands the truth to the
+(an action under a model) and ``reveal`` (a grant); ``unseal`` hands the truth to the
 scorer. The noise of a row is keyed by the row's identity, never by call order.
 """
 
@@ -13,7 +13,7 @@ import jax.numpy as jnp
 from jaxtyping import ArrayLike, Int, PRNGKeyArray
 
 from spaceodyssey.belief import Belief
-from spaceodyssey.types import AbstractObservationLaw, Action, Atoms, Grant, Pool, Row
+from spaceodyssey.types import AbstractObservationModel, Action, Atoms, Grant, Pool, Row
 
 
 def row_key(
@@ -70,19 +70,19 @@ class SealedWorld(eqx.Module):
         )
 
     def observe(
-        self, law: AbstractObservationLaw, action: Action, key: PRNGKeyArray
+        self, model: AbstractObservationModel, action: Action, key: PRNGKeyArray
     ) -> Row:
-        """The row an action returns: the law's payload drawn from the true star.
+        """The row an action returns: the model's payload drawn from the true star.
 
-        The host passes the law module and the row's key, from ``row_key``. The row is
-        written in its own law's frame: ``law`` is 0 and ``payload`` has one entry.
+        The host passes the model and the row's key, from ``row_key``. The row is
+        written in its own model's frame: ``model`` is 0 and ``payload`` has one entry.
         Its times are placeholders: ``start_d`` and ``release_d`` are 0 and
-        ``charged_d`` is the exposure. The host's ``step`` sets the times and the law
+        ``charged_d`` is the exposure. The host's ``step`` sets the times and the model
         slot (moving the payload into that slot) when it writes the row to the log. A
         stack of worlds is observed under ``eqx.filter_vmap``.
 
         Args:
-            law: the law of the action's mode.
+            model: the model of the action's mode.
             action: the action.
             key: the row's key.
 
@@ -90,7 +90,7 @@ class SealedWorld(eqx.Module):
             The row.
         """
         truth = jax.tree.map(lambda leaf: leaf[action.star], self._truth)
-        payload = jax.tree.map(lambda x: x[0], law.sample(truth, action, key))
+        payload = jax.tree.map(lambda x: x[0], model.sample(truth, action, key))
         zero_d = jnp.zeros_like(action.exposure_d)
         zero_i = jnp.zeros_like(action.star)
         return Row(
@@ -101,56 +101,59 @@ class SealedWorld(eqx.Module):
             charged_d=action.exposure_d,
             release_d=zero_d,
             refusal=zero_i,
-            law=zero_i,
+            model=zero_i,
             payload=(payload,),
         )
 
     def reveal(
-        self, grant: Grant, laws: tuple[AbstractObservationLaw, ...], key: PRNGKeyArray
+        self,
+        grant: Grant,
+        models: tuple[AbstractObservationModel, ...],
+        key: PRNGKeyArray,
     ) -> Row:
         """The rows of a grant, drawn from the truth, released at time zero.
 
-        Granted row ``i`` is drawn exactly as ``observe`` draws it, with the law in
+        Granted row ``i`` is drawn exactly as ``observe`` draws it, with the model in
         its slot and the key ``row_key(key, star, i)``: granted row ``i`` is row ``i``
         of the log, so the host numbers its observed rows after the grant. Each row is
         released at time zero and charged nothing, keeps the exposure of its action,
-        and carries its law slot, with its payload in that slot and the other slots
-        zero. The rows of each law are drawn together under ``jax.vmap``.
+        and carries its model slot, with its payload in that slot and the other slots
+        zero. The rows of each model are drawn together under ``jax.vmap``.
 
         Args:
             grant: the grant.
-            laws: the law table of the run, static; ``grant.law`` indexes it.
+            models: the model table of the run, static; ``grant.model`` indexes it.
             key: the run key.
 
         Returns:
             The granted rows, stacked along a leading axis.
 
         Raises:
-            ValueError: if a law slot of the grant is not in ``laws``.
+            ValueError: if a model slot of the grant is not in ``models``.
         """
-        if any(not 0 <= s < len(laws) for s in grant.law):
-            raise ValueError("a grant's law slot is not in the law table")
+        if any(not 0 <= s < len(models) for s in grant.model):
+            raise ValueError("a grant's model slot is not in the model table")
         actions = grant.actions
-        n_row = len(grant.law)
+        n_row = len(grant.model)
         keys = jax.vmap(row_key, in_axes=(None, 0, 0))(
             key, actions.star, jnp.arange(n_row)
         )
-        # One unbatched action, to read each law's payload shape (also for no rows).
+        # One unbatched action, to read each model's payload shape (also for no rows).
         probe = jax.tree.map(lambda x: jnp.zeros(x.shape[1:], x.dtype), actions)
 
-        def draw(law, action, k):
-            return self.observe(law, action, k).payload[0]
+        def draw(model, action, k):
+            return self.observe(model, action, k).payload[0]
 
         payload = []
-        for slot, law in enumerate(laws):
-            shapes = jax.eval_shape(draw, law, probe, key)
+        for slot, model in enumerate(models):
+            shapes = jax.eval_shape(draw, model, probe, key)
             buffer = jax.tree.map(
                 lambda x: jnp.zeros((n_row, *x.shape), x.dtype), shapes
             )
-            rows = jnp.asarray([i for i, s in enumerate(grant.law) if s == slot], int)
+            rows = jnp.asarray([i for i, s in enumerate(grant.model) if s == slot], int)
             if rows.size:
                 these = jax.tree.map(lambda leaf, rows=rows: leaf[rows], actions)
-                drawn = jax.vmap(draw, in_axes=(None, 0, 0))(law, these, keys[rows])
+                drawn = jax.vmap(draw, in_axes=(None, 0, 0))(model, these, keys[rows])
                 buffer = jax.tree.map(
                     lambda b, d, rows=rows: b.at[rows].set(d), buffer, drawn
                 )
@@ -165,7 +168,7 @@ class SealedWorld(eqx.Module):
             charged_d=zero_d,
             release_d=zero_d,
             refusal=zero_i,
-            law=jnp.asarray(grant.law, dtype=zero_i.dtype).reshape(n_row),
+            model=jnp.asarray(grant.model, dtype=zero_i.dtype).reshape(n_row),
             payload=tuple(payload),
         )
 

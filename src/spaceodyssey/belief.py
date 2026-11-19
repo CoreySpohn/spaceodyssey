@@ -87,7 +87,7 @@ def role_log_weights(
     weight, the role prior, minus the refit target ``p0``, plus the role's likelihood.
 
     Preconditions: ``log_weight`` is against ``p0`` times the incoming likelihood, and
-    that likelihood is the same law for every role; every prior and ``p0`` share a
+    that likelihood is the same model for every role; every prior and ``p0`` share a
     measure (checked here); the proposal covers the support of each role's prior times
     its likelihood. A draw outside a prior's support has zero weight under that role.
 

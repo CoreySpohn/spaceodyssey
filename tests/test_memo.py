@@ -14,7 +14,7 @@ from numpy.testing import assert_allclose
 from spaceodyssey.belief import Belief, chain, count_pmf, q
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.information import chain_gain, diagnose, information, log_score
-from spaceodyssey.toy import GAS_FLOOR, GAS_PRIOR_SD, GaussianGasLaw
+from spaceodyssey.toy import GAS_FLOOR, GAS_PRIOR_SD, GaussianGasModel
 
 PLANET = jnp.asarray(0)
 FLOOR = 0.3  # a nonzero gas floor, so its sign and its place in the indicator show
@@ -195,9 +195,9 @@ def test_members_by_ratio_on_a_resample(toy):
     assert_allclose(np.round(d.n_eff[1:]), [1917.0, 2000.0, 1897.0])
 
 
-# The gas law at the toy constants: floor 0 dex, the verdict's gas prior N(0, 1) dex,
+# The gas model at the toy constants: floor 0 dex, the verdict's gas prior N(0, 1) dex,
 # sigma = 2.5 / (S/N) dex. The numbers below hold for these constants only.
-GAS_LAW = GaussianGasLaw(snr_one_day=[1.0])
+GAS_MODEL = GaussianGasModel(snr_one_day=[1.0])
 
 
 def _expected_row(snr, u):
@@ -209,7 +209,7 @@ def _expected_row(snr, u):
 def _p_gas(toy, snr, y):
     """P(gas above its floor) after one reading y at S/N `snr`, from the prior."""
     prior = toy.atoms([[1.0]], [[1.0]], [1.0], GAS_FLOOR, GAS_PRIOR_SD**2, n_gas=1)
-    posterior = GAS_LAW.update(_expected_row([snr], y), prior)
+    posterior = GAS_MODEL.update(_expected_row([snr], y), prior)
     return GasAbove(0, GAS_FLOOR).prob(posterior, toy.star)[0, 0]
 
 
@@ -229,8 +229,8 @@ def gas_stages(toy):
     return [toy.belief(s0), toy.belief(s1)], claim
 
 
-def test_gas_law_numbers_at_snr_5(gas_stages, toy):
-    """The E track with the Gaussian gas law at S/N 5, the datum at y = u = 1 dex.
+def test_gas_model_numbers_at_snr_5(gas_stages, toy):
+    """The E track with the Gaussian gas model at S/N 5, the datum at y = u = 1 dex.
 
     sigma = 0.5, gain 1 / (1 + 0.25) = 0.8, posterior 0.80 +- 0.447 dex, P(gas) =
     Phi(0.8 / 0.447) = 0.963. Stage values q = 0.0625, 0.175, 0.337, 0.649; E's
@@ -243,8 +243,8 @@ def test_gas_law_numbers_at_snr_5(gas_stages, toy):
     """
     stages, claim = gas_stages
     water, oxygen = _expected_row([5.0, 0.0], 1.0), _expected_row([0.0, 5.0], 1.0)
-    after_water = GAS_LAW.update(water, stages[1].atoms)
-    after_oxygen = GAS_LAW.update(oxygen, after_water)
+    after_water = GAS_MODEL.update(water, stages[1].atoms)
+    after_oxygen = GAS_MODEL.update(oxygen, after_water)
     assert_allclose(after_water.x_mean[:, 0, 0], 0.8, rtol=1e-12)
     assert_allclose(np.sqrt(after_water.x_var[:, 0, 0]), 0.447, atol=5e-4)
     assert_allclose(after_water.x_mean[:, 0, 1], 0.0)

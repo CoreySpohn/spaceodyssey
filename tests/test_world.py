@@ -9,7 +9,7 @@ from numpy.testing import assert_allclose, assert_array_max_ulp
 
 from spaceodyssey.belief import count_pmf, q
 from spaceodyssey.claim import Claim, GasAbove
-from spaceodyssey.toy import GAS_FLOOR, GaussianGasLaw, StepReportLaw
+from spaceodyssey.toy import GAS_FLOOR, GaussianGasModel, StepReportModel
 from spaceodyssey.types import Action, Grant
 from spaceodyssey.world import SealedWorld, draw_worlds, row_key
 
@@ -39,9 +39,9 @@ def _differ(a, b):
     return not all(jax.tree.leaves(jax.tree.map(np.allclose, a, b)))
 
 
-def _observe(world, law, star, index):
+def _observe(world, model, star, index):
     action = Action(kind=0, star=star, mode=0, exposure_d=1.0)
-    return world.observe(law, action, row_key(KEY, star, index)).payload[0]
+    return world.observe(model, action, row_key(KEY, star, index)).payload[0]
 
 
 def test_row_noise_depends_only_on_star_index_and_key(toy):
@@ -56,16 +56,16 @@ def test_row_noise_depends_only_on_star_index_and_key(toy):
     the row index is not folded into it.
     """
     world = SealedWorld(_point_truth(toy, [[0.5, 1.0], [0.5, 1.0]]))
-    law = GaussianGasLaw(snr_one_day=[5.0, 5.0])
+    model = GaussianGasModel(snr_one_day=[5.0, 5.0])
     rows = [(0, 0), (1, 1), (0, 2), (1, 3)]
-    first = {r: _observe(world, law, *r) for r in rows}
+    first = {r: _observe(world, model, *r) for r in rows}
     second = {}
     for r in reversed(rows):
-        _observe(world, law, 1, 7)  # an unrelated row in between
-        second[r] = _observe(world, law, *r)
+        _observe(world, model, 1, 7)  # an unrelated row in between
+        second[r] = _observe(world, model, *r)
     for r in rows:
         _assert_ulp(first[r], second[r])
-    assert _differ(_observe(world, law, 0, 5), _observe(world, law, 1, 5))
+    assert _differ(_observe(world, model, 0, 5), _observe(world, model, 1, 5))
     assert _differ(first[(0, 0)], first[(0, 2)])
 
     def prior(key):
@@ -91,9 +91,9 @@ def test_observe_reads_the_right_star_and_unseal_gives_a_point_belief(toy):
     truth = _point_truth(toy, [[0.3, -0.4], [-0.3, 0.4]])
     truth = eqx.tree_at(lambda a: a.cloud.log_weight, truth, jnp.full((2, 1), -jnp.inf))
     world = SealedWorld(truth)
-    law = GaussianGasLaw(snr_one_day=[1.0e4, 1.0e4])
+    model = GaussianGasModel(snr_one_day=[1.0e4, 1.0e4])
     for star, x in enumerate(([0.3, -0.4], [-0.3, 0.4])):
-        assert_allclose(_observe(world, law, star, 0)["reading"][0], x, atol=1e-3)
+        assert_allclose(_observe(world, model, star, 0)["reading"][0], x, atol=1e-3)
 
     belief = world.unseal()
     planet = jnp.asarray(0)
@@ -111,41 +111,44 @@ def test_observe_reads_the_right_star_and_unseal_gives_a_point_belief(toy):
 
 
 def _grant():
-    """Three granted rows: star 1 under law slot 1, then stars 0 and 1 under slot 0."""
+    """Three granted rows: star 1 in model slot 1, then stars 0 and 1 in slot 0."""
     actions = Action(kind=[0, 0, 0], star=[1, 0, 1], mode=[2, 0, 0], exposure_d=1.0)
     actions = eqx.tree_at(lambda a: a.exposure_d, actions, jnp.array([4.0, 1.0, 2.0]))
-    return Grant(actions, law=(1, 0, 0))
+    return Grant(actions, model=(1, 0, 0))
 
 
-LAWS = (GaussianGasLaw(snr_one_day=[5.0, 5.0]), StepReportLaw(snr_one_day=[3.0, 3.0]))
+MODELS = (
+    GaussianGasModel(snr_one_day=[5.0, 5.0]),
+    StepReportModel(snr_one_day=[3.0, 3.0]),
+)
 
 
 def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
     """Granted rows are drawn as `observe` draws them, released at time zero, free.
 
-    Granted row i equals `observe` under the law in its slot with key row_key(key,
+    Granted row i equals `observe` under the model in its slot with key row_key(key,
     star, i), to ULPs; it is released at 0 and charged 0, keeps its action's star, mode
-    and exposure, carries its law slot, and its other law slot is zero. The step row
+    and exposure, carries its model slot, and its other model slot is zero. The step row
     (S/N 3 x 2 = 6) reports the true bits of star 1, (0, 1).
 
     Fails if a granted row is released late or charged, its noise is keyed by anything
-    but (star, row index, key), its payload lands in the wrong law slot, or the grant
+    but (star, row index, key), its payload lands in the wrong model slot, or the grant
     reads a star other than its action's.
     """
     world = SealedWorld(_point_truth(toy, [[0.5, 1.0], [-0.5, 1.0]]))
     grant = _grant()
-    revealed = world.reveal(grant, LAWS, KEY)
+    revealed = world.reveal(grant, MODELS, KEY)
     assert_allclose(revealed.release_d, 0.0)
     assert_allclose(revealed.charged_d, 0.0)
     assert_allclose(revealed.start_d, 0.0)
     assert_allclose(revealed.exposure_d, [4.0, 1.0, 2.0])
     assert_allclose(revealed.star, [1, 0, 1])
     assert_allclose(revealed.mode, [2, 0, 0])
-    assert_allclose(revealed.law, [1, 0, 0])
-    for i, slot in enumerate(grant.law):
+    assert_allclose(revealed.model, [1, 0, 0])
+    for i, slot in enumerate(grant.model):
         action = jax.tree.map(lambda leaf, i=i: leaf[i], grant.actions)
         key = row_key(KEY, action.star, i)
-        expected = world.observe(LAWS[slot], action, key).payload[0]
+        expected = world.observe(MODELS[slot], action, key).payload[0]
         _assert_ulp(jax.tree.map(lambda x, i=i: x[i], revealed.payload[slot]), expected)
         for other in jax.tree.leaves(revealed.payload[1 - slot]):
             assert_allclose(other[i], 0.0)
@@ -156,25 +159,25 @@ def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
 def test_reveal_differs_between_worlds(toy):
     """Two worlds with different truths reveal different rows from one grant and key.
 
-    An empty grant reveals no rows, and a grant whose law slot is not in the law table
-    is refused.
+    An empty grant reveals no rows, and a grant whose model slot is not in the model
+    table is refused.
 
     Fails if the grant's rows do not depend on the truth (rows carried by the grant, or
-    drawn from a fixed state), or a row of a missing law is silently dropped.
+    drawn from a fixed state), or a row of a missing model is silently dropped.
     """
     grant = _grant()
     a = SealedWorld(_point_truth(toy, [[0.5, 1.0], [-0.5, 1.0]]))
     b = SealedWorld(_point_truth(toy, [[0.5, 1.0], [0.5, -1.0]]))
-    rows_a, rows_b = a.reveal(grant, LAWS, KEY), b.reveal(grant, LAWS, KEY)
+    rows_a, rows_b = a.reveal(grant, MODELS, KEY), b.reveal(grant, MODELS, KEY)
     for slot in (0, 1):
         assert _differ(rows_a.payload[slot], rows_b.payload[slot])
     no_int = jnp.zeros(0, int)
-    empty = Grant(Action(no_int, no_int, no_int, jnp.zeros(0)), law=())
-    none = a.reveal(empty, LAWS, KEY)
+    empty = Grant(Action(no_int, no_int, no_int, jnp.zeros(0)), model=())
+    none = a.reveal(empty, MODELS, KEY)
     assert none.star.shape == (0,)
     assert {k: v.shape for k, v in none.payload[0].items()} == {
         "snr": (0, 1, 2),
         "reading": (0, 1, 2),
     }
-    with pytest.raises(ValueError, match="law table"):
-        a.reveal(grant, LAWS[:1], KEY)
+    with pytest.raises(ValueError, match="model table"):
+        a.reveal(grant, MODELS[:1], KEY)

@@ -1,4 +1,4 @@
-"""Leaf types shared by every layer: draws, pool, rows, actions, the law contract.
+"""Leaf types shared by every layer: draws, pool, rows, actions, the model contract.
 
 This module imports nothing from the package. Axis names used in the annotations:
 ``A`` draws, ``K`` planets one draw can hold, ``G`` gases, ``R`` roles (forecast is
@@ -140,9 +140,9 @@ class Row(eqx.Module):
         charged_d: time charged against the budget in days.
         release_d: time at which the row is released, in days.
         refusal: refusal code, zero for an accepted row.
-        law: index of the law that inverts the payload.
-        payload: one payload per law, each a dict of named arrays, zero-padded; only
-            the payload of ``law`` is meaningful.
+        model: index of the model that inverts the payload.
+        payload: one payload per model, each a dict of named arrays, zero-padded; only
+            the payload of ``model`` is meaningful.
     """
 
     star: Int[Array, ""] = eqx.field(converter=jnp.asarray)
@@ -152,7 +152,7 @@ class Row(eqx.Module):
     charged_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
     release_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
     refusal: Int[Array, ""] = eqx.field(converter=jnp.asarray)
-    law: Int[Array, ""] = eqx.field(converter=jnp.asarray)
+    model: Int[Array, ""] = eqx.field(converter=jnp.asarray)
     payload: tuple[PyTree, ...] = eqx.field(
         converter=lambda p: tuple(_asarrays(x) for x in p)
     )
@@ -184,28 +184,28 @@ class Grant(eqx.Module):
     Attributes:
         actions: an ``Action`` whose leaves have a leading axis over the granted rows;
             each gives the star, the mode and the exposure that sets the S/N.
-        law: the law slot of each granted row, static, one entry per row.
+        model: the model slot of each granted row, static, one entry per row.
     """
 
     actions: Action
-    law: tuple[int, ...] = eqx.field(
+    model: tuple[int, ...] = eqx.field(
         static=True, converter=lambda s: tuple(int(i) for i in s)
     )
 
     def __check_init__(self):
-        """Check that every granted row has one law slot."""
-        if jnp.shape(self.actions.star) != (len(self.law),):
-            raise ValueError("a grant has one law slot per granted action")
+        """Check that every granted row has one model slot."""
+        if jnp.shape(self.actions.star) != (len(self.model),):
+            raise ValueError("a grant has one model slot per granted action")
 
 
 CELL_SAMPLES = 4096
-"""Samples per draw in the binned default of ``AbstractObservationLaw.cells``."""
+"""Samples per draw in the binned default of ``AbstractObservationModel.cells``."""
 
 
-class AbstractObservationLaw(eqx.Module):
-    """The contract of an observation law.
+class AbstractObservationModel(eqx.Module):
+    """The contract of an observation model.
 
-    A law holds configuration only, never an observed datum: ``log_like`` is rebuilt
+    A model holds configuration only, never an observed datum: ``log_like`` is rebuilt
     from a row payload each time it is called.
     """
 
@@ -247,7 +247,7 @@ class AbstractObservationLaw(eqx.Module):
         """Probability of each outcome cell under each draw.
 
         The default bins ``CELL_SAMPLES`` draws of ``sample`` per draw (a Monte Carlo
-        estimate with a fixed key). A law with a closed form overrides it, and the
+        estimate with a fixed key). A model with a closed form overrides it, and the
         override is tested against this default.
 
         Args:
