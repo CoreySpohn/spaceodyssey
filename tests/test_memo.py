@@ -201,9 +201,9 @@ GAS_LAW = GaussianGasLaw(snr_one_day=[1.0])
 
 
 def _expected_row(snr, u):
-    """Payload (1, G, 2) of one planet whose readings sit at their expected value."""
+    """Payload of one planet whose readings sit at their expected value."""
     snr = jnp.asarray(snr, float)
-    return jnp.stack([snr, jnp.where(snr > 0, u, 0.0)], axis=-1)[None]
+    return {"snr": snr[None], "reading": jnp.where(snr > 0, u, 0.0)[None]}
 
 
 def _p_gas(toy, snr, y):

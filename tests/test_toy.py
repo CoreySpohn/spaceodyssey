@@ -21,10 +21,15 @@ def _action(exposure_d=1.0):
     return Action(kind=0, star=0, mode=0, exposure_d=exposure_d)
 
 
-def _expected_row(snr, u):
-    """Payload (1, G, 2) of one planet whose readings sit at their expected value."""
+def _expected_row(snr, u, name="reading"):
+    """Payload of one planet whose readings sit at their expected value."""
     snr = jnp.asarray(snr, float)
-    return jnp.stack([snr, jnp.where(snr > 0, u, 0.0)], axis=-1)[None]
+    return {"snr": snr[None], name: jnp.where(snr > 0, u, 0.0)[None]}
+
+
+def _first(payload):
+    """The payload of the first draw."""
+    return jax.tree.map(lambda x: x[0], payload)
 
 
 def _prior(toy, n_gas=2):
@@ -89,19 +94,20 @@ def test_step_report(toy):
     at = StepReportLaw(snr_one_day=[5.0, 5.0])
 
     silent = below.sample(atoms, _action(), key)
-    assert_allclose(silent[..., 1], 0.0)
-    assert_allclose(below.log_like(silent[0], atoms, toy.star), [0.0, 0.0])
-    assert_allclose(below.log_like(_expected_row([4.9, 4.9], 1.0), atoms, ()), 0.0)
+    assert_allclose(silent["bit"], 0.0)
+    assert_allclose(below.log_like(_first(silent), atoms, toy.star), [0.0, 0.0])
+    gated = _expected_row([4.9, 4.9], 1.0, "bit")
+    assert_allclose(below.log_like(gated, atoms, ()), 0.0)
 
-    bits = at.sample(atoms, _action(), key)[:, 0, :, 1]
+    bits = at.sample(atoms, _action(), key)["bit"][:, 0, :]
     assert_allclose(bits, [[1.0, 0.0], [1.0, 1.0]])
     # The report of draw 0 is certain under draw 0 and impossible under draw 1.
-    payload = at.sample(atoms, _action(), key)[0]
+    payload = _first(at.sample(atoms, _action(), key))
     assert_allclose(at.log_like(payload, atoms, toy.star), [0.0, -np.inf])
 
     fuzzy = toy.atoms([[1.0]], [[1.0]], [1.0], 0.4, 1.0, n_gas=1)
     with pytest.raises(ValueError, match="point gas"):
-        at.log_like(_expected_row([5.0], 1.0), fuzzy, toy.star)
+        at.log_like(_expected_row([5.0], 1.0, "bit"), fuzzy, toy.star)
     with pytest.raises(ValueError, match="point gas"):
         at.sample(fuzzy, _action(), key)
     with pytest.raises(ValueError, match="point gas"):
@@ -130,7 +136,7 @@ def test_gas_law_tends_to_the_step_rule(toy):
             for s in (5.0, 50.0, 500.0, 1.0e4)
         ]
         truth = toy.atoms([[1.0]], [[1.0]], [1.0], u, 0.0, n_gas=1)
-        bit = step.sample(truth, _action(), jax.random.key(0))[0, 0, 0, 1]
+        bit = step.sample(truth, _action(), jax.random.key(0))["bit"][0, 0, 0]
         distance = np.abs(np.asarray(p) - float(bit))
         assert np.all(np.diff(distance) <= 0) and distance[0] > 1e-3
         assert distance[-1] < 1e-6

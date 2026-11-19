@@ -29,6 +29,16 @@ def _point_truth(toy, abundances):
     return _stack(stars)
 
 
+def _assert_ulp(a, b, maxulp=4):
+    """Every array of two payloads agrees to ``maxulp`` ULPs."""
+    jax.tree.map(lambda x, y: assert_array_max_ulp(x, y, maxulp=maxulp), a, b)
+
+
+def _differ(a, b):
+    """Whether two payloads differ in some array."""
+    return not all(jax.tree.leaves(jax.tree.map(np.allclose, a, b)))
+
+
 def _observe(world, law, star, index):
     action = Action(kind=0, star=star, mode=0, exposure_d=1.0)
     return world.observe(law, action, row_key(KEY, star, index)).payload[0]
@@ -54,9 +64,9 @@ def test_row_noise_depends_only_on_star_index_and_key(toy):
         _observe(world, law, 1, 7)  # an unrelated row in between
         second[r] = _observe(world, law, *r)
     for r in rows:
-        assert_array_max_ulp(first[r], second[r], maxulp=4)
-    assert not np.allclose(_observe(world, law, 0, 5), _observe(world, law, 1, 5))
-    assert not np.allclose(first[(0, 0)], first[(0, 2)])
+        _assert_ulp(first[r], second[r])
+    assert _differ(_observe(world, law, 0, 5), _observe(world, law, 1, 5))
+    assert _differ(first[(0, 0)], first[(0, 2)])
 
     def prior(key):
         return _point_truth(toy, jax.random.normal(key, (2, 2)))
@@ -83,7 +93,7 @@ def test_observe_reads_the_right_star_and_unseal_gives_a_point_belief(toy):
     world = SealedWorld(truth)
     law = GaussianGasLaw(snr_one_day=[1.0e4, 1.0e4])
     for star, x in enumerate(([0.3, -0.4], [-0.3, 0.4])):
-        assert_allclose(_observe(world, law, star, 0)[0, :, 1], x, atol=1e-3)
+        assert_allclose(_observe(world, law, star, 0)["reading"][0], x, atol=1e-3)
 
     belief = world.unseal()
     planet = jnp.asarray(0)
@@ -136,9 +146,11 @@ def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
         action = jax.tree.map(lambda leaf, i=i: leaf[i], grant.actions)
         key = row_key(KEY, action.star, i)
         expected = world.observe(LAWS[slot], action, key).payload[0]
-        assert_array_max_ulp(revealed.payload[slot][i], expected, maxulp=4)
-        assert_allclose(revealed.payload[1 - slot][i], 0.0)
-    assert_allclose(revealed.payload[1][0, 0], [[6.0, 0.0], [6.0, 1.0]])
+        _assert_ulp(jax.tree.map(lambda x, i=i: x[i], revealed.payload[slot]), expected)
+        for other in jax.tree.leaves(revealed.payload[1 - slot]):
+            assert_allclose(other[i], 0.0)
+    assert_allclose(revealed.payload[1]["snr"][0, 0], [6.0, 6.0])
+    assert_allclose(revealed.payload[1]["bit"][0, 0], [0.0, 1.0])
 
 
 def test_reveal_differs_between_worlds(toy):
@@ -155,10 +167,14 @@ def test_reveal_differs_between_worlds(toy):
     b = SealedWorld(_point_truth(toy, [[0.5, 1.0], [0.5, -1.0]]))
     rows_a, rows_b = a.reveal(grant, LAWS, KEY), b.reveal(grant, LAWS, KEY)
     for slot in (0, 1):
-        assert not np.allclose(rows_a.payload[slot], rows_b.payload[slot])
+        assert _differ(rows_a.payload[slot], rows_b.payload[slot])
     no_int = jnp.zeros(0, int)
     empty = Grant(Action(no_int, no_int, no_int, jnp.zeros(0)), law=())
     none = a.reveal(empty, LAWS, KEY)
-    assert none.star.shape == (0,) and none.payload[0].shape == (0, 1, 2, 2)
+    assert none.star.shape == (0,)
+    assert {k: v.shape for k, v in none.payload[0].items()} == {
+        "snr": (0, 1, 2),
+        "reading": (0, 1, 2),
+    }
     with pytest.raises(ValueError, match="law table"):
         a.reveal(grant, LAWS[:1], KEY)

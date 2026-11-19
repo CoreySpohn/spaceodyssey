@@ -5,9 +5,10 @@ on a star into a row payload (``sample``), scores a payload against every draw
 (``log_like``), and gives the distribution of a row's outcome over discrete cells
 (``cells``). The host passes the law module; nothing dispatches on a traced law id.
 
-Both toy laws read the gas block of ``Atoms`` and write one payload of shape
-``(K, G, 2)`` per row: for every planet and gas, the S/N reached (zero for a gas the
-mode does not cover) and the reading.
+Both toy laws read the gas block of ``Atoms`` and write one payload per row, a dict of
+named ``(K, G)`` arrays: ``"snr"``, the S/N reached by every planet and gas (zero for a
+gas the mode does not cover), and the reading (``"reading"`` for the Gaussian law,
+``"bit"`` for the step report).
 
 Toy constants. The floor, the width of the verdict's gas prior and the linear shape of
 the reading are proposed for the toy and wait on approval:
@@ -44,11 +45,6 @@ STEP_GATE_SNR = 5.0
 def _snr(snr_one_day: Float[Array, " G"], action: Action) -> Float[Array, " G"]:
     """S/N per gas reached by an action: it grows as the root of the exposure."""
     return snr_one_day * jnp.sqrt(action.exposure_d)
-
-
-def _pack(snr: Float[Array, "*A K G"], value: Float[Array, "*A K G"]) -> Array:
-    """Payload ``(..., K, G, 2)``: the S/N and the reading of each planet and gas."""
-    return jnp.stack([snr, value], axis=-1)
 
 
 def _joint(factors: Float[Array, "A K G B"]) -> Float[Array, "A Y"]:
@@ -108,13 +104,13 @@ class GaussianGasLaw(AbstractObservationLaw):
         likelihood; a sum over rows is exact for point states, or for at most one row
         per gas. ``update`` folds rows into the block one at a time.
         """
-        snr, y = payload[..., 0], payload[..., 1]  # (K, G)
+        snr, y = payload["snr"], payload["reading"]  # (K, G)
         var = atoms.x_var + self._noise_var(snr)
         safe = jnp.where(snr > 0, var, 1.0)
         terms = -0.5 * ((y - atoms.x_mean) ** 2 / safe + jnp.log(2 * jnp.pi * safe))
         return jnp.where(snr > 0, terms, 0.0).sum(axis=(1, 2))
 
-    def update(self, payload: Array, atoms: Atoms) -> Atoms:
+    def update(self, payload: dict[str, Array], atoms: Atoms) -> Atoms:
         """Conjugate update of every draw's gas Gaussian by one row.
 
         With prior ``N(m, v)`` and a reading ``y`` of variance ``sigma**2``, the gain is
@@ -122,13 +118,13 @@ class GaussianGasLaw(AbstractObservationLaw):
         ``v * (1 - gain)``. An uncovered gas and a point state are unchanged.
 
         Args:
-            payload: the payload of one row, ``(K, G, 2)``.
+            payload: the payload of one row, ``(K, G)`` arrays.
             atoms: the draws.
 
         Returns:
             The draws with their gas block updated.
         """
-        snr, y = payload[..., 0], payload[..., 1]
+        snr, y = payload["snr"], payload["reading"]
         precision = jnp.where(snr > 0, (snr / READING_SD_AT_UNIT_SNR) ** 2, 0.0)
         gain = atoms.x_var * precision / (1.0 + atoms.x_var * precision)
         mean = atoms.x_mean + gain * (y - atoms.x_mean)
@@ -136,15 +132,15 @@ class GaussianGasLaw(AbstractObservationLaw):
         return eqx.tree_at(lambda a: (a.x_mean, a.x_var), atoms, (mean, var))
 
     def sample(self, atoms, action, key):
-        """Readings of every planet and gas, per draw; shape ``(A, K, G, 2)``."""
+        """Readings of every planet and gas, per draw; ``(A, K, G)`` arrays."""
         snr = jnp.broadcast_to(_snr(self.snr_one_day, action), atoms.x_mean.shape)
         sd = jnp.sqrt(atoms.x_var + self._noise_var(snr))
         y = atoms.x_mean + sd * jax.random.normal(key, atoms.x_mean.shape)
-        return _pack(snr, jnp.where(snr > 0, y, 0.0))
+        return {"snr": snr, "reading": jnp.where(snr > 0, y, 0.0)}
 
     def cell(self, payload):
         """Bin of each covered reading at ``edges``, cell 0 for an uncovered gas."""
-        snr, y = payload[..., 0], payload[..., 1]
+        snr, y = payload["snr"], payload["reading"]
         code = jnp.searchsorted(self.edges, y, side="right")
         return _cell_index(jnp.where(snr > 0, code, 0), self.edges.shape[0] + 1)
 
@@ -209,24 +205,24 @@ class StepReportLaw(AbstractObservationLaw):
     def log_like(self, payload, atoms, star):
         """Log probability of the reported bits; a gas below the gate adds zero."""
         self._check_point(atoms)
-        snr, bit = payload[..., 0], payload[..., 1]
+        snr, bit = payload["snr"], payload["bit"]
         p_above = self._p_above(atoms, star)
         p = jnp.where(bit > 0.5, p_above, 1.0 - p_above)
         return jnp.where(snr >= STEP_GATE_SNR, jnp.log(p), 0.0).sum(axis=(1, 2))
 
     def sample(self, atoms, action, key):
-        """Bits of every planet and gas, per draw; shape ``(A, K, G, 2)``."""
+        """Bits of every planet and gas, per draw; ``(A, K, G)`` arrays."""
         self._check_point(atoms)
         snr = jnp.broadcast_to(_snr(self.snr_one_day, action), atoms.x_mean.shape)
         x = atoms.x_mean + jnp.sqrt(atoms.x_var) * jax.random.normal(
             key, atoms.x_mean.shape
         )
         bit = jnp.where(snr >= STEP_GATE_SNR, x > GAS_FLOOR, False)
-        return _pack(snr, bit.astype(snr.dtype))
+        return {"snr": snr, "bit": bit.astype(snr.dtype)}
 
     def cell(self, payload):
         """0 for no report, otherwise 1 plus the bit."""
-        snr, bit = payload[..., 0], payload[..., 1]
+        snr, bit = payload["snr"], payload["bit"]
         code = jnp.where(snr >= STEP_GATE_SNR, 1 + (bit > 0.5), 0)
         return _cell_index(code, 3)
 

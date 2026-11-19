@@ -141,7 +141,8 @@ class Row(eqx.Module):
         release_d: time at which the row is released, in days.
         refusal: refusal code, zero for an accepted row.
         law: index of the law that inverts the payload.
-        payload: one zero-padded array per law; only the array of ``law`` is meaningful.
+        payload: one payload per law, each a dict of named arrays, zero-padded; only
+            the payload of ``law`` is meaningful.
     """
 
     star: Int[Array, ""] = eqx.field(converter=jnp.asarray)
@@ -152,8 +153,8 @@ class Row(eqx.Module):
     release_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
     refusal: Int[Array, ""] = eqx.field(converter=jnp.asarray)
     law: Int[Array, ""] = eqx.field(converter=jnp.asarray)
-    payload: tuple[Array, ...] = eqx.field(
-        converter=lambda p: tuple(map(jnp.asarray, p))
+    payload: tuple[PyTree, ...] = eqx.field(
+        converter=lambda p: tuple(_asarrays(x) for x in p)
     )
 
 
@@ -208,11 +209,11 @@ class AbstractObservationLaw(eqx.Module):
     from a row payload each time it is called.
     """
 
-    def log_like(self, payload: Array, atoms: Atoms, star) -> Float[Array, " A"]:
+    def log_like(self, payload: PyTree, atoms: Atoms, star) -> Float[Array, " A"]:
         """Log likelihood of a row payload under each draw.
 
         Args:
-            payload: the payload of one row.
+            payload: the payload of one row, a dict of named arrays.
             atoms: the draws.
             star: a pytree of scalar leaves describing the star.
 
@@ -221,7 +222,7 @@ class AbstractObservationLaw(eqx.Module):
         """
         raise NotImplementedError
 
-    def sample(self, atoms: Atoms, action: Action, key: PRNGKeyArray) -> Array:
+    def sample(self, atoms: Atoms, action: Action, key: PRNGKeyArray) -> PyTree:
         """Draw the payload an action would return, independently for each draw.
 
         Args:
@@ -230,11 +231,11 @@ class AbstractObservationLaw(eqx.Module):
             key: the key of the row.
 
         Returns:
-            Payloads with leading axis ``A``.
+            The payload, a dict of named arrays with leading axis ``A``.
         """
         raise NotImplementedError
 
-    def cell(self, payload: Array) -> Int[Array, ""]:
+    def cell(self, payload: PyTree) -> Int[Array, ""]:
         """Index of the outcome cell one payload falls in."""
         raise NotImplementedError
 

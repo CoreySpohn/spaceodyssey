@@ -90,7 +90,7 @@ class SealedWorld(eqx.Module):
             The row.
         """
         truth = jax.tree.map(lambda leaf: leaf[action.star], self._truth)
-        payload = law.sample(truth, action, key)[0]
+        payload = jax.tree.map(lambda x: x[0], law.sample(truth, action, key))
         zero_d = jnp.zeros_like(action.exposure_d)
         zero_i = jnp.zeros_like(action.star)
         return Row(
@@ -143,13 +143,17 @@ class SealedWorld(eqx.Module):
 
         payload = []
         for slot, law in enumerate(laws):
-            shape = jax.eval_shape(draw, law, probe, key)
-            buffer = jnp.zeros((n_row, *shape.shape), shape.dtype)
+            shapes = jax.eval_shape(draw, law, probe, key)
+            buffer = jax.tree.map(
+                lambda x: jnp.zeros((n_row, *x.shape), x.dtype), shapes
+            )
             rows = jnp.asarray([i for i, s in enumerate(grant.law) if s == slot], int)
             if rows.size:
                 these = jax.tree.map(lambda leaf, rows=rows: leaf[rows], actions)
                 drawn = jax.vmap(draw, in_axes=(None, 0, 0))(law, these, keys[rows])
-                buffer = buffer.at[rows].set(drawn)
+                buffer = jax.tree.map(
+                    lambda b, d, rows=rows: b.at[rows].set(d), buffer, drawn
+                )
             payload.append(buffer)
         zero_d = jnp.zeros_like(actions.exposure_d)
         zero_i = jnp.zeros_like(actions.star)
