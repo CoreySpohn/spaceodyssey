@@ -230,8 +230,10 @@ def test_milestone_1_e_and_l_as_a_scored_log(toy):
     assert_allclose(res["n_cond"][0], 250.0, rtol=1e-10)
     assert_allclose(cert["q_lo"][0], 250.0 / 254.0, rtol=1e-10)
     assert round(float(cert["q_lo"][0]), 4) == 0.9843
+    text = format_report(report)
+    assert "-0.0000" not in text  # chain gains that round to zero print as 0.0000
     print("Step rule, S/N 6 reports, 4,000 draws\n")
-    print(format_report(report))
+    print(text)
 
     gaussian_models = (
         OrbitReport(),

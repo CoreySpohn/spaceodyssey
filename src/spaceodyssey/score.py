@@ -376,7 +376,8 @@ def _cell(name: str, value) -> str:
         return "yes" if value else "no"
     if np.issubdtype(value.dtype, np.integer):
         return str(int(value))
-    return f"{float(value):.4f}"
+    text = f"{float(value):.4f}"
+    return "0.0000" if text == "-0.0000" else text  # a value that rounds to zero
 
 
 def _table(title: str, columns: dict) -> str:
