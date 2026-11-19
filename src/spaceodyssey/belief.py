@@ -754,13 +754,26 @@ def quadrature_draws(b: Belief, floor: Float[Array, " G"], n: int = 16) -> Belie
     )
 
 
-def _role_rows(b: Belief, rows: slice) -> Belief:
-    """The belief of some of ``b``'s roles: its rows ``rows``, the pool's with them."""
+def select_roles(b: Belief, rows: slice) -> Belief:
+    """The belief of some of ``b``'s roles: its rows ``rows``, the pool's with them.
+
+    Leading axes (a stack of stars) are kept.
+
+    Args:
+        b: the belief.
+        rows: the role rows to keep, a slice of the role axis ``R``.
+
+    Returns:
+        The belief of those roles, on the same draws.
+    """
     pool = b.pool
     pool = Pool(
-        pool.marks, pool.log_prior[rows], pool.log_like[rows], pool.log_mass[rows]
+        pool.marks,
+        pool.log_prior[..., rows, :],
+        pool.log_like[..., rows, :],
+        pool.log_mass[..., rows],
     )
-    return Belief(b.atoms, b.log_prior[rows], b.log_like[rows], pool)
+    return Belief(b.atoms, b.log_prior[..., rows, :], b.log_like[..., rows, :], pool)
 
 
 def planning_beliefs(
@@ -802,6 +815,6 @@ def planning_beliefs(
     from_forecast = replay_belief(forecast, roles, models, star, pool)
     from_verdict = replay_belief(verdict, roles, models, star, pool)
     return (
-        quadrature_draws(_role_rows(from_forecast, slice(0, 1)), floor, n),
-        quadrature_draws(_role_rows(from_verdict, slice(1, None)), floor, n),
+        quadrature_draws(select_roles(from_forecast, slice(0, 1)), floor, n),
+        quadrature_draws(select_roles(from_verdict, slice(1, None)), floor, n),
     )

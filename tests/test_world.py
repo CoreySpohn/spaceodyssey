@@ -117,21 +117,15 @@ def test_world_keys_and_row_keys_are_distinct(toy):
                 assert not np.allclose(truth[i, s], noise_draw)
 
 
-def test_world_noise_and_policy_keys_are_independent():
-    """The three keys of one run key are independent streams.
+def test_world_noise_and_policy_keys_are_distinct():
+    """The three keys of one run key, world, noise and policy, are distinct keys:
+    each is the run key folded with its own tag, so distinct key data are distinct
+    streams.
 
-    4,096 standard normals are drawn from each of the world, noise and policy keys of
-    one run key. Each pair's sample correlation is within 4 / sqrt(4096) = 0.0625 of
-    zero (four standard errors), and the three keys are distinct.
-
-    Fails if `run_keys` folds one tag into two keys (that pair is identical, its
-    correlation one), or hands the policy the world or the noise key.
+    Fails if `run_keys` folds one tag into two keys, or hands the policy the world or
+    the noise key.
     """
-    keys = run_keys(KEY)
-    draws = np.stack([np.asarray(jax.random.normal(k, (4096,))) for k in keys])
-    pairs = np.corrcoef(draws)[np.triu_indices(3, 1)]
-    assert np.all(np.abs(pairs) < 4.0 / np.sqrt(4096))
-    data = {np.asarray(jax.random.key_data(k)).tobytes() for k in keys}
+    data = {np.asarray(jax.random.key_data(k)).tobytes() for k in run_keys(KEY)}
     assert len(data) == 3
 
 

@@ -22,7 +22,7 @@ TYPECHECK = os.environ.get("SPACEODYSSEY_TYPECHECK", "1") == "1"
 if TYPECHECK:
     install_import_hook("spaceodyssey", "beartype.beartype")
 
-from spaceodyssey.belief import Belief  # noqa: E402
+from spaceodyssey.belief import Belief, select_roles  # noqa: E402
 from spaceodyssey.claim import AbstractConjunct  # noqa: E402
 from spaceodyssey.log import execute  # noqa: E402
 from spaceodyssey.policy import AbstractPolicy  # noqa: E402
@@ -169,18 +169,7 @@ class _Toy:
         (role 0) and the verdict member (role 1), sharing the draws. Leading axes (a
         stack of stars) are kept.
         """
-
-        def rows(r):
-            pool = b.pool
-            pool = Pool(
-                pool.marks,
-                pool.log_prior[..., r, :],
-                pool.log_like[..., r, :],
-                pool.log_mass[..., r],
-            )
-            return Belief(b.atoms, b.log_prior[..., r, :], b.log_like[..., r, :], pool)
-
-        return rows(slice(0, 1)), rows(slice(1, 2))
+        return select_roles(b, slice(0, 1)), select_roles(b, slice(1, 2))
 
     class GasPrior(AbstractRolePrior):
         """One planet in the toy box (hz = size = 1) whose `n_gas` gases are iid
