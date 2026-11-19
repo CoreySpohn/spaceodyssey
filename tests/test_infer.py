@@ -1,4 +1,4 @@
-"""Replaying logged rows into a belief: `infer`, `replay`, `absorb`.
+"""Replaying logged rows into a belief: `replay`, `absorb`, `replay_belief`.
 
 The toy state is one planet with one gas per draw. A Gaussian gas row of S/N 2.5 has
 noise sd 2.5 / 2.5 = 1 dex, so the closed forms are those of a unit-noise reading.
@@ -13,7 +13,7 @@ from jax.scipy.special import ndtri
 from jax.scipy.stats import norm
 from numpy.testing import assert_allclose, assert_array_max_ulp
 
-from spaceodyssey.belief import absorb, infer, replay, replay_belief, weights
+from spaceodyssey.belief import absorb, replay, replay_belief, weights
 from spaceodyssey.roles import AbstractRolePrior, Roles
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
 from spaceodyssey.types import Atoms, ObservationLog, Refit, Row, WeightedCloud
@@ -73,7 +73,7 @@ def _step(snr, bit):
 NO_GAS, NO_STEP = _gas(0.0, 0.0), _step(0.0, 0.0)
 
 
-def _row(slot, *payload, star=0, refusal=0):
+def _row(slot, *payload, star=0, refusal=0, release_d=0.0):
     """One row; `payload` holds one buffer per model slot, `slot` names the real one."""
     return Row(
         star=star,
@@ -81,7 +81,7 @@ def _row(slot, *payload, star=0, refusal=0):
         time_d=0.0,
         exposure_d=1.0,
         charged_d=0.0,
-        release_d=0.0,
+        release_d=release_d,
         refusal=refusal,
         model_slot=slot,
         payload=payload,
@@ -113,7 +113,15 @@ def _assert_ulp(a, b, maxulp=4):
     assert_array_max_ulp(a[finite], b[finite], maxulp=maxulp)
 
 
-INFER = eqx.filter_jit(infer)
+NOW = jnp.asarray(1.0)  # a query time after every row released at time zero
+
+
+@eqx.filter_jit
+def _infer(refit, log, models, pool, time_d=NOW):
+    """The belief at `time_d` under `ROLES`: `replay_belief` of `replay`."""
+    return replay_belief(
+        replay(refit, log, models, STAR, time_d), ROLES, models, STAR, pool
+    )
 
 
 def test_replay_applies_each_row_outside_the_mask_once(toy):
@@ -122,18 +130,23 @@ def test_replay_applies_each_row_outside_the_mask_once(toy):
     x ~ N(0, 1) (the refit target p0 and the role prior of the forecast and the first
     member); rows y1 = y2 = 1 with noise sd 1. The draws are the 20,000 midpoint
     quantiles of the posterior given row 1, N(0.5, 0.5), with `row_mask` holding row
-    1 and `log_weight` 0, and `log_ref_density` is log p0. Row 2 is outside. `infer`
-    gives the posterior of precision 1 + 1 + 1 = 3: mean 2/3 and variance 1/3 under
-    N(0, 1), and mean (1 + 1 + 1) / 3 = 1 under the member N(1, 1). Rows that must add
-    nothing sit in the same log: another star's row, a refused row, a step row whose
-    gas buffer holds a stray reading, a gas row whose step buffer holds a stray bit, and
-    a row past `count`, each reading 5 (or reporting the gas absent). Counting row 1
-    again gives precision 4 (mean 3/4, variance 1/4); dropping row 2 leaves the draws'
-    own N(0.5, 0.5); both are computed here to show the test separates them.
+    1 and `log_weight` 0, and `log_ref_density` is log p0. Row 2 is outside. The
+    belief has the posterior of precision 1 + 1 + 1 = 3: mean 2/3 and variance 1/3
+    under N(0, 1), and mean (1 + 1 + 1) / 3 = 1 under the member N(1, 1). Rows that
+    must add nothing sit in the same log: another star's row, a refused row, a step
+    row whose gas buffer holds a stray reading, a gas row whose step buffer holds a
+    stray bit, a row in flight (released at day 10) and a row past `count`, each
+    reading 5 (or reporting the gas absent) except the row in flight, which reads 2.
+    Counting row 1 again gives precision 4 (mean 3/4, variance 1/4); dropping row 2
+    leaves the draws' own N(0.5, 0.5); both are computed here to show the test
+    separates them. At day 10 the row in flight is released: precision 4, mean
+    (1 + 1 + 2) / 4 = 1 under N(0, 1) and (1 + 1 + 1 + 2) / 4 = 5/4 under N(1, 1),
+    variance 1/4.
 
     Fails if a row in `row_mask` is applied again, a released row is dropped, a row of
-    another star, a refused row or a row past `count` is applied, a buffer is read in
-    the wrong model slot, or `log_ref_density` enters with the wrong sign.
+    another star, a refused row, a row in flight or a row past `count` is applied, a
+    row is not applied once released, a buffer is read in the wrong model slot, or
+    `log_ref_density` enters with the wrong sign.
     """
     n = 20_000
     x = 0.5 + jnp.sqrt(0.5) * ndtri((jnp.arange(n) + 0.5) / n)
@@ -146,88 +159,100 @@ def test_replay_applies_each_row_outside_the_mask_once(toy):
         _row(0, _gas(2.5, 5.0), NO_STEP, refusal=1),
         _row(1, _gas(2.5, 5.0), NO_STEP),
         _row(0, NO_GAS, _step(5.0, 0.0)),
+        _row(0, _gas(2.5, 2.0), NO_STEP, release_d=10.0),  # in flight until day 10
         _row(0, _gas(2.5, 5.0), NO_STEP),  # past count
     ]
-    log = _log(rows, 6)
+    log = _log(rows, 7)
     pool = toy.empty_pool(n_roles=3)
 
-    mean, var = _moments(INFER(ROLES, refit, log, MODELS, STAR, pool))
+    mean, var = _moments(_infer(refit, log, MODELS, pool))
     assert_allclose(mean, [2 / 3, 2 / 3, 1.0], rtol=1e-3)
     assert_allclose(var, [1 / 3, 1 / 3, 1 / 3], rtol=1e-3)
 
-    twice = INFER(ROLES, _refit(atoms), log, MODELS, STAR, pool)
+    twice = _infer(_refit(atoms), log, MODELS, pool)
     assert_allclose(_moments(twice)[0][0], 0.75, rtol=1e-3)
     assert_allclose(_moments(twice)[1][0], 0.25, rtol=1e-3)
-    dropped = INFER(ROLES, refit, _with_count(log, 1), MODELS, STAR, pool)
+    dropped = _infer(refit, _with_count(log, 1), MODELS, pool)
     assert_allclose(_moments(dropped)[0][0], 0.5, rtol=1e-3)
     assert_allclose(_moments(dropped)[1][0], 0.5, rtol=1e-3)
 
+    released = _infer(refit, log, MODELS, pool, jnp.asarray(10.0))
+    mean, var = _moments(released)
+    assert_allclose(mean, [1.0, 1.0, 1.25], rtol=1e-3)
+    assert_allclose(var, [0.25, 0.25, 0.25], rtol=1e-3)
 
-def test_replay_is_order_free_and_absorb_equals_infer(toy):
-    """Row order does not matter, and rows absorbed one by one equal the batch.
 
-    Nine point draws, a grant row in `row_mask` (row 0), then gas rows at S/N 5, 1 and
-    3, a step row that reports the gas present (so draws below the floor drop out), a
-    silent step row and a row of star 1. Permuting the observed rows changes the
-    likelihood and weights by at most 4 ULPs. A replay of the grant alone, advanced by
-    `absorb` after each appended row, gives `infer`'s belief on the whole log to 4
-    ULPs; absorbing with no new row changes nothing. Under `eqx.filter_jit`, `absorb`
-    traces once for every row and for a replay of the other star, which applies only
-    its own row.
+def test_replay_is_order_free_and_absorb_equals_replay(toy):
+    """Row order does not matter, and rows absorbed as they fall due equal the batch.
 
-    Fails if a row is absorbed twice or skipped, `absorb` applies a different rule or
-    arithmetic than `infer`, the replay depends on where a row sits in the log, or a
-    second row or star retraces `absorb`.
+    Nine point draws, a grant row in `row_mask` (row 0), then six rows appended on days
+    1 to 6 and released half a day later, except row 4, in flight until day 9: gas rows
+    at S/N 5, 1 and 3, a step row that reports the gas present (so draws below the
+    floor drop out), a silent step row and a row of star 1. At day 10 every row is
+    released. Permuting the observed rows changes the likelihood and weights by at most
+    4 ULPs. A replay of the grant alone, brought by `absorb` to day k + 0.6 after row k
+    is appended, leaves row 4 unapplied until day 10 and then gives the belief of
+    `replay` on the whole log to 4 ULPs; absorbing again changes nothing. Under
+    `eqx.filter_jit`, `absorb` traces once for every row and time and for a replay of
+    the other star, which applies only its own row.
+
+    Fails if a row is absorbed twice, skipped or applied before its release, `absorb`
+    applies a different rule or arithmetic than `replay`, the replay depends on where
+    a row sits in the log, or a second row, time or star retraces `absorb`.
     """
     x = jnp.linspace(-1.75, 2.25, 9)
     atoms = _atoms(x, 0.0, norm.logpdf(x))
     refit = _refit(atoms, [0])
     observed = [
-        _row(0, _gas(5.0, 1.3), NO_STEP),
-        _row(1, NO_GAS, _step(5.0, 1.0)),
-        _row(0, _gas(2.5, 0.4), NO_STEP, star=1),
-        _row(0, _gas(1.0, -0.2), NO_STEP),
-        _row(1, NO_GAS, _step(2.0, 0.0)),
-        _row(0, _gas(3.0, 0.9), NO_STEP),
+        _row(0, _gas(5.0, 1.3), NO_STEP, release_d=1.5),
+        _row(1, NO_GAS, _step(5.0, 1.0), release_d=2.5),
+        _row(0, _gas(2.5, 0.4), NO_STEP, star=1, release_d=3.5),
+        _row(0, _gas(1.0, -0.2), NO_STEP, release_d=9.0),
+        _row(1, NO_GAS, _step(2.0, 0.0), release_d=5.5),
+        _row(0, _gas(3.0, 0.9), NO_STEP, release_d=6.5),
     ]
     grant = _row(0, _gas(2.5, 0.8), NO_STEP)
     log = _log([grant, *observed], 7)
     pool = toy.empty_pool(n_roles=3)
-    batch = INFER(ROLES, refit, log, MODELS, STAR, pool)
+    end = jnp.asarray(10.0)
+    batch = _infer(refit, log, MODELS, pool, end)
 
     shuffled = _log([grant, *(observed[i] for i in (4, 2, 0, 5, 3, 1))], 7)
-    other = INFER(ROLES, refit, shuffled, MODELS, STAR, pool)
+    other = _infer(refit, shuffled, MODELS, pool, end)
     _assert_ulp(other.log_like, batch.log_like)
     _assert_ulp(weights(other), weights(batch))
 
     traces = []
 
     @eqx.filter_jit
-    def step(r, log):
+    def step(r, log, time_d):
         traces.append(None)
-        return absorb(r, log, MODELS, STAR)
+        return absorb(r, log, MODELS, STAR, time_d)
 
-    r = replay(ROLES, refit, _with_count(log, 1), MODELS, STAR, pool)
+    r = replay(refit, _with_count(log, 1), MODELS, STAR, jnp.asarray(0.0))
     for count in range(2, 8):
-        r = step(r, _with_count(log, count))
-    held = step(r, log)
-    assert int(held.count) == 7
-    jax.tree.map(np.testing.assert_array_equal, held.stats, r.stats)
-    online = replay_belief(r, MODELS, STAR)
+        r = step(r, _with_count(log, count), jnp.asarray(count - 1 + 0.6))
+    assert not r.applied[4]
+    r = step(r, log, end)
+    assert r.applied[4]
+    held = step(r, log, end)
+    jax.tree.map(np.testing.assert_array_equal, held, r)
+    online = replay_belief(r, ROLES, MODELS, STAR, pool)
     _assert_ulp(online.log_like, batch.log_like)
     _assert_ulp(weights(online), weights(batch))
 
     star_one = replay(
-        ROLES, _refit(atoms, [0], star=1), _with_count(log, 3), MODELS, STAR, pool
+        _refit(atoms, [0], star=1), _with_count(log, 3), MODELS, STAR, NOW
     )
-    star_one = step(star_one, log)
+    star_one = step(star_one, log, end)
     assert len(traces) == 1
     only_its_row = _log([grant, _row(0, _gas(2.5, 0.4), NO_STEP)], 2)
-    expected = INFER(ROLES, refit, only_its_row, MODELS, STAR, pool)
-    _assert_ulp(replay_belief(star_one, MODELS, STAR).log_like, expected.log_like)
+    expected = _infer(refit, only_its_row, MODELS, pool)
+    held = replay_belief(star_one, ROLES, MODELS, STAR, pool)
+    _assert_ulp(held.log_like, expected.log_like)
 
 
-def test_infer_on_an_uncertain_gas_uses_the_joint_marginal(toy):
+def test_replay_on_an_uncertain_gas_uses_the_joint_marginal(toy):
     """Rows reading one Gaussian gas enter through summed statistics and `finalize`.
 
     Two draws whose gas is N(0, 1) and N(1, 0.5); rows y1 = 1 at S/N 5 (noise variance
@@ -238,14 +263,14 @@ def test_infer_on_an_uncertain_gas_uses_the_joint_marginal(toy):
     7, mean 6.4 / 7. The same rows split over two model slots give the same belief to
     1e-12: the slots are finalized in turn, each against the draws the last returned.
 
-    Fails if `infer` sums per-row likelihoods on an uncertain gas, finalizes each slot
-    against the refit's draws (the prior counted once per slot), or drops a row's
+    Fails if the replay sums per-row likelihoods on an uncertain gas, finalizes each
+    slot against the refit's draws (the prior counted once per slot), or drops a row's
     statistics.
     """
     refit = _refit(_atoms([0.0, 1.0], [1.0, 0.5], jnp.zeros(2)))
     pool = toy.empty_pool(n_roles=3)
     one_slot = _log([_row(0, _gas(5.0, 1.0)), _row(0, _gas(2.5, 0.4))], 2)
-    b = INFER(ROLES, refit, one_slot, (GAS,), STAR, pool)
+    b = _infer(refit, one_slot, (GAS,), pool)
 
     y = np.array([1.0, 0.4])
     joint = []
@@ -264,35 +289,37 @@ def test_infer_on_an_uncertain_gas_uses_the_joint_marginal(toy):
     two_slots = _log(
         [_row(0, _gas(5.0, 1.0), NO_GAS), _row(1, NO_GAS, _gas(2.5, 0.4))], 2
     )
-    split = INFER(ROLES, refit, two_slots, (GAS, GAS), STAR, pool)
+    split = _infer(refit, two_slots, (GAS, GAS), pool)
     assert_allclose(split.log_like, b.log_like, rtol=1e-12)
     assert_allclose(split.atoms.x_mean, b.atoms.x_mean, rtol=1e-12)
     assert_allclose(split.atoms.x_var, b.atoms.x_var, rtol=1e-12)
 
 
-def test_infer_refuses_what_it_cannot_replay(toy):
-    """The measure check of the role weights holds through `infer`, and shapes are
+def test_replay_refuses_what_it_cannot_replay(toy):
+    """The measure check of the role weights holds through a replay, and shapes are
     checked.
 
-    A verdict prior on measure "y" against a cloud on "toy" raises, as do a model table
-    whose length differs from the log's payload buffers, a `row_mask` whose capacity
-    differs from the log's, and a belief's updated draws passed as a refit.
+    A verdict prior on measure "y" against a cloud on "toy" raises when the belief is
+    read, as do a model table whose length differs from the log's payload buffers, a
+    `row_mask` whose capacity differs from the log's, and a belief's updated draws
+    passed as a refit.
 
-    Fails if `infer` builds role weights without the measure check (a missing Jacobian
-    goes unnoticed), reads a payload buffer or a mask entry that does not exist, or
-    replays draws that already carry the rows.
+    Fails if the belief is read without the measure check (a missing Jacobian goes
+    unnoticed), the replay reads a payload buffer or a mask entry that does not exist,
+    or it replays draws that already carry the rows.
     """
     refit = _refit(_atoms([0.0, 1.0], 0.0, jnp.zeros(2)))
     log = _log([_row(0, _gas(2.5, 1.0), NO_STEP)], 1)
     pool = toy.empty_pool(n_roles=3)
+    r = replay(refit, log, MODELS, STAR, NOW)
     on_y = Roles(ROLES.forecast, GasGaussian("y", mean=[0.0, 1.0], sd=[1.0, 1.0]))
     with pytest.raises(ValueError, match="measure"):
-        infer(on_y, refit, log, MODELS, STAR, pool)
+        replay_belief(r, on_y, MODELS, STAR, pool)
     with pytest.raises(ValueError, match="payload buffers"):
-        infer(ROLES, refit, log, (GAS,), STAR, pool)
+        replay(refit, log, (GAS,), STAR, NOW)
     short = eqx.tree_at(lambda r: r.row_mask, refit, jnp.zeros(3, bool))
     with pytest.raises(ValueError, match="capacity"):
-        infer(ROLES, short, log, MODELS, STAR, pool)
-    updated = infer(ROLES, refit, log, MODELS, STAR, pool).atoms
+        replay(short, log, MODELS, STAR, NOW)
+    updated = replay_belief(r, ROLES, MODELS, STAR, pool).atoms
     with pytest.raises((TypeError, AttributeError)):
-        infer(ROLES, updated, log, MODELS, STAR, pool)
+        replay(updated, log, MODELS, STAR, NOW)
