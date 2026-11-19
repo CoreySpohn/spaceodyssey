@@ -158,11 +158,11 @@ def _bit(q_claim: Float[Array, "..."]) -> Float[Array, "... 2"]:
 
 def claim_information(
     b: Belief,
+    model: AbstractObservationModel,
+    action: Action,
     claim: Claim,
     star,
     planet: Int[Array, ""],
-    model: AbstractObservationModel,
-    action: Action,
 ) -> Float[Array, " R"]:
     """Expected gain of each role's log score on one planet's claim bit from an action.
 
@@ -180,11 +180,11 @@ def claim_information(
 
     Args:
         b: the belief.
+        model: the observation model of the action.
+        action: the action.
         claim: an unconditional claim (``claim.given == 0``).
         star: a pytree of scalar leaves describing the star.
         planet: index of the planet along the ``K`` axis.
-        model: the observation model of the action.
-        action: the action.
 
     Returns:
         The expected gain per role in nats, shape ``(R,)``.

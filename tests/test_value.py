@@ -3,7 +3,6 @@ forms and the sign errors they catch.
 """
 
 import itertools
-from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -18,7 +17,7 @@ from spaceodyssey.belief import Belief, mark_weights, pool_rate
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.information import claim_information
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
-from spaceodyssey.types import AbstractObservationModel, Action
+from spaceodyssey.types import Action
 from spaceodyssey.value import (
     Count,
     Frontier,
@@ -153,22 +152,11 @@ def _frontier_of(belief, claim, star, utility, models, menu, depth, lam=0.0):
     return _traced_frontier(belief, claim, star, utility, models, menu, lam, depth)
 
 
-def _one(x):
-    """Stack one star's pytree along a leading star axis of length one."""
-    return jax.tree.map(lambda leaf: jnp.asarray(leaf)[None], x)
-
-
 def _menu(exposure_d, mode, mask=True):
     """A menu over stars: `exposure_d` has shape (S, M), `mode` one mode per entry."""
     exposure_d = jnp.asarray(exposure_d, float)
     mask = jnp.broadcast_to(jnp.asarray(mask, bool), exposure_d.shape)
     return Menu(exposure_d, mask, mode)
-
-
-def _empty_pool(toy, n_gas):
-    """A two-role pool with no expected planets, its one mark a point gas state."""
-    marks = toy.atoms([[0.0]], [[0.0]], [1.0], 0.0, 0.0, n_gas)
-    return eqx.tree_at(lambda p: p.marks, toy.empty_pool(2), marks)
 
 
 # The two spectra (V; T): water and oxygen reports at S/N 6 (above the step gate), each
@@ -194,7 +182,7 @@ def _spectra_belief(toy, psi):
     cand = np.array([psi if h else 1.0 - psi for h, _, _ in states])
     present = np.array([w > 0 and o > 0 for _, w, o in states])
     log_prior = [np.where(present, np.log(cand), -np.inf), np.log(cand / 4.0)]
-    return Belief(atoms, log_prior, np.zeros((2, 8)), _empty_pool(toy, 2))
+    return Belief(atoms, log_prior, np.zeros((2, 8)), toy.empty_pool(2, 2))
 
 
 def _spectra_claim(toy):
@@ -218,9 +206,11 @@ def test_two_spectra_are_worth_the_verdict_gain(toy, psi, memo):
     gain = psi * np.log(4.0) + (1.0 - psi) * (np.log(1.0 - psi) - np.log(1 - psi / 4))
     b = _spectra_belief(toy, psi)
     claim = _spectra_claim(toy)
-    info = claim_information(b, claim, toy.star, PLANET, SPECTRA[2], Action(0, 0, 1.0))
+    info = claim_information(b, SPECTRA[2], Action(0, 0, 1.0), claim, toy.star, PLANET)
     assert_allclose(info, [0.0, gain], atol=1e-12)  # row 0 is I_F
-    f = _frontier_of(_one(b), claim, toy.star, LogScore(1), SPECTRA, SPECTRA_MENU, 1)
+    f = _frontier_of(
+        toy.stack(b), claim, toy.star, LogScore(1), SPECTRA, SPECTRA_MENU, 1
+    )
     assert_allclose(f.reward[0, 0], gain, rtol=1e-12)
     assert round(float(f.reward[0, 0]), 2) == memo
 
@@ -236,7 +226,7 @@ def _coarsening_belief(toy):
     gas = [[1.0], [1.0], [-1.0], [-1.0]]
     atoms = toy.atoms(hz, np.ones_like(hz), np.ones(4), gas, 0.0, n_gas=1)
     log_prior = np.log([[0.45, 0.05, 0.05, 0.45], [0.05, 0.45, 0.45, 0.05]])
-    return Belief(atoms, log_prior, np.zeros((2, 4)), _empty_pool(toy, 1))
+    return Belief(atoms, log_prior, np.zeros((2, 4)), toy.empty_pool(2, 1))
 
 
 # One gas report at S/N 6 (fine: the bit is reported) or 3 (merged: nothing reported).
@@ -259,7 +249,7 @@ def test_coarsening_can_raise_the_verdict_gain(toy):
     b = _coarsening_belief(toy)
     claim = Claim((toy.InHz(),))
     f = _frontier_of(
-        _one(b), claim, toy.star, LogScore(1), GAS_REPORT, FINE_AND_MERGED, 1
+        toy.stack(b), claim, toy.star, LogScore(1), GAS_REPORT, FINE_AND_MERGED, 1
     )
     assert_allclose(f.reward[0], [-1.390, 0.0], atol=5e-4)
     exact = 0.9 * np.log(0.1) + 0.1 * np.log(0.9) - np.log(0.5)
@@ -268,7 +258,7 @@ def test_coarsening_can_raise_the_verdict_gain(toy):
     assert round(mutual, 3) == 0.368
     for exposure_d, row in ((1.0, [mutual, exact]), (0.25, [0.0, 0.0])):
         action = Action(0, 0, exposure_d)
-        info = claim_information(b, claim, toy.star, PLANET, GAS_REPORT[0], action)
+        info = claim_information(b, GAS_REPORT[0], action, claim, toy.star, PLANET)
         assert_allclose(info, row, atol=1e-12)  # row 0 is I_F, row 1 the reward
 
 
@@ -290,7 +280,7 @@ def test_value_does_not_fall_with_depth(toy):
     psi = 0.7
     alone = psi * np.log(2.0) + (1 - psi) * (np.log(1 - psi / 2) - np.log(1 - psi / 4))
     both = psi * np.log(4.0) + (1 - psi) * (np.log(1 - psi) - np.log(1 - psi / 4))
-    b, claim = _one(_spectra_belief(toy, psi)), _spectra_claim(toy)
+    b, claim = toy.stack(_spectra_belief(toy, psi)), _spectra_claim(toy)
     rewards = np.stack(
         [
             _frontier_of(
@@ -307,7 +297,7 @@ def test_value_does_not_fall_with_depth(toy):
     losing = np.stack(
         [
             _frontier_of(
-                _one(_coarsening_belief(toy)),
+                toy.stack(_coarsening_belief(toy)),
                 Claim((toy.InHz(),)),
                 toy.star,
                 LogScore(1),
@@ -322,32 +312,6 @@ def test_value_does_not_fall_with_depth(toy):
     assert_allclose(losing[1], losing[0], rtol=1e-12)
 
 
-class Search(AbstractObservationModel):
-    """A test search: it detects a planet with probability `hit` when its `hz` bit is
-    set and `other` otherwise. Cell 0 is the miss, cell 1 the detection; a slot with no
-    planet is always a miss. Read only through `cells`.
-    """
-
-    searches: ClassVar[bool] = True
-    hit: jax.Array = eqx.field(converter=jnp.asarray)
-    other: jax.Array = eqx.field(converter=jnp.asarray)
-
-    def cells(self, atoms, action):
-        d = jnp.where(atoms.cloud.samples["hz"][:, 0] > 0.5, self.hit, self.other)
-        d = jnp.where(atoms.exists[:, 0], d, 0.0)
-        return jnp.stack([1.0 - d, d], axis=-1)
-
-    def sample(self, key, atoms, action):
-        raise NotImplementedError("read only through cells")
-
-    def stats(self, payload, atoms, star):
-        raise NotImplementedError("read only through cells")
-
-    def finalize(self, stats, atoms, star):
-        raise NotImplementedError("read only through cells")
-
-
-SEARCH = (Search(hit=0.8, other=0.2),)
 LOOK = _menu([[1.0]], (0,))
 
 
@@ -355,6 +319,13 @@ def _search_pool(toy):
     """Test 5's pool: mass 2, marks with claim bits (1, 0), weighed (0.5, 0.5) by role
     0 and (0.2, 0.8) by role 1."""
     return toy.pool([1.0, 0.0], [[0.5, 0.5], [0.2, 0.8]], np.log(2.0), n_roles=2)
+
+
+def _search(toy):
+    """Test 5's search: it detects a planet in the HZ with probability 0.8 and any
+    other with 0.2, in one day.
+    """
+    return toy.Search(hit=0.8, other=0.2)
 
 
 def _search_belief(toy, pool):
@@ -391,11 +362,15 @@ def test_count_and_thin_by_hand(toy):
     assert_allclose(Count(pool)(belief, claim, toy.star), 0.8, rtol=1e-12)
 
     action = Action(0, 0, 1.0)
-    assert_allclose(completeness(pool, SEARCH[0], action, claim, toy.star), [0.8, 0.8])
+    assert_allclose(
+        completeness(pool, _search(toy), action, claim, toy.star), [0.8, 0.8]
+    )
 
-    start = _one(_search_belief(toy, pool))
+    start = toy.stack(_search_belief(toy, pool))
     for depth, found in ((1, 0.8), (2, 0.96)):
-        f = _frontier_of(start, claim, toy.star, Count(_one(pool)), SEARCH, LOOK, depth)
+        f = _frontier_of(
+            start, claim, toy.star, Count(toy.stack(pool)), (_search(toy),), LOOK, depth
+        )
         assert_allclose(f.reward[0, 0], found, rtol=1e-12)
 
 
@@ -413,10 +388,10 @@ def test_a_follow_up_is_charged_at_the_price(toy):
     lam = 0.2), or if the price is read as a Python value (a second price retraces).
     """
     pool, claim = _search_pool(toy), Claim((toy.InHz(),))
-    start, count = _one(_search_belief(toy, pool)), Count(_one(pool))
+    start, count = toy.stack(_search_belief(toy, pool)), Count(toy.stack(pool))
 
     def reward(lam):
-        f = _frontier_of(start, claim, toy.star, count, SEARCH, LOOK, 2, lam)
+        f = _frontier_of(start, claim, toy.star, count, (_search(toy),), LOOK, 2, lam)
         assert_allclose(f.cost_d, [[1.0]])
         return f.reward[0, 0]
 
@@ -441,11 +416,11 @@ def test_a_model_that_does_not_search_leaves_the_pool(toy):
     action = Action(0, 0, 1.0)
     assert_allclose(completeness(pool, reading, action, claim, toy.star), [0.0, 0.0])
     f = _frontier_of(
-        _one(_search_belief(toy, pool)),
+        toy.stack(_search_belief(toy, pool)),
         claim,
         toy.star,
-        Count(_one(pool)),
-        (SEARCH[0], reading),
+        Count(toy.stack(pool)),
+        (_search(toy), reading),
         _menu([[1.0, 1.0]], (0, 1)),
         1,
     )
@@ -462,10 +437,9 @@ def test_a_second_star_and_world_add_no_traces(toy):
     belief or menu.
     """
     claim = _spectra_claim(toy)
-    stack = lambda *x: jax.tree.map(lambda *leaf: jnp.stack(leaf), *x)  # noqa: E731
 
     def world(psis, exposure_d, mask):
-        beliefs = stack(*[_spectra_belief(toy, p) for p in psis])
+        beliefs = toy.stack(*[_spectra_belief(toy, p) for p in psis])
         menu = _menu(exposure_d, (0, 1, 2), mask)
         return beliefs, menu
 
@@ -480,7 +454,7 @@ def test_a_second_star_and_world_add_no_traces(toy):
     assert_allclose(f2.cost_d, [[1.0, 0.1, 1.0], [2.0] * 3])
     assert_allclose(f2.reward[0, 1], 0.0)  # masked
     alone = _frontier_of(
-        _one(_spectra_belief(toy, 0.3)),
+        toy.stack(_spectra_belief(toy, 0.3)),
         claim,
         toy.star,
         LogScore(1),
@@ -516,12 +490,12 @@ def test_cells_reward_matches_nested_monte_carlo(toy):
     w_forecast = np.array([0.3, 0.1, 0.2, 0.1, 0.2, 0.1])
     w_verdict = np.array([0.1, 0.25, 0.1, 0.3, 0.05, 0.2])
     b = Belief(
-        atoms, np.log([w_forecast, w_verdict]), np.zeros((2, 6)), _empty_pool(toy, 1)
+        atoms, np.log([w_forecast, w_verdict]), np.zeros((2, 6)), toy.empty_pool(2, 1)
     )
     claim = Claim((toy.InHz(), GasAbove(0, 0.0)))
     model = GaussianGasModel(snr_one_day=[3.0], edges=[-0.5, 0.0, 0.5])
     menu = _menu([[1.0]], (0,))
-    exact = _frontier_of(_one(b), claim, toy.star, LogScore(1), (model,), menu, 1)
+    exact = _frontier_of(toy.stack(b), claim, toy.star, LogScore(1), (model,), menu, 1)
     exact = float(exact.reward[0, 0])
 
     action = Action(0, 0, 1.0)
