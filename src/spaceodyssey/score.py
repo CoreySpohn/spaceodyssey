@@ -38,7 +38,7 @@ from spaceodyssey.information import (
     widen_by_mass_outside,
 )
 from spaceodyssey.study import Study
-from spaceodyssey.types import ACCEPTED, Atoms, ObservationLog, spent_d
+from spaceodyssey.types import ACCEPTED, Atoms, ObservationLog, clock_d
 from spaceodyssey.world import SealedWorld
 
 
@@ -226,9 +226,10 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
 
     Every row the run took is scored at its own release time, those still in flight
     when the run ended included: their data were taken, and the science arrives after
-    the last exposure. The run's end, the time it charged (``spent_d``), is a stage of
-    its own at every star, marked in the information table's ``end`` column, so the
-    table shows what was known at the end and what the rows in flight added after it.
+    the last exposure. The run's end, the calendar time its last row ends
+    (``clock_d``), is a stage of its own at every star, marked in the information
+    table's ``end`` column, so the table shows what was known at the end and what the
+    rows in flight added after it.
     The certificates, the resolution and the counts are read after the last release.
 
     Args:
@@ -248,7 +249,7 @@ def score(log: ObservationLog, world: SealedWorld, study: Study) -> Report:
     n_star, n_role = study.prior_mass_outside.shape
     khat_max = khat_threshold(study.refits.atoms.cloud.log_weights.shape[-1])
     members = range(1, n_role)
-    end_d = float(spent_d(log))
+    end_d = float(clock_d(log))
 
     information, certificates, resolution, planets = [], [], [], []
     for s in range(n_star):

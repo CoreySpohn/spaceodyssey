@@ -22,6 +22,7 @@ from spaceodyssey.types import (
     Grant,
     ObservationLog,
     Row,
+    clock_d,
     spent_d,
 )
 from spaceodyssey.world import SealedWorld, row_key, run_keys
@@ -99,8 +100,10 @@ def step(
 ) -> ObservationLog:
     """Take one action: draw its row from the world and write it at ``count``.
 
-    The row starts at the time charged so far (``spent_d``). An action whose exposure
-    fits the budget left is accepted: it is charged its exposure, its payload is drawn
+    The row starts on the calendar at the later of the action's ``not_before_d`` and
+    the time the instrument is next free (``clock_d``), so waiting costs no budget. An
+    action whose exposure fits the budget left (the budget less ``spent_d``) is
+    accepted: it is charged its exposure, its payload is drawn
     by the world under the model of its mode with ``row_key(key, star, count)``, and
     it is released ``mode.latency_d`` after its exposure ends. One that does not fit is
     refused (``OVER_BUDGET``): charged nothing, its payload zeros. The payload sits in
@@ -126,8 +129,8 @@ def step(
     index = eqx.error_if(
         log.count, log.count >= log.rows.star.shape[0], "the log is full"
     )
-    time_d = spent_d(log)
-    accepted = action.exposure_d <= resources.budget_d - time_d
+    time_d = jnp.maximum(action.not_before_d, clock_d(log))
+    accepted = action.exposure_d <= resources.budget_d - spent_d(log)
     drawn = world.observe(
         row_key(key, action.star, index), models[mode.model_slot], action
     )

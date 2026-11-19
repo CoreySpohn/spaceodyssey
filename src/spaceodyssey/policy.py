@@ -14,7 +14,14 @@ import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray
 
 from spaceodyssey.design import Resources
-from spaceodyssey.types import Action, ObservationLog, as_float, as_index, spent_d
+from spaceodyssey.types import (
+    Action,
+    ObservationLog,
+    as_float,
+    as_index,
+    clock_d,
+    spent_d,
+)
 
 
 class PublicView(eqx.Module):
@@ -23,7 +30,7 @@ class PublicView(eqx.Module):
     Attributes:
         log: the log, with the payload of every row not yet released zeroed: a row in
             flight shows its star, mode, times and charge, not its data.
-        time_d: the current time, days: the time charged so far.
+        time_d: the current calendar time, days: when the instrument is next free.
         budget_left_d: the budget not yet charged, days.
         in_flight: the rows taken and not yet released, shape ``(W,)``.
         n_taken: the actions taken so far, refused ones included: the rows after the
@@ -40,7 +47,7 @@ class PublicView(eqx.Module):
 def public_view(
     log: ObservationLog, n_granted: Int[Array, ""], resources: Resources
 ) -> PublicView:
-    """The public view of a run at the time charged so far.
+    """The public view of a run at the calendar time its rows end (``clock_d``).
 
     Args:
         log: the log, grant rows first.
@@ -51,7 +58,7 @@ def public_view(
         The view a policy decides from.
     """
     rows = log.rows
-    time_d = spent_d(log)
+    time_d = clock_d(log)
     real = jnp.arange(rows.star.shape[0]) < log.count
     released = real & (rows.release_d <= time_d)
 
@@ -63,7 +70,7 @@ def public_view(
     return PublicView(
         log=public,
         time_d=time_d,
-        budget_left_d=resources.budget_d - time_d,
+        budget_left_d=resources.budget_d - spent_d(log),
         in_flight=real & ~released,
         n_taken=log.count - n_granted,
     )

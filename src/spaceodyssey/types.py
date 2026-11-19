@@ -196,15 +196,16 @@ class Row(eqx.Module):
     """One released observation result.
 
     The log is a ``Row`` stacked along a leading axis (``ObservationLog``), so its
-    columns are these fields.
+    columns are these fields. Times are calendar days from the start of the survey;
+    the budget counts only ``charged_d``.
 
     Attributes:
         star: star index.
         mode: observing mode index.
-        time_d: start time, days from the start of the survey.
+        time_d: start time, calendar days from the start of the survey.
         exposure_d: exposure length in days.
         charged_d: time charged against the budget in days.
-        release_d: time at which the row is released, in days.
+        release_d: calendar time at which the row is released, in days.
         refusal: refusal code, ``ACCEPTED`` or ``OVER_BUDGET``.
         model_slot: index into the run's model table of the model that inverts the
             payload.
@@ -250,10 +251,9 @@ class ObservationLog(eqx.Module):
 
 
 def spent_d(log: ObservationLog) -> Float[Array, ""]:
-    """The time a run has charged so far, days: the survey clock.
+    """The time a run has charged against its budget so far, days.
 
-    Observations run one after another, so a run's clock is the time charged by its
-    real rows; the grant and a refused row are charged nothing.
+    The grant and a refused row are charged nothing; waiting is charged nothing.
 
     Args:
         log: the log.
@@ -265,18 +265,56 @@ def spent_d(log: ObservationLog) -> Float[Array, ""]:
     return jnp.sum(jnp.where(real, log.rows.charged_d, 0.0))
 
 
+def clock_d(log: ObservationLog) -> Float[Array, ""]:
+    """The calendar time at which the instrument is next free, days: the survey clock.
+
+    Observations run one after another on the calendar, so the clock is the latest end
+    of a real row, ``time_d + charged_d``; zero for a log with no rows. Calendar time
+    advances by exposures and by waiting: a row that starts later than the one before
+    it ended moves the clock by the wait as well, and a refused row by its wait alone.
+
+    Args:
+        log: the log.
+
+    Returns:
+        The calendar time the rows before ``count`` end.
+    """
+    rows = log.rows
+    real = jnp.arange(rows.charged_d.shape[0]) < log.count
+    ends = jnp.where(real, rows.time_d + rows.charged_d, 0.0)
+    return jnp.max(ends, initial=0.0)
+
+
 class Action(eqx.Module):
     """What a policy asks for: one observation of one star in one mode.
+
+    An action starts at the later of ``not_before_d`` and the time the instrument is
+    next free (``clock_d``), so a policy waits by asking for a later start; waiting
+    costs calendar time and no budget. A granted action's ``not_before_d`` is ignored:
+    the grant is released at time zero.
 
     Attributes:
         star: star index.
         mode: index of the observing mode in the design's mode table.
         exposure_d: requested exposure in days.
+        not_before_d: earliest calendar start, days from the start of the survey;
+            zero (as soon as the instrument is free) by default, and broadcast to the
+            shape of ``exposure_d``.
     """
 
     star: Int[Array, ""] = eqx.field(converter=as_index)
     mode: Int[Array, ""] = eqx.field(converter=as_index)
     exposure_d: Float[Array, ""] = eqx.field(converter=as_float)
+    not_before_d: Float[Array, ""] = eqx.field(converter=as_float)
+
+    def __init__(self, star, mode, exposure_d, not_before_d=0.0):
+        """An action; ``not_before_d`` is broadcast to the shape of ``exposure_d``."""
+        self.star = star
+        self.mode = mode
+        self.exposure_d = as_float(exposure_d)
+        self.not_before_d = jnp.broadcast_to(
+            as_float(not_before_d), self.exposure_d.shape
+        )
 
 
 class Grant(eqx.Module):

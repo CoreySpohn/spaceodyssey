@@ -477,6 +477,48 @@ def test_each_decision_is_keyed_from_the_policy_key(toy):
     assert len({k.tobytes() for k in policy.keys}) == 4
 
 
+def test_waiting_costs_no_budget_and_releases_follow_the_calendar(toy):
+    """A policy waits by asking for a later start: the wait moves the calendar, not the
+    budget, and rows are released, shown and scored in calendar order.
+
+    Budget 2 days. Row 0: E's orbit, one day from day 0, in a mode released 20 days
+    after it ends (day 21). Row 1: L's orbit, one day not before day 10, in a mode
+    released at once (day 11). Row 1 waits 9 days, starts at day 10 and is accepted:
+    the two rows charge 2 days, all of the budget, and the clock reads day 11. At day
+    11 the view shows row 1 released and row 0 in flight, with the full budget
+    charged. `score` stages L at day 11 (the run's end) and E at day 21, after it.
+
+    Fails if a row starts at the time charged so far instead of on the calendar (row
+    1 would start at day 1), if waiting is charged (row 1 would be refused), or if
+    releases are read against charged time (row 1 would wait in flight until day 2).
+    """
+    models = (OrbitReport(),)
+    modes = (Mode(0, 20.0), Mode(0, 0.0))
+    design = Design(models, modes, Resources(2.0), CAPACITY)
+    table = TablePolicy(Action([0, 1], [0, 1], [1.0, 1.0], [0.0, 10.0]))
+    world = _el_world(toy)
+    log = execute(KEY, table, world, design, _no_grant())
+    rows = log.rows
+    assert int(log.count) == 2
+    assert_allclose(rows.time_d[:2], [0.0, 10.0])
+    assert_allclose(rows.charged_d[:2], [1.0, 1.0])
+    assert_allclose(rows.release_d[:2], [21.0, 11.0])
+    assert list(np.asarray(rows.refusal[:2])) == [0, 0]
+    view = public_view(log, jnp.asarray(0), design.resources)
+    assert_allclose([view.time_d, view.budget_left_d], [11.0, 0.0])
+    assert list(np.asarray(view.in_flight[:2])) == [True, False]
+    assert_allclose(view.log.rows.payload[0]["hz"][:2, 0], [0.0, 1.0])
+
+    claim = Claim((toy.InHz(),))
+    study = _study(toy, _step_rule_cloud(toy), design, 2, claim)
+    report = score(log, world, study)
+    e, look_alike = _by_star(report, 0), _by_star(report, 1)
+    assert_allclose(look_alike["time_d"], [11.0])
+    assert list(look_alike["end"]) == [True]
+    assert_allclose(e["time_d"], [11.0, 21.0])
+    assert list(e["end"]) == [True, False]
+
+
 def test_a_second_world_and_star_do_not_retrace_step(toy):
     """`step` compiles once for a run: a second world, a second star, a later row and
     a refused row reuse the first program.
