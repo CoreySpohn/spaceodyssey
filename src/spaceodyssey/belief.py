@@ -8,7 +8,6 @@ verdict's, each off its own replay (``planning_beliefs``).
 """
 
 import itertools
-from functools import partial
 
 import equinox as eqx
 import jax
@@ -391,11 +390,27 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:
 
     lam = pool_rate(b.pool, claim, star)  # (R,)
     from_pool = jax.vmap(_poisson, in_axes=(0, None))(lam, n_bins)  # (R, N)
+    return _add_counts(from_draws, from_pool)
 
-    full = jax.vmap(partial(jnp.convolve, precision=EXACT))(from_draws, from_pool)
-    return jnp.concatenate(
-        [full[:, : n_bins - 1], full[:, n_bins - 1 :].sum(1, keepdims=True)], 1
+
+def _add_counts(a: Float[Array, "... N"], b: Float[Array, "... N"]) -> Array:
+    """Distribution of the sum of two independent counts, lumped at the last bin.
+
+    ``out[n] = sum_{j + k = n} a[j] b[k]`` for ``n < N - 1`` and the rest of the mass,
+    ``j + k >= N - 1``, in the last bin: the convolution written out over the static
+    ``N x N`` grid of pairs, each pair's product added to the bin
+    ``min(j + k, N - 1)`` by one product with a fixed 0/1 matrix. ``N`` is short and
+    static, so this is a few hundred multiplications, and under ``vmap`` it batches as
+    a plain matrix product (a batched ``jnp.convolve`` becomes a grouped convolution,
+    quadratic in the batch on the CPU in float64).
+    """
+    n_bins = a.shape[-1]
+    pair_bin = np.minimum(
+        np.add.outer(np.arange(n_bins), np.arange(n_bins)), n_bins - 1
     )
+    to_bin = np.eye(n_bins)[pair_bin.reshape(-1)]  # (N N, N), a 0/1 matrix
+    pairs = (a[..., :, None] * b[..., None, :]).reshape(*a.shape[:-1], n_bins**2)
+    return jnp.matmul(pairs, jnp.asarray(to_bin, a.dtype), precision=EXACT)
 
 
 class Replay(eqx.Module):
