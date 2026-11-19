@@ -70,7 +70,13 @@ def public_view(
 
 
 class AbstractPolicy(eqx.Module):
-    """A rule for the next action, from the public view alone."""
+    """A rule for the next action, from the public view alone.
+
+    ``execute`` never reads a belief: it shows the policy the public view and takes the
+    action it returns. A policy that plans on a belief holds that belief itself and
+    keeps it current through ``absorb``, applying the rows the view shows released
+    since its last decision; it never replays rows it has not been shown.
+    """
 
     @abc.abstractmethod
     def decide(self, public: PublicView) -> Action | None:
