@@ -507,3 +507,28 @@ def test_rows_in_flight_at_the_end_are_scored_after_a_marked_end(toy):
     assert (row["star"], row["planet"], row["member"]) == ("0", "0", "1")
     assert row["information_at_end"] == f"{np.log(2.8):.4f}"
     assert row["information"] == f"{np.log(5.6):.4f}"
+
+
+def test_a_study_refuses_per_star_fields_that_disagree(toy):
+    """A study checks its per-star fields against each other and the log's capacity.
+
+    Fails if a study accepts `prior_mass_outside` with another number of stars or of
+    roles than its pools, or refits whose row masks are not of the log's capacity.
+    """
+    design = _design(_step_models())
+    good = _study(toy, _step_rule_cloud(toy), design, 2, _e_track_claim(toy))
+
+    def remake(outside, design=design):
+        return Study(
+            good.claim, good.truth, good.roles.forecast, good.roles.verdict,
+            good.refits, good.pool, good.stars, design, outside, good.alpha,
+        )  # fmt: skip
+
+    remake(jnp.zeros((2, 2)))
+    with pytest.raises(ValueError, match="disagree on S"):
+        remake(jnp.zeros((3, 2)))
+    with pytest.raises(ValueError, match="disagree on R"):
+        remake(jnp.zeros((2, 3)))
+    small = Design(design.models, design.modes, design.resources, 4)
+    with pytest.raises(ValueError, match="row masks"):
+        remake(jnp.zeros((2, 2)), small)

@@ -56,7 +56,8 @@ class Study(eqx.Module):
 
     Raises:
         ValueError: if the refits, the pools and ``prior_mass_outside`` disagree on the
-            number of stars, or the refits' row masks are not of the log's capacity.
+            number of stars, the pools and ``prior_mass_outside`` on the number of
+            roles, or the refits' row masks are not of the log's capacity.
     """
 
     claim: Claim
@@ -94,7 +95,7 @@ class Study(eqx.Module):
         self.alpha = float(alpha)
 
     def __check_init__(self):
-        """Check that every per-star field has one star axis and the log's capacity."""
+        """Check one ``S`` and one ``R`` across the per-star fields, and W."""
         n_star = {
             self.refits.star_index.shape[0],
             self.pool.log_mass.shape[0],
@@ -102,6 +103,9 @@ class Study(eqx.Module):
         }
         if len(n_star) != 1:
             raise ValueError(f"per-star fields disagree on S: {n_star}")
+        n_role = {self.pool.log_mass.shape[-1], self.prior_mass_outside.shape[-1]}
+        if len(n_role) != 1:
+            raise ValueError(f"pool and prior_mass_outside disagree on R: {n_role}")
         if self.refits.row_mask.shape[-1] != self.design.capacity:
             raise ValueError(
                 f"refit row masks hold {self.refits.row_mask.shape[-1]} rows, the log "
