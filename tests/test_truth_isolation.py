@@ -64,6 +64,14 @@ def violations(sources: dict[str, str]) -> list[str]:
     found = []
     for path, source in sources.items():
         tree = ast.parse(source)
+        # The one `_truth` allowed outside a function: the field line of the class.
+        field_line = {
+            id(statement.target)
+            for cls in ast.walk(tree)
+            if isinstance(cls, ast.ClassDef) and cls.name == "SealedWorld"
+            for statement in cls.body
+            if isinstance(statement, ast.AnnAssign)
+        }
         # Every node's enclosing function, to place each `_truth`.
         owner = {}
         for function in ast.walk(tree):
@@ -76,8 +84,10 @@ def violations(sources: dict[str, str]) -> list[str]:
             name = node.id if isinstance(node, ast.Name) else name
             if name == "_truth":
                 in_function = owner.get(node)
-                if path != "world.py" or (
-                    in_function is not None and in_function not in TRUTH_READERS
+                if (
+                    path != "world.py"
+                    or (in_function is None and id(node) not in field_line)
+                    or (in_function is not None and in_function not in TRUTH_READERS)
                 ):
                     found.append(f"{where} names _truth")
             if isinstance(node, ast.Call):
@@ -111,7 +121,8 @@ def test_only_the_world_holds_the_truth_and_only_the_scorer_unseals_it():
     """Every source file obeys the truth-isolation rules.
 
     Fails if a module outside `world.py` names `_truth`, a function other than the
-    world's own reads it, anything but `score` unseals a world, anything but `log`
+    world's own reads it, a statement outside a function other than the class's field
+    line names it, anything but `score` unseals a world, anything but `log`
     draws rows from one, a module flattens a world to reach its leaves, or a rank-1
     module imports `world`.
     """
@@ -129,6 +140,11 @@ def test_only_the_world_holds_the_truth_and_only_the_scorer_unseals_it():
         (
             "world.py",
             "class SealedWorld:\n    def peek(self):\n        return self._truth",
+            "names _truth",
+        ),
+        (
+            "world.py",
+            "class SealedWorld:\n    _truth: int\n\nPEEK = SealedWorld._truth",
             "names _truth",
         ),
         ("log.py", "def f(world):\n    return world.unseal()", "calls unseal"),
