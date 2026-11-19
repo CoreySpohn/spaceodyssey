@@ -7,6 +7,7 @@ an action until the policy stops, threading the policy's state between decisions
 """
 
 import abc
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -101,7 +102,19 @@ class AbstractPolicy(eqx.Module):
     ``forecast_updates`` of the planner (``PricePolicy``), its only reader. With the
     forecast frozen the planner maximizes a frozen-forecast surrogate, which is not a
     martingale.
+
+    ``execute`` compiles ``decide`` once (``eqx.filter_jit``), so a decision costs its
+    arithmetic, not a trace: the policy record is an argument, its arrays traced and its
+    static fields part of the compiled program. A policy that must see concrete values
+    at each decision (one that records or checksums what it is shown on the host) sets
+    the class constant ``host_only``, and ``execute`` then calls its ``decide``
+    directly; it cannot run under a compiled loop.
+
+    Attributes:
+        host_only: whether ``decide`` runs on the host, uncompiled; false by default.
     """
+
+    host_only: ClassVar[bool] = False
 
     @abc.abstractmethod
     def init(self, public: PublicView) -> eqx.Module:

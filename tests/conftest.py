@@ -53,6 +53,8 @@ class _Recording(AbstractPolicy):
     (the key, its state and the public view) and then defers to `inner`.
     """
 
+    host_only: ClassVar[bool] = True  # reads concrete values on the host
+
     inner: AbstractPolicy
     seen: list = eqx.field(default_factory=list)
 

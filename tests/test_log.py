@@ -383,6 +383,8 @@ class Echo(AbstractPolicy):
     checksum's parity.
     """
 
+    host_only: ClassVar[bool] = True  # reads concrete values on the host
+
     def init(self, public):
         return EchoState(0)
 
@@ -422,16 +424,35 @@ def test_a_policy_cannot_read_the_truth(toy, policy):
     toy.assert_non_interference(KEY, policy, worlds, blind, seeing, _no_grant())
 
 
+class Counted(AbstractPolicy):
+    """Defers to `inner`, counting each time its `decide` body runs (traced or
+    eager) in `COUNTED`."""
+
+    inner: AbstractPolicy
+
+    def init(self, public):
+        return self.inner.init(public)
+
+    def decide(self, key, state, public):
+        COUNTED.append(None)
+        return self.inner.decide(key, state, public)
+
+
+COUNTED = []
+
+
 def test_a_table_decides_with_a_traced_cursor(toy):
     """A table's decision compiles once and reads its position from its state.
 
     Under one `eqx.filter_jit`, three decisions on a two-action table return its two
     actions in order, then stop, and the cursor counts 1, 2, 3; the three calls trace
-    once. An empty table stops at its first decision.
+    once. An empty table stops at its first decision. `execute` runs the same table
+    (three decisions) through one compiled `decide`: its body runs once.
 
     Fails if the table reads its position as a Python value (`int` of a traced
     counter raises under jit, and a concrete one retraces), skips or repeats an
-    action, or stops early or late.
+    action, or stops early or late, or if `execute` calls `decide` uncompiled (its
+    body would run at every decision).
     """
     design = _design(_step_models())
     log = _empty_log(_el_world(toy), design)
@@ -455,9 +476,16 @@ def test_a_table_decides_with_a_traced_cursor(toy):
     empty = TablePolicy(Action(jnp.zeros(0, int), jnp.zeros(0, int), jnp.zeros(0)))
     assert bool(empty.decide(KEY, empty.init(view), view)[1])
 
+    COUNTED.clear()
+    log = execute(KEY, _no_grant(), _el_world(toy), design, Counted(table))
+    assert int(log.count) == 2
+    assert len(COUNTED) == 1
+
 
 class KeyLog(AbstractPolicy):
     """Takes three one-day looks at star 0 and records the key of each decision."""
+
+    host_only: ClassVar[bool] = True  # reads concrete values on the host
 
     keys: list = eqx.field(default_factory=list)
 

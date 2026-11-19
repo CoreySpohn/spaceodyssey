@@ -167,6 +167,12 @@ _step = eqx.filter_jit(step)
 _public_view = eqx.filter_jit(public_view)
 
 
+@eqx.filter_jit
+def _decide(policy, key, state, public):
+    """A policy's decision, compiled once per policy structure."""
+    return policy.decide(key, state, public)
+
+
 def execute(
     key: PRNGKeyArray,
     grant: Grant,
@@ -180,10 +186,11 @@ def execute(
     every row's noise comes from its noise key, and each decision's key is the policy
     key folded with the number of actions taken. The grant's rows are revealed at time
     zero and start the log, and the policy's state starts from ``policy.init``. Then,
-    on the host, the policy is shown the public view of the log and its action is
-    taken by one compiled ``step``, with the model picked from the design's static mode
-    table, until the policy stops. The policy's state passes from one decision to the
-    next unread: the host reads only the action and the stop flag.
+    on the host, the policy is shown the public view of the log, decides through one
+    compiled ``decide`` (called directly for a ``host_only`` policy), and its action
+    is taken by one compiled ``step``, with the model picked from the design's static
+    mode table, until the policy stops. The policy's state passes from one decision to
+    the next unread: the host reads only the action and the stop flag.
 
     The arguments follow ``step``: the key, the state the run starts from (the
     grant), the world, the design and what chooses the actions.
@@ -210,7 +217,10 @@ def execute(
     state = policy.init(public)
     while True:
         decision_key = jax.random.fold_in(policy_key, public.n_taken)
-        action, stop, state = policy.decide(decision_key, state, public)
+        if policy.host_only:
+            action, stop, state = policy.decide(decision_key, state, public)
+        else:
+            action, stop, state = _decide(policy, decision_key, state, public)
         if bool(stop):
             return log
         mode_index = int(action.mode)
