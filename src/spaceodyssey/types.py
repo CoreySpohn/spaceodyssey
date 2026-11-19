@@ -622,7 +622,10 @@ class AbstractObservationModel(eqx.Module):
         """Probability of each outcome cell under each draw.
 
         For a searching model (``searches``) cell 0 is the miss: on a pool's marks,
-        every other cell is a detection. A model without a closed form returns
+        every other cell is a detection. A slot that holds no planet on a draw has
+        one outcome there, as an unread one does (code 0 of its factors), so cells it
+        cannot give have probability zero on that draw and a planner may drop them
+        (``frontier``'s ``max_cells``). A model without a closed form returns
         ``binned_cells``.
 
         Args:

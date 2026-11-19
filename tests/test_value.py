@@ -786,7 +786,9 @@ def test_a_spectrum_waits_for_a_detection(toy):
     is not offered and is worth 0 at any depth; the search alone is worth
     0.5 U(0.5) + 0.5 U(0) - U(0.25) = 0.2158 at depth 1, and 0.5623 at depth 2,
     where the spectrum follows a detection and settles the claim. At a star whose
-    planet is already detected the spectrum is offered and worth the same 0.2158.
+    root stage is already that of a detection the spectrum is offered at the root and
+    settles the claim alone (0.5623): it reports the water of a planet that exists and
+    nothing in a draw whose slot is empty.
 
     Fails if a spectrum is offered before a detection (at the root or after a miss),
     if a detection on the path does not raise the star to the stage the spectrum
@@ -808,7 +810,7 @@ def test_a_spectrum_waits_for_a_detection(toy):
     for detected, depth, expected in (
         (False, 1, [one_search, 0.0]),
         (False, 2, [-entropy(0.25), 0.0]),
-        (True, 1, [one_search, one_search]),
+        (True, 1, [one_search, -entropy(0.25)]),
     ):
         menu = Menu([[1.0, 1.0]], [[True, True]], (0, 1), (0, 1), [int(detected)])
         f = _frontier_of(beliefs, claim, toy.star, LogScore(1), models, menu, depth)
@@ -1287,3 +1289,78 @@ def test_a_conditional_claim_counts_true_planets_given_the_admitted_ones(toy):
     ]
     assert_allclose(rewards[0], 0.0, atol=1e-12)
     assert_allclose(rewards[1], h(0.42) - 0.6 * h(0.7), rtol=1e-10)
+
+
+def _search_gain_by_enumeration(law, rate, d, pbar, n_terms=16):
+    """The `LogScore` gain of one search of a pool with no draws, by enumeration.
+
+    Forecast and verdict agree, so the gain is `E_y[sum_n p(n | y) ln p(n | y)] -
+    sum_n p(n) ln p(n)`, with `n` the claim-true planets and `y` the number the search
+    found. Every pool planet is claim-true with `pbar` and detected with `d`,
+    independently. Bernoulli: one planet with probability `rate`, its four states
+    enumerated. Poisson: the four kinds of planet (claim-true or not, detected or
+    not) are independent Poisson counts of rate `rate` times their probability (the
+    marking theorem), each summed to `n_terms`.
+    """
+    kinds = [(c, f) for c in (0, 1) for f in (0, 1)]
+    prob = [(pbar if c else 1 - pbar) * (d if f else 1 - d) for c, f in kinds]
+    joint = np.zeros((n_terms * 4, n_terms * 4))  # (found, claim-true)
+    if law == BERNOULLI:
+        joint[0, 0] = 1.0 - rate
+        for (c, f), p in zip(kinds, prob, strict=True):
+            joint[f, c] += rate * p
+    else:
+
+        def pois(mean, k):
+            return math.exp(-mean) * mean**k / math.factorial(k)
+
+        terms = [[pois(rate * p, k) for k in range(n_terms)] for p in prob]
+        for counts in itertools.product(range(n_terms), repeat=4):
+            p = np.prod([terms[j][k] for j, k in enumerate(counts)])
+            found = sum(k for (_, f), k in zip(kinds, counts, strict=True) if f)
+            true = sum(k for (c, _), k in zip(kinds, counts, strict=True) if c)
+            joint[found, true] += p
+
+    def neg_entropy(p):
+        p = p[p > 0]
+        return float(np.sum(p * np.log(p)))
+
+    p_found = joint.sum(axis=1)
+    after = sum(
+        p_found[y] * neg_entropy(joint[y] / p_found[y])
+        for y in range(joint.shape[0])
+        if p_found[y] > 0
+    )
+    return after - neg_entropy(joint.sum(axis=0))
+
+
+@pytest.mark.parametrize(
+    ("law", "rate", "n_max"), [(BERNOULLI, 0.5, 1), ("poisson", 0.5, 6)]
+)
+def test_a_planet_a_search_finds_stays_in_the_count(toy, law, rate, n_max):
+    """A pool planet a hypothetical search finds is counted, claim-true with the claim
+    probability of a detected mark, not dropped from the count.
+
+    A star with no draws, its pool a planet with probability 0.5 (Bernoulli) or a
+    Poisson count of mean 0.5; every mark is detected with d = 0.75 in one day and
+    claim-true with 0.2 (marks HZ and not, weighed 0.2 and 0.8, a search that does not
+    read the HZ bit). Forecast and verdict agree. One search's `LogScore` reward equals
+    the gain by enumeration of every planet state: 0.0325 nats under the Bernoulli
+    law. With the found planet dropped from the count it would be 0.2201 (the search
+    paid for the planet vanishing), and under the Poisson law the gain of the thinned
+    pool alone.
+
+    Fails if the lookahead empties a found planet out of the count (Bernoulli) or
+    thins the pool in every outcome without counting the planets found (Poisson), or
+    if the found planet's claim probability is not that of a detected mark.
+    """
+    pool = toy.pool([1.0, 0.0], [[0.2, 0.8]] * 2, np.log(rate), n_roles=2)
+    pool = Pool(pool.marks, pool.log_prior_ratio, pool.log_like, pool.log_mass, law)
+    start = toy.split(toy.stack(_search_belief(toy, pool)))
+    search = (DetectionModel(0.75, 0.75),)
+    claim = Claim((toy.InHz(),))
+    f = _frontier_of(start, claim, toy.star, LogScore(n_max), search, LOOK, 1)
+    expected = _search_gain_by_enumeration(law, rate, 0.75, 0.2)
+    if law == BERNOULLI:
+        assert_allclose(expected, 0.0325, atol=5e-5)
+    assert_allclose(f.reward[0, 0], expected, rtol=1e-6)

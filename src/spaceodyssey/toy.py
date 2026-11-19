@@ -83,6 +83,14 @@ def _snr(snr_one_day: Float[Array, " G"], action: Action) -> Float[Array, " G"]:
     return snr_one_day * jnp.sqrt(action.exposure_d)
 
 
+def _read_snr(
+    snr_one_day: Float[Array, " G"], atoms: Atoms, action: Action
+) -> Float[Array, "A K G"]:
+    """S/N of each gas of each slot of each draw; zero for a slot with no planet."""
+    snr = jnp.broadcast_to(_snr(snr_one_day, action), atoms.x_mean.shape)
+    return jnp.where(atoms.exists[..., None], snr, 0.0)
+
+
 def _joint(factors: Float[Array, "A K G B"]) -> Float[Array, "A Y"]:
     """Joint cell probabilities of independent factors, ``Y = B ** (K G)``.
 
@@ -113,7 +121,8 @@ class GaussianGasModel(AbstractObservationModel):
     with S/N 0 is not covered: its reading is 0 and carries no information.
 
     The outcome cells bin each reading at ``edges``; an uncovered gas has one outcome
-    (cell 0). A row's cells are the joint over planets and gases; ``cell`` and
+    (cell 0), and so has every gas of a slot with no planet, which is not read (S/N
+    0). A row's cells are the joint over planets and gases; ``cell`` and
     ``n_cells`` give the same coding for ``binned_cells``. A planner reads the cells on
     point draws (``quadrature_draws``), where the bins of two rows are independent
     given the draw and reweighting by a bin's probability is the exact update; on an
@@ -194,7 +203,7 @@ class GaussianGasModel(AbstractObservationModel):
 
     def sample(self, key, atoms, action):
         """Readings of every planet and gas, per draw; ``(A, K, G)`` arrays."""
-        snr = jnp.broadcast_to(_snr(self.snr_one_day, action), atoms.x_mean.shape)
+        snr = _read_snr(self.snr_one_day, atoms, action)
         sd = jnp.sqrt(atoms.x_var + self._noise_var(snr))
         y = atoms.x_mean + sd * jax.random.normal(key, atoms.x_mean.shape)
         return {"snr": snr, "reading": jnp.where(snr > 0, y, 0.0)}
@@ -211,8 +220,8 @@ class GaussianGasModel(AbstractObservationModel):
         return (self.edges.shape[0] + 1) ** (n_planet * n_gas)
 
     def gas_cells(self, atoms, action):
-        """Each reading's bins, differences of normal CDFs; one for an uncovered gas."""
-        snr = jnp.broadcast_to(_snr(self.snr_one_day, action), atoms.x_mean.shape)
+        """Each reading's bins, differences of normal CDFs; one for an unread gas."""
+        snr = _read_snr(self.snr_one_day, atoms, action)
         covered = (snr > 0)[..., None]
         sd = jnp.sqrt(atoms.x_var + self._noise_var(snr))
         sd = jnp.where(snr > 0, sd, 1.0)[..., None]
@@ -245,8 +254,9 @@ class StepReportModel(AbstractObservationModel):
     that reports nothing reads no gas, so a model table holding this model replays
     Gaussian draws as long as none of its rows reports on them.
 
-    Each gas has three outcome cells: 0 no report, 1 bit 0, 2 bit 1; a row's cells are
-    the joint over planets and gases, coded by ``cell`` and ``n_cells``. The report
+    Each gas has three outcome cells: 0 no report, 1 bit 0, 2 bit 1; a slot with no
+    planet reports nothing. A row's cells are the joint over planets and gases, coded
+    by ``cell`` and ``n_cells``. The report
     characterizes the planets it reads; it does not search (``searches`` is false).
 
     Attributes:
@@ -321,7 +331,7 @@ class StepReportModel(AbstractObservationModel):
     def sample(self, key, atoms, action):
         """Bits of every planet and gas, per draw; ``(A, K, G)`` arrays."""
         self._check_point(atoms)
-        snr = jnp.broadcast_to(_snr(self.snr_one_day, action), atoms.x_mean.shape)
+        snr = _read_snr(self.snr_one_day, atoms, action)
         x = atoms.x_mean + jnp.sqrt(atoms.x_var) * jax.random.normal(
             key, atoms.x_mean.shape
         )
@@ -342,7 +352,7 @@ class StepReportModel(AbstractObservationModel):
     def gas_cells(self, atoms, action):
         """Each gas's report: silent below the gate, else the bit above the floor."""
         self._check_point(atoms)
-        snr = jnp.broadcast_to(_snr(self.snr_one_day, action), atoms.x_mean.shape)
+        snr = _read_snr(self.snr_one_day, atoms, action)
         p = self._p_above(atoms, ())
         reported = jnp.stack([jnp.zeros_like(p), 1.0 - p, p], axis=-1)
         silent = jnp.eye(3)[0]

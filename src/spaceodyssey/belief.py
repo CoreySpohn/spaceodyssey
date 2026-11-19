@@ -50,16 +50,24 @@ class Belief(eqx.Module):
             a role the reweighting gate refused (``role_belief``).
         log_like: summed log likelihood of the rows each role has seen, ``(R, A)``.
         pool: the undetected planets.
+        found: the planets a hypothetical search found in the pool, which a lookahead
+            keeps in the count (a real one becomes a track through a refit), per role
+            and found slot: the probability that the planet meets the first ``c``
+            conjuncts of the claim planned on, ``c = 0 .. C``, shape ``(R, J, C + 1)``
+            (column 0 is 1 for a found planet and 0 for an empty slot); None, no found
+            planet, outside a lookahead (``value.frontier``). They are independent of
+            the draws' planets and of the pool, and ``count_pmf`` adds them.
 
     Raises:
-        ValueError: if ``log_prior_ratio``, ``log_like`` and the pool disagree on the
-            number of roles, or the draws on their number.
+        ValueError: if ``log_prior_ratio``, ``log_like``, the pool and the found
+            planets disagree on the number of roles, or the draws on their number.
     """
 
     atoms: Atoms
     log_prior_ratio: Float[Array, "R A"] = eqx.field(converter=jnp.asarray)
     log_like: Float[Array, "R A"] = eqx.field(converter=jnp.asarray)
     pool: Pool
+    found: Float[Array, "R J C1"] | None = None
 
     def __check_init__(self):
         """Check the static shapes: one ``R`` and one ``A`` across the fields."""
@@ -69,6 +77,8 @@ class Belief(eqx.Module):
             self.log_like.shape[-2],
             self.pool.log_mass.shape[-1],
         }
+        if self.found is not None:
+            roles.add(self.found.shape[-3])
         draws = {self.log_prior_ratio.shape[-1], self.log_like.shape[-1], n_draw}
         if len(roles) != 1 or len(draws) != 1:
             raise ValueError(
@@ -486,7 +496,7 @@ def _poisson_binomial(p: Float[Array, "A K"], n_bins: int) -> Float[Array, "A N"
     return pmf
 
 
-def _poisson(lam: Float[Array, ""], n_bins: int) -> Float[Array, " N"]:
+def poisson_pmf(lam: Float[Array, ""], n_bins: int) -> Float[Array, " N"]:
     """Poisson pmf on ``0 .. n_bins - 2`` with the remaining mass in the last bin.
 
     The head is ``exp(-lam) lam^n / n!`` built by the running product of ``lam / n``,
@@ -510,16 +520,48 @@ def _poisson(lam: Float[Array, ""], n_bins: int) -> Float[Array, " N"]:
     return jnp.append(head, tail)
 
 
+def _mark_claim_mass(pool: Pool, claim: Claim, star) -> Float[Array, "Am C1"]:
+    """Per mark, the probability that the first ``c`` conjuncts hold, ``c = 0 .. C``."""
+    probs = _conjunct_probs(pool.marks, claim, star)[:, :, 0]  # (C, Am)
+    joint = jnp.concatenate([jnp.ones_like(probs[:1]), jnp.cumprod(probs, axis=0)])
+    return joint.T
+
+
 def _pool_masses(pool: Pool, claim: Claim, star) -> Float[Array, "R C1"]:
     """Expected number of pool planets meeting the first ``c`` conjuncts, ``c = 0..C``.
 
     Per role, the pool's expected number times the mark-weighted probability that the
     first ``c`` conjuncts hold; column 0 is the expected number itself.
     """
-    probs = _conjunct_probs(pool.marks, claim, star)[:, :, 0]  # (C, Am)
-    joint = jnp.concatenate([jnp.ones_like(probs[:1]), jnp.cumprod(probs, axis=0)])
-    weighted = jnp.matmul(mark_weights(pool), joint.T, precision=EXACT)  # (R, C + 1)
+    joint = _mark_claim_mass(pool, claim, star)
+    weighted = jnp.matmul(mark_weights(pool), joint, precision=EXACT)  # (R, C + 1)
     return jnp.exp(pool.log_mass)[:, None] * weighted
+
+
+def found_masses(
+    pool: Pool, detect_prob: Float[Array, " Am"], claim: Claim, star
+) -> Float[Array, "R C1"]:
+    """What a planet an observation found in the pool is, per role.
+
+    The planet found is one of the pool's marks, drawn with the role's mark weight
+    times the mark's detection probability: it meets the first ``c`` conjuncts with
+    ``sum_m w_r(m) d(m) p_c(m) / sum_m w_r(m) d(m)``, the claim probability of a
+    detected mark. Column 0 is 1 (a planet is there); a role that can detect no mark
+    gives 0 everywhere. This is one row of ``Belief.found``.
+
+    Args:
+        pool: the undetected planets before the observation.
+        detect_prob: probability that the observation detects each mark, ``(Am,)``.
+        claim: the claim.
+        star: a pytree of scalar leaves describing the star.
+
+    Returns:
+        The probabilities, shape ``(R, C + 1)``.
+    """
+    weights = mark_weights(pool) * detect_prob  # (R, Am)
+    joint = _mark_claim_mass(pool, claim, star)
+    found = jnp.matmul(weights, joint, precision=EXACT)
+    return safe_ratio(found, jnp.sum(weights, axis=-1, keepdims=True))
 
 
 def pool_rate(pool: Pool, claim: Claim, star) -> Float[Array, " R"]:
@@ -580,6 +622,11 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Array:
     unpruned Poisson process, or for a Bernoulli pool whose planet is apart from the
     draws' slots.
 
+    The planets a hypothetical search found (``Belief.found``, in a lookahead) are a
+    third independent part: each adds one to ``N`` with its claim probability, and,
+    for a conditional claim, one to ``F`` with the probability it meets the condition
+    and fails the claim, as a draw's planet does.
+
     Args:
         b: the belief.
         claim: the claim.
@@ -602,8 +649,11 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Array:
         if b.pool.law == BERNOULLI:  # static
             from_pool = _bernoulli(rates[:, -1], n_bins)
         else:
-            from_pool = jax.vmap(_poisson, in_axes=(0, None))(rates[:, -1], n_bins)
-        return _add_counts(from_draws, from_pool)
+            from_pool = jax.vmap(poisson_pmf, in_axes=(0, None))(rates[:, -1], n_bins)
+        counts = _add_counts(from_draws, from_pool)
+        if b.found is None:  # static
+            return counts
+        return _add_counts(counts, _poisson_binomial(b.found[:, :, -1], n_bins))
 
     p_cond = jnp.prod(probs[: claim.given], axis=0)  # (A, K)
     per_draw = _pair_poisson_binomial(p_cond - p_draw, p_draw, n_bins)  # (A, N, N)
@@ -617,12 +667,17 @@ def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Array:
         else:
             from_pool = from_pool.at[:, 0, 0].set(1.0 - p_f - p_n)
             from_pool = from_pool.at[:, 1, 0].set(p_f).at[:, 0, 1].set(p_n)
-        return _add_pair_counts(from_draws, from_pool)
-    poisson = jax.vmap(_poisson, in_axes=(0, None))
-    failed = poisson(failed_rate, n_bins)  # (R, N)
-    true = poisson(rates[:, -1], n_bins)
-    from_pool = failed[:, :, None] * true[:, None, :]
-    return _add_pair_counts(from_draws, from_pool)
+    else:
+        poisson = jax.vmap(poisson_pmf, in_axes=(0, None))
+        failed = poisson(failed_rate, n_bins)  # (R, N)
+        true = poisson(rates[:, -1], n_bins)
+        from_pool = failed[:, :, None] * true[:, None, :]
+    counts = _add_pair_counts(from_draws, from_pool)
+    if b.found is None:  # static
+        return counts
+    p_n = b.found[:, :, -1]
+    found = _pair_poisson_binomial(b.found[:, :, claim.given] - p_n, p_n, n_bins)
+    return _add_pair_counts(counts, found)
 
 
 def _bernoulli(p: Float[Array, " R"], n_bins: int) -> Float[Array, "R N"]:
@@ -1357,7 +1412,7 @@ def quadrature_draws(
     split = _split_points(atoms, claim, models)
     nodes = GasNodes(*_floor_nodes(atoms.x_mean, atoms.x_var, split, n))
     atoms = Atoms(atoms.cloud, atoms.x_mean, atoms.x_var, atoms.exists, nodes)
-    return Belief(atoms, b.log_prior_ratio, b.log_like, b.pool)
+    return Belief(atoms, b.log_prior_ratio, b.log_like, b.pool, b.found)
 
 
 def select_roles(b: Belief, rows: slice) -> Belief:
@@ -1373,8 +1428,9 @@ def select_roles(b: Belief, rows: slice) -> Belief:
         The belief of those roles, on the same draws.
     """
     pool = _pool_rows(b.pool, rows)
+    found = None if b.found is None else b.found[..., rows, :, :]
     return Belief(
-        b.atoms, b.log_prior_ratio[..., rows, :], b.log_like[..., rows, :], pool
+        b.atoms, b.log_prior_ratio[..., rows, :], b.log_like[..., rows, :], pool, found
     )
 
 
