@@ -26,7 +26,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float, Int, PyTree
 
-from spaceodyssey._numerics import EXACT, guarded_log, safe_ratio
+from spaceodyssey._numerics import EXACT, TIE_ULPS, guarded_log, safe_ratio
 from spaceodyssey.belief import Belief, count_pmf, mark_weights, pool_rate
 from spaceodyssey.claim import Claim
 from spaceodyssey.information import (
@@ -450,13 +450,30 @@ def _worth(node, plan, depth: int) -> Float[Array, ""]:
     ``W_k = max(U, max_m (E_F[W_{k-1}(after m)] - charge_m))``, with ``charge_m`` the
     price of entry ``m``'s time (infinite for an entry not offered there): stopping
     is always an option, so ``W_k`` never falls below ``W_{k-1}``.
+
+    Ties are broken as ``dispatch`` breaks them, toward the cheapest: values within
+    ``TIE_ULPS`` units of roundoff of their scale are equal, a follow-up is taken only
+    when it beats stopping by more than that, and among tied follow-ups the shortest
+    is taken (the first in menu order among equals). So a look worth exactly nothing
+    more, as after a report that resolved the claim, is never bought at any price,
+    zero included, and the slope in the price (the plan's follow-up time) is never a
+    split decided by rounding. A NaN (a refused role) stays NaN.
     """
     forecast, verdict, stage = node
     now = plan.utility(forecast, verdict, plan.claim, plan.star)
     if depth == 0:
         return now
     later = _expected_after(node, plan, depth - 1)
-    return jnp.maximum(now, jnp.max(later - _charge(plan, stage)))
+    net = later - _charge(plan, stage)
+    best = jnp.max(net)
+    scale = jnp.maximum(
+        jnp.abs(now), jnp.max(jnp.where(net > -jnp.inf, jnp.abs(net), 0))
+    )
+    tol = TIE_ULPS * jnp.finfo(net.dtype).eps * scale
+    tied = net >= best - tol
+    go = net[jnp.argmin(jnp.where(tied, plan.menu.exposure_d, jnp.inf))]
+    worth = jnp.where(go > now + tol, go, now)
+    return jnp.where(jnp.isnan(best) | jnp.isnan(now), jnp.nan, worth)
 
 
 def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:

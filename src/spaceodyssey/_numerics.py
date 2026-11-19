@@ -13,6 +13,11 @@ EXACT = lax.Precision.HIGHEST
 """Precision of every product of weights. On a GPU the default precision of a float32
 dot or convolution can drop to TF32, about three digits."""
 
+TIE_ULPS = 64
+"""Values within this many units of roundoff of their scale are a tie: a plan's choice
+between stopping and a follow-up (``value``) and a star's between options (``price``)
+read such values as equal, so rounding never decides them."""
+
 
 def guarded_log(x):
     """``ln x``, ``-inf`` at zero, with a finite derivative there.

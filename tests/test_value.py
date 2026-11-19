@@ -908,6 +908,30 @@ def test_a_follow_up_is_charged_at_the_price(toy):
     assert_allclose(net, [0.96, 0.86, 0.8], rtol=1e-12)
 
 
+def test_a_follow_up_worth_nothing_more_is_never_bought_at_price_zero(toy):
+    """At a zero price a plan breaks a tie toward stopping, as `dispatch` does.
+
+    Two stars at depth 2: test 5's star (a revisit adds 0.16 planets) and one whose
+    pool is empty, so every look at it is worth exactly nothing. At lam = 0 the empty
+    star's plan stops after its first look: cost 1 day, not the 1.5 of a derivative
+    that splits a tie in half; test 5's star revisits: reward 0.96 over 2 days.
+
+    Fails if a follow-up that adds exactly nothing is taken in part or whole at a zero
+    price (the plan's follow-up time, and so the spend the price clears, is then
+    decided by rounding), or if a follow-up worth something is dropped.
+    """
+    claim = Claim((toy.InHz(),))
+    empty = toy.pool([1.0, 0.0], [[0.5, 0.5]] * 2, -np.inf, n_roles=2)
+    pools = (empty, _search_pool(toy))
+    start = toy.split(toy.stack(*[_search_belief(toy, pool) for pool in pools]))
+    f = _frontier_of(
+        start, claim, toy.star, Count(toy.stack(*pools)), (_search(toy),),
+        _menu(np.ones((2, 1)), (0,)), 2, 0.0,
+    )  # fmt: skip
+    assert_allclose(f.cost_d[:, 0], [1.0, 2.0], rtol=1e-12)
+    assert_allclose(f.reward[:, 0], [0.0, 0.96], rtol=1e-12, atol=1e-15)
+
+
 def test_follow_up_time_raises_the_price_and_keeps_the_budget(toy):
     """With the follow-ups' time counted, the price clears the time the plans use.
 

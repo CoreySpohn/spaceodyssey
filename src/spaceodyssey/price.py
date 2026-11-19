@@ -26,10 +26,8 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float
 
+from spaceodyssey._numerics import TIE_ULPS
 from spaceodyssey.value import Frontier, value_and_spend
-
-# Net rewards within this many units of roundoff of the best are a tie.
-_TIE_ULPS = 64
 
 
 def dual(
@@ -173,12 +171,12 @@ def dispatch(
     net = jnp.where(mask, reward - lam * cost, -jnp.inf)
     best = jnp.max(net, axis=-1, keepdims=True)
     scale = jnp.where(mask, jnp.abs(reward) + lam * cost, 0.0)
-    tol = _TIE_ULPS * jnp.finfo(dtype).eps * jnp.max(scale, axis=-1, keepdims=True)
+    tol = TIE_ULPS * jnp.finfo(dtype).eps * jnp.max(scale, axis=-1, keepdims=True)
     tied = mask & (net >= best - tol)
     base = jnp.argmin(jnp.where(tied, cost, jnp.inf), axis=-1)
     base_cost = jnp.take_along_axis(cost, base[:, None], axis=-1)[:, 0]
     capacity_d = jnp.asarray(capacity_d, dtype)
-    slack = _TIE_ULPS * jnp.finfo(dtype).eps * jnp.abs(capacity_d)
+    slack = TIE_ULPS * jnp.finfo(dtype).eps * jnp.abs(capacity_d)
 
     def upgrade(left, star):
         tied_s, cost_s, base_s, base_cost_s = star
