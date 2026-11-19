@@ -18,6 +18,7 @@ import pytest
 from numpy.testing import assert_allclose
 
 from spaceodyssey.belief import (
+    REFIT_REFUSED,
     due_rows,
     new_planets,
     planning_beliefs,
@@ -38,6 +39,7 @@ from spaceodyssey.design import (
 )
 from spaceodyssey.log import execute, grant_rows, start_log
 from spaceodyssey.policy import (
+    REFIT_GATE,
     AbstractPolicy,
     PlannerSettings,
     PricePolicy,
@@ -111,18 +113,20 @@ class Stars(eqx.Module):
     roles: Roles
 
 
-def _stars(masses, hz=(1.0, 0.0, 1.0, 0.0), log_weights=None, prior=PRIOR):
+def _stars(masses, hz=(1.0, 0.0, 1.0, 0.0), mark_log_weights=None, prior=PRIOR):
     """Stars whose planets are all in the pool: `masses` expected planets on marks of
-    the HZ bits `hz`, weighed equally by the forecast `prior` and one verdict member.
+    the HZ bits `hz`, weighed by `mark_log_weights` (equally by default) under the
+    forecast `prior` and one verdict member.
     """
     roles = Roles(prior, _stack(prior))
     refits, pools = [], []
     for s, mass in enumerate(masses):
         draws = _points(0.0, False, 4)
-        if log_weights is not None:
-            draws = eqx.tree_at(lambda a: a.cloud.log_weights, draws, log_weights[s])
         refits.append(Refit(draws, jnp.zeros(CAPACITY, bool), s))
         marks = _points(hz, True, len(hz))
+        if mark_log_weights is not None:
+            weights = mark_log_weights[s]
+            marks = eqx.tree_at(lambda a: a.cloud.log_weights, marks, weights)
         log_mass = jnp.full(2, jnp.log(mass))  # an empty pool at mass 0
         pools.append(
             role_pool(marks, roles, jnp.zeros((2, len(hz))), log_mass, STAR, **UNGATED)
@@ -151,10 +155,10 @@ def _menu(n_star, exposure_d=(1.0,)):
     return Menu(exposure_d, jnp.ones(exposure_d.shape, bool), (0,) * n_entry)
 
 
-def _policy(stars, design, menu, settings):
+def _policy(stars, design, menu, settings, refitter=REFITTER):
     return PricePolicy(
         stars.refits, stars.pool, stars.stars, stars.roles, CLAIM, Count(),
-        design.models, mode_models(design), menu, REFITTER, settings,
+        design.models, mode_models(design), menu, refitter, settings,
     )  # fmt: skip
 
 
@@ -333,9 +337,10 @@ def test_a_star_in_flight_offers_nothing_and_the_planner_waits():
 def test_a_refused_star_is_reported_and_priced_as_absent():
     """A star whose roles the reweighting gate refuses is reported, not read as zero.
 
-    Two stars (mass 2 each), gate `min_n_eff = 3`: star 0's four draws are equally
-    weighted (Kish size 4) and star 1's hold one draw of weight (Kish size 1), so
-    star 1's forecast and verdict rows are NaN, and so is every option it offers.
+    Two stars (mass 2 each), gate `min_n_eff = 3`: star 0's four marks are equally
+    weighted (Kish size 4) and star 1's hold one mark of weight (Kish size 1), so
+    star 1's forecast and verdict pool rows are NaN, and so is every option it offers.
+    Its draws pass the gate, so no refit is queued (a refit does not redraw a pool).
     Every state marks star 1 refused; the planner prices star 0 as if star 1 were
     absent and searches only it (0.8, then 0.16) within the budget of 2 days.
 
@@ -344,7 +349,7 @@ def test_a_refused_star_is_reported_and_priced_as_absent():
     searched.
     """
     weights = jnp.array([[0.0] * 4, [0.0, -jnp.inf, -jnp.inf, -jnp.inf]])
-    stars = _stars([2.0, 2.0], log_weights=weights)
+    stars = _stars([2.0, 2.0], mark_log_weights=weights)
     design = _design(2.0)
     settings = PlannerSettings(3.0, math.inf, 1, member=0)
     trace = Trace(_policy(stars, design, _menu(2), settings))
@@ -628,8 +633,9 @@ def test_a_new_detection_is_refit_and_its_star_planned_on():
     2's: rewards 0.8, 0.8, 0.16, 0.032, 0.0064 and three searches.
 
     The same refit through the queue (`refit_stars`) under a gate of five draws, more
-    than the cloud holds, comes back with NaN weights; a NaN threshold is refused when
-    the settings are made.
+    than the cloud holds, is refused at the first attempt and on the retry, and the
+    star keeps its old refit, never a NaN cloud; a NaN threshold is refused when the
+    settings are made.
 
     Fails if a new detection is scored against draws that hold no planet (their
     weights go to zero, the replay's to NaN), if the star is not refit (its draws hold
@@ -661,15 +667,109 @@ def test_a_new_detection_is_refit_and_its_star_planned_on():
     assert not np.any(np.asarray(last.pending))
 
     # The producer slot through its queue: a gate the four draws cannot meet refuses
-    # the new cloud (NaN weights), and a NaN threshold is refused on the host.
-    refused = refit_stars(
+    # the new cloud at both attempts, the old refit is kept, and a NaN threshold is
+    # refused on the host.
+    kept, status = refit_stars(
         REFITTER, _stack(refit0), due_rows(log, refit0, after)[None], _stack(STAR),
         jax.random.key(1)[None], jnp.array([True]), log, design.models,
-        min_n_eff=5.0, max_khat=math.inf, batch_size=1,
+        min_n_eff=5.0, max_khat=math.inf, retry_factor=8,
     )  # fmt: skip
-    assert np.all(np.isnan(np.asarray(refused.atoms.cloud.log_weights)))
+    assert list(np.asarray(status)) == [REFIT_REFUSED]
+    assert_allclose(kept.atoms.cloud.log_weights[0], 0.0)
+    assert not np.any(np.asarray(kept.row_mask))
     with pytest.raises(ValueError, match="NaN"):
         PlannerSettings(math.nan, math.inf, 1, member=0)
+
+
+LOW = ToyPrior("toy", [1.0], 0.4, 0.5, 0.0, 1.0, n_gas=1)  # in the HZ one time in five
+
+
+def _collapsing_star(n_draw=64, n_mark=64):
+    """One star whose `n_draw` draws hold its planet (in the HZ one time in five, the
+    law `LOW`), and whose pool holds one planet in expectation, in the HZ."""
+    roles = Roles(LOW, _stack(LOW))
+    refit = Refit(LOW.draws(KEY, STAR, n_draw), jnp.zeros(CAPACITY, bool), 0)
+    hz = jnp.ones((n_mark, 1))
+    marks = point_atoms(hz, 0 * hz, jnp.zeros((n_mark, 1, 1)), hz > 0, LOW)
+    pool = role_pool(
+        marks, roles, jnp.zeros((2, n_mark)), jnp.zeros(2), STAR, **UNGATED
+    )
+    return Stars(_stack(refit), _stack(pool), _stack(STAR), roles)
+
+
+def _collapsing_run(min_n_eff):
+    """`_collapsing_star` searched by a search that finds an HZ planet in a day with
+    probability 0.9 and never any other, in a world whose planet is in the HZ."""
+    stars = _collapsing_star()
+    design = _design(3.0, DetectionModel(0.9, 0.0))
+    settings = PlannerSettings(min_n_eff, math.inf, 1, member=0)
+    trace = Trace(_policy(stars, design, _menu(1), settings, ToyRefitter(LOW)))
+    log = execute(KEY, _no_grant(), _world(1, hz=1.0), design, trace)
+    return stars, design, trace, log
+
+
+def test_rows_that_collapse_a_cloud_refit_the_star_and_it_stays_planned_on():
+    """Rows appended to a star's cloud are gated after their likelihood is added; a
+    star they collapse is refit, retried with more proposals, and planned on.
+
+    The star's 64 draws hold its planet, in the HZ in about one in five; the search
+    finds an HZ planet with probability 0.9 a day and no other. The first search finds
+    the planet (a track), so every draw out of the HZ gets zero weight: the Kish size
+    after the row is about 13, below the gate of 20, though the cloud before it held 64.
+    The star is queued for a refit (`REFIT_GATE`). One proposal per draw gives a cloud
+    of about 13 again, refused; the retry draws 8 per draw (`retry_factor`), Kish size
+    about 43, and lands. The star is planned on: its pool (one HZ planet in
+    expectation) is searched three times, rewards 0.9, 0.09, 0.009.
+
+    Fails if the gate reads the weights before the rows (no refit: the planner plans on
+    a cloud of 13 draws until the planning gate refuses the star, which is then never
+    searched again), if a refused first attempt is not retried, or if a refit is
+    queued for a star the rows did not collapse (the time-zero cloud passes).
+    """
+    _, _, trace, log = _collapsing_run(20.0)
+    assert list(_column(log, "star")) == [0, 0, 0]
+    assert_allclose(log.rows.payload[0]["detected"][0], [1.0])
+    rewards = [float(s.frontier.reward[0, 0]) for s in trace.states]
+    assert_allclose(rewards[:4], [0.9, 0.9, 0.09, 0.009], rtol=1e-10)
+    assert list(np.asarray(trace.states[0].pending)) == [False]
+    last = trace.states[-1]
+    assert list(np.asarray(last.refits)) == [1]
+    assert list(np.asarray(last.refit_refused)) == [0]
+    assert not np.any(np.asarray(last.refused))
+    assert bool(last.replay.refit.row_mask[0, 0])
+    weights = np.exp(np.asarray(last.replay.refit.atoms.cloud.log_weights[0]))
+    assert weights.sum() ** 2 / (weights**2).sum() >= 20.0
+    hz = np.asarray(last.replay.refit.atoms.cloud.samples["hz"][0, :, 0])
+    assert np.all(hz[weights > 0] == 1.0)  # every draw of weight holds an HZ planet
+
+
+def test_a_refit_refused_after_its_retry_is_reported_and_the_star_kept():
+    """A refit the gate refuses again on its retry leaves the star its old cloud, the
+    reason reported, the star refused, and its pool with the searches taken.
+
+    `_collapsing_run` with a gate of 50 draws: the retry's cloud (about 43) is refused
+    too. The star keeps its time-zero refit and the row appended, so its roles read
+    NaN: it is reported refused (`PriceState.refused`) with the reason `REFIT_GATE`
+    (`PriceState.refit_refused`), and it is not searched again. Its pool is not
+    frozen at time zero: it holds the search taken, so the forecast counts 0.9 planets
+    found there and 0.1 left.
+
+    Fails if a refused refit hands the planner a NaN cloud or a cloud the gate refused
+    (it would be read as a refit landed), if the reason is lost, or if the star is
+    planned on a cloud the gate refused (a second search).
+    """
+    stars, design, trace, log = _collapsing_run(50.0)
+    assert list(_column(log, "star")) == [0]
+    last = trace.states[-1]
+    assert list(np.asarray(last.refits)) == [0]
+    assert list(np.asarray(last.refit_refused)) == [REFIT_GATE]
+    assert list(np.asarray(last.refused)) == [True]
+    assert not bool(last.replay.refit.row_mask[0, 0])
+    assert_allclose(last.replay.refit.atoms.cloud.log_weights[0], 0.0)
+    end = jnp.asarray(10.0)
+    assert_allclose(_found(stars, log, design.models, end), 0.9, rtol=1e-12)
+    rate = _rates(last.pool, last.replay.refit, log, design.models, end)[1]
+    assert_allclose(rate, [0.1], rtol=1e-10)
 
 
 def test_a_star_in_keepout_offers_nothing_and_the_planner_waits_for_it():

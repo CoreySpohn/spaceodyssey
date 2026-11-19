@@ -33,7 +33,7 @@ from typing import ClassVar
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jax.scipy.special import ndtr
+from jax.scipy.special import logsumexp, ndtr
 from jax.scipy.stats import norm
 from jaxtyping import Array, Float, Int
 
@@ -590,68 +590,86 @@ class ToyPrior(AbstractRolePrior):
 
 
 class ToyRefitter(AbstractRefitter):
-    """An importance refit: a new planet's state drawn for each draw, rows rescored.
+    """An importance refit from fresh draws of the law of one planet, rows rescored.
 
-    Each slot the term's rows detected and no draw holds becomes a track: every draw
-    gets a planet there, its state drawn from ``law`` (the law of one undetected
-    planet, the pool marks' law), and the other slots keep their states. The weights
-    are the joint likelihood of every row the new refit represents (those the old
-    refit represented and the term's), scored on the new draws through the models'
-    statistics; the draws' gas blocks are those rows' updates
-    (``replay_likelihood``). The draws are therefore read as proposed by the refit's
-    prior, a new planet's state by ``law``: the existence of a planet in the new slot
-    is given by the detection, and the prior's existence probability there is one
-    constant factor, so the weights are the likelihood alone. That holds for a cloud
-    of prior draws of equal weight (the toy survey's) and for every cloud this
-    refitter returns, since it rescores every represented row afresh and never keeps
-    a weight. Weights the gate refuses (``gate_weights``) are NaN: an importance refit
-    has no fallback. The cloud's target and evidence are placeholders, as
+    The new cloud tracks the old cloud's planets and each slot the term's rows detected
+    that no draw holds (``planet_tracks``): every draw holds a planet in each of those
+    slots, its state drawn afresh from ``law`` (the law of one planet, the pool marks'
+    law), and no planet elsewhere. Each of the ``A`` draws is chosen from
+    ``proposal_factor`` candidates, all drawn from the law, in proportion to the joint
+    likelihood of every row the new refit represents (those the old refit represented
+    and the term's), scored through the models' statistics (``replay_likelihood``),
+    and its weight is the mean of the candidates' likelihoods. That pair is properly
+    weighted for the prior times the likelihood (the multiple-try identity
+    ``E[mean_j L_j f(y_chosen)] = E[L f]``), so more candidates lower the variance of
+    the weights, never their mean: a refused refit retried with more candidates draws
+    a cloud of the same ``A`` with a larger Kish size. Every slot's state is drawn
+    from the law of one planet, which is the refit prior's law of a planet in a slot
+    it holds, and a slot's existence is the same in every draw, so the prior over the
+    proposal is constant and the weights are the likelihood alone. The refit never
+    keeps an old weight or state, so it holds for any cloud. Weights the gate refuses
+    (``gate_weights``) are NaN. The cloud's target and evidence are placeholders, as
     ``point_atoms``'.
 
     Attributes:
-        law: the law of one new planet, a one-slot ``ToyPrior``.
+        law: the law of one planet, a one-slot ``ToyPrior``; its existence
+            probability is not read (a track exists).
     """
 
     law: ToyPrior
 
-    def refit(self, refit, term, key, *, min_n_eff, max_khat):
-        """The star's cloud with each new planet a track, rescored on its rows."""
+    def refit(self, refit, term, key, *, min_n_eff, max_khat, proposal_factor=1):
+        """The star's cloud redrawn with its tracks and each new planet, rescored."""
         atoms = refit.atoms
         n_draw, n_slot = atoms.exists.shape
+        n_try = int(proposal_factor)
         detected = detected_slots(term.log, term.rows, term.models, n_slot)
-        new = detected & ~planet_tracks(atoms)  # (K,)
-        fresh = self.law.draws(key, term.star, n_draw * n_slot)
-        samples = atoms.cloud.samples
+        tracks = planet_tracks(atoms) | detected  # (K,)
+        k_draw, k_pick = jax.random.split(key)
+        law = eqx.tree_at(lambda p: p.p_exist, self.law, jnp.ones(1))
+        fresh = law.draws(k_draw, term.star, n_draw * n_try * n_slot)
+        n_prop = n_draw * n_try
+        exists = jnp.broadcast_to(tracks, (n_prop, n_slot))
 
-        def place(old, drawn):
-            drawn = drawn.reshape(n_draw, n_slot, *drawn.shape[2:])
-            return jnp.where(new.reshape(1, -1, *([1] * (old.ndim - 2))), drawn, old)
+        def slots(x):
+            x = x.reshape(n_prop, n_slot, *x.shape[2:])
+            return jnp.where(exists.reshape(*exists.shape, *([1] * (x.ndim - 2))), x, 0)
 
-        samples = {
-            "hz": place(samples["hz"], fresh.cloud.samples["hz"]),
-            "size": place(samples["size"], fresh.cloud.samples["size"]),
-        }
+        samples = fresh.cloud.samples
         cloud = WeightedCloud(
-            samples,
-            jnp.zeros(n_draw),
-            atoms.cloud.log_target,
+            {"hz": slots(samples["hz"]), "size": slots(samples["size"])},
+            jnp.zeros(n_prop),
+            jnp.zeros(n_prop),
             jnp.nan,
             atoms.cloud.prior,
         )
-        proposed = Atoms(
-            cloud,
-            place(atoms.x_mean, fresh.x_mean),
-            place(atoms.x_var, fresh.x_var),
-            atoms.exists | new,
-        )
+        x = slots(fresh.x_mean)
+        proposed = Atoms(cloud, x, jnp.zeros_like(x), exists)
         represented = refit.row_mask | term.rows
         # Every represented row is released, so the replay applies them all.
         scored = Refit(proposed, ~represented, refit.star_index)
         every = jnp.asarray(jnp.inf)
         rescored = replay(scored, term.log, term.models, term.star, every)
         drawn, log_like = replay_likelihood(rescored, term.models, term.star)
-        log_like = gate_weights(log_like, min_n_eff=min_n_eff, max_khat=max_khat)
-        weighted = eqx.tree_at(lambda a: a.cloud.log_weights, drawn, log_like)
+        log_like = log_like.reshape(n_draw, n_try)
+        log_w = logsumexp(log_like, axis=-1) - jnp.log(n_try)
+        pick = jax.random.categorical(k_pick, log_like, axis=-1)  # (A,)
+        chosen = jnp.arange(n_draw) * n_try + pick
+
+        def take(leaf):
+            return leaf[chosen]
+
+        log_w = gate_weights(log_w, min_n_eff=min_n_eff, max_khat=max_khat)
+        cloud = WeightedCloud(
+            jax.tree.map(take, drawn.cloud.samples),
+            log_w,
+            jnp.zeros(n_draw),
+            jnp.nan,
+            atoms.cloud.prior,
+        )
+        weighted = Atoms(
+            cloud, take(drawn.x_mean), take(drawn.x_var), take(drawn.exists)
+        )
         return Refit(weighted, represented, refit.star_index)
 
 

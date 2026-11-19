@@ -178,11 +178,14 @@ def _prior_ratio_rows(
     min_n_eff,
     max_khat,
     exempt=None,
+    log_like=None,
 ) -> Float[Array, "R A"]:
     """Gated ``log pi_r - log pi_0`` of each draw, a row per member when stacked.
 
     Checks the chart against that of the refit's prior. A draw outside either prior's
-    support gets ``-inf``. Rows in ``exempt`` are not gated.
+    support gets ``-inf``. Rows in ``exempt`` are not gated. With ``log_like`` (the
+    likelihood of rows the draws have seen since the refit, ``(A,)``) the gate reads
+    the weights after those rows, ``log_weights + log_like + ratio``.
     """
     base = atoms.cloud.prior
     if prior.chart != base.chart:
@@ -199,7 +202,10 @@ def _prior_ratio_rows(
     log_p0 = base.log_prob(atoms, star)
     outside = jnp.isneginf(log_p) | jnp.isneginf(log_p0)
     ratio = jnp.where(outside, -jnp.inf, log_p - log_p0)
-    return _gate(atoms.cloud.log_weights, ratio, min_n_eff, max_khat, exempt)
+    base = atoms.cloud.log_weights
+    if log_like is not None:
+        base = jnp.where(jnp.isneginf(log_like), -jnp.inf, base + log_like)
+    return _gate(base, ratio, min_n_eff, max_khat, exempt)
 
 
 def _role_log_prior_ratio(
@@ -223,19 +229,21 @@ def _role_log_prior_ratio(
 
 
 def refused_roles(
-    refit: Refit, pool: Pool, roles: Roles, star, *, min_n_eff, max_khat
+    r: "Replay", pool: Pool, roles: Roles, models, star, *, min_n_eff, max_khat
 ) -> Bool[Array, " R"]:
     """The roles the reweighting gate refuses at a star, on its draws or its marks.
 
-    A role is refused when its prior ratio on the refit's draws (``role_belief``) or on
-    the pool's marks (``role_pool``; an empty pool is never refused) fails the gate:
-    everything read from it is then NaN. This is the report a run summary gives per
-    role, beside a planner's refused stars.
+    A role is refused when its weights on the replay's draws after the rows the replay
+    applied (``refused_after_rows``) or its prior ratio on the pool's marks
+    (``role_pool``; an empty pool is never refused) fail the gate: everything read from
+    it is then NaN. This is the report a run summary gives per role, beside a planner's
+    refused stars, at the planner's thresholds.
 
     Args:
-        refit: the star's refit.
+        r: the star's replay: its refit and the rows applied since.
         pool: the star's pool, every role.
         roles: the forecast and the stacked verdict members.
+        models: the run's model table, static.
         star: a pytree of scalar leaves describing the star.
         min_n_eff: the least Kish size of a role's weights.
         max_khat: the largest Pareto shape of a role's reweighted cloud.
@@ -243,11 +251,49 @@ def refused_roles(
     Returns:
         True for each refused role, forecast first, shape ``(R,)``.
     """
-    gate = (min_n_eff, max_khat)
-    draws = _role_log_prior_ratio(refit.atoms, roles, star, *gate)
+    gate = {"min_n_eff": min_n_eff, "max_khat": max_khat}
+    draws = refused_after_rows(r, roles, models, star, **gate)
     empty = jnp.isneginf(pool.log_mass)
-    marks = _role_log_prior_ratio(pool.marks, roles, star, *gate, empty)
-    return jnp.any(jnp.isnan(draws), axis=-1) | jnp.any(jnp.isnan(marks), axis=-1)
+    marks = _role_log_prior_ratio(pool.marks, roles, star, *gate.values(), empty)
+    return draws | jnp.any(jnp.isnan(marks), axis=-1)
+
+
+def refused_after_rows(
+    r: "Replay", roles: Roles, models, star, *, min_n_eff, max_khat
+) -> Bool[Array, " R"]:
+    """The roles whose weights on a replay's draws fail the gate after its rows.
+
+    A role's weights are ``log_weights + log pi_r - log pi_0 + log_like``: the refit's
+    weights, the role's prior ratio and the likelihood of every row the replay applied
+    since the refit (``replay_likelihood``). This is the gate after an append: rows
+    sharp enough to leave a cloud a few effective draws refuse it here, and a planner
+    then refits the star (``PricePolicy``) rather than plan on it.
+
+    Args:
+        r: the star's replay.
+        roles: the forecast and the stacked verdict members.
+        models: the run's model table, static.
+        star: a pytree of scalar leaves describing the star.
+        min_n_eff: the least Kish size of a role's weights.
+        max_khat: the largest Pareto shape of a role's weights.
+
+    Returns:
+        True for each refused role, forecast first, shape ``(R,)``.
+    """
+    _, log_like = replay_likelihood(r, models, star)
+    gate = (min_n_eff, max_khat)
+    atoms = r.refit.atoms
+    ratio = jnp.concatenate(
+        [
+            _prior_ratio_rows(
+                atoms, roles.forecast, star, "forecast", False, *gate, None, log_like
+            ),
+            _prior_ratio_rows(
+                atoms, roles.verdict, star, "verdict", True, *gate, None, log_like
+            ),
+        ]
+    )
+    return jnp.any(jnp.isnan(ratio), axis=-1)
 
 
 def role_pool(
@@ -977,6 +1023,16 @@ def gate_weights(
     return log_weights + _gate(log_weights[None], zero, min_n_eff, max_khat)[0]
 
 
+REFIT_KEPT = 0
+"""Status of a star a refit queue did not refit: it keeps its refit."""
+REFIT_LANDED = 1
+"""Status of a refit the gate accepted at the first attempt."""
+REFIT_RETRIED = 2
+"""Status of a refit the gate refused at the first attempt and accepted on the retry."""
+REFIT_REFUSED = 3
+"""Status of a refit the gate refused at every attempt: the star keeps its old refit."""
+
+
 def refit_stars(
     refitter: AbstractRefitter,
     refits: Refit,
@@ -989,12 +1045,22 @@ def refit_stars(
     *,
     min_n_eff,
     max_khat,
-    batch_size: int,
-) -> Refit:
+    retry_factor: int | None = None,
+    batch_size: int | None = None,
+) -> tuple[Refit, Int[Array, " N"]]:
     """A queue of refits in one call: each queued star's cloud updated by its rows.
 
-    The stars are mapped in chunks of ``batch_size`` (``jax.lax.map``); a star that is
-    not queued keeps its refit, and its refit is not computed outside ``vmap``.
+    A refit the gate refuses (NaN weights) is retried once with ``retry_factor`` times
+    the backend's proposals (``AbstractRefitter``) and a key folded from the star's;
+    one refused again is dropped, and the star keeps its old refit, never a NaN cloud.
+    The status of each star says which happened.
+
+    The stars are mapped one at a time (``jax.lax.map``), so a star that is not queued
+    keeps its refit, its refit is never computed, and a retry runs only after a
+    refusal. With ``batch_size`` above one the stars are mapped in chunks of that size,
+    each chunk under ``vmap``, where every branch is a select: every star of a chunk is
+    refit, and retried, whatever the outcome. A caller that batches therefore gathers
+    its queue first, so a chunk holds queued stars (``PricePolicy``).
 
     Args:
         refitter: the producer of refits.
@@ -1007,21 +1073,50 @@ def refit_stars(
         models: the run's model table, static.
         min_n_eff: the gate's least Kish size of a new cloud's weights.
         max_khat: the gate's largest Pareto shape of a new cloud's weights.
-        batch_size: stars refit at once, static: a memory bound.
+        retry_factor: the proposal factor of the retry, static; None for no retry.
+        batch_size: stars refit at once, static: None or 1 for one at a time.
 
     Returns:
-        The refits, leading axis ``N``.
+        The refits, leading axis ``N``, and each star's status: ``REFIT_KEPT``,
+        ``REFIT_LANDED``, ``REFIT_RETRIED`` or ``REFIT_REFUSED``, shape ``(N,)``.
     """
     gate = {"min_n_eff": min_n_eff, "max_khat": max_khat}
+
+    def refused(r: Refit) -> Bool[Array, ""]:
+        return jnp.any(jnp.isnan(r.atoms.cloud.log_weights))
 
     def one(args):
         refit, rows_s, star, key, queued_s = args
         term = RefitTerm(log, rows_s, models, star)
+
+        def attempt(k, factor):
+            return refitter.refit(refit, term, k, **gate, proposal_factor=factor)
+
+        def run():
+            first = attempt(key, 1)
+            if retry_factor is None:
+                status = jnp.where(refused(first), REFIT_REFUSED, REFIT_LANDED)
+                kept = jax.lax.cond(refused(first), lambda: refit, lambda: first)
+                return kept, jnp.asarray(status, int)
+            second = jax.lax.cond(
+                refused(first),
+                lambda: attempt(jax.random.fold_in(key, 1), retry_factor),
+                lambda: first,
+            )
+            status = jnp.where(
+                ~refused(first),
+                REFIT_LANDED,
+                jnp.where(refused(second), REFIT_REFUSED, REFIT_RETRIED),
+            )
+            kept = jax.lax.cond(refused(second), lambda: refit, lambda: second)
+            return kept, jnp.asarray(status, int)
+
         return jax.lax.cond(
-            queued_s, lambda: refitter.refit(refit, term, key, **gate), lambda: refit
+            queued_s, run, lambda: (refit, jnp.asarray(REFIT_KEPT, int))
         )
 
-    return jax.lax.map(one, (refits, rows, stars, keys, queued), batch_size=batch_size)
+    batch = None if batch_size is None or batch_size <= 1 else batch_size
+    return jax.lax.map(one, (refits, rows, stars, keys, queued), batch_size=batch)
 
 
 MAX_NODES = 2**22
@@ -1287,7 +1382,10 @@ def planning_beliefs(
     by the same function and gate (``role_pool``): the ratios the pool carries in are
     not read, so its marks are weighed under exactly the priors and the gate the draws
     are, and a role whose marks fail the gate reads NaN (an empty pool is never
-    refused). Each belief carries its own draws, so a gas block the verdict's rows
+    refused). The draws are gated after the rows each replay applied, on
+    ``log_weights + log pi_r - log pi_0 + log_like`` (``refused_after_rows``): a role
+    whose rows left its cloud below the gate reads NaN, never a belief of a few draws.
+    Each belief carries its own draws, so a gas block the verdict's rows
     update never reaches the forecast. Each is then put on quadrature nodes split at
     the claim's floors (``quadrature_draws``, with ``models`` for their steps), on
     which a hypothetical outcome updates the belief exactly by reweighting.
@@ -1321,11 +1419,13 @@ def planning_beliefs(
 
     def read(r, prior, name, stacked, pool):
         gate = (min_n_eff, max_khat)
-        ratio = _prior_ratio_rows(r.refit.atoms, prior, star, name, stacked, *gate)
+        atoms, log_like = replay_likelihood(r, models, star)
+        ratio = _prior_ratio_rows(
+            r.refit.atoms, prior, star, name, stacked, *gate, None, log_like
+        )
         empty = jnp.isneginf(pool.log_mass)
         marks = _prior_ratio_rows(pool.marks, prior, star, name, stacked, *gate, empty)
-        pool = Pool(pool.marks, marks, pool.log_like, pool.log_mass)
-        atoms, log_like = replay_likelihood(r, models, star)
+        pool = eqx.tree_at(lambda p: p.log_prior_ratio, pool, marks)
         log_like = jnp.broadcast_to(log_like, ratio.shape)
         return quadrature_draws(Belief(atoms, ratio, log_like, pool), claim, n, models)
 

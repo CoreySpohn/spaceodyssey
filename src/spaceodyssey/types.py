@@ -743,9 +743,11 @@ class RefitTerm(eqx.Module):
 class AbstractRefitter(eqx.Module):
     """The producer of a star's refits: a new cloud from its cloud and its new rows.
 
-    A planner queues a refit of a star whose released rows detected a planet its cloud
-    holds no track for (``planet_tracks``); the refit returns a cloud that represents
-    the old cloud's rows and the term's, the new planet a track in a free slot of the
+    A planner appends a star's released rows to its replay first (``absorb``) and gates
+    the weights they leave (``refused_after_rows``); it queues a refit of the star when
+    those rows detected a planet its cloud holds no track for (``planet_tracks``) or
+    left a role's weights below the gate. The refit returns a cloud that represents the
+    old cloud's rows and the term's, any new planet a track in a free slot of the
     star's planet capacity ``K``. It reads only the public log. A refitter is a record
     of configuration (the backend); the toy's is an importance refit
     (``toy.ToyRefitter``), and a study of real data plugs its fitter in here.
@@ -753,11 +755,13 @@ class AbstractRefitter(eqx.Module):
     The call has the shape of a posterior update by one likelihood term: the star's
     current cloud, the new rows as the term, the key, and the reweighting gate's
     thresholds (the planner's ``PlannerSettings``), so a fitter whose update takes
-    ``(posterior, term, backend, key, *, min_n_eff, max_khat)`` is wrapped directly. A
-    cloud the gate refuses carries NaN log weights, so the star is refused, never
-    planned on silently. The thresholds are checked on the host where they are set
-    (``PlannerSettings`` refuses NaN). A decision's queue is refit in one call,
-    ``refit_stars``, which maps the stars in chunks of a batch size.
+    ``(posterior, term, backend, key, *, min_n_eff, max_khat)`` is wrapped directly,
+    the term swapped in for the rows the cloud represents. ``proposal_factor`` scales
+    the backend's draw count (the proposals it weighs to make the returned draws), so
+    a refused refit can be retried with more. A cloud the gate refuses carries NaN log
+    weights, never a cloud planned on silently. The thresholds are checked on the host
+    where they are set (``PlannerSettings`` refuses NaN). A decision's queue is refit
+    in one call, ``refit_stars``.
 
     The new refit's pool is not the refitter's job: the planner thins the old pool by
     the searches the new refit represents (``replay_pool``), which counts the new
@@ -773,6 +777,7 @@ class AbstractRefitter(eqx.Module):
         *,
         min_n_eff: Float[Array, ""],
         max_khat: Float[Array, ""],
+        proposal_factor: int = 1,
     ) -> Refit:
         """A new refit of one star: its cloud updated by the term's rows.
 
@@ -782,6 +787,8 @@ class AbstractRefitter(eqx.Module):
             key: the key of the refit.
             min_n_eff: the least Kish size of the new cloud's weights.
             max_khat: the largest Pareto shape of the new cloud's weights.
+            proposal_factor: how many times its backend's proposals the refit draws,
+                static; 1 by default.
 
         Returns:
             The new refit: its draws, of the same ``A`` and ``K``, NaN weights where
