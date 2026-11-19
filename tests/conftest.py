@@ -163,6 +163,25 @@ class _Toy:
             atoms, flat, flat, cls.empty_pool(n_roles) if pool is None else pool
         )
 
+    @staticmethod
+    def split(b):
+        """The planner's two beliefs from one hand-built two-role belief: the forecast
+        (role 0) and the verdict member (role 1), sharing the draws. Leading axes (a
+        stack of stars) are kept.
+        """
+
+        def rows(r):
+            pool = b.pool
+            pool = Pool(
+                pool.marks,
+                pool.log_prior[..., r, :],
+                pool.log_like[..., r, :],
+                pool.log_mass[..., r],
+            )
+            return Belief(b.atoms, b.log_prior[..., r, :], b.log_like[..., r, :], pool)
+
+        return rows(slice(0, 1)), rows(slice(1, 2))
+
     class GasPrior(AbstractRolePrior):
         """One planet in the toy box (hz = size = 1) whose `n_gas` gases are iid
         N(mean, sd^2); it samples a point state.

@@ -157,29 +157,31 @@ def _bit(q_claim: Float[Array, "..."]) -> Float[Array, "... 2"]:
 
 
 def claim_information(
-    b: Belief,
+    forecast: Belief,
+    verdict: Belief,
     model: AbstractObservationModel,
     action: Action,
     claim: Claim,
     star,
     planet: Int[Array, ""],
 ) -> Float[Array, " R"]:
-    """Expected gain of each role's log score on one planet's claim bit from an action.
+    """Expected gain of each verdict member's log score on one planet's claim bit.
 
     Row ``r`` is ``E_F[ln p_r(Z | Y) - ln p_r(Z)]``: ``Z`` the claim bit, ``Y`` the
-    action's outcome cell, and the expectation over the forecast's joint distribution
-    of the two (row 0). Each cell updates the weights by ``update_by_cell``. Row 0 is
-    the forecast's own expected information, the mutual information of ``Z`` and ``Y``
-    under the forecast (Lindley 1956); a verdict row is the verdict's gain as the
-    forecast expects it, which equals that mutual information only when the two agree,
-    and can be negative when they do not. A cell the forecast gives no mass adds
-    nothing.
+    action's outcome cell, ``p_r`` the verdict's role ``r`` and the expectation over
+    the forecast's joint distribution of the two. Each belief is updated by the cell on
+    its own draws (``update_by_cell``). Passing the forecast as the verdict gives the
+    forecast's own expected information, the mutual information of ``Z`` and ``Y``
+    under the forecast (Lindley 1956); a verdict's gain as the forecast expects it
+    equals that mutual information only when the two agree, and can be negative when
+    they do not. A cell the forecast gives no mass adds nothing.
 
     The gain is on the cells the model reports. Merging cells can raise a verdict
     row, so no bound on the gain of a finer outcome follows from coarser cells.
 
     Args:
-        b: the belief.
+        forecast: the forecast's belief, one role (``R = 1``).
+        verdict: the verdict's belief, one role per member.
         model: the observation model of the action.
         action: the action.
         claim: an unconditional claim (``claim.given == 0``).
@@ -187,7 +189,7 @@ def claim_information(
         planet: index of the planet along the ``K`` axis.
 
     Returns:
-        The expected gain per role in nats, shape ``(R,)``.
+        The expected gain per verdict member in nats, shape ``(R,)``.
 
     Raises:
         ValueError: if the claim is conditional; its bit is defined only where the
@@ -195,19 +197,26 @@ def claim_information(
     """
     if claim.given != 0:
         raise ValueError("claim_information needs an unconditional claim")
-    cells = model.cells(b.atoms, action)  # (A, Y)
-    p_cell = outcome_prob(b, cells)[0]  # (Y,), the forecast's
+    cells_f = model.cells(forecast.atoms, action)  # (A_F, Y)
+    cells_v = model.cells(verdict.atoms, action)  # (A_V, Y)
+    p_cell = outcome_prob(forecast, cells_f)[0]  # (Y,), the forecast's
     seen = p_cell > 0
     # A cell the forecast cannot give is replaced by a harmless one: its gain is
     # dropped below, and its NaN weights would otherwise reach the derivative.
-    safe = jnp.where(seen, cells, 1.0)
-    q_after = jax.vmap(
-        lambda c: q(update_by_cell(b, c), claim, star, planet), in_axes=1
-    )(safe)  # (Y, R)
-    q_before = q(b, claim, star, planet)  # (R,)
+    safe_f = jnp.where(seen, cells_f, 1.0)
+    safe_v = jnp.where(seen, cells_v, 1.0)
+
+    def q_after(b, cells):
+        return jax.vmap(
+            lambda c: q(update_by_cell(b, c), claim, star, planet), in_axes=1
+        )(cells)
+
+    q_f, q_v = q_after(forecast, safe_f)[:, 0], q_after(verdict, safe_v)  # (Y,), (Y, R)
     score = jax.vmap(expected_log_score, in_axes=(0, None))
-    after = jax.vmap(lambda qy: score(_bit(qy), _bit(qy[0])))(q_after)  # (Y, R)
-    before = score(_bit(q_before), _bit(q_before[0]))
+    after = jax.vmap(lambda qv, qf: score(_bit(qv), _bit(qf)))(q_v, q_f)  # (Y, R)
+    before = score(
+        _bit(q(verdict, claim, star, planet)), _bit(q(forecast, claim, star, planet)[0])
+    )
     expected_after = jnp.sum(jnp.where(seen[:, None], p_cell[:, None] * after, 0), 0)
     return expected_after - before
 

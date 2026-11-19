@@ -1,6 +1,7 @@
-"""Every public function of `belief` and `information`, the replay, the pool functions,
-`frontier` of `value` and the survey `step`, under `jax.jit`, `jax.vmap` over a leading
-world axis, and `jax.grad` where it is differentiable (forward mode only for `absorb`).
+"""Every public function of `belief` and `information`, the replay and the planner's
+two beliefs, the pool functions, `frontier` of `value` and the survey `step`, under
+`jax.jit`, `jax.vmap` over a leading world axis, and `jax.grad` where it is
+differentiable (forward mode only for `absorb`).
 """
 
 import equinox as eqx
@@ -19,6 +20,7 @@ from spaceodyssey.belief import (
     draw_claim_mass,
     log_weights,
     mark_weights,
+    planning_beliefs,
     pool_rate,
     q,
     replay,
@@ -171,7 +173,9 @@ def _cases(toy):
     )
 
     def value(b, utility, menu):
-        return frontier(b, plain, star, utility, search, menu, jnp.asarray(0.0), 1)
+        return frontier(
+            *toy.split(b), plain, star, utility, search, menu, jnp.asarray(0.0), 1
+        )
 
     # `step` on two sealed worlds of one star each, taking the free slot of a log.
     truths = [
@@ -209,6 +213,14 @@ def _cases(toy):
             [(full[0], roles), (full[1], roles1)],
             lambda a: a[0].stats[0]["weighted_sum"],
             belief_scalar,
+        ),
+        "planning_beliefs": (
+            lambda frozen, now: planning_beliefs(
+                frozen, now, roles, gas, star, b0.pool
+            ),
+            [(early[0], full[0]), (early[1], full[1])],
+            lambda a: a[1].stats[0]["weighted_sum"],
+            lambda pair: belief_scalar(pair[0]) + belief_scalar(pair[1]),
         ),
         "step": (
             take,
@@ -329,7 +341,7 @@ def _cases(toy):
             lambda b: uneven(weights(b)),
         ),
         "claim_information": (
-            lambda b, m, a, k: claim_information(b, m, a, claim, star, k),
+            lambda b, m, a, k: claim_information(*toy.split(b), m, a, claim, star, k),
             [(b0, model, actions[0], planets[0]), (b1, model, actions[1], planets[1])],
             lambda a: a[0].log_prior,
             uneven,
@@ -378,6 +390,7 @@ CASES = [
     "replay",
     "absorb",
     "replay_belief",
+    "planning_beliefs",
     "step",
     "frontier",
 ]

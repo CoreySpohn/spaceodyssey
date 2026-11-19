@@ -3,7 +3,8 @@
 The belief at a star is read off a replay of the log into one refit: ``replay``
 applies every row due at a query time that the refit does not already represent,
 ``absorb`` brings a replay up to a later query time, and ``replay_belief`` reads the
-belief off it under a role set.
+belief off it under a role set. A planner reads two beliefs, the forecast's and the
+verdict's, each off its own replay (``planning_beliefs``).
 """
 
 from functools import partial
@@ -636,3 +637,49 @@ def replay_belief(
         slot_log_like, atoms = model.finalize(stats, atoms, star)
         log_like = log_like + slot_log_like
     return Belief(atoms, log_prior, jnp.broadcast_to(log_like, log_prior.shape), pool)
+
+
+def _role_rows(b: Belief, rows: slice) -> Belief:
+    """The belief of some of ``b``'s roles: its rows ``rows``, the pool's with them."""
+    pool = b.pool
+    pool = Pool(
+        pool.marks, pool.log_prior[rows], pool.log_like[rows], pool.log_mass[rows]
+    )
+    return Belief(b.atoms, b.log_prior[rows], b.log_like[rows], pool)
+
+
+def planning_beliefs(
+    forecast: Replay,
+    verdict: Replay,
+    roles: Roles,
+    models: tuple[AbstractObservationModel, ...],
+    star,
+    pool: Pool,
+) -> tuple[Belief, Belief]:
+    """The two beliefs a planner reads: the forecast's and the verdict's.
+
+    Each is read off its own replay of the log (``replay_belief``): the forecast's
+    belief, one role (``R = 1``), off ``forecast`` under the forecast prior, and the
+    verdict's, one role per member, off ``verdict`` under the members, each with its
+    own rows of the pool. The two replays may hold different rows: a frozen forecast is
+    the replay at ``time_d = 0`` while the verdict's follows the decision time. Each
+    belief carries its own draws, so a gas block the verdict's rows update never
+    reaches the forecast.
+
+    Args:
+        forecast: the forecast's replay.
+        verdict: the verdict's replay.
+        roles: the forecast and the stacked verdict members.
+        models: the run's model table, static.
+        star: a pytree of scalar leaves describing the star.
+        pool: the undetected planets, every role.
+
+    Returns:
+        The forecast's belief (``R = 1``) and the verdict's (``R`` the members).
+    """
+    from_forecast = replay_belief(forecast, roles, models, star, pool)
+    from_verdict = replay_belief(verdict, roles, models, star, pool)
+    return (
+        _role_rows(from_forecast, slice(0, 1)),
+        _role_rows(from_verdict, slice(1, None)),
+    )

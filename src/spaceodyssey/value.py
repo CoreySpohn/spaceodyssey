@@ -1,9 +1,11 @@
 """Value and spend: what each star is worth to the planner at a given price of time.
 
-A utility scores a belief about one star (``LogScore``, ``Count``). ``frontier`` turns a
-menu of actions into the reward of each: the utility it is expected to add, averaged
-over the outcome cells the forecast expects, with up to ``depth - 1`` further actions at
-the same star after it, each charged at the price of time.
+A utility scores what the planner believes about one star (``LogScore``, ``Count``),
+read as two beliefs: the forecast's and the verdict's, each from its own replay
+(``planning_beliefs``). ``frontier`` turns a menu of actions into the reward of each:
+the utility it is expected to add, averaged over the outcome cells the forecast
+expects, with up to ``depth - 1`` further actions at the same star after it, each
+charged at the price of time.
 
 The planner prices exposure time at ``lam`` (reward per day). Each star offers a padded
 menu of options, each with a reward and a cost in days, and always the null option
@@ -96,18 +98,21 @@ def value_and_spend(
 
 
 class AbstractUtility(eqx.Module):
-    """What a belief about one star is worth to the planner, a scalar.
+    """What the planner's beliefs about one star are worth to it, a scalar.
 
     The reward of an action is the utility it is expected to add (``frontier``), so a
     utility matters only up to a constant.
     """
 
     @abc.abstractmethod
-    def __call__(self, b: Belief, claim: Claim, star) -> Float[Array, ""]:
-        """The utility of a belief.
+    def __call__(
+        self, forecast: Belief, verdict: Belief, claim: Claim, star
+    ) -> Float[Array, ""]:
+        """The utility of the forecast's and the verdict's beliefs about one star.
 
         Args:
-            b: the belief about one star.
+            forecast: the forecast's belief, one role (``R = 1``).
+            verdict: the verdict's belief, one role per member.
             claim: an unconditional claim.
             star: a pytree of scalar leaves describing the star.
 
@@ -119,10 +124,11 @@ class AbstractUtility(eqx.Module):
 class LogScore(AbstractUtility):
     """The verdict's log score on the claim-true count, expected under the forecast.
 
-    ``U(b) = sum_n P_F(N = n) ln P_gamma(N = n)``, with ``N`` the number of claim-true
-    planets at the star (``count_pmf``), ``F`` the forecast (row 0) and ``gamma`` the
-    verdict member (row 1). Planning reads one member (a declared deviation: a minimum
-    over members would not be a proper score), so the belief has ``R = 2``.
+    ``U = sum_n P_F(N = n) ln P_gamma(N = n)``, with ``N`` the number of claim-true
+    planets at the star (``count_pmf``), ``F`` the forecast and ``gamma`` the verdict
+    member, each read off its own belief. Planning reads one member (a declared
+    deviation: a minimum over members would not be a proper score), so the verdict's
+    belief has ``R = 1``.
 
     One action's expected gain in ``U`` is the verdict gain
     ``E_F[ln p_gamma(N | Y) - ln p_gamma(N)]`` over its outcome cells ``Y``: averaged
@@ -136,39 +142,41 @@ class LogScore(AbstractUtility):
 
     n_max: int = eqx.field(static=True)
 
-    def __call__(self, b, claim, star):
+    def __call__(self, forecast, verdict, claim, star):
         """The forecast-expected verdict log score of the count.
 
         Raises:
-            ValueError: if the belief does not have exactly one verdict member.
+            ValueError: if the verdict's belief does not have exactly one member.
         """
-        pmf = count_pmf(b, claim, star, self.n_max)
-        if pmf.shape[0] != 2:
+        pmf = count_pmf(verdict, claim, star, self.n_max)
+        if pmf.shape[0] != 1:
             raise ValueError(
-                f"LogScore plans with one verdict member (R = 2), not R = "
-                f"{pmf.shape[0]}"
+                f"LogScore plans with one verdict member, not {pmf.shape[0]}"
             )
-        return expected_log_score(pmf[1], pmf[0])
+        expected = count_pmf(forecast, claim, star, self.n_max)[0]
+        return expected_log_score(pmf[0], expected)
 
 
 class Count(AbstractUtility):
     """Expected number of claim-true planets found since time zero, under the forecast.
 
-    ``U(b) = rate0 - rate``, the forecast's claim-true pool rate (``pool_rate``, row 0)
-    in the pool at time zero less the rate in ``b``'s pool. A planet found is one no
-    longer in the pool, so a second look at a star counts only what the first look
-    missed: ``thin`` has already taken the found planets out of the pool.
+    ``U = rate0 - rate``, the forecast's claim-true pool rate (``pool_rate``) in the
+    pool at time zero less the rate in the forecast belief's pool. A planet found is
+    one no longer in the pool, so a second look at a star counts only what the first
+    look missed: ``thin`` has already taken the found planets out of the pool. The
+    verdict is not read.
 
     Attributes:
-        pool0: the pool at time zero, after the grant; held beside the beliefs, not in
-            them.
+        pool0: the pool at time zero, after the grant, its row 0 the forecast's; held
+            beside the beliefs, not in them.
     """
 
     pool0: Pool
 
-    def __call__(self, b, claim, star):
+    def __call__(self, forecast, verdict, claim, star):
         """The claim-true rate at time zero less the rate now, for the forecast."""
-        return pool_rate(self.pool0, claim, star)[0] - pool_rate(b.pool, claim, star)[0]
+        now = pool_rate(forecast.pool, claim, star)[0]
+        return pool_rate(self.pool0, claim, star)[0] - now
 
 
 class Menu(eqx.Module):
@@ -286,19 +294,21 @@ def completeness(
 
 
 def _branches(
-    b: Belief,
+    forecast: Belief,
+    verdict: Belief,
     mode_models: tuple[AbstractObservationModel, ...],
     menu: Menu,
     star_index: Int[Array, ""],
-) -> tuple[Float[Array, "M A Y"], Float[Array, "M Am"]]:
-    """Cells of each entry on the draws and its detection probability of each mark.
+):
+    """Cells of each entry on each belief's draws and its detection of each mark.
 
     ``menu`` is one star's (leaves of shape ``(M,)``). The entries of one mode are
     evaluated together; the cell axis is padded with impossible cells to the widest
     model. Neither depends on the weights, so they are computed once per star and read
-    at every node of the recursion.
+    at every node of the recursion. Returns, per belief, cells ``(M, A, Y)`` and the
+    detection probability ``(M, Am)``.
     """
-    order, cells, detect = [], [], []
+    order, cells, detect = [], ([], []), ([], [])
     for mode, model in enumerate(mode_models):
         entries = [m for m, e in enumerate(menu.mode) if e == mode]
         if not entries:
@@ -310,58 +320,80 @@ def _branches(
             exposure_d,
         )
         order += entries
-        cells.append(jax.vmap(model.cells, in_axes=(None, 0))(b.atoms, actions))
-        marks = b.pool.marks
-        detect.append(
-            jax.vmap(_detect_prob, in_axes=(None, None, 0))(model, marks, actions)
-        )
-    n_cell = max(c.shape[-1] for c in cells)
-    cells = [jnp.pad(c, ((0, 0), (0, 0), (0, n_cell - c.shape[-1]))) for c in cells]
+        for b, c, d in zip((forecast, verdict), cells, detect, strict=True):
+            c.append(jax.vmap(model.cells, in_axes=(None, 0))(b.atoms, actions))
+            d.append(
+                jax.vmap(_detect_prob, in_axes=(None, None, 0))(
+                    model, b.pool.marks, actions
+                )
+            )
     back = jnp.asarray(sorted(range(len(order)), key=order.__getitem__))
-    return jnp.concatenate(cells)[back], jnp.concatenate(detect)[back]
+    n_cell = max(c.shape[-1] for c in cells[0])
+
+    def gather(per_mode, pad):
+        if pad:
+            per_mode = [
+                jnp.pad(c, ((0, 0), (0, 0), (0, n_cell - c.shape[-1])))
+                for c in per_mode
+            ]
+        return jnp.concatenate(per_mode)[back]
+
+    return tuple(
+        (gather(c, True), gather(d, False)) for c, d in zip(cells, detect, strict=True)
+    )
 
 
-def _worth(b, claim, star, utility, branches, charge, depth: int) -> Float[Array, ""]:
-    """The utility of ``b`` with up to ``depth`` more actions, each chosen to raise it.
+def _after(b: Belief, cells: Float[Array, " A"], detect: Float[Array, " Am"]) -> Belief:
+    """A belief after an outcome cell: its pool thinned, its weights updated."""
+    return update_by_cell(eqx.tree_at(lambda x: x.pool, b, thin(b.pool, detect)), cells)
 
-    ``W_0 = U`` and ``W_k(b) = max(U(b), max_m (E_F[W_{k-1}(b after m)] - charge_m))``,
-    with ``charge_m`` the price of entry ``m``'s time (infinite for a masked entry):
-    stopping is always an option, so ``W_k`` never falls below ``W_{k-1}``.
+
+def _worth(node, claim, star, utility, branches, charge, depth: int):
+    """The utility of a node with up to ``depth`` more actions, each chosen to raise it.
+
+    A node is the pair of beliefs (forecast, verdict). ``W_0 = U`` and
+    ``W_k = max(U, max_m (E_F[W_{k-1}(after m)] - charge_m))``, with ``charge_m`` the
+    price of entry ``m``'s time (infinite for a masked entry): stopping is always an
+    option, so ``W_k`` never falls below ``W_{k-1}``.
     """
-    now = utility(b, claim, star)
+    now = utility(*node, claim, star)
     if depth == 0:
         return now
-    later = _expected_after(b, claim, star, utility, branches, charge, depth - 1)
+    later = _expected_after(node, claim, star, utility, branches, charge, depth - 1)
     return jnp.maximum(now, jnp.max(later - charge))
 
 
 def _expected_after(
-    b, claim, star, utility, branches, charge, depth: int
+    node, claim, star, utility, branches, charge, depth: int
 ) -> Float[Array, " M"]:
-    """``E_F[W_depth(b after m)]`` for each entry ``m``, over the forecast's cells.
+    """``E_F[W_depth(node after m)]`` for each entry ``m``, over the forecast's cells.
 
-    After entry ``m`` with outcome in cell ``y`` the draws are weighted by their
-    probability of ``y`` (``update_by_cell``) and the pool is thinned by the entry's
-    detection probability in every cell. A cell the forecast gives no mass adds nothing.
+    After entry ``m`` with outcome in cell ``y`` each belief's draws are weighted by
+    their probability of ``y`` (``update_by_cell``) and its pool is thinned by the
+    entry's detection probability in every cell. A cell the forecast gives no mass adds
+    nothing.
     """
+    forecast, verdict = node
+    (cells_f, detect_f), (cells_v, detect_v) = branches
 
-    def entry(cells, detect):
-        p_cell = outcome_prob(b, cells)[0]  # (Y,), the forecast's
+    def entry(cf, df, cv, dv):
+        p_cell = outcome_prob(forecast, cf)[0]  # (Y,), the forecast's
         seen = p_cell > 0
-        thinned = eqx.tree_at(lambda x: x.pool, b, thin(b.pool, detect))
 
-        def worth_after(c):
-            after = update_by_cell(thinned, c)
+        def worth_after(cf_y, cv_y):
+            after = (_after(forecast, cf_y, df), _after(verdict, cv_y, dv))
             return _worth(after, claim, star, utility, branches, charge, depth)
 
-        worth = jax.vmap(worth_after, in_axes=1)(jnp.where(seen, cells, 1.0))
+        safe_f, safe_v = (jnp.where(seen, c, 1.0) for c in (cf, cv))
+        worth = jax.vmap(worth_after, in_axes=1)(safe_f, safe_v)
         return jnp.sum(jnp.where(seen, p_cell * worth, 0.0))
 
-    return jax.vmap(entry)(*branches)
+    return jax.vmap(entry)(cells_f, detect_f, cells_v, detect_v)
 
 
 def frontier(
-    belief: Belief,
+    forecast: Belief,
+    verdict: Belief,
     claim: Claim,
     star,
     utility: AbstractUtility,
@@ -372,17 +404,18 @@ def frontier(
 ) -> Frontier:
     """The reward and cost of each menu entry at each star.
 
-    The reward of entry ``m`` is ``E_F[W_{depth-1}(b after m)] - U(b)``: the utility
-    ``U`` it is expected to add, with up to ``depth - 1`` further entries of the same
-    star's menu after it, each chosen on the outcomes so far to raise the utility net
-    of its time at price ``lam`` (``lam`` times its cost), or none. The expectation is
-    over the forecast's (row 0) distribution of each outcome cell; an outcome updates
-    every role by ``update_by_cell`` and thins the pool by the entry's detection
-    probability of each mark (``thin``; zero for a model that does not search). The
-    first entry's cost (its exposure) is not netted: it stays in the frontier for the
-    dual. Under
-    ``LogScore`` at depth 1 the reward is the verdict gain
-    ``E_F[ln p_gamma(N | Y) - ln p_gamma(N)]``; ``lam`` enters only at ``depth > 1``.
+    The planner's beliefs are two: the forecast's and the verdict's, each from its own
+    replay (``planning_beliefs``). The reward of entry ``m`` is
+    ``E_F[W_{depth-1}(after m)] - U``: the utility ``U`` it is expected to add, with up
+    to ``depth - 1`` further entries of the same star's menu after it, each chosen on
+    the outcomes so far to raise the utility net of its time at price ``lam`` (``lam``
+    times its cost), or none. The expectation is over the forecast's distribution of
+    each outcome cell; an outcome updates each belief on its own draws by
+    ``update_by_cell`` and thins its pool by the entry's detection probability of each
+    mark (``thin``; zero for a model that does not search). The first entry's cost (its
+    exposure) is not netted: it stays in the frontier for the dual. Under ``LogScore``
+    at depth 1 the reward is the verdict gain ``E_F[ln p_gamma(N | Y) - ln
+    p_gamma(N)]``; ``lam`` enters only at ``depth > 1``.
 
     The price a frontier is built at is not the price the dual then solves for. A
     planner (``PricePolicy``) passes the last solved price: one step of the fixed point
@@ -390,7 +423,7 @@ def frontier(
     does not depend on ``lam``.
 
     This is the generic bounded recursion, the reference: it evaluates
-    ``(M Y) ** depth`` hypothetical beliefs per star, so it serves small menus and
+    ``(M Y) ** depth`` hypothetical belief pairs per star, so it serves small menus and
     shallow depths. The cells of every entry are computed once per star, since a
     hypothetical outcome changes weights, not draws.
 
@@ -400,14 +433,16 @@ def frontier(
     (see ``update_by_cell``), so the reward is exact only where the claim and the cell
     are independent given each draw.
 
-    Every leaf of ``belief``, ``star``, ``menu`` and the array leaves of ``utility``
-    (``Count``'s time-zero pool) carry a leading star axis ``S``; ``claim`` and
-    ``mode_models`` are shared by the stars. The menu's modes, the cell counts and
+    Every leaf of the two beliefs, ``star``, ``menu`` and the array leaves of
+    ``utility`` (``Count``'s time-zero pool) carry a leading star axis ``S``; ``claim``
+    and ``mode_models`` are shared by the stars. The menu's modes, the cell counts and
     ``depth`` are static, so another star or world of the same shapes reuses the
     compiled program.
 
     Args:
-        belief: the beliefs, one per star.
+        forecast: the forecast's beliefs, one per star, one role each.
+        verdict: the verdict's beliefs, one per star, one role each (planning reads
+            one member).
         claim: an unconditional claim.
         star: the stars, a pytree whose leaves have a leading axis ``S``.
         utility: the utility.
@@ -431,12 +466,15 @@ def frontier(
     if any(not 0 <= m < len(mode_models) for m in menu.mode):
         raise ValueError("a menu entry's mode is not in the mode table")
 
-    def one_star(b, star, utility, menu, star_index):
-        branches = _branches(b, mode_models, menu, star_index)
+    def one_star(forecast, verdict, star, utility, menu, star_index):
+        node = (forecast, verdict)
+        branches = _branches(forecast, verdict, mode_models, menu, star_index)
         charge = jnp.where(menu.mask, lam * menu.exposure_d, jnp.inf)
-        later = _expected_after(b, claim, star, utility, branches, charge, depth - 1)
-        return jnp.where(menu.mask, later - utility(b, claim, star), 0.0)
+        later = _expected_after(node, claim, star, utility, branches, charge, depth - 1)
+        return jnp.where(menu.mask, later - utility(*node, claim, star), 0.0)
 
     star_index = jnp.arange(menu.mask.shape[0])
-    reward = eqx.filter_vmap(one_star)(belief, star, utility, menu, star_index)
+    reward = eqx.filter_vmap(one_star)(
+        forecast, verdict, star, utility, menu, star_index
+    )
     return Frontier(reward, menu.exposure_d, menu.mask)
