@@ -22,6 +22,8 @@ TYPECHECK = os.environ.get("SPACEODYSSEY_TYPECHECK", "1") == "1"
 if TYPECHECK:
     install_import_hook("spaceodyssey", "beartype.beartype")
 
+from spaceodyssey import belief, information, value  # noqa: E402
+from spaceodyssey._standin import diagnostics  # noqa: E402
 from spaceodyssey.belief import Belief, select_roles  # noqa: E402
 from spaceodyssey.claim import AbstractConjunct  # noqa: E402
 from spaceodyssey.log import execute  # noqa: E402
@@ -67,6 +69,36 @@ class _Recording(AbstractPolicy):
         return self.inner.decide(key, state, public)
 
 
+class _Jit:
+    """One compiled wrapper per hot kernel, shared by every test file.
+
+    A kernel called outside `jit` compiles each of its operations as a program of its
+    own for every new shape (about 100 per call of `diagnose`); through one shared
+    `eqx.filter_jit` wrapper it compiles once per shape and structure, and a second
+    file calling it at the same shape reuses the program. Static arguments (claims,
+    models, `n_max`) are part of the key, arrays are traced.
+    """
+
+    diagnose = staticmethod(eqx.filter_jit(information.diagnose))
+    certify = staticmethod(eqx.filter_jit(information.certify))
+    refit_trigger = staticmethod(eqx.filter_jit(information.refit_trigger))
+    pareto_khat = staticmethod(eqx.filter_jit(jax.vmap(diagnostics.pareto_khat)))
+    q = staticmethod(eqx.filter_jit(belief.q))
+    chain = staticmethod(eqx.filter_jit(belief.chain))
+    weights = staticmethod(eqx.filter_jit(belief.weights))
+    count_pmf = staticmethod(eqx.filter_jit(belief.count_pmf))
+    pool_rate = staticmethod(eqx.filter_jit(belief.pool_rate))
+    replay = staticmethod(eqx.filter_jit(belief.replay))
+    absorb = staticmethod(eqx.filter_jit(belief.absorb))
+    replay_belief = staticmethod(eqx.filter_jit(belief.replay_belief))
+    role_belief = staticmethod(eqx.filter_jit(belief.role_belief))
+    planning_beliefs = staticmethod(eqx.filter_jit(belief.planning_beliefs))
+    mark_weights = staticmethod(eqx.filter_jit(belief.mark_weights))
+    claim_information = staticmethod(eqx.filter_jit(information.claim_information))
+    thin = staticmethod(eqx.filter_jit(value.thin))
+    completeness = staticmethod(eqx.filter_jit(value.completeness))
+
+
 # Toy state for the layer tests: per-draw, per-planet `hz` and `size` bits plus a gas
 # block. Builders, conjuncts, the toy prior and search, and the assertion and stacking
 # helpers are exposed through the `toy` fixture, not imported.
@@ -76,6 +108,7 @@ class _Toy:
     """
 
     star = ()  # the toy's star is an empty pytree, never None
+    jit = _Jit  # the shared compiled kernels
 
     class InHz(AbstractConjunct):
         """The `hz` bit of the toy state."""

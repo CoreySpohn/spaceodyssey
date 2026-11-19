@@ -9,7 +9,7 @@ from jax.test_util import check_grads
 from jaxtyping import TypeCheckError
 from numpy.testing import assert_allclose, assert_array_max_ulp
 
-from spaceodyssey.belief import Belief, chain, count_pmf, pool_rate, q, weights
+from spaceodyssey.belief import Belief, count_pmf
 from spaceodyssey.claim import AbstractConjunct, Claim, GasAbove
 from spaceodyssey.information import log_score
 from spaceodyssey.types import Pool
@@ -49,7 +49,7 @@ def test_weights_normalize_per_role(toy):
     log_prior = jnp.log(jnp.array([[1.0, 1.0], [3.0, 1.0]]))
     log_like = jnp.log(jnp.array([[1.0, 1.0], [1.0, 2.0]]))
     b = Belief(atoms, log_prior, log_like, b.pool)
-    assert_allclose(weights(b), [[0.4, 0.6], [0.5, 0.5]], rtol=1e-12)
+    assert_allclose(toy.jit.weights(b), [[0.4, 0.6], [0.5, 0.5]], rtol=1e-12)
 
 
 def test_chain_multiplies_to_q_and_given_splits_it(toy):
@@ -68,26 +68,30 @@ def test_chain_multiplies_to_q_and_given_splits_it(toy):
     conj = (toy.InHz(), toy.InSize(), GasAbove(0, 0.0), GasAbove(1, 0.0))
     plain = Claim(conj)
     probs = np.stack([np.asarray(c.prob(b.atoms, toy.star))[:, 0] for c in conj])
-    q_plain = q(b, plain, toy.star, PLANET)
+    q_plain = toy.jit.q(b, plain, toy.star, PLANET)
     assert_allclose(q_plain, [(w * probs.prod(0)).sum()], rtol=1e-12)
     assert_array_max_ulp(
-        np.asarray(chain(b, plain, toy.star, PLANET).prod(axis=1)),
+        np.asarray(toy.jit.chain(b, plain, toy.star, PLANET).prod(axis=1)),
         np.asarray(q_plain),
         maxulp=4,
     )
     for given in (1, 2, 3):
         claim = Claim(conj, given=given)
-        c = np.asarray(chain(b, claim, toy.star, PLANET))[0]
+        c = np.asarray(toy.jit.chain(b, claim, toy.star, PLANET))[0]
         p_given = (w * probs[:given].prod(0)).sum()
         assert_allclose(c[:given].prod(), p_given, rtol=1e-12)
-        assert_allclose(c[given:].prod(), q(b, claim, toy.star, PLANET)[0], rtol=1e-12)
         assert_allclose(
-            q(b, claim, toy.star, PLANET)[0], q_plain[0] / p_given, rtol=1e-12
+            c[given:].prod(), toy.jit.q(b, claim, toy.star, PLANET)[0], rtol=1e-12
+        )
+        assert_allclose(
+            toy.jit.q(b, claim, toy.star, PLANET)[0], q_plain[0] / p_given, rtol=1e-12
         )
     never = toy.belief(toy.atoms([[0.0], [0.0]], [[1.0], [1.0]], [0.5, 0.5]))
     claim = Claim((toy.InHz(), toy.InSize()), given=1)
-    assert_allclose(q(never, claim, toy.star, PLANET), [0.0], atol=0.0)
-    assert_allclose(chain(never, claim, toy.star, PLANET), [[0.0, 0.0]], atol=0.0)
+    assert_allclose(toy.jit.q(never, claim, toy.star, PLANET), [0.0], atol=0.0)
+    assert_allclose(
+        toy.jit.chain(never, claim, toy.star, PLANET), [[0.0, 0.0]], atol=0.0
+    )
 
 
 def test_pool_count_pmf_by_hand(toy):
@@ -119,7 +123,7 @@ def test_pool_count_pmf_by_hand(toy):
         cloud=[2.0, 1.0],
         ref=[1.0, 2.0],
     )
-    pmf = count_pmf(
+    pmf = toy.jit.count_pmf(
         toy.belief(atoms, pool, n_roles=2), Claim((toy.InHz(),)), toy.star, 3
     )
     e1 = np.exp(-1.0)
@@ -147,12 +151,12 @@ def test_pool_rate_now_and_at_time_zero(toy):
     pool0 = toy.pool([1.0, 0.0], [[0.5, 0.5]], np.log(2.0))
     thinned = toy.pool([1.0, 0.0], [[0.5, 0.5]], np.log(1.0), like=[[0.2, 0.8]])
     claim = Claim((toy.InHz(),))
-    now = pool_rate(thinned, claim, toy.star)
-    then = pool_rate(pool0, claim, toy.star)
+    now = toy.jit.pool_rate(thinned, claim, toy.star)
+    then = toy.jit.pool_rate(pool0, claim, toy.star)
     assert_allclose(now, [0.2], rtol=1e-12)
     assert_allclose(then, [1.0], rtol=1e-12)
     assert_allclose(then - now, [0.8], rtol=1e-12)
-    pmf = count_pmf(toy.belief(atoms, thinned), claim, toy.star, 1)
+    pmf = toy.jit.count_pmf(toy.belief(atoms, thinned), claim, toy.star, 1)
     assert_allclose(pmf, [[np.exp(-0.2), 1 - np.exp(-0.2)]], rtol=1e-12)
 
 
@@ -170,11 +174,11 @@ def test_count_pmf_convolves_draws_and_pool(toy):
     """
     atoms = toy.atoms([[1.0]], [[1.0]], [1.0])
     pool = toy.pool([1.0], [[1.0]], 0.0)
-    pmf = count_pmf(toy.belief(atoms, pool), Claim((toy.InHz(),)), toy.star, 3)
+    pmf = toy.jit.count_pmf(toy.belief(atoms, pool), Claim((toy.InHz(),)), toy.star, 3)
     e1 = np.exp(-1.0)
     assert_allclose(pmf[0], [0.0, e1, e1, 1 - 2 * e1], atol=1e-12)
     three = toy.atoms([[0.5, 0.5, 0.5]], [[1.0, 1.0, 1.0]], [1.0])
-    pmf = count_pmf(toy.belief(three), Claim((toy.InHz(),)), toy.star, 1)
+    pmf = toy.jit.count_pmf(toy.belief(three), Claim((toy.InHz(),)), toy.star, 1)
     assert_allclose(pmf[0], [0.125, 0.875], atol=1e-12)
 
 
@@ -237,13 +241,17 @@ def test_a_nonexistent_slot_changes_nothing(toy):
     b_pad = toy.belief(padded, eqx.tree_at(lambda p: p.marks, pool, marks))
 
     for c in (claim, given):
-        assert_allclose(q(b_pad, c, toy.star, PLANET), q(b, c, toy.star, PLANET))
         assert_allclose(
-            chain(b_pad, c, toy.star, PLANET), chain(b, c, toy.star, PLANET)
+            toy.jit.q(b_pad, c, toy.star, PLANET), toy.jit.q(b, c, toy.star, PLANET)
         )
-        assert_allclose(q(b_pad, c, toy.star, jnp.asarray(1)), [0.0], atol=0.0)
+        assert_allclose(
+            toy.jit.chain(b_pad, c, toy.star, PLANET),
+            toy.jit.chain(b, c, toy.star, PLANET),
+        )
+        assert_allclose(toy.jit.q(b_pad, c, toy.star, jnp.asarray(1)), [0.0], atol=0.0)
     assert_allclose(
-        count_pmf(b_pad, plain, toy.star, 3), count_pmf(b, plain, toy.star, 3)
+        toy.jit.count_pmf(b_pad, plain, toy.star, 3),
+        toy.jit.count_pmf(b, plain, toy.star, 3),
     )
 
 
@@ -298,7 +306,7 @@ def test_annotations_are_checked_and_boolean_conjuncts_count(toy, typecheck):
             return atoms.cloud.samples["hz"] > 0.5
 
     atoms = toy.atoms([[1.0]], [[1.0]], [1.0])
-    pmf = count_pmf(toy.belief(atoms), Claim((HzBit(),)), toy.star, 1)
+    pmf = toy.jit.count_pmf(toy.belief(atoms), Claim((HzBit(),)), toy.star, 1)
     assert pmf.dtype == atoms.x_mean.dtype
     assert_allclose(pmf, [[0.0, 1.0]], atol=0.0)
 
@@ -310,7 +318,7 @@ def test_count_pmf_rejects_a_conditional_claim(toy):
     """
     atoms = toy.atoms([[1.0]], [[1.0]], [1.0])
     with pytest.raises(ValueError, match="unconditional"):
-        count_pmf(
+        toy.jit.count_pmf(
             toy.belief(atoms), Claim((toy.InHz(), toy.InSize()), given=1), toy.star, 2
         )
 
@@ -347,10 +355,12 @@ def test_count_pmf_gradients_reach_the_pool(toy, mass):
     claim = Claim((toy.InHz(),))
     like = jnp.array([[1.0, 1.0], [0.3, 0.7]])
 
+    @jax.jit
     def pmf(log_mass, mark_weights, like):
         b = _pool_belief(toy, log_mass, mark_weights, like)
         return count_pmf(b, claim, toy.star, 3)
 
+    @jax.jit
     def score(log_mass, mark_weights, like):
         return log_score(pmf(log_mass, mark_weights, like)[0], jnp.asarray(3))
 
@@ -375,6 +385,7 @@ def test_count_pmf_derivative_at_a_zero_pool_rate(toy, n_max):
     """
     claim = Claim((toy.InHz(),))
 
+    @jax.jit
     def pmf(mark_hz):
         b = _pool_belief(toy, jnp.log(2.0), POOL_WEIGHTS, mark_hz=mark_hz, draws=False)
         return count_pmf(b, claim, toy.star, n_max)
@@ -391,6 +402,7 @@ def test_count_pmf_derivative_at_a_zero_pool_rate(toy, n_max):
     grad_score = jax.grad(lambda h: log_score(pmf(h)[0], jnp.asarray(0)))(zero)
     assert_allclose(grad_score, -2.0 * POOL_WEIGHTS[0], atol=1e-12)
 
+    @jax.jit
     def empty(log_mass, mark_weights):
         b = _pool_belief(toy, log_mass, mark_weights, draws=False)
         return (count_pmf(b, claim, toy.star, n_max) * jnp.arange(n_max + 1)).sum()
@@ -415,8 +427,8 @@ def test_pool_tail_is_accurate_in_float32(toy):
         lambda x: x.astype(jnp.float32) if jnp.issubdtype(x.dtype, jnp.floating) else x,
         b64,
     )
-    pmf64 = count_pmf(b64, claim, toy.star, 3)
-    pmf32 = count_pmf(b32, claim, toy.star, 3)
+    pmf64 = toy.jit.count_pmf(b64, claim, toy.star, 3)
+    pmf32 = toy.jit.count_pmf(b32, claim, toy.star, 3)
     assert pmf32.dtype == jnp.float32
     assert_allclose(pmf64[0, 3], 1.6654e-10, rtol=1e-4)
     assert_allclose(pmf32, pmf64, rtol=1e-5, atol=1e-7)

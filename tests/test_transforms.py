@@ -119,8 +119,13 @@ def _cases(toy):
     def diag(b, planet):
         return diagnose(b, conditional, star, planet, jnp.full(N_ROLES, 0.01))
 
-    d0, d1 = diag(b0, planets[0]), diag(b1, planets[1])
-    pmf = [count_pmf(b, plain, star, 3)[0] for b in (b0, b1)]
+    # Inputs are built through the shared compiled kernels; the cases call the raw ones.
+    mass = jnp.full(N_ROLES, 0.01)
+    d0, d1 = (
+        toy.jit.diagnose(b, conditional, star, k, mass)
+        for b, k in zip((b0, b1), planets, strict=True)
+    )
+    pmf = [toy.jit.count_pmf(b, plain, star, 3)[0] for b in (b0, b1)]
     counts = (jnp.asarray(1), jnp.asarray(2))
     roles = Roles(Tilt("toy", 0.0), Tilt("toy", jnp.array([0.5, -0.4])))
     roles1 = Roles(Tilt("toy", 0.2), Tilt("toy", jnp.array([0.1, 0.7])))
@@ -159,11 +164,11 @@ def _cases(toy):
     refits = [Refit(b.atoms, jnp.zeros(CAPACITY, bool), 0) for b in (b0, b1)]
     times = (jnp.asarray(1.0), jnp.asarray(2.0))
     early = [
-        replay(r, lg, gas, star, jnp.asarray(0.2))
+        toy.jit.replay(r, lg, gas, star, jnp.asarray(0.2))
         for r, lg in zip(refits, logs, strict=True)
     ]
     full = [
-        replay(r, lg, gas, star, t)
+        toy.jit.replay(r, lg, gas, star, t)
         for r, lg, t in zip(refits, logs, times, strict=True)
     ]
 

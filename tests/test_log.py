@@ -5,6 +5,7 @@ track as rows through `execute`, and `score` reads the information table and the
 certificates off the log against the unsealed truth.
 """
 
+import functools
 import zlib
 from typing import ClassVar
 
@@ -118,6 +119,7 @@ def _e_track_claim(toy):
     return Claim((toy.InHz(), toy.InSize(), *gases), given=2)
 
 
+@functools.cache  # built once per session; arrays are immutable
 def _el_world(toy):
     """E (star 0): an Earth-sized HZ planet with water and oxygen 1 dex above their
     floors. L (star 1): its look-alike, the same but not Earth-sized.
@@ -140,6 +142,7 @@ def _stage_table():
     return TablePolicy(Action([0, 1, 0, 1, 0, 1], [0, 0, 1, 1, 2, 2], [1.0] * 6))
 
 
+@functools.cache  # built once per session; arrays are immutable
 def _step_rule_cloud(toy):
     """The 16 point draws over (hz, size, water, oxygen), each gas 1 dex above or
     below its floor, `COPIES` times each, equal weights.
@@ -150,6 +153,7 @@ def _step_rule_cloud(toy):
     return toy.atoms(bits[:, :1], bits[:, 1:2], np.ones(len(bits)), gases, 0.0)
 
 
+@functools.cache  # built once per session; arrays are immutable
 def _gaussian_cloud(toy):
     """The 4 draws over (hz, size), 1,000 times each, both gases N(0, 1) dex."""
     bits = np.array(np.meshgrid([0.0, 1.0], [0.0, 1.0], indexing="ij")).reshape(2, -1)

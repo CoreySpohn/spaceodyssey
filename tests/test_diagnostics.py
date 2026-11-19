@@ -1,15 +1,18 @@
 """Diagnostics and certificates: boundary precision, the certify rule and the Pareto
 tail fit.
+
+Every belief here has N_DRAW draws (a smaller cloud is padded with zero-weight draws,
+which every diagnostic treats as absent) and two roles, and the kernels run through the
+shared compiled wrappers (`toy.jit`), so the file compiles each kernel once.
 """
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from spaceodyssey._standin.diagnostics import khat_threshold, pareto_khat
+from spaceodyssey._standin.diagnostics import khat_threshold
 from spaceodyssey.claim import Claim
 from spaceodyssey.information import (
     INAPPLICABLE,
@@ -17,19 +20,30 @@ from spaceodyssey.information import (
     POSITIVE,
     UNRESOLVED,
     Diagnostics,
-    certify,
     clip_q,
-    diagnose,
-    refit_trigger,
 )
 
 PLANET = jnp.asarray(0)
+N_DRAW = 5000  # every belief's draw count; smaller clouds are padded
+NO_MASS = jnp.zeros(2)  # no prior mass outside the support, two roles
+
+
+def _belief(toy, hz, size, w=None):
+    """A two-role belief of flat priors over `len(hz)` draws of weight `w` (unit by
+    default), padded to N_DRAW draws of zero weight.
+    """
+    n = len(hz)
+    w = np.ones(n) if w is None else np.asarray(w)
+    pad = np.zeros(N_DRAW - n)
+    hz, size = (
+        np.concatenate([np.asarray(x, float), pad])[:, None] for x in (hz, size)
+    )
+    return toy.belief(toy.atoms(hz, size, np.concatenate([w, pad])), n_roles=2)
 
 
 def _unit_weight_belief(toy, n_true, n):
     """`n` draws of unit weight, the first `n_true` claim-true (one planet each)."""
-    hz = (jnp.arange(n) < n_true).astype(float)[:, None]
-    return toy.belief(toy.atoms(hz, jnp.ones_like(hz), jnp.ones(n)))
+    return _belief(toy, np.arange(n) < n_true, np.ones(n))
 
 
 @pytest.mark.parametrize("n", [60, 400, 1900])
@@ -43,13 +57,13 @@ def test_boundary_precision(toy, n):
     weights, or no centering on q), or n_eff is not the Kish size of the weights.
     """
     b = _unit_weight_belief(toy, round(0.95 * n), n)
-    d = diagnose(b, Claim((toy.InHz(),)), toy.star, PLANET, jnp.zeros(1))
+    d = toy.jit.diagnose(b, Claim((toy.InHz(),)), toy.star, PLANET, NO_MASS)
     assert_allclose(d.q, 0.95, rtol=1e-12)
     assert_allclose(d.mc_se / (1.0 - d.q), np.sqrt(19.0 / n), rtol=1e-10)
     assert_allclose(d.n_eff, n, rtol=1e-10)
     resolution = 0.5 / d.n_eff
     assert_allclose(clip_q(d.q, resolution), 0.95, rtol=1e-12)
-    assert_allclose(clip_q(jnp.ones(1), resolution), 1.0 - 0.5 / n, rtol=1e-12)
+    assert_allclose(clip_q(jnp.ones(2), resolution), 1.0 - 0.5 / n, rtol=1e-12)
 
 
 def _diag(q, n_eff, khat=0.0, cond_mass=1.0, outside=0.0):
@@ -95,7 +109,7 @@ ALPHA = 0.05
         pytest.param(_diag([0.97, 0.92], 5000), UNRESOLVED, id="members-disagree"),
     ],
 )
-def test_certify_at_the_boundary(diag, status):
+def test_certify_at_the_boundary(toy, diag, status):
     """Unanimous draws (mc_se = 0) at alpha = 0.05 and z = 2: only n_eff = 5000
     certifies (bounds in the next test), and the negative side is symmetric. A NaN
     khat is unresolved; a condition mass of 5e-5, below 1 / (2 * 5000), is
@@ -111,10 +125,10 @@ def test_certify_at_the_boundary(diag, status):
     not the draws that meet the condition, if one member suffices, or if row 0 is a
     member.
     """
-    assert int(certify(diag, ALPHA).status) == status
+    assert int(toy.jit.certify(diag, ALPHA).status) == status
 
 
-def test_certify_bounds_at_unanimity():
+def test_certify_bounds_at_unanimity(toy):
     """With every draw agreeing the bound is Wilson's: n / (n + z^2) = 0.556, 0.926
     and 0.9992 at n_eff = 5, 50 and 5000 (z = 2), and 4 / (n + 4) on the negative
     side. A prior mass m = 0.06 outside the support moves the lower bound to its
@@ -124,6 +138,7 @@ def test_certify_bounds_at_unanimity():
     applied to the wrong end.
     """
     n = np.array([5.0, 50.0, 5000.0])
+    certify = toy.jit.certify
     lows = np.array([float(certify(_diag([1.0], k), ALPHA).q_lo) for k in n])
     highs = np.array([float(certify(_diag([0.0], k), ALPHA).q_hi) for k in n])
     assert_allclose(lows, n / (n + 4.0), rtol=1e-12)
@@ -134,7 +149,7 @@ def test_certify_bounds_at_unanimity():
     assert_allclose(outside.q_hi, 1.0, rtol=1e-12)
 
 
-def test_pareto_khat_recovers_a_known_tail():
+def test_pareto_khat_recovers_a_known_tail(toy):
     """Weights w = U^-k with U uniform have a Pareto tail of shape k. One estimate at
     S = 5000 (a 213-draw tail) scatters by about 0.09 at k = 0.5 and 0.13 at k = 1,
     so the test averages 64 replicates: N = (4 * 0.13 / 0.1)^2 = 27 replicates puts
@@ -145,43 +160,54 @@ def test_pareto_khat_recovers_a_known_tail():
     Fails if the fit's sign convention is flipped, the tail is taken from the wrong
     end, or the exceedances are not over the next-largest weight.
     """
-    keys = jax.random.split(jax.random.PRNGKey(0), 64)
-    for k in (0.5, 1.0):
-        log_w = -k * jnp.log(
-            jax.vmap(lambda key: jax.random.uniform(key, (5000,)))(keys)
-        )
-        khat = jax.vmap(pareto_khat)(log_w)
+    u = np.random.default_rng(0).uniform(size=(2, 64, N_DRAW))
+    for k, u_k in zip((0.5, 1.0), u, strict=True):
+        khat = toy.jit.pareto_khat(-k * np.log(u_k))
         assert abs(float(jnp.mean(khat)) - k) < 0.1, (k, jnp.mean(khat))
 
     assert khat_threshold(100) == pytest.approx(0.5)
     assert khat_threshold(5000) == pytest.approx(0.7)
 
 
-def test_pareto_khat_without_a_tail():
+def test_pareto_khat_without_a_tail(toy):
     """Weights with no tail give -inf: 5000 equal weights, the same with a quarter
     of the draws at zero weight, equal weights off by one ulp in three draws, and two
     weight levels (1,405 and 595 draws, ratio 0.6). Fifty draws at twice the weight of
-    the rest fit a bounded tail (khat below zero). A fit that cannot be made is NaN:
-    three draws above an otherwise flat cloud (fewer than five exceedances), or no
-    finite weight.
+    1,950 others fit a bounded tail (khat below zero). A fit that cannot be made is
+    NaN: three draws above an otherwise flat cloud (fewer than five exceedances), or no
+    finite weight. Every case is 5000 draws, a smaller one padded with zero weights,
+    and all run as one batch.
 
     Fails if constant or two-level weights give NaN (a cloud of exact posterior draws
     could then never be certified), if draws tied with the cutoff enter the fit, if
     float noise counts as a tail, or if an impossible fit returns a number.
     """
-    flat = jnp.zeros(5000)
-    two_level = jnp.concatenate([jnp.zeros(1405), jnp.full(595, jnp.log(0.6))])
-    plateau = jnp.concatenate([jnp.full(50, jnp.log(2.0)), jnp.zeros(1950)])
-    for log_w in (
-        flat,
-        flat.at[:1250].set(-jnp.inf),
-        flat.at[:3].set(jnp.finfo(flat.dtype).eps),
-        two_level,
-    ):
-        assert jnp.isneginf(pareto_khat(log_w))
-    assert float(pareto_khat(plateau)) < 0.0
-    assert jnp.isnan(pareto_khat(flat.at[:3].set(jnp.log(2.0))))
-    assert jnp.isnan(pareto_khat(jnp.full(100, -jnp.inf)))
+    flat = np.zeros(N_DRAW)
+
+    def padded(*parts):
+        log_w = np.concatenate(parts)
+        return np.concatenate([log_w, np.full(N_DRAW - len(log_w), -np.inf)])
+
+    with_ulp = flat.copy()
+    with_ulp[:3] = np.finfo(flat.dtype).eps
+    three_up = flat.copy()
+    three_up[:3] = np.log(2.0)
+    khat = toy.jit.pareto_khat(
+        np.stack(
+            [
+                flat,
+                padded(np.zeros(3750)),
+                with_ulp,
+                padded(np.zeros(1405), np.full(595, np.log(0.6))),
+                padded(np.full(50, np.log(2.0)), np.zeros(1950)),
+                three_up,
+                np.full(N_DRAW, -np.inf),
+            ]
+        )
+    )
+    assert np.all(np.isneginf(khat[:4]))
+    assert float(khat[4]) < 0.0
+    assert np.all(np.isnan(khat[5:]))
 
 
 def test_constant_weights_certify(toy):
@@ -190,28 +216,24 @@ def test_constant_weights_certify(toy):
 
     Fails if a cloud of equal weights (exact posterior draws) cannot be certified.
     """
-    b = toy.belief(
-        toy.atoms(jnp.ones((5000, 1)), jnp.ones((5000, 1)), jnp.ones(5000)), n_roles=2
-    )
-    d = diagnose(b, Claim((toy.InHz(),)), toy.star, PLANET, jnp.zeros(2))
+    b = _belief(toy, np.ones(N_DRAW), np.ones(N_DRAW))
+    d = toy.jit.diagnose(b, Claim((toy.InHz(),)), toy.star, PLANET, NO_MASS)
     assert jnp.all(jnp.isneginf(d.khat))
-    assert int(certify(d, ALPHA).status) == POSITIVE
-    assert not bool(refit_trigger(d, ALPHA))
+    assert int(toy.jit.certify(d, ALPHA).status) == POSITIVE
+    assert not bool(toy.jit.refit_trigger(d, ALPHA))
 
 
 def test_a_failed_fit_is_unresolved(toy):
-    """The diagnostics of the previous test with a NaN khat on one member (a failed
+    """The diagnostics of the previous test with a NaN khat on the member (a failed
     fit, set directly) are unresolved and trigger a refit.
 
     Fails if a NaN khat passes the tail gate or does not trigger a refit.
     """
-    b = toy.belief(
-        toy.atoms(jnp.ones((5000, 1)), jnp.ones((5000, 1)), jnp.ones(5000)), n_roles=3
-    )
-    d = diagnose(b, Claim((toy.InHz(),)), toy.star, PLANET, jnp.zeros(3))
-    failed = eqx.tree_at(lambda x: x.khat, d, d.khat.at[2].set(jnp.nan))
-    assert int(certify(failed, ALPHA).status) == UNRESOLVED
-    assert bool(refit_trigger(failed, ALPHA))
+    b = _belief(toy, np.ones(N_DRAW), np.ones(N_DRAW))
+    d = toy.jit.diagnose(b, Claim((toy.InHz(),)), toy.star, PLANET, NO_MASS)
+    failed = eqx.tree_at(lambda x: x.khat, d, d.khat.at[1].set(jnp.nan))
+    assert int(toy.jit.certify(failed, ALPHA).status) == UNRESOLVED
+    assert bool(toy.jit.refit_trigger(failed, ALPHA))
 
 
 def test_conditional_error_and_bound(toy):
@@ -236,41 +258,39 @@ def test_conditional_error_and_bound(toy):
     a condition no draw meets gives a NaN n_cond (and NaN bounds).
     """
     claim = Claim((toy.InSize(), toy.InHz()), given=1)
+    diagnose, certify = toy.jit.diagnose, toy.jit.certify
 
     def belief(n, n_size, n_both, w=None):
-        draw = jnp.arange(n)
-        size = (draw < n_size).astype(float)[:, None]
-        hz = (draw < n_both).astype(float)[:, None]
-        w = jnp.ones(n) if w is None else w
-        return toy.belief(toy.atoms(hz, size, w), n_roles=2)
+        draw = np.arange(n)
+        return _belief(toy, draw < n_both, draw < n_size, w)
 
-    d = diagnose(belief(1000, 200, 150), claim, toy.star, PLANET, jnp.zeros(2))
+    d = diagnose(belief(1000, 200, 150), claim, toy.star, PLANET, NO_MASS)
     assert_allclose(d.q, 0.75, rtol=1e-12)
     assert_allclose(d.cond_mass, 0.2, rtol=1e-12)
     assert_allclose(d.mc_se, np.sqrt(0.75 * 0.25 / 200), rtol=1e-10)
 
-    d = diagnose(belief(5000, 10, 10), claim, toy.star, PLANET, jnp.zeros(2))
+    d = diagnose(belief(5000, 10, 10), claim, toy.star, PLANET, NO_MASS)
     assert_allclose(d.n_cond, 10.0, rtol=1e-10)
     cert = certify(d, ALPHA)
     assert int(cert.status) == UNRESOLVED
     assert_allclose(cert.q_lo, 10.0 / 14.0, rtol=1e-12)
-    assert bool(refit_trigger(d, ALPHA))
+    assert bool(toy.jit.refit_trigger(d, ALPHA))
 
-    w = jnp.where(jnp.arange(500) < 250, 0.7, 0.3)
-    d = diagnose(belief(500, 250, 500, w), claim, toy.star, PLANET, jnp.zeros(2))
+    w = np.where(np.arange(500) < 250, 0.7, 0.3)
+    d = diagnose(belief(500, 250, 500, w), claim, toy.star, PLANET, NO_MASS)
     assert_allclose(d.n_eff, 250**2 / (250 * 0.58), rtol=1e-10)
     assert_allclose(d.cond_mass, 0.7, rtol=1e-12)
     assert_allclose(d.n_cond, 250.0, rtol=1e-10)
     assert_allclose(certify(d, ALPHA).q_lo, 250.0 / 254.0, rtol=1e-12)
 
-    d = diagnose(belief(500, 0, 0), claim, toy.star, PLANET, jnp.zeros(2))
+    d = diagnose(belief(500, 0, 0), claim, toy.star, PLANET, NO_MASS)
     assert_allclose(d.n_cond, 0.0)
     cert = certify(d, ALPHA)
     assert int(cert.status) == INAPPLICABLE
     assert (float(cert.q_lo), float(cert.q_hi)) == (0.0, 1.0)
 
 
-def test_refit_trigger_reads_each_member():
+def test_refit_trigger_reads_each_member(toy):
     """Members at 0.97 and 0.92 on 5000 draws are unresolved, but each member's own
     interval sits on one side of 0.95, so no refit is triggered: more draws cannot
     settle a disagreement between priors. A member at 0.95 on 400 draws straddles
@@ -279,6 +299,7 @@ def test_refit_trigger_reads_each_member():
     Fails if the trigger reads the span over members instead of each member's
     interval, or fires on an inapplicable claim.
     """
+    certify, refit_trigger = toy.jit.certify, toy.jit.refit_trigger
     disagree = _diag([0.97, 0.92], 5000)
     assert int(certify(disagree, ALPHA).status) == UNRESOLVED
     assert not bool(refit_trigger(disagree, ALPHA))

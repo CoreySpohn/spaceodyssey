@@ -15,9 +15,7 @@ from jax.test_util import check_grads
 from numpy.testing import assert_allclose
 
 from spaceodyssey._standin.diagnostics import mc_se
-from spaceodyssey.belief import q, role_belief, weights
 from spaceodyssey.claim import AbstractConjunct, Claim
-from spaceodyssey.information import diagnose
 from spaceodyssey.roles import AbstractRolePrior, Roles
 from spaceodyssey.types import Atoms, WeightedCloud
 
@@ -108,7 +106,7 @@ def _roles(chart="x", b_mean=0.5, upper=jnp.inf, jacobian=True):
 
 def _belief(toy, atoms, roles):
     n_draws = atoms.cloud.log_weights.shape[0]
-    return role_belief(
+    return toy.jit.role_belief(
         atoms, roles, jnp.zeros((2, n_draws)), STAR, toy.empty_pool(2, n_gas=0)
     )
 
@@ -134,12 +132,12 @@ def test_reweighting_matches_the_truth(clouds, toy):
     constant on the support, so each error moves both roles' estimates.
     """
     b = _belief(toy, clouds["x"], _roles())
-    d = diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(2))
+    d = toy.jit.diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(2))
     truth = jnp.array([1.0 - ndtr(1.0), Q_B])
     assert jnp.all(jnp.abs(d.q - truth) < 3.0 * d.mc_se), (d.q, truth, d.mc_se)
 
     x = clouds["x"].cloud.samples["x"][:, 0]
-    log_w_b = jnp.log(weights(b)[1])
+    log_w_b = jnp.log(toy.jit.weights(b)[1])
     mean_b = jnp.exp(log_w_b) @ x
     se_mean = mc_se(log_w_b, x)
     assert jnp.abs(mean_b - 0.5) < 3.0 * se_mean, (mean_b, se_mean)
@@ -156,12 +154,12 @@ def test_two_charts_and_a_one_sided_jacobian(clouds, toy):
     the test could not see a one-sided Jacobian, if a chart mismatch is accepted, or
     if an undeclared chart or reference density is read as a declared one.
     """
-    on_x = q(_belief(toy, clouds["x"], _roles("x")), CLAIM, STAR, PLANET)
-    on_y = q(_belief(toy, clouds["y"], _roles("y")), CLAIM, STAR, PLANET)
+    on_x = toy.jit.q(_belief(toy, clouds["x"], _roles("x")), CLAIM, STAR, PLANET)
+    on_y = toy.jit.q(_belief(toy, clouds["y"], _roles("y")), CLAIM, STAR, PLANET)
     assert_allclose(on_y, on_x, rtol=1e-10)
 
     tilted = _belief(toy, clouds["y"], _roles("y", jacobian=False))
-    d = diagnose(tilted, CLAIM, STAR, PLANET, jnp.zeros(2))
+    d = toy.jit.diagnose(tilted, CLAIM, STAR, PLANET, jnp.zeros(2))
     assert jnp.abs(d.q[1] - (1.0 - ndtr(-0.5))) < 3.0 * d.mc_se[1]
     assert jnp.abs(d.q[1] - Q_B) > 20.0 * d.mc_se[1]
 
@@ -203,18 +201,18 @@ def test_a_hard_edged_prior_keeps_weights_and_gradients_finite(clouds, toy):
     )
 
     def q_b(mean):
-        return q(
+        return toy.jit.q(
             _belief(toy, dead, _roles(b_mean=mean, upper=2.0)), CLAIM, STAR, PLANET
         )[1]
 
     b = _belief(toy, dead, _roles(upper=2.0))
-    w = weights(b)
+    w = toy.jit.weights(b)
     x = atoms.cloud.samples["x"][:, 0]
     assert jnp.all(jnp.isfinite(w))
     assert jnp.all(w[:, 0] == 0.0)
     assert jnp.all(w[1, x >= 2.0] == 0.0)
 
-    d = diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(2))
+    d = toy.jit.diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(2))
     truncated = (ndtr(1.5) - ndtr(0.5)) / ndtr(1.5)
     assert jnp.abs(d.q[1] - truncated) < 3.0 * d.mc_se[1]
 
@@ -233,7 +231,7 @@ def test_mc_se_is_calibrated(toy):
     @jax.jit
     def one(key):
         b = _belief(toy, _cloud(key, 2000), _roles())
-        d = diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(2))
+        d = toy.jit.diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(2))
         return d.q[1], d.mc_se[1]
 
     q_hat, se = jax.vmap(one)(jax.random.split(jax.random.PRNGKey(0), 200))
@@ -254,8 +252,10 @@ def test_members_by_ratio(toy):
     )
     member_w = jnp.array([0.6, 1.0, 1.6])
     roles = Roles(LookAlikeRatio("x", 1.0), LookAlikeRatio("x", member_w))
-    b = role_belief(atoms, roles, jnp.zeros((4, 2)), STAR, toy.empty_pool(4, n_gas=0))
-    d = diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(4))
+    b = toy.jit.role_belief(
+        atoms, roles, jnp.zeros((4, 2)), STAR, toy.empty_pool(4, n_gas=0)
+    )
+    d = toy.jit.diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(4))
     w = jnp.concatenate([jnp.ones(1), member_w])
     look = 0.29 * w
     assert_allclose(d.q, 0.71 / (0.71 + look), rtol=1e-12)

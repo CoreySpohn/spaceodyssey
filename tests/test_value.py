@@ -16,15 +16,11 @@ from numpy.testing import assert_allclose
 
 from spaceodyssey.belief import (
     Belief,
-    mark_weights,
     planning_beliefs,
-    pool_rate,
     q,
     replay,
-    weights,
 )
 from spaceodyssey.claim import Claim, GasAbove
-from spaceodyssey.information import claim_information
 from spaceodyssey.price import dispatch, solve_price
 from spaceodyssey.roles import Roles
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
@@ -39,9 +35,7 @@ from spaceodyssey.value import (
     Frontier,
     LogScore,
     Menu,
-    completeness,
     frontier,
-    thin,
     value_and_spend,
 )
 
@@ -228,7 +222,9 @@ def test_two_spectra_are_worth_the_verdict_gain(toy, psi, memo):
     forecast, verdict = toy.split(b)
     action = Action(0, 0, 1.0)
     info = [
-        claim_information(forecast, b, SPECTRA[2], action, claim, toy.star, PLANET)
+        toy.jit.claim_information(
+            forecast, b, SPECTRA[2], action, claim, toy.star, PLANET
+        )
         for b in (forecast, verdict)
     ]
     assert_allclose(np.concatenate(info), [0.0, gain], atol=1e-12)  # I_F, the gain
@@ -290,7 +286,7 @@ def test_coarsening_can_raise_the_verdict_gain(toy):
     for exposure_d, row in ((1.0, [mutual, exact]), (0.25, [0.0, 0.0])):
         action = Action(0, 0, exposure_d)
         info = [
-            claim_information(
+            toy.jit.claim_information(
                 forecast, v, GAS_REPORT[0], action, claim, toy.star, PLANET
             )
             for v in (forecast, verdict)
@@ -377,11 +373,11 @@ def test_a_frozen_forecast_plans_on_its_own_replay(toy):
     refit = Refit(atoms, jnp.zeros(capacity, bool), 0)
     prior = toy.GasPrior("toy", n_gas=1)
     roles = Roles(prior, toy.stack(prior))
-    frozen = replay(refit, log, models, toy.star, jnp.asarray(0.0))
-    now = replay(refit, log, models, toy.star, jnp.asarray(1.0))
+    frozen = toy.jit.replay(refit, log, models, toy.star, jnp.asarray(0.0))
+    now = toy.jit.replay(refit, log, models, toy.star, jnp.asarray(1.0))
     pool0, pool = toy.empty_pool(2, 1), toy.empty_pool(2, 1)
     pool = eqx.tree_at(lambda p: p.log_mass, pool, jnp.array([-1.0, -2.0]))
-    forecast, verdict = planning_beliefs(
+    forecast, verdict = toy.jit.planning_beliefs(
         frozen, now, roles, models, toy.star, pool0, pool, jnp.zeros(1)
     )
     assert_allclose(forecast.pool.log_mass, [-np.inf])  # the pool at time zero
@@ -391,7 +387,9 @@ def test_a_frozen_forecast_plans_on_its_own_replay(toy):
     p_water = float(norm.cdf(0.8 / np.sqrt(0.2)))
     for b, mean in ((forecast, 0.0), (verdict, 0.8)):  # split into point draws
         assert_allclose(b.atoms.x_var, 0.0)
-        w = np.asarray(weights(b))[0]  # the mean to quadrature error; q below exact
+        w = np.asarray(toy.jit.weights(b))[
+            0
+        ]  # the mean to quadrature error; q below exact
         assert_allclose(w @ np.asarray(b.atoms.x_mean)[:, 0, 0], mean, atol=5e-3)
     assert_allclose(q(forecast, claim, toy.star, PLANET), [0.5], rtol=1e-12)
     assert_allclose(q(verdict, claim, toy.star, PLANET), [p_water], rtol=1e-12)
@@ -600,18 +598,18 @@ def test_count_and_thin_by_hand(toy):
     weights, or if `Count` counts from the current pool rather than from time zero.
     """
     pool, claim = _search_pool(toy), Claim((toy.InHz(),))
-    after = thin(pool, jnp.array([0.8, 0.2]))
+    after = toy.jit.thin(pool, jnp.array([0.8, 0.2]))
     assert_allclose(jnp.exp(after.log_mass), [1.0, 1.36], rtol=1e-12)
-    assert_allclose(mark_weights(after)[0], [0.2, 0.8], rtol=1e-12)
-    assert_allclose(pool_rate(after, claim, toy.star), [0.2, 0.08], rtol=1e-12)
-    assert_allclose(pool_rate(pool, claim, toy.star), [1.0, 0.4], rtol=1e-12)
+    assert_allclose(toy.jit.mark_weights(after)[0], [0.2, 0.8], rtol=1e-12)
+    assert_allclose(toy.jit.pool_rate(after, claim, toy.star), [0.2, 0.08], rtol=1e-12)
+    assert_allclose(toy.jit.pool_rate(pool, claim, toy.star), [1.0, 0.4], rtol=1e-12)
 
     belief = _search_belief(toy, after)
     assert_allclose(Count(pool)(*toy.split(belief), claim, toy.star), 0.8, rtol=1e-12)
 
     action = Action(0, 0, 1.0)
     assert_allclose(
-        completeness(pool, _search(toy), action, claim, toy.star), [0.8, 0.8]
+        toy.jit.completeness(pool, _search(toy), action, claim, toy.star), [0.8, 0.8]
     )
 
     start = toy.split(toy.stack(_search_belief(toy, pool)))
@@ -717,7 +715,9 @@ def test_a_model_that_does_not_search_leaves_the_pool(toy):
     pool, claim = _search_pool(toy), Claim((toy.InHz(),))
     reading = GaussianGasModel(snr_one_day=[2.0, 2.0], edges=[0.0])
     action = Action(0, 0, 1.0)
-    assert_allclose(completeness(pool, reading, action, claim, toy.star), [0.0, 0.0])
+    assert_allclose(
+        toy.jit.completeness(pool, reading, action, claim, toy.star), [0.0, 0.0]
+    )
     f = _frontier_of(
         toy.split(toy.stack(_search_belief(toy, pool))),
         claim,
@@ -730,11 +730,11 @@ def test_a_model_that_does_not_search_leaves_the_pool(toy):
     assert_allclose(f.reward[0], [0.8, 0.0], rtol=1e-12, atol=1e-12)
 
 
-@pytest.mark.medium(reason="depth-2 frontier over three modes, compiled for two shapes")
 def test_a_second_star_and_world_add_no_traces(toy):
     """`frontier` traces once per structure: two worlds of two stars, with other
     weights, menu exposures, costs, masks and price, run one program, and a star's
-    rewards do not depend on the stars stacked beside it.
+    rewards do not depend on the stars stacked beside it: the first world with its two
+    stars swapped gives the same rewards, swapped, from the same program.
 
     Fails if the menu, its mask or a cell count is read as a Python value, if the
     depth or the model table is traced, or if a star's recursion reads another star's
@@ -760,16 +760,11 @@ def test_a_second_star_and_world_add_no_traces(toy):
     assert_allclose(np.asarray(f2.cost_d)[masked], exposure_d[masked])
     assert np.all(np.asarray(f2.cost_d) >= exposure_d)  # follow-ups add time
     assert_allclose(f2.reward[0, 1], 0.0)  # masked
-    alone = _frontier_of(
-        toy.split(toy.stack(_spectra_belief(toy, 0.3))),
-        claim,
-        toy.star,
-        LogScore(1),
-        SPECTRA,
-        jax.tree.map(lambda x: x[1:], first[1]),
-        2,
-    )
-    assert_allclose(alone.reward[0], f1.reward[1], rtol=1e-12)
+    swapped = world((0.3, 0.7), [[0.5, 1.0, 1.0], [1.0] * 3], True)
+    f3 = _frontier_of(swapped[0], claim, toy.star, LogScore(1), SPECTRA, swapped[1], 2)
+    assert len(traces) == before
+    assert_allclose(f3.reward[::-1], f1.reward, rtol=1e-12)
+    assert_allclose(f3.cost_d[::-1], f1.cost_d, rtol=1e-12)
     assert not np.allclose(f1.reward, f2.reward)
 
 

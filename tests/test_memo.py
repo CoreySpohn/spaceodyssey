@@ -11,9 +11,9 @@ import pytest
 from jax.scipy.special import ndtri
 from numpy.testing import assert_allclose
 
-from spaceodyssey.belief import Belief, chain, count_pmf, q
+from spaceodyssey.belief import Belief, chain
 from spaceodyssey.claim import Claim, GasAbove
-from spaceodyssey.information import chain_gain, diagnose, information, log_score
+from spaceodyssey.information import chain_gain, information, log_score
 from spaceodyssey.toy import GAS_FLOOR, GAS_PRIOR_SD, GaussianGasModel
 from spaceodyssey.types import row_update
 
@@ -56,7 +56,7 @@ def test_e_stage_values(stages, claim, toy):
     expected_q = [0.0625, 0.175, 0.35, 0.70]
     expected_chain = [[0.5] * 4, [1, 0.7, 0.5, 0.5], [1, 0.7, 1, 0.5], [1, 0.7, 1, 1]]
     for b, want_q, want_chain in zip(stages, expected_q, expected_chain, strict=True):
-        assert_allclose(q(b, claim, toy.star, PLANET), [want_q], rtol=1e-12)
+        assert_allclose(toy.jit.q(b, claim, toy.star, PLANET), [want_q], rtol=1e-12)
         assert_allclose(chain(b, claim, toy.star, PLANET), [want_chain], rtol=1e-12)
 
 
@@ -72,7 +72,7 @@ def test_e_and_l_information(stages, claim, toy):
     Fails if the count distribution of one planet is not [1 - q, q], the score or its
     sign is wrong, or a negative count wraps around to the tail bin.
     """
-    pmf = [count_pmf(b, claim, toy.star, 1)[0] for b in stages]
+    pmf = [toy.jit.count_pmf(b, claim, toy.star, 1)[0] for b in stages]
     assert_allclose(pmf[0], [0.9375, 0.0625], rtol=1e-12)
     gain_e = information(pmf[0], pmf[3], jnp.asarray(1))
     gain_l = information(pmf[0], pmf[3], jnp.asarray(0))
@@ -139,12 +139,12 @@ def test_joint_versus_product(toy):
     assert_allclose(
         GasAbove(0, FLOOR).prob(closed, toy.star)[:, 0], [0.6914624612740131, 0.0]
     )
-    assert_allclose(q(b, joint, toy.star, PLANET), [0.35], rtol=1e-12)
+    assert_allclose(toy.jit.q(b, joint, toy.star, PLANET), [0.35], rtol=1e-12)
     p_water = 0.7 * 0.5 + 0.3 * 0.8
     assert_allclose(chain(b, given, toy.star, PLANET)[0, 0], p_water, rtol=1e-12)
-    assert_allclose(q(b, given, toy.star, PLANET), [0.35 / p_water], rtol=1e-12)
-    size_alone = q(b, Claim((toy.InSize(),)), toy.star, PLANET)
-    water_alone = q(b, Claim((GasAbove(0, FLOOR),)), toy.star, PLANET)
+    assert_allclose(toy.jit.q(b, given, toy.star, PLANET), [0.35 / p_water], rtol=1e-12)
+    size_alone = toy.jit.q(b, Claim((toy.InSize(),)), toy.star, PLANET)
+    water_alone = toy.jit.q(b, Claim((GasAbove(0, FLOOR),)), toy.star, PLANET)
     assert_allclose(size_alone * water_alone, [0.70 * 0.59], rtol=1e-12)  # 0.413
 
 
@@ -162,14 +162,16 @@ def test_two_planet_count(toy):
     """
     atoms = toy.atoms([[1.0, 0.0], [0.0, 1.0]], [[1.0, 1.0], [1.0, 1.0]], [0.5, 0.5])
     claim = Claim((toy.InHz(), toy.InSize()))
-    pmf = count_pmf(toy.belief(atoms), claim, toy.star, 2)[0]
+    pmf = toy.jit.count_pmf(toy.belief(atoms), claim, toy.star, 2)[0]
     assert_allclose(pmf, [0.0, 1.0, 0.0], atol=1e-12)
     assert_allclose(jnp.log(pmf[1]), 0.0, atol=1e-12)
     bits = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
     independent = toy.belief(toy.atoms(bits, [[1.0, 1.0]] * 4, [0.25] * 4))
-    pmf = count_pmf(independent, claim, toy.star, 2)[0]
+    pmf = toy.jit.count_pmf(independent, claim, toy.star, 2)[0]
     assert_allclose(log_score(pmf, jnp.asarray(1)), -0.693, atol=1e-3)
-    tracks = [q(independent, claim, toy.star, jnp.asarray(k))[0] for k in (0, 1)]
+    tracks = [
+        toy.jit.q(independent, claim, toy.star, jnp.asarray(k))[0] for k in (0, 1)
+    ]
     assert_allclose(sum(np.log(tracks)), -1.386, atol=1e-3)
 
 
@@ -191,7 +193,7 @@ def test_members_by_ratio_on_a_resample(toy):
     flat = toy.belief(atoms, n_roles=4)
     b = Belief(atoms, log_prior, flat.log_like, flat.pool)
     claim = Claim((toy.InHz(), toy.InSize()))
-    d = diagnose(b, claim, toy.star, PLANET, jnp.zeros(4))
+    d = toy.jit.diagnose(b, claim, toy.star, PLANET, jnp.zeros(4))
     assert_allclose(np.round(d.q[1:], 2), [0.80, 0.70, 0.60])
     assert_allclose(np.round(d.n_eff[1:]), [1917.0, 2000.0, 1897.0])
 
@@ -251,10 +253,10 @@ def test_gas_model_numbers_at_snr_5(gas_stages, toy):
     assert_allclose(after_water.x_mean[:, 0, 1], 0.0)
 
     beliefs = [stages[0], stages[1], toy.belief(after_water), toy.belief(after_oxygen)]
-    values = [q(b, claim, toy.star, PLANET)[0] for b in beliefs]
+    values = [toy.jit.q(b, claim, toy.star, PLANET)[0] for b in beliefs]
     assert_allclose(values, [0.0625, 0.175, 0.337, 0.649], atol=5e-4)
 
-    pmf = [count_pmf(b, claim, toy.star, 1)[0] for b in beliefs]
+    pmf = [toy.jit.count_pmf(b, claim, toy.star, 1)[0] for b in beliefs]
     gains_e = [information(a, b, jnp.asarray(1)) for a, b in pairwise(pmf)]
     gains_l = [information(a, b, jnp.asarray(0)) for a, b in pairwise(pmf)]
     assert_allclose(gains_e, [1.03, 0.66, 0.66], atol=5e-3)

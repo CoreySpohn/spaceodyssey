@@ -205,7 +205,7 @@ def test_replay_is_order_free_and_absorb_equals_replay(toy, roles):
     shuffled = _log([grant, *(observed[i] for i in (4, 2, 0, 5, 3, 1))], 7)
     other = _infer(roles, refit, shuffled, MODELS, pool, end)
     toy.assert_ulp(other.log_like, batch.log_like)
-    toy.assert_ulp(weights(other), weights(batch))
+    toy.assert_ulp(toy.jit.weights(other), toy.jit.weights(batch))
 
     traces = []
 
@@ -214,7 +214,7 @@ def test_replay_is_order_free_and_absorb_equals_replay(toy, roles):
         traces.append(None)
         return absorb(r, log, MODELS, STAR, time_d)
 
-    r = replay(refit, _with_count(log, 1), MODELS, STAR, jnp.asarray(0.0))
+    r = toy.jit.replay(refit, _with_count(log, 1), MODELS, STAR, jnp.asarray(0.0))
     for count in range(2, 8):
         r = step(r, _with_count(log, count), jnp.asarray(count - 1 + 0.6))
     assert not r.applied[4]
@@ -222,18 +222,18 @@ def test_replay_is_order_free_and_absorb_equals_replay(toy, roles):
     assert r.applied[4]
     held = step(r, log, end)
     jax.tree.map(np.testing.assert_array_equal, held, r)
-    online = replay_belief(r, roles, MODELS, STAR, pool)
+    online = toy.jit.replay_belief(r, roles, MODELS, STAR, pool)
     toy.assert_ulp(online.log_like, batch.log_like)
-    toy.assert_ulp(weights(online), weights(batch))
+    toy.assert_ulp(toy.jit.weights(online), toy.jit.weights(batch))
 
-    star_one = replay(
+    star_one = toy.jit.replay(
         _refit(atoms, [0], star=1), _with_count(log, 3), MODELS, STAR, NOW
     )
     star_one = step(star_one, log, end)
     assert len(traces) == 1
     only_its_row = _log([grant, _row(0, _gas(2.5, 0.4), NO_STEP)], 2)
     expected = _infer(roles, refit, only_its_row, MODELS, pool)
-    held = replay_belief(star_one, roles, MODELS, STAR, pool)
+    held = toy.jit.replay_belief(star_one, roles, MODELS, STAR, pool)
     toy.assert_ulp(held.log_like, expected.log_like)
 
 
