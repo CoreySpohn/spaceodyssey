@@ -502,6 +502,47 @@ def test_two_readings_of_an_uncertain_gas_use_the_joint(toy):
     assert_allclose(f.reward[0, 0], exact, rtol=1e-10)
 
 
+def test_a_spectrum_waits_for_a_detection(toy):
+    """A spectrum is worth nothing in the lookahead before a planet is detected.
+
+    Four equal draws in the HZ: the planet exists or not, its water 1 dex above or
+    below the floor; claim (HZ, water), q = 0.25; forecast and verdict agree;
+    `LogScore`, so U(q) = q ln q + (1 - q) ln(1 - q) and U(0.25) = -0.5623. A search
+    finds the planet whenever it exists (cell 1, half the time), a water spectrum
+    reports the bit at S/N 6 and needs a detection. At an undetected star the spectrum
+    is not offered and is worth 0 at any depth; the search alone is worth
+    0.5 U(0.5) + 0.5 U(0) - U(0.25) = 0.2158 at depth 1, and 0.5623 at depth 2,
+    where the spectrum follows a detection and settles the claim. At a star whose
+    planet is already detected the spectrum is offered and worth the same 0.2158.
+
+    Fails if a spectrum is offered before a detection (at the root or after a miss),
+    if a detection on the path does not open it, or if the mask ignores the root's
+    detection.
+    """
+    hz = [[1.0]] * 4
+    exists = [[True], [True], [False], [False]]
+    water = [[1.0], [-1.0], [1.0], [-1.0]]
+    atoms = toy.atoms(hz, hz, np.ones(4), water, 0.0, n_gas=1, exists=exists)
+    beliefs = toy.split(toy.stack(toy.belief(atoms, n_roles=2)))
+    claim = Claim((toy.InHz(), GasAbove(0, 0.0)))
+    models = (toy.Search(hit=1.0, other=1.0), StepReportModel(snr_one_day=[6.0]))
+
+    def entropy(q):
+        return q * np.log(q) + (1 - q) * np.log(1 - q)
+
+    one_search = 0.5 * entropy(0.5) - entropy(0.25)
+    assert round(one_search, 4) == 0.2158
+    for detected, depth, expected in (
+        (False, 1, [one_search, 0.0]),
+        (False, 2, [-entropy(0.25), 0.0]),
+        (True, 1, [one_search, one_search]),
+    ):
+        menu = Menu([[1.0, 1.0]], [[True, True]], (0, 1), (False, True), [detected])
+        f = _frontier_of(beliefs, claim, toy.star, LogScore(1), models, menu, depth)
+        assert_allclose(f.reward[0], expected, rtol=1e-12, atol=1e-12)
+        assert list(np.asarray(f.mask[0])) == [True, detected]
+
+
 LOOK = _menu([[1.0]], (0,))
 
 

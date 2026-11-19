@@ -188,31 +188,65 @@ class Menu(eqx.Module):
     design's one table (``mode_models``). Its cost is its exposure: no mode charges an
     overhead yet. A masked entry is still evaluated: keep its exposure finite.
 
+    Availability: an entry that ``needs_detection`` (a spectrum, which needs a planet
+    to point at) is offered at a star only once a planet there is detected: at the
+    root when ``detected``, and at a hypothetical step of the lookahead once a
+    searching entry's outcome on the path to it was a detection (a cell other than
+    the miss, cell 0). ``mask`` says what a star offers at all.
+
     Attributes:
         exposure_d: exposure of each entry at each star, days, shape ``(S, M)``.
         mask: true where the entry is offered, shape ``(S, M)``.
         mode: the mode of each entry, static, one per entry.
+        needs_detection: whether each entry needs a detected planet, static, one per
+            entry; none by default.
+        detected: whether each star has a detected planet now, shape ``(S,)``; none
+            by default.
 
     Raises:
-        ValueError: if the fields disagree on ``(S, M)`` or ``mode`` has not one entry
-            per column.
+        ValueError: if the fields disagree on ``(S, M)``, or ``mode`` or
+            ``needs_detection`` has not one entry per column.
     """
 
     exposure_d: Float[Array, "S M"] = eqx.field(converter=jnp.asarray)
     mask: Bool[Array, "S M"] = eqx.field(converter=jnp.asarray)
-    mode: tuple[int, ...] = eqx.field(
-        static=True, converter=lambda s: tuple(int(i) for i in s)
-    )
+    mode: tuple[int, ...] = eqx.field(static=True)
+    needs_detection: tuple[bool, ...] = eqx.field(static=True)
+    detected: Bool[Array, " S"] = eqx.field(converter=jnp.asarray)
+
+    def __init__(self, exposure_d, mask, mode, needs_detection=None, detected=None):
+        """A menu; by default no entry needs a detection and no star has one."""
+        self.exposure_d = exposure_d
+        self.mask = mask
+        self.mode = tuple(int(i) for i in mode)
+        if needs_detection is None:
+            needs_detection = (False,) * len(self.mode)
+        self.needs_detection = tuple(bool(x) for x in needs_detection)
+        if detected is None:
+            detected = jnp.zeros(jnp.shape(mask)[:-1], bool)
+        self.detected = detected
 
     def __check_init__(self):
         """Check that every field has the shape ``(S, M)`` with ``M = len(mode)``."""
-        if self.exposure_d.shape != self.mask.shape or self.mask.shape[-1:] != (
-            len(self.mode),
+        n_entry = (len(self.mode),)
+        if (
+            self.exposure_d.shape != self.mask.shape
+            or self.mask.shape[-1:] != n_entry
+            or (len(self.needs_detection),) != n_entry
+            or self.detected.shape != self.mask.shape[:-1]
         ):
             raise ValueError(
                 f"menu fields disagree on (S, M): {self.exposure_d.shape}, "
-                f"{self.mask.shape}, {len(self.mode)} modes"
+                f"{self.mask.shape}, {len(self.mode)} modes, "
+                f"{len(self.needs_detection)} detection needs, "
+                f"detected {self.detected.shape}"
             )
+
+
+def _offered(menu: Menu, detected: Bool[Array, "..."]) -> Bool[Array, "... M"]:
+    """The entries a star offers when its planet is or is not ``detected``."""
+    needs = jnp.asarray(menu.needs_detection, bool)
+    return menu.mask & (~needs | detected[..., None])
 
 
 def thin(pool: Pool, detect_prob: Float[Array, " Am"]) -> Pool:
@@ -312,19 +346,27 @@ def _after(b, model, payload, cell_prob, detect, star) -> Belief:
     return update_by_cell(thinned, model, payload, cell_prob, star)
 
 
+def _charge(plan, detected) -> Float[Array, " M"]:
+    """The price of each entry's time at a node, infinite where it is not offered."""
+    offered = _offered(plan.menu, detected)
+    return jnp.where(offered, plan.lam * plan.menu.exposure_d, jnp.inf)
+
+
 def _worth(node, plan, depth: int) -> Float[Array, ""]:
     """The utility of a node with up to ``depth`` more actions, each chosen to raise it.
 
-    A node is the pair of beliefs (forecast, verdict). ``W_0 = U`` and
+    A node is the pair of beliefs (forecast, verdict) and whether a planet has been
+    detected on the path to it. ``W_0 = U`` and
     ``W_k = max(U, max_m (E_F[W_{k-1}(after m)] - charge_m))``, with ``charge_m`` the
-    price of entry ``m``'s time (infinite for a masked entry): stopping is always an
-    option, so ``W_k`` never falls below ``W_{k-1}``.
+    price of entry ``m``'s time (infinite for an entry not offered there): stopping
+    is always an option, so ``W_k`` never falls below ``W_{k-1}``.
     """
-    now = plan.utility(*node, plan.claim, plan.star)
+    forecast, verdict, detected = node
+    now = plan.utility(forecast, verdict, plan.claim, plan.star)
     if depth == 0:
         return now
     later = _expected_after(node, plan, depth - 1)
-    return jnp.maximum(now, jnp.max(later - plan.charge))
+    return jnp.maximum(now, jnp.max(later - _charge(plan, detected)))
 
 
 def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
@@ -334,10 +376,11 @@ def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
     hypothetical outcome may have changed them. After entry ``m`` with outcome in cell
     ``y`` each belief is conditioned on the cell, weights and draws
     (``update_by_cell``), and its pool is thinned by the entry's detection probability
-    in every cell. The entries of one mode are evaluated together. A cell the forecast
-    gives no mass adds nothing.
+    in every cell; a searching entry's detection (any cell but the miss) marks the
+    planet detected. The entries of one mode are evaluated together. A cell the
+    forecast gives no mass adds nothing.
     """
-    forecast, verdict = node
+    forecast, verdict, detected = node
     order, values = [], []
     for mode, model in enumerate(plan.mode_models):
         entries, actions = _entries(plan.menu, mode, plan.star_index)
@@ -353,15 +396,19 @@ def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
             p_cell = outcome_prob(forecast, cells_f)[0]  # (Y,), the forecast's
             seen = p_cell > 0
 
-            def worth_after(payload, cf, cv):
+            def worth_after(cell, payload, cf, cv):
                 after = (
                     _after(forecast, model, payload, cf, detect_f, plan.star),
                     _after(verdict, model, payload, cv, detect_v, plan.star),
+                    detected | (cell > 0) if model.searches else detected,
                 )
                 return _worth(after, plan, depth)
 
             safe_f, safe_v = (jnp.where(seen, c, 1.0) for c in (cells_f, cells_v))
-            worth = jax.vmap(worth_after, in_axes=(0, 1, 1))(payloads, safe_f, safe_v)
+            cell = jnp.arange(p_cell.shape[0])
+            worth = jax.vmap(worth_after, in_axes=(0, 0, 1, 1))(
+                cell, payloads, safe_f, safe_v
+            )
             return jnp.sum(jnp.where(seen, p_cell * worth, 0.0))
 
         order += entries
@@ -373,8 +420,7 @@ def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
 class _Plan(eqx.Module):
     """What the recursion at one star reads besides the node.
 
-    The claim, the star, the utility, the menu and its models, and the price of each
-    entry's time.
+    The claim, the star, the utility, the menu and its models, and the price of time.
     """
 
     claim: Claim
@@ -383,7 +429,7 @@ class _Plan(eqx.Module):
     mode_models: tuple[AbstractObservationModel, ...]
     menu: Menu
     star_index: Int[Array, ""]
-    charge: Float[Array, " M"]
+    lam: Float[Array, ""]
 
 
 def frontier(
@@ -464,14 +510,14 @@ def frontier(
         raise ValueError("a menu entry's mode is not in the mode table")
 
     def one_star(forecast, verdict, star, utility, menu, star_index):
-        node = (forecast, verdict)
-        charge = jnp.where(menu.mask, lam * menu.exposure_d, jnp.inf)
-        plan = _Plan(claim, star, utility, mode_models, menu, star_index, charge)
+        node = (forecast, verdict, menu.detected)
+        plan = _Plan(claim, star, utility, mode_models, menu, star_index, lam)
         later = _expected_after(node, plan, depth - 1)
-        return jnp.where(menu.mask, later - utility(*node, claim, star), 0.0)
+        offered = _offered(menu, menu.detected)
+        return jnp.where(offered, later - utility(forecast, verdict, claim, star), 0.0)
 
     star_index = jnp.arange(menu.mask.shape[0])
     reward = eqx.filter_vmap(one_star)(
         forecast, verdict, star, utility, menu, star_index
     )
-    return Frontier(reward, menu.exposure_d, menu.mask)
+    return Frontier(reward, menu.exposure_d, _offered(menu, menu.detected))
