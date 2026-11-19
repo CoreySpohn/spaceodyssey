@@ -26,7 +26,12 @@ from jaxtyping import Array, Bool, Float
 
 from spaceodyssey.belief import Belief, count_pmf, mark_weights, pool_rate
 from spaceodyssey.claim import Claim
-from spaceodyssey.information import expected_log_score, outcome_prob, update_by_cell
+from spaceodyssey.information import (
+    _log,
+    expected_log_score,
+    outcome_prob,
+    update_by_cell,
+)
 from spaceodyssey.types import AbstractObservationModel, Action, Atoms, Pool
 
 
@@ -230,14 +235,11 @@ def thin(pool: Pool, detect_prob: Float[Array, " Am"]) -> Pool:
     miss = 1.0 - detect_prob
     kept = jnp.matmul(mark_weights(pool), miss, precision=jax.lax.Precision.HIGHEST)
     emptied = (kept <= 0)[:, None]
-    log_miss = jnp.log(jnp.where(miss > 0, miss, 1.0))
-    log_miss = jnp.where(miss > 0, log_miss, -jnp.inf)
-    log_kept = jnp.log(jnp.where(kept > 0, kept, 1.0))
     return Pool(
         pool.marks,
         pool.log_prior,
-        jnp.where(emptied, pool.log_like, pool.log_like + log_miss),
-        pool.log_mass + jnp.where(kept > 0, log_kept, -jnp.inf),
+        jnp.where(emptied, pool.log_like, pool.log_like + _log(miss)),
+        pool.log_mass + _log(kept),
     )
 
 
