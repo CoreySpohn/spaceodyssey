@@ -724,6 +724,23 @@ MAX_NODES = 2**22
 about 32 MiB per float64 array, and a planner's cells hold ``M B`` times that."""
 
 
+_NEAR_FLOOR = 0.3
+"""The near block of each side runs from the floor over this fraction of the minority
+side's mass."""
+_GRADED_UNTIL = 0.05
+"""The graded block of each side ends at this fraction of the side's mass (or at twice
+the near block's end, whichever is further)."""
+
+
+def _block_counts(h: int) -> tuple[int, int, int]:
+    """Nodes in the near, graded and far blocks of a side of ``h`` nodes."""
+    if h < 4:
+        return 0, 0, h
+    near = 2 if h >= 6 else 1
+    graded = (h - near) // 2
+    return near, graded, h - near - graded
+
+
 def _floor_nodes(
     mean: Float[Array, "*f"],
     var: Float[Array, "*f"],
@@ -732,25 +749,60 @@ def _floor_nodes(
 ) -> tuple[Float[Array, "*f n"], Float[Array, "*f n"]]:
     """Nodes and weights of each factor ``N(mean, var)`` split at ``split``.
 
-    ``n / 2`` Gauss-Legendre nodes on the CDF scale below the split and ``n / 2``
-    above it: on each side the probability ``u`` runs over the side's mass, and the
-    node is ``mean + sd Phi^-1(u)``, read from the near tail of each side so that no
-    probability is taken as one minus a small number. A point factor (``var = 0``)
-    gives ``n`` nodes at its mean, weights summing to one; a side with no mass gives
-    nodes at the mean with weight zero, so every node stays finite.
+    ``n / 2`` nodes on each side of the split, placed by the probability ``e`` between
+    the node and the split. A side of mass ``M`` is cut, in ``e``, into three
+    Gauss-Legendre blocks: a near block ``[0, a]``, uniform in ``e``; a graded block
+    ``[a, b]``, uniform in ``log e``; a far block ``[b, M]``, uniform in ``e``. Here
+    ``a`` is 0.3 times the minority side's mass and ``b`` the larger of 0.05 ``M`` and
+    ``2 a``. Near certainty the posterior of every outcome cell is concentrated on the
+    minority side and within about the minority mass of the floor on the dominant
+    side: a uniform block over the dominant side puts no node there, the near block
+    puts two, and the graded block carries the nodes from that scale out to the bulk.
+    With fewer than 4 nodes per side, one uniform block.
+
+    The node is ``mean -/+ sd Phi^-1(p)`` with ``p`` the probability beyond the node
+    on its near or far tail, whichever is smaller, so that no small probability is
+    taken as one minus a number. A point factor (``var = 0``) gives ``n`` nodes at its
+    mean, weights summing to one; a side with no mass gives nodes at the mean with
+    weight zero, so every node stays finite.
     """
-    t, w = np.polynomial.legendre.leggauss(n // 2)
-    fraction, w = (1.0 + t) / 2.0, w / 2.0  # on (0, 1), summing to one
+    counts = _block_counts(n // 2)
     spread = var > 0
     sd = jnp.sqrt(jnp.where(spread, var, 1.0))
     z = jnp.where(spread, (split - mean) / sd, 0.0)
+    below, above = ndtr(z), ndtr(-z)
+    tiny = jnp.finfo(z.dtype).tiny  # a normal number: XLA flushes subnormals to zero
+    minority = jnp.minimum(below, above)
     nodes, weights = [], []
-    for mass, sign in ((ndtr(z), 1.0), (ndtr(-z), -1.0)):
-        live = mass > 0
-        u = jnp.where(live, mass, 1.0)[..., None] * fraction
-        x = mean[..., None] + sign * sd[..., None] * ndtri(u)
-        nodes.append(jnp.where((live & spread)[..., None], x, mean[..., None]))
-        weights.append(mass[..., None] * w)
+    for mass, other, sign in ((below, above, -1.0), (above, below, 1.0)):
+        a = jnp.maximum(_NEAR_FLOOR * minority, tiny)
+        b = jnp.maximum(_GRADED_UNTIL * mass, 2.0 * a)
+        zero = jnp.zeros_like(mass)
+        ends = (zero, a, b, mass) if counts[0] else (zero, mass)
+        blocks = zip(ends[:-1], ends[1:], [k for k in counts if k], strict=True)
+        e, w = [], []
+        for i, (e0, e1, k) in enumerate(blocks):
+            t, gw = np.polynomial.legendre.leggauss(k)
+            f, gw = (1.0 + t) / 2.0, gw / 2.0
+            if counts[0] and i == 1:  # graded: uniform in log e
+                v0, v1 = jnp.log(e0)[..., None], jnp.log(e1)[..., None]
+                share = jnp.exp((v1 - v0) * (f - 1.0))  # e / b, in (a / b, 1)
+                wk = gw * share  # normalized below: the block's mass b - a is exact
+                e.append(e1[..., None] * share)
+                w.append((e1 - e0)[..., None] * wk / jnp.sum(wk, -1, keepdims=True))
+            else:
+                e.append(e0[..., None] + (e1 - e0)[..., None] * f)
+                w.append((e1 - e0)[..., None] * gw)
+        e, w = jnp.concatenate(e, -1), jnp.concatenate(w, -1)
+        live = (mass > 0)[..., None]
+        # Beyond the node toward the split and the far side: other + e; away: mass - e.
+        toward, away = other[..., None] + e, mass[..., None] - e
+        near = toward < away
+        p = jnp.where(live, jnp.where(near, toward, away), 0.5)
+        step = sd[..., None] * ndtri(jnp.clip(p, tiny, 1.0))
+        x = mean[..., None] + sign * jnp.where(near, step, -step)
+        nodes.append(jnp.where(live & spread[..., None], x, mean[..., None]))
+        weights.append(jnp.where(live, w, 0.0))
     return jnp.concatenate(nodes, -1), jnp.concatenate(weights, -1)
 
 
@@ -802,14 +854,15 @@ def _split_points(
 def quadrature_draws(
     b: Belief,
     claim: Claim,
-    n: int = 16,
+    n: int = 24,
     models: tuple[AbstractObservationModel, ...] = (),
 ) -> Belief:
     """The belief with each draw's gas block on quadrature nodes, factor by factor.
 
     Every factor of the block, one planet and one gas ``N(m, v)``, is carried by ``n``
-    point nodes: ``n / 2`` Gauss-Legendre nodes on the CDF scale below the split and
-    ``n / 2`` above it, ``x = m + sqrt(v) Phi^-1(u)`` with weight ``omega``. The split
+    point nodes: ``n / 2`` below the split and ``n / 2`` above it, ``x = m + sqrt(v)
+    Phi^-1(u)`` with weight ``omega``, in three Gauss-Legendre blocks per side graded
+    toward the split (``_floor_nodes``). The split
     of a gas is the floor of the claim's ``GasAbove`` on it, so a claim that steps at
     the floor keeps its probability (the mass on each side is exact) and the
     integrand of every outcome is smooth on each side; a gas the claim does not read
@@ -821,9 +874,12 @@ def quadrature_draws(
 
     On these nodes a planner's update by an outcome cell is exact reweighting of the
     draws and the nodes (``update_by_cell``): the cells of rows are independent given
-    the points. The error is that of the quadrature: at 16 nodes a lookahead value of
-    a gas reading is within about half a percent of a dense quadrature for a prior
-    probability of the claim between 0.04 and 0.96.
+    the points. The error is that of the quadrature: at the default 24 nodes the
+    lookahead value of a reading binned at the floor is within 0.8 percent of a dense
+    quadrature at depth 1 and 2, for a prior probability of the claim from 1e-6 to
+    1 - 1e-6 and S/N 2 to 20 (3 percent at 16 nodes, 0.6 percent at 32). A bin edge
+    away from the split is not graded for: an edge 0.3 or 0.5 dex from the floor
+    measured 1.4 to 2.2 percent at 24 nodes near certainty.
 
     Every factor is carried, read or not: the cost is linear in the factors, and which
     gases a model covers is a traced value (its S/N per gas), not a static one.
@@ -899,7 +955,7 @@ def planning_beliefs(
     forecast_pool: Pool,
     verdict_pool: Pool,
     claim: Claim,
-    n: int = 16,
+    n: int = 24,
     *,
     min_n_eff,
     max_khat,

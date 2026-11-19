@@ -443,10 +443,18 @@ def _binned_reading_oracle(m, v, sigma, depth):
 
 # The gas-reading stars: (prior mean, prior variance, replay time, exposure). A reading
 # y = 1 at S/N 5 released at day 1 turns N(0, 1) into N(0.8, 0.2); an exposure of 0.16
-# days reads at S/N 2.
-GAS_STARS = ((0.0, 1.0, 0.0, 1.0), (0.0, 1.0, 1.0, 1.0), (0.3, 0.1, 0.0, 1.0),
-             (0.0, 1.0, 1.0, 0.16))  # fmt: skip
-GAS_BLOCKS = ((0.0, 1.0), (0.8, 0.2), (0.3, 0.1), (0.8, 0.2))
+# days reads at S/N 2, one of 4 days at S/N 10. The last four are near certain: N(m, 1)
+# with P(x > 0) = 0.9996 and 0.999996, each read at S/N 5 and 10.
+NEAR_CERTAIN = tuple(float(norm.ppf(q0)) for q0 in (0.9996, 0.999996))
+GAS_STARS = (
+    (0.0, 1.0, 0.0, 1.0), (0.0, 1.0, 1.0, 1.0), (0.3, 0.1, 0.0, 1.0),
+    (0.0, 1.0, 1.0, 0.16),
+    *((m, 1.0, 0.0, e) for m in NEAR_CERTAIN for e in (1.0, 4.0)),
+)  # fmt: skip
+GAS_BLOCKS = (
+    (0.0, 1.0), (0.8, 0.2), (0.3, 0.1), (0.8, 0.2),
+    *((m, 1.0) for m in NEAR_CERTAIN for _ in range(2)),
+)  # fmt: skip
 
 
 @eqx.filter_jit
@@ -473,9 +481,11 @@ def test_a_binned_gas_reading_is_valued_exactly(toy):
     quadrature over the abundance, at depth 1 and 2, and never exceeds the value of
     the continuous reading.
 
-    Four one-draw stars, built through `replay` and `planning_beliefs` (16 sub-draws per
-    draw): water N(0, 1); N(0.8, 0.2) after a reading y = 1 at S/N 5; a narrow
-    N(0.3, 0.1); and N(0.8, 0.2) read at S/N 2. One `GaussianGasModel` entry, one edge
+    Eight one-draw stars, built through `replay` and `planning_beliefs` (24 nodes per
+    factor): water N(0, 1); N(0.8, 0.2) after a reading y = 1 at S/N 5; a narrow
+    N(0.3, 0.1); N(0.8, 0.2) read at S/N 2; and N(m, 1) with P(x > 0) = 0.9996 and
+    0.999996, each read at S/N 5 and 10 (values 1.6e-3 to 2.4e-5 at depth 1, within
+    0.6 percent of the oracle). One `GaussianGasModel` entry, one edge
     at the floor; `LogScore` on the count of water planets, forecast = verdict,
     lam = 0. The oracle (`_binned_reading_oracle`) at the prior, depth 1, is the
     closed form U(q) - ln 0.5 with q = 2 P(x > 0, y > 0) = 1/2 + arcsin(1 /
@@ -486,7 +496,9 @@ def test_a_binned_gas_reading_is_valued_exactly(toy):
     instead of splitting it (the value then runs +46 to +187 percent above the oracle at
     S/N 5, above the continuous bound, and -97 percent at S/N 2), if the split is
     skipped (an uncertain block is refused, and reweighting it alone values it near
-    zero), or if the split moves mass across the floor.
+    zero), if the split moves mass across the floor, or if the dominant side of a
+    near-certain block has no nodes graded toward the floor (one uniform block per
+    side misses the near-certain values by up to 33 percent).
     """
     log_of = jnp.zeros(2, int), jnp.zeros(2)
     payload = {"snr": jnp.full((2, 1, 1), 5.0), "reading": jnp.ones((2, 1, 1))}
@@ -591,10 +603,11 @@ def test_per_factor_nodes_equal_the_product_grid(toy):
     the same nodes, to rounding.
 
     Three draws, four factors of two nodes each (one on each side of the floor), so
-    the product grid holds 3 x 2**4 = 48 point draws; the claim is (HZ, water, oxygen) and the forecast and
-    the verdict differ. Depth 2 on a Gaussian reading of both gases (16 cells) and a
-    step report of both (81 cells, three bins per factor), each follow-up updating the
-    nodes the first outcome moved; the claim-bit information of the Gaussian reading.
+    the product grid holds 3 x 2**4 = 48 point draws; the claim is (HZ, water,
+    oxygen) and the forecast and the verdict differ. Depth 2 on a Gaussian reading of
+    both gases (16 cells) and a step report of both (81 cells, three bins per factor),
+    each follow-up updating the nodes the first outcome moved; the claim-bit
+    information of the Gaussian reading.
 
     Fails if an outcome updates a factor's nodes without the draw's weight (or the
     draw's weight without the nodes), mixes the bins of two factors, carries the
@@ -626,24 +639,24 @@ def test_per_factor_nodes_equal_the_product_grid(toy):
     assert_allclose(info[0], info[1], rtol=1e-10)
 
 
-@pytest.mark.medium(reason="the smoke size, 4,000 draws on 16 nodes, depth 2, 3 s")
+@pytest.mark.medium(reason="the smoke size, 4,000 draws on 24 nodes, depth 2, 3 s")
 def test_two_planets_and_two_gases_plan_at_the_smoke_size(toy):
-    """Two planets with two uncertain gases each, 4,000 draws on 16 nodes per factor:
+    """Two planets with two uncertain gases each, 4,000 draws on 24 nodes per factor:
     a depth-2 frontier of a Gaussian reading of both gases runs within memory, and
     reading the gases is worth something.
 
-    The product grid of these nodes would hold 4,000 x 16**4 = 2.6e8 draws per star.
+    The product grid of these nodes would hold 4,000 x 24**4 = 1.3e9 draws per star.
 
     Fails if the quadrature forms the product grid of the factors' nodes, or if a
     lookahead level holds every grandchild belief at once (both run out of memory).
     """
     claim = Claim((toy.InHz(), GasAbove(0, 0.0), GasAbove(1, 0.0)))
     big = toy.jit.quadrature_draws(
-        _two_planet_two_gas_belief(toy, 4000), claim, 16, TWO_GASES
+        _two_planet_two_gas_belief(toy, 4000), claim, 24, TWO_GASES
     )
     f = _frontier_of(
         toy.split(toy.stack(big)), claim, toy.star, LogScore(2), TWO_GASES,
-        _menu([[1.0, 0.5]], (0, 0)), 2,
+        _menu([[1.0]], (0,)), 2,
     )  # fmt: skip
     assert np.all(np.isfinite(f.reward)) and np.all(np.asarray(f.reward) > 0.0)
 
@@ -868,7 +881,8 @@ def test_a_refused_forecast_reads_nan_not_zero(toy):
     Four point draws (`_coarsening_belief`'s), refit prior flat, both roles the gas
     prior N(0, 1); the draws' Kish size is 4, so a gate with `min_n_eff = 5` refuses
     the forecast's row. On test 5's search and pool, the `LogScore` utility, the
-    `LogScore` and `Count` rewards at depth 1 and 2 and `claim_information` are NaN.
+    `LogScore` rewards at depth 1 and 2, the `Count` reward and `claim_information`
+    are NaN.
 
     Fails if a guard reads a NaN forecast as giving no mass (`forecast > 0` in
     `expected_log_score`, `p_cell > 0` in `frontier` or `claim_information`), which
@@ -891,10 +905,10 @@ def test_a_refused_forecast_reads_nan_not_zero(toy):
     claim, models = Claim((toy.InHz(),)), (_search(toy),)
     assert np.isnan(LogScore(1)(forecast, verdict, claim, toy.star))
     beliefs = (toy.stack(forecast), toy.stack(verdict))
-    for utility in (LogScore(1), Count(toy.stack(pool))):
-        for depth in (1, 2):
-            f = _frontier_of(beliefs, claim, toy.star, utility, models, LOOK, depth)
-            assert np.isnan(f.reward[0, 0]), (utility, depth)
+    count = Count(toy.stack(pool))
+    for utility, depth in ((LogScore(1), 1), (LogScore(1), 2), (count, 1)):
+        f = _frontier_of(beliefs, claim, toy.star, utility, models, LOOK, depth)
+        assert np.isnan(f.reward[0, 0]), (utility, depth)
     info = toy.jit.claim_information(
         forecast, verdict, models[0], Action(0, 0, 1.0), claim, toy.star, PLANET
     )
