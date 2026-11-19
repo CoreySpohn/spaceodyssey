@@ -13,7 +13,7 @@ import jax.numpy as jnp
 from jaxtyping import ArrayLike, Int, PRNGKeyArray
 
 from spaceodyssey.belief import Belief
-from spaceodyssey.types import AbstractLaw, Action, Atoms, Grant, Pool, Row
+from spaceodyssey.types import AbstractObservationLaw, Action, Atoms, Grant, Pool, Row
 
 
 def row_key(
@@ -69,7 +69,9 @@ class SealedWorld(eqx.Module):
             (x_var, zero, zero),
         )
 
-    def observe(self, law: AbstractLaw, action: Action, key: PRNGKeyArray) -> Row:
+    def observe(
+        self, law: AbstractObservationLaw, action: Action, key: PRNGKeyArray
+    ) -> Row:
         """The row an action returns: the law's payload drawn from the true star.
 
         The host passes the law module and the row's key, from ``row_key``. The row is
@@ -104,7 +106,7 @@ class SealedWorld(eqx.Module):
         )
 
     def reveal(
-        self, grant: Grant, laws: tuple[AbstractLaw, ...], key: PRNGKeyArray
+        self, grant: Grant, laws: tuple[AbstractObservationLaw, ...], key: PRNGKeyArray
     ) -> Row:
         """The rows of a grant, drawn from the truth, released at time zero.
 

@@ -1,9 +1,9 @@
 """Toy observation laws: two gas laws on the gas block.
 
-A law (``AbstractLaw``, defined in ``types``) turns an action on a star into a row
-payload (``sample``), scores a payload against every draw (``log_like``), and gives the
-distribution of a row's outcome over discrete cells (``cells``). The host passes the
-law module; nothing dispatches on a traced law id.
+An observation law (``AbstractObservationLaw``, defined in ``types``) turns an action
+on a star into a row payload (``sample``), scores a payload against every draw
+(``log_like``), and gives the distribution of a row's outcome over discrete cells
+(``cells``). The host passes the law module; nothing dispatches on a traced law id.
 
 Both toy laws read the gas block of ``Atoms`` and write one payload of shape
 ``(K, G, 2)`` per row: for every planet and gas, the S/N reached (zero for a gas the
@@ -26,7 +26,7 @@ from jax.scipy.special import ndtr
 from jaxtyping import Array, Float, Int
 
 from spaceodyssey.claim import GasAbove
-from spaceodyssey.types import AbstractLaw, Action, Atoms
+from spaceodyssey.types import AbstractObservationLaw, Action, Atoms
 
 GAS_FLOOR = 0.0
 """Abundance floor of every gas in the toy, dex (a toy constant)."""
@@ -72,7 +72,7 @@ def _cell_index(codes: Int[Array, "K G"], n_bin: int) -> Int[Array, ""]:
     return jnp.sum(flat * powers)
 
 
-class GaussianGasLaw(AbstractLaw):
+class GaussianGasLaw(AbstractObservationLaw):
     """A linear Gaussian reading of every gas abundance.
 
     The reading is ``y = x + eps`` with ``eps ~ N(0, sigma**2)`` and
@@ -168,7 +168,7 @@ class GaussianGasLaw(AbstractLaw):
         return _joint(factors)
 
 
-class StepReportLaw(AbstractLaw):
+class StepReportLaw(AbstractObservationLaw):
     """A one-bit report per gas, given at or above S/N ``STEP_GATE_SNR``.
 
     Below the gate nothing is reported; at or above it, whether the gas is above its

@@ -14,7 +14,7 @@ from spaceodyssey.toy import (
     GaussianGasLaw,
     StepReportLaw,
 )
-from spaceodyssey.types import CELL_SAMPLES, AbstractLaw, Action
+from spaceodyssey.types import CELL_SAMPLES, AbstractObservationLaw, Action
 
 
 def _action(exposure_d=1.0):
@@ -63,7 +63,7 @@ def test_cells_normalize_and_match_the_binned_default(law, edges_b, var, toy):
     assert law.n_cells(atoms) == edges_b**2
     for exposure in (1.0, 4.0):
         exact = law.cells(atoms, _action(exposure))
-        binned = AbstractLaw.cells(law, atoms, _action(exposure))
+        binned = AbstractObservationLaw.cells(law, atoms, _action(exposure))
         for p in (exact, binned):
             assert_array_max_ulp(p.sum(axis=1), np.ones(4), maxulp=4)
         se = np.sqrt(exact * (1.0 - exact) / CELL_SAMPLES)

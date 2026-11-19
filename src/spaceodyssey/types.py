@@ -1,4 +1,4 @@
-"""Leaf types shared by every layer: cloud, atoms, pool, row, action, grant, law.
+"""Leaf types shared by every layer: draws, pool, rows, actions, the law contract.
 
 This module imports nothing from the package. Axis names used in the annotations:
 ``A`` draws, ``K`` planets one draw can hold, ``G`` gases, ``R`` roles (forecast is
@@ -198,10 +198,10 @@ class Grant(eqx.Module):
 
 
 CELL_SAMPLES = 4096
-"""Samples per draw in the binned-``sample`` default of ``AbstractLaw.cells``."""
+"""Samples per draw in the binned default of ``AbstractObservationLaw.cells``."""
 
 
-class AbstractLaw(eqx.Module):
+class AbstractObservationLaw(eqx.Module):
     """The contract of an observation law.
 
     A law holds configuration only, never an observed datum: ``log_like`` is rebuilt
