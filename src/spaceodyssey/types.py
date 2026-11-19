@@ -304,7 +304,18 @@ class AbstractObservationModel(eqx.Module):
     read nothing of a draw that a model in an earlier slot changes in ``finalize``. The
     toy models qualify: the Gaussian model's statistics read no draw, and the step
     report's read only point gas blocks, which no ``finalize`` changes.
+
+    Each model declares ``searches``, a class constant: whether its rows detect
+    planets. Only a searching model takes planets out of the pool or has a
+    completeness; a characterization (a spectrum of known planets) leaves the pool as
+    it is.
+
+    Attributes:
+        searches: whether the model detects planets, a class constant every concrete
+            model sets.
     """
+
+    searches: eqx.AbstractClassVar[bool]
 
     @abc.abstractmethod
     def sample(self, atoms: Atoms, action: Action, key: PRNGKeyArray) -> PyTree:
@@ -353,7 +364,9 @@ class AbstractObservationModel(eqx.Module):
     def cells(self, atoms: Atoms, action: Action) -> Float[Array, "A Y"]:
         """Probability of each outcome cell under each draw.
 
-        A model without a closed form returns ``binned_cells``.
+        For a searching model (``searches``) cell 0 is the miss: on a pool's marks,
+        every other cell is a detection. A model without a closed form returns
+        ``binned_cells``.
 
         Args:
             atoms: the draws.
