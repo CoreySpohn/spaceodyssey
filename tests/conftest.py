@@ -77,10 +77,9 @@ class _Toy:
         )
         return Atoms(
             cloud,
-            jnp.zeros((n_draw, n_planet, n_gas), int),
             block(mean),
             block(var),
-            jnp.zeros((n_draw, 1), bool),
+            jnp.zeros(1, bool),
             jnp.broadcast_to(jnp.asarray(exists, bool), (n_draw, n_planet)),
         )
 

@@ -28,9 +28,9 @@ class WeightedCloud(eqx.Module):
     Weight contract: ``log_weight`` is the log of target over proposal, where the
     target is ``p0`` times the rows in ``row_mask``. It is not a log ratio against a
     proposal that equals ``p0``: that reading would count ``-log p0`` twice when the
-    role weights are formed. One cloud has one row set, so ``row_mask`` is constant
-    across its draws unless a block normalization is defined. The cloud comes from one
-    refit.
+    role weights are formed. One cloud has one row set, so ``row_mask`` is one mask
+    for all its draws; a block normalization would need one per draw. The cloud comes
+    from one refit.
 
     Attributes:
         samples: the state pytree, leading axis ``A``.
@@ -46,7 +46,7 @@ class WeightedCloud(eqx.Module):
 
 
 class Atoms[StateT](eqx.Module):
-    """A weighted cloud with the gas block and the rows each draw already represents.
+    """A weighted cloud with the gas block and the rows the cloud already represents.
 
     ``cloud.samples`` carries the state of type ``StateT``. The gas block holds, per
     draw, planet and gas, a Gaussian over the abundance: ``x_mean`` and ``x_var`` (zero
@@ -61,19 +61,17 @@ class Atoms[StateT](eqx.Module):
 
     Attributes:
         cloud: the weighted draws.
-        component: gas label into the shared Gaussian dictionary; unused until a role
-            has more than one component.
         x_mean: mean abundance, shape ``(A, K, G)``.
         x_var: abundance variance, shape ``(A, K, G)``, zero for a point state.
-        row_mask: rows this draw already represents, shape ``(A, W)``; all false here.
+        row_mask: log rows the refit conditioned on, shape ``(W,)``, one set for the
+            whole cloud.
         exists: whether each planet slot of each draw holds a planet, shape ``(A, K)``.
     """
 
     cloud: WeightedCloud
-    component: Int[Array, "A K G"] = eqx.field(converter=jnp.asarray)
     x_mean: Float[Array, "A K G"] = eqx.field(converter=jnp.asarray)
     x_var: Float[Array, "A K G"] = eqx.field(converter=jnp.asarray)
-    row_mask: Bool[Array, "A W"] = eqx.field(converter=jnp.asarray)
+    row_mask: Bool[Array, " W"] = eqx.field(converter=jnp.asarray)
     exists: Bool[Array, "A K"] = eqx.field(converter=jnp.asarray)
 
 

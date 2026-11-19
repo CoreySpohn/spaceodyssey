@@ -40,10 +40,7 @@ class GasPrior(AbstractRolePrior):
         cloud = WeightedCloud(
             {"hz": one, "size": one}, jnp.zeros(1), jnp.zeros(1), "toy"
         )
-        no_rows = jnp.zeros((1, 1), bool)
-        return Atoms(
-            cloud, jnp.zeros_like(x, int), x, jnp.zeros_like(x), no_rows, one > 0
-        )
+        return Atoms(cloud, x, jnp.zeros_like(x), jnp.zeros(1, bool), one > 0)
 
 
 def _stack(trees):

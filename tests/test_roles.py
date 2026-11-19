@@ -86,10 +86,9 @@ def _atoms(x, log_weight, log_ref, measure):
     empty = jnp.zeros((n, 1, 0))
     return Atoms(
         cloud,
-        empty.astype(int),
         empty,
         empty,
-        jnp.zeros((n, 0), bool),
+        jnp.zeros(0, bool),
         jnp.ones((n, 1), bool),
     )
 
