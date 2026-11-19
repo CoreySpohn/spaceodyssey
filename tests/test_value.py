@@ -16,12 +16,14 @@ from numpy.testing import assert_allclose
 
 from spaceodyssey.belief import (
     Belief,
+    count_pmf,
     planning_beliefs,
     q,
     replay,
     select_roles,
 )
 from spaceodyssey.claim import Claim, GasAbove
+from spaceodyssey.information import cell_probs, outcome_cells, update_by_cell
 from spaceodyssey.price import dispatch, solve_price
 from spaceodyssey.roles import Roles
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
@@ -597,22 +599,53 @@ TWO_GASES = (
 )
 
 
+@eqx.filter_jit
+def _two_readings(b, models, claim, star):
+    """After a reading by each of two models: every cell pair's log probability per
+    role, and the claim probability of each planet and the count pmf after it."""
+    action = Action(0, 0, 1.0)
+    first, second = (outcome_cells(b, m, action) for m in models)
+
+    def after(y1, y2):
+        out = update_by_cell(update_by_cell(b, first, y1), second, y2)
+        log_mass = jax.nn.logsumexp(
+            out.atoms.cloud.log_weights + out.log_prior_ratio + out.log_like, axis=-1
+        )
+        planets = jnp.arange(out.atoms.exists.shape[-1])
+        q_each = jax.vmap(lambda k: q(out, claim, star, k))(planets)
+        return log_mass, q_each, count_pmf(out, claim, star, 3)
+
+    y1, y2 = jnp.arange(first.draw.shape[-1]), jnp.arange(second.draw.shape[-1])
+    return jax.vmap(lambda a: jax.vmap(lambda c: after(a, c))(y2))(y1)
+
+
+@eqx.filter_jit
+def _factor_and_joint_cells(b, models):
+    """Each model's cell probabilities through its factors' cells and its own joint."""
+    action = Action(0, 0, 1.0)
+    return [
+        (cell_probs(b, outcome_cells(b, m, action)), m.cells(b.atoms, action))
+        for m in models
+    ]
+
+
 def test_per_factor_nodes_equal_the_product_grid(toy):
     """With two planets and two uncertain gases, the per-factor nodes give the
-    frontier's rewards and costs and the claim-bit information of the product grid of
-    the same nodes, to rounding.
+    probability of every pair of outcomes, the claim probabilities and count pmf after
+    it, and the claim-bit information of the product grid of the same nodes, to
+    rounding; on point draws the factors' cells are the model's own joint cells.
 
     Three draws, four factors of two nodes each (one on each side of the floor), so
     the product grid holds 3 x 2**4 = 48 point draws; the claim is (HZ, water,
-    oxygen) and the forecast and the verdict differ. Depth 2 on a Gaussian reading of
-    both gases (16 cells) and a step report of both (81 cells, three bins per factor),
-    each follow-up updating the nodes the first outcome moved; the claim-bit
-    information of the Gaussian reading.
+    oxygen), two roles. A Gaussian reading of both gases (16 cells) and then a step
+    report of both (81 cells, three bins per factor), the second updating the nodes the
+    first moved; the claim-bit information of the Gaussian reading.
 
     Fails if an outcome updates a factor's nodes without the draw's weight (or the
     draw's weight without the nodes), mixes the bins of two factors, carries the
-    nodes' weights from one level to the next wrongly, or codes the cells in another
-    order than the model's joint.
+    nodes' weights from one update to the next wrongly, codes the cells in another
+    order than the model's joint, or if `GasAbove` or `count_pmf` read a planet's gas
+    off the block's mean instead of its nodes.
     """
     claim = Claim((toy.InHz(), GasAbove(0, 0.0), GasAbove(1, 0.0)))
     b = toy.jit.quadrature_draws(
@@ -620,16 +653,13 @@ def test_per_factor_nodes_equal_the_product_grid(toy):
     )
     grid = _product_grid(b)
     assert grid.atoms.x_mean.shape[0] == 48
-    menu = _menu([[1.0, 1.0]], (0, 1))
     per_factor, product = (
-        _frontier_of(
-            toy.split(toy.stack(x)), claim, toy.star, LogScore(2), TWO_GASES, menu, 2,
-            lam=0.05,
-        )
-        for x in (b, grid)
-    )  # fmt: skip
-    assert_allclose(per_factor.reward, product.reward, rtol=1e-10)
-    assert_allclose(per_factor.cost_d, product.cost_d, rtol=1e-10)
+        _two_readings(x, TWO_GASES, claim, toy.star) for x in (b, grid)
+    )
+    for got, want in zip(per_factor, product, strict=True):
+        assert_allclose(got, want, rtol=1e-10, atol=1e-14)
+    for factors, joint in _factor_and_joint_cells(grid, TWO_GASES):
+        assert_allclose(factors, joint, rtol=1e-12, atol=1e-15)
     info = [
         toy.jit.claim_information(
             *toy.split(x), TWO_GASES[0], Action(0, 0, 1.0), claim, toy.star, PLANET
