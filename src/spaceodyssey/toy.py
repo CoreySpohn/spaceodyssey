@@ -101,6 +101,7 @@ class GaussianGasModel(AbstractObservationModel):
     """
 
     searches: ClassVar[bool] = False
+    stage: ClassVar[int] = 0
 
     snr_one_day: Float[Array, " G"] = eqx.field(converter=jnp.asarray)
     edges: Float[Array, " E"] = eqx.field(converter=jnp.asarray, default=(GAS_FLOOR,))
@@ -217,6 +218,7 @@ class StepReportModel(AbstractObservationModel):
     """
 
     searches: ClassVar[bool] = False
+    stage: ClassVar[int] = 0
 
     snr_one_day: Float[Array, " G"] = eqx.field(converter=jnp.asarray)
 

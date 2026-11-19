@@ -46,6 +46,7 @@ class OrbitReport(AbstractObservationModel):
     """
 
     searches: ClassVar[bool] = False
+    stage: ClassVar[int] = 0
 
     def sample(self, key, atoms, action):
         return {"hz": atoms.cloud.samples["hz"]}
@@ -69,6 +70,7 @@ class ExpectedReading(AbstractObservationModel):
     """
 
     searches: ClassVar[bool] = False
+    stage: ClassVar[int] = 0
     gas: GaussianGasModel
 
     def sample(self, key, atoms, action):
@@ -354,6 +356,7 @@ class Blind(AbstractObservationModel):
     """A model whose payload does not depend on the truth: every row reads zeros."""
 
     searches: ClassVar[bool] = False
+    stage: ClassVar[int] = 0
 
     def sample(self, key, atoms, action):
         return {"value": jnp.zeros(atoms.exists.shape)}

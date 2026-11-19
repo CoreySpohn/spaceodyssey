@@ -528,8 +528,8 @@ def test_a_spectrum_waits_for_a_detection(toy):
     planet is already detected the spectrum is offered and worth the same 0.2158.
 
     Fails if a spectrum is offered before a detection (at the root or after a miss),
-    if a detection on the path does not open it, or if the mask ignores the root's
-    detection.
+    if a detection on the path does not raise the star to the stage the spectrum
+    requires, or if the mask ignores the root's stage.
     """
     hz = [[1.0]] * 4
     exists = [[True], [True], [False], [False]]
@@ -549,7 +549,7 @@ def test_a_spectrum_waits_for_a_detection(toy):
         (False, 2, [-entropy(0.25), 0.0]),
         (True, 1, [one_search, one_search]),
     ):
-        menu = Menu([[1.0, 1.0]], [[True, True]], (0, 1), (False, True), [detected])
+        menu = Menu([[1.0, 1.0]], [[True, True]], (0, 1), (0, 1), [int(detected)])
         f = _frontier_of(beliefs, claim, toy.star, LogScore(1), models, menu, depth)
         assert_allclose(f.reward[0], expected, rtol=1e-12, atol=1e-12)
         assert list(np.asarray(f.mask[0])) == [True, detected]

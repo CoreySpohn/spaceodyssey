@@ -382,12 +382,21 @@ class AbstractObservationModel(eqx.Module):
     completeness; a characterization (a spectrum of known planets) leaves the pool as
     it is.
 
+    Each model also declares ``stage``, a class constant: the stage of a star's
+    follow-up chain that a positive outcome (any cell but cell 0) reaches. A planner
+    offers an option once the star has reached the option's required stage (a
+    spectrum needs a detection), so stages are ordered and a star's stage only rises.
+    A model whose outcomes open nothing reaches stage 0.
+
     Attributes:
         searches: whether the model detects planets, a class constant every concrete
+            model sets.
+        stage: the stage a positive outcome reaches, a class constant every concrete
             model sets.
     """
 
     searches: eqx.AbstractClassVar[bool]
+    stage: eqx.AbstractClassVar[int]
 
     @abc.abstractmethod
     def sample(self, key: PRNGKeyArray, atoms: Atoms, action: Action) -> PyTree:

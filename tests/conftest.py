@@ -202,11 +202,13 @@ class _Toy:
         """A test search of planet 0: per day of exposure it detects the planet with
         probability `hit` when its `hz` bit is set and `other` otherwise, so
         `1 - (1 - p)**exposure_d` in all, smooth in the exposure. A slot with no
-        planet is always missed. Cell 0 is the miss, cell 1 the detection; a payload
-        carries the exposure and whether the planet was detected.
+        planet is always missed. Cell 0 is the miss, cell 1 the detection, which
+        reaches stage 1; a payload carries the exposure and whether the planet was
+        detected.
         """
 
         searches: ClassVar[bool] = True
+        stage: ClassVar[int] = 1  # a detection opens a spectrum
         hit: jax.Array = eqx.field(converter=jnp.asarray)
         other: jax.Array = eqx.field(converter=jnp.asarray)
 
