@@ -18,7 +18,7 @@ from spaceodyssey._standin.diagnostics import mc_se
 from spaceodyssey.belief import q, role_log_weights, weights
 from spaceodyssey.claim import AbstractConjunct, Claim
 from spaceodyssey.information import diagnose
-from spaceodyssey.roles import AbstractPrior, Roles
+from spaceodyssey.roles import AbstractRolePrior, Roles
 from spaceodyssey.types import Atoms, Pool, WeightedCloud
 
 STAR = ()
@@ -37,7 +37,7 @@ class Above(AbstractConjunct):
         return (atoms.cloud.samples["x"] > self.threshold).astype(float)
 
 
-class Gaussian(AbstractPrior):
+class Gaussian(AbstractRolePrior):
     """N(mean, sd^2) on x, or its density on y = exp(x) when the measure is "y".
 
     On "y" the log Jacobian -x is added unless `jacobian` is False (the deliberate
@@ -49,22 +49,34 @@ class Gaussian(AbstractPrior):
     upper: jax.Array = eqx.field(converter=jnp.asarray, default=jnp.inf)
     jacobian: bool = eqx.field(static=True, default=True)
 
-    def log_density(self, atoms, star):
+    def log_prob(self, atoms, star):
         x = atoms.cloud.samples["x"][:, 0]
         log_p = norm.logpdf(x, self.mean, self.sd)
         if self.measure == "y" and self.jacobian:
             log_p = log_p - x
         return jnp.where(x < self.upper, log_p, -jnp.inf)
 
+    def sample(self, key, star):
+        top = (self.upper - self.mean) / self.sd
+        x = self.mean + self.sd * jax.random.truncated_normal(key, -jnp.inf, top, (1,))
+        return _atoms(x, jnp.zeros(1), jnp.zeros(1), self.measure)
 
-class LookAlikeRatio(AbstractPrior):
-    """Multiplies the weight of the look-alike draws (x <= 1) by `w`."""
+
+class LookAlikeRatio(AbstractRolePrior):
+    """Multiplies the weight of the look-alike draws (x <= 1) by `w`.
+
+    A ratio against the refit target, not a normalized density, so it has no sampler:
+    it can judge as a verdict member but cannot draw a truth.
+    """
 
     w: jax.Array = eqx.field(converter=jnp.asarray)
 
-    def log_density(self, atoms, star):
+    def log_prob(self, atoms, star):
         x = atoms.cloud.samples["x"][:, 0]
         return jnp.where(x > 1.0, 0.0, jnp.log(self.w))
+
+    def sample(self, key, star):
+        raise NotImplementedError("a likelihood-ratio member has no sampler")
 
 
 def _atoms(x, log_weight, log_ref, measure):

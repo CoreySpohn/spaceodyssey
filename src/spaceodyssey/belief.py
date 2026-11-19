@@ -110,9 +110,9 @@ def role_log_weights(
                 f"the {name} prior is on measure {prior.measure!r} but the cloud is "
                 f"on {atoms.cloud.measure!r}"
             )
-    forecast = roles.forecast.log_density(atoms, star)
+    forecast = roles.forecast.log_prob(atoms, star)
     verdict = eqx.filter_vmap(
-        lambda prior: prior.log_density(atoms, star), in_axes=eqx.if_array(0)
+        lambda prior: prior.log_prob(atoms, star), in_axes=eqx.if_array(0)
     )(roles.verdict)
     log_prior = jnp.concatenate([forecast[None], verdict], axis=0)
     return Belief(atoms, log_prior, log_like, pool)

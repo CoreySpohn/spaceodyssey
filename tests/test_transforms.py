@@ -29,18 +29,24 @@ from spaceodyssey.information import (
     log_score,
     refit_trigger,
 )
-from spaceodyssey.roles import AbstractPrior, Roles
+from spaceodyssey.roles import AbstractRolePrior, Roles
 
 N_ROLES, N_DRAWS, N_PLANETS = 3, 6, 2
 
 
-class Tilt(AbstractPrior):
-    """log density `shift * hz` of the first planet: a prior with one traced leaf."""
+class Tilt(AbstractRolePrior):
+    """log density `shift * hz` of the first planet: a prior with one traced leaf.
+
+    A tilt against the refit target, read only as a weight, so it has no sampler.
+    """
 
     shift: jax.Array = eqx.field(converter=jnp.asarray)
 
-    def log_density(self, atoms, star):
+    def log_prob(self, atoms, star):
         return self.shift * atoms.cloud.samples["hz"][:, 0]
+
+    def sample(self, key, star):
+        raise NotImplementedError("a tilt is read only as a weight")
 
 
 def _worlds(toy):
