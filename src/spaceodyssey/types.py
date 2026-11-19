@@ -241,6 +241,22 @@ class ObservationLog(eqx.Module):
             raise ValueError(f"log columns disagree on the capacity W: {capacity}")
 
 
+def spent_d(log: ObservationLog) -> Float[Array, ""]:
+    """The time a run has charged so far, days: the survey clock.
+
+    Observations run one after another, so a run's clock is the time charged by its
+    real rows; the grant and a refused row are charged nothing.
+
+    Args:
+        log: the log.
+
+    Returns:
+        The charged time of the rows before ``count``.
+    """
+    real = jnp.arange(log.rows.charged_d.shape[0]) < log.count
+    return jnp.sum(jnp.where(real, log.rows.charged_d, 0.0))
+
+
 class Action(eqx.Module):
     """What a policy asks for: one observation of one star in one mode.
 
