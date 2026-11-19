@@ -36,7 +36,7 @@ from spaceodyssey.types import (
     clock_d,
     spent_d,
 )
-from spaceodyssey.world import SealedWorld, row_key, run_keys
+from spaceodyssey.world import SealedWorld, draw_worlds, row_key, run_keys
 
 KEY = jax.random.key(0)
 CAPACITY = 8  # W
@@ -784,3 +784,56 @@ def test_a_grant_in_a_mode_outside_the_table_is_refused(toy):
     nothing = TablePolicy(Action(jnp.zeros(0, int), jnp.zeros(0, int), jnp.zeros(0)))
     with pytest.raises(ValueError, match="mode table"):
         execute(KEY, grant, _el_world(toy), design, nothing)
+
+
+@pytest.mark.medium(reason="scores eight stars of the toy survey with refits, ~8 s")
+def test_a_found_pool_planet_is_judged_on_a_refit_and_an_undetected_one_not_at_all(
+    toy,
+):
+    """`score` refits a star whose rows found a planet its cloud holds no track for,
+    and judges that planet on the refit; an undetected pool planet has no row.
+
+    The toy survey of eight stars (a known planet each, a pool planet with
+    probability 0.9), each searched for three days by a table: the search finds most
+    pool planets. The first world in which a claim-true pool planet is found is
+    scored. Every pool planet the run detected has a certificate row, judged on a
+    cloud that holds it: a claim-true one is positive or unresolved, its `q_hi` above
+    0.1, never negative. A pool planet the run did not detect has no certificate,
+    resolution or information row.
+
+    Fails if `score` judges a found planet on the time-zero refit, which holds no
+    planet in its slot (it would read q = 0 and certify a claim-true planet negative),
+    or if an undetected pool planet is certified (the draws hold nothing there).
+    """
+    n_star = 8
+    survey = toy.survey(
+        jax.random.key(7), n_star, 200, 50, pool_mass=0.9, budget_d=40.0,
+        end_d=3000.0, capacity=n_star + 2, n_grant=0,
+    )  # fmt: skip
+    study = survey.study
+    table = TablePolicy(Action(np.arange(n_star), np.zeros(n_star, int), [3.0] * 8))
+    for w in range(8):
+        key = jax.random.fold_in(KEY, w)
+        world = jax.tree.map(
+            lambda x: x[0], draw_worlds(key, study.truth, study.stars, 1)
+        )
+        log = execute(key, survey.grant, world, study.design, table)
+        truth = world.unseal()
+        detected = np.asarray(log.rows.payload[0]["detected"][:n_star, 1]) > 0.5
+        claim_true = np.asarray(truth.cloud.samples["hz"][:, 0, 1]) > 0.5
+        claim_true &= np.asarray(truth.x_mean[:, 0, 1, 0]) > 0.0
+        if np.any(detected & claim_true):
+            break
+    report = score(log, world, study)
+    cert = {k: np.asarray(v) for k, v in report.certificates.items()}
+    pool_rows = cert["planet"] == 1
+    assert set(cert["star"][pool_rows]) == set(np.flatnonzero(detected))
+    for i in np.flatnonzero(pool_rows):
+        s = int(cert["star"][i])
+        assert bool(cert["truth"][i]) == bool(claim_true[s])
+        if claim_true[s]:
+            assert int(cert["status"][i]) in (POSITIVE, UNRESOLVED)
+            assert cert["q_hi"][i] > 0.1
+    for table_ in (report.resolution, report.information):
+        undetected = ~detected[np.asarray(table_["star"])]
+        assert not np.any((np.asarray(table_["planet"]) == 1) & undetected)

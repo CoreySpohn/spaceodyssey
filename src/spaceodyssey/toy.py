@@ -677,18 +677,15 @@ class ToySurvey(eqx.Module):
     """A toy study with what a run of it reads besides a policy.
 
     Attributes:
-        study: the study: claim, truth, roles, each star's refit and pool, the stars and
-            the design.
+        study: the study: claim, truth, roles, each star's refit and pool, the stars,
+            the design and the refitter.
         menu: the planner's menu of each star.
         grant: the rows given at time zero.
-        refitter: the refit a planner queues when a search finds a planet new to a
-            star's cloud.
     """
 
     study: Study
     menu: Menu
     grant: Grant
-    refitter: ToyRefitter
 
 
 TOY_SEARCH_D = (0.5, 1.0)
@@ -772,8 +769,8 @@ def toy_survey(
     (``toy_keepout``). The menu offers each star two searches (``TOY_SEARCH_D``) and
     two spectra (``TOY_SPECTRUM_D``), the spectra once a search has found a planet
     (stage 1). The grant is one archival search (the first exposure) of each of the
-    first ``n_grant`` stars. A search that finds a pool planet hands it to the refit
-    (``ToyRefitter``, on the law of one planet).
+    first ``n_grant`` stars. A search that finds a pool planet hands it to the
+    study's refitter (``ToyRefitter``, on the law of one planet).
 
     Args:
         key: the key of the stars, the refits, the marks and the keepout.
@@ -859,6 +856,7 @@ def toy_survey(
         design,
         jnp.zeros((n_star, n_role)),
         alpha=0.05,
+        refitter=ToyRefitter(one_planet),
     )
 
     exposures = (*TOY_SEARCH_D, *TOY_SPECTRUM_D)
@@ -875,4 +873,4 @@ def toy_survey(
             jnp.full(n_grant, TOY_SEARCH_D[0]),
         )
     )
-    return ToySurvey(study, menu, grant, ToyRefitter(one_planet))
+    return ToySurvey(study, menu, grant)

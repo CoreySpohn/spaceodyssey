@@ -11,7 +11,14 @@ from jaxtyping import Array, Float, PyTree
 from spaceodyssey.claim import Claim
 from spaceodyssey.design import Design
 from spaceodyssey.roles import Roles
-from spaceodyssey.types import AbstractRolePrior, Grant, Pool, Refit, as_float
+from spaceodyssey.types import (
+    AbstractRefitter,
+    AbstractRolePrior,
+    Grant,
+    Pool,
+    Refit,
+    as_float,
+)
 
 
 class Arm(eqx.Module):
@@ -46,6 +53,10 @@ class Study(eqx.Module):
         prior_mass_outside: each role's prior mass outside each star's refit box,
             shape ``(S, R)``.
         alpha: the risk of a certificate, static.
+        refitter: the producer of a star's refit when its rows find a planet its
+            cloud holds no track for (``AbstractRefitter``); ``score`` refits with it,
+            and a planner is handed the same one. None for a study whose clouds hold
+            every planet a run can detect.
 
     Raises:
         ValueError: if the refits, the pools, ``prior_mass_outside`` and the design's
@@ -63,6 +74,7 @@ class Study(eqx.Module):
     design: Design
     prior_mass_outside: Float[Array, "S R"]
     alpha: float = eqx.field(static=True)
+    refitter: AbstractRefitter | None
 
     def __init__(
         self,
@@ -76,6 +88,8 @@ class Study(eqx.Module):
         design: Design,
         prior_mass_outside: Float[Array, "S R"],
         alpha: float,
+        *,
+        refitter: AbstractRefitter | None = None,
     ):
         """Declare a study; the forecast and the verdict members become its roles."""
         self.claim = claim
@@ -87,6 +101,7 @@ class Study(eqx.Module):
         self.design = design
         self.prior_mass_outside = as_float(prior_mass_outside)
         self.alpha = float(alpha)
+        self.refitter = refitter
 
     def __check_init__(self):
         """Check one ``S`` and one ``R`` across the per-star fields, and W."""
