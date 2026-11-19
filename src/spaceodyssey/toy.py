@@ -191,9 +191,12 @@ class StepReportModel(AbstractObservationModel):
     The model applies only to point gas blocks (``x_var = 0``). On a Gaussian block two
     rows of one gas report the same bit, so their likelihoods are not independent and
     their sum would count the bit twice; the block after a bit is a truncated Gaussian,
-    which ``Atoms`` cannot hold. Every method raises ``ValueError`` when the gas
-    variance is a concrete nonzero value; a traced variance cannot be checked, and the
-    restriction holds all the same.
+    which ``Atoms`` cannot hold. ``sample`` and ``cells`` raise ``ValueError`` when
+    the gas variance is a concrete nonzero value; a traced variance cannot be checked
+    there, and the restriction holds all the same. ``stats`` raises at run time, under
+    ``jit`` as well, for a row that reports on a gas whose variance is nonzero; a row
+    that reports nothing reads no gas, so a model table holding this model replays
+    Gaussian draws as long as none of its rows reports on them.
 
     Each gas has three outcome cells: 0 no report, 1 bit 0, 2 bit 1; a row's cells are
     the joint over planets and gases, coded by ``cell`` and ``n_cells``.
@@ -221,19 +224,24 @@ class StepReportModel(AbstractObservationModel):
 
     def stats(self, payload, atoms, star):
         """The row's log probability of the reported bits; a silent gas adds zero."""
-        self._check_point(atoms)
         snr, bit = payload["snr"], payload["bit"]
+        reported = snr >= STEP_GATE_SNR
         p_above = self._p_above(atoms, star)
         p = jnp.where(bit > 0.5, p_above, 1.0 - p_above)
-        return jnp.where(snr >= STEP_GATE_SNR, jnp.log(p), 0.0).sum(axis=(1, 2))
+        log_p = jnp.where(reported, jnp.log(p), 0.0).sum(axis=(1, 2))
+        return eqx.error_if(
+            log_p,
+            jnp.any(reported & (atoms.x_var != 0)),
+            "StepReportModel needs point gas draws (x_var = 0) for a reported gas",
+        )
 
     def finalize(self, stats, atoms, star):
         """The summed log probabilities, with the draws unchanged.
 
         Rows are independent given a point draw, so their log probabilities add, and
-        a bit about a point state changes nothing in it.
+        a bit about a point state changes nothing in it. ``stats`` has checked the
+        draws of every reporting row.
         """
-        self._check_point(atoms)
         return stats, atoms
 
     def sample(self, atoms, action, key):

@@ -388,7 +388,12 @@ def _add_stats(
     atoms: Atoms,
     star,
 ) -> PyTree:
-    """``total`` plus one row's statistics where ``keep``, exact zeros elsewhere."""
+    """``total`` plus one row's statistics where ``keep``, exact zeros elsewhere.
+
+    A row that is not kept is read as a zero payload, so a model's checks on a row's
+    payload see only the rows applied in its slot.
+    """
+    payload = jax.tree.map(lambda x: jnp.where(keep, x, jnp.zeros_like(x)), payload)
     stats = model.stats(payload, atoms, star)
     return jax.tree.map(
         lambda t, s: t + jnp.where(keep, s, jnp.zeros_like(s)), total, stats

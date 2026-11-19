@@ -262,10 +262,13 @@ def test_replay_on_an_uncertain_gas_uses_the_joint_marginal(toy):
     blocks update to precision 1 + 4 + 1 = 6, mean 4.4 / 6, and precision 2 + 4 + 1 =
     7, mean 6.4 / 7. The same rows split over two model slots give the same belief to
     1e-12: the slots are finalized in turn, each against the draws the last returned.
+    With the step report in the table and only a row of another star in its slot, the
+    belief is the same again: the step report reads only point draws, but no row of
+    this star reports through it.
 
     Fails if the replay sums per-row likelihoods on an uncertain gas, finalizes each
-    slot against the refit's draws (the prior counted once per slot), or drops a row's
-    statistics.
+    slot against the refit's draws (the prior counted once per slot), drops a row's
+    statistics, or the step report refuses Gaussian draws it has no row about.
     """
     refit = _refit(_atoms([0.0, 1.0], [1.0, 0.5], jnp.zeros(2)))
     pool = toy.empty_pool(n_roles=3)
@@ -294,6 +297,18 @@ def test_replay_on_an_uncertain_gas_uses_the_joint_marginal(toy):
     assert_allclose(split.atoms.x_mean, b.atoms.x_mean, rtol=1e-12)
     assert_allclose(split.atoms.x_var, b.atoms.x_var, rtol=1e-12)
 
+    with_step = _log(
+        [
+            _row(0, _gas(5.0, 1.0), NO_STEP),
+            _row(0, _gas(2.5, 0.4), NO_STEP),
+            _row(1, NO_GAS, _step(5.0, 1.0), star=1),
+        ],
+        3,
+    )
+    mixed = _infer(refit, with_step, MODELS, pool)
+    assert_allclose(mixed.log_like, b.log_like, rtol=1e-12)
+    assert_allclose(mixed.atoms.x_mean, b.atoms.x_mean, rtol=1e-12)
+
 
 def test_replay_refuses_what_it_cannot_replay(toy):
     """The measure check of the role weights holds through a replay, and shapes are
@@ -301,12 +316,13 @@ def test_replay_refuses_what_it_cannot_replay(toy):
 
     A verdict prior on measure "y" against a cloud on "toy" raises when the belief is
     read, as do a model table whose length differs from the log's payload buffers, a
-    `row_mask` whose capacity differs from the log's, and a belief's updated draws
-    passed as a refit.
+    `row_mask` whose capacity differs from the log's, a belief's updated draws passed
+    as a refit, and a step report applied to a Gaussian gas, under `jit` too.
 
     Fails if the belief is read without the measure check (a missing Jacobian goes
     unnoticed), the replay reads a payload buffer or a mask entry that does not exist,
-    or it replays draws that already carry the rows.
+    it replays draws that already carry the rows, or a step report on a Gaussian gas
+    is summed as if the rows were independent.
     """
     refit = _refit(_atoms([0.0, 1.0], 0.0, jnp.zeros(2)))
     log = _log([_row(0, _gas(2.5, 1.0), NO_STEP)], 1)
@@ -323,3 +339,7 @@ def test_replay_refuses_what_it_cannot_replay(toy):
     updated = replay_belief(r, ROLES, MODELS, STAR, pool).atoms
     with pytest.raises((TypeError, AttributeError)):
         replay(updated, log, MODELS, STAR, NOW)
+    fuzzy = _refit(_atoms([0.0, 1.0], 1.0, jnp.zeros(2)))
+    reported = _log([_row(1, NO_GAS, _step(5.0, 1.0))], 1)
+    with pytest.raises(RuntimeError, match="point gas"):
+        _infer(fuzzy, reported, MODELS, pool)

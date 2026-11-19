@@ -114,7 +114,7 @@ def test_step_report(toy):
     assert_allclose(row_log_like(at, payload, atoms, toy.star), [0.0, -np.inf])
 
     fuzzy = toy.atoms([[1.0]], [[1.0]], [1.0], 0.4, 1.0, n_gas=1)
-    with pytest.raises(ValueError, match="point gas"):
+    with pytest.raises(RuntimeError, match="point gas"):
         row_log_like(at, _expected_row([5.0], 1.0, "bit"), fuzzy, toy.star)
     with pytest.raises(ValueError, match="point gas"):
         at.sample(fuzzy, _action(), key)
