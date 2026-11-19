@@ -141,7 +141,7 @@ def _cases(toy):
 
     hz_only = Claim((toy.InHz(),))
     model = GaussianGasModel(snr_one_day=[2.0], edges=[0.0, 0.6])
-    actions = (Action(0, 0, 0, 1.0), Action(0, 0, 0, 2.5))
+    actions = (Action(0, 0, 1.0), Action(0, 0, 2.5))
     cells = [model.cells(b.atoms, a) for b, a in zip((b0, b1), actions, strict=True)]
     detect = (jnp.array([0.3, 0.9, 0.1]), jnp.array([0.6, 0.2, 0.5]))
 

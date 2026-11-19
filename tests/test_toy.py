@@ -24,7 +24,7 @@ from spaceodyssey.types import (
 
 
 def _action(exposure_d=1.0):
-    return Action(kind=0, star=0, mode=0, exposure_d=exposure_d)
+    return Action(star=0, mode=0, exposure_d=exposure_d)
 
 
 def _expected_row(snr, u, name="reading"):

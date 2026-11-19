@@ -11,6 +11,7 @@ import jax.numpy as jnp
 from jaxtyping import ArrayLike, Int, PRNGKeyArray, PyTree
 
 from spaceodyssey.belief import Belief
+from spaceodyssey.design import Mode
 from spaceodyssey.roles import AbstractRolePrior
 from spaceodyssey.types import AbstractObservationModel, Action, Atoms, Grant, Pool
 
@@ -103,20 +104,21 @@ class SealedWorld(eqx.Module):
         key: PRNGKeyArray,
         grant: Grant,
         models: tuple[AbstractObservationModel, ...],
+        modes: tuple[Mode, ...],
     ) -> tuple[PyTree, ...]:
         """The payloads of a grant's rows, drawn from the truth.
 
-        Granted row ``i`` is drawn exactly as ``observe`` draws it, with the model in
-        its slot and the key ``row_key(key, star, i)``: granted row ``i`` is row ``i``
+        Granted row ``i`` is drawn exactly as ``observe`` draws it, with the model of
+        its mode and the key ``row_key(key, star, i)``: granted row ``i`` is row ``i``
         of the log, so the host numbers its observed rows after the grant. The rows of
         each model are drawn together under ``jax.vmap``. ``grant_rows`` builds the
         log rows from the payloads.
 
         Args:
-            key: the run key.
-            grant: the grant.
-            models: the model table of the run, static; ``grant.model_slot`` indexes
-                it.
+            key: the run's noise key.
+            grant: the grant, its actions concrete.
+            models: the design's model table, static.
+            modes: the design's mode table, static; a granted action's mode indexes it.
 
         Returns:
             One payload buffer per model, each a dict of arrays with a leading axis
@@ -124,12 +126,13 @@ class SealedWorld(eqx.Module):
             buffer and zeros in the others.
 
         Raises:
-            ValueError: if a model slot of the grant is not in ``models``.
+            ValueError: if a granted row's model slot is not in ``models``.
         """
-        if any(not 0 <= s < len(models) for s in grant.model_slot):
-            raise ValueError("a grant's model slot is not in the model table")
         actions = grant.actions
-        n_row = len(grant.model_slot)
+        slots = [modes[int(m)].model_slot for m in jnp.ravel(actions.mode)]
+        if any(not 0 <= s < len(models) for s in slots):
+            raise ValueError("a grant's model slot is not in the model table")
+        n_row = len(slots)
         keys = jax.vmap(row_key, in_axes=(None, 0, 0))(
             key, actions.star, jnp.arange(n_row)
         )
@@ -142,9 +145,7 @@ class SealedWorld(eqx.Module):
             buffer = jax.tree.map(
                 lambda x: jnp.zeros((n_row, *x.shape), x.dtype), shapes
             )
-            rows = jnp.asarray(
-                [i for i, s in enumerate(grant.model_slot) if s == slot], int
-            )
+            rows = jnp.asarray([i for i, s in enumerate(slots) if s == slot], int)
             if rows.size:
                 these = jax.tree.map(lambda leaf, rows=rows: leaf[rows], actions)
                 drawn = jax.vmap(self.observe, in_axes=(0, None, 0))(

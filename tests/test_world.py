@@ -10,16 +10,11 @@ from numpy.testing import assert_allclose, assert_array_max_ulp
 
 from spaceodyssey.belief import count_pmf, q
 from spaceodyssey.claim import Claim, GasAbove
+from spaceodyssey.design import Mode
+from spaceodyssey.log import grant_rows
 from spaceodyssey.roles import AbstractRolePrior
 from spaceodyssey.toy import GAS_FLOOR, GaussianGasModel, StepReportModel
-from spaceodyssey.types import (
-    Action,
-    Atoms,
-    Grant,
-    ObservationLog,
-    WeightedCloud,
-    grant_rows,
-)
+from spaceodyssey.types import Action, Atoms, Grant, ObservationLog, WeightedCloud
 from spaceodyssey.world import SealedWorld, draw_worlds, row_key
 
 KEY = jax.random.key(0)
@@ -67,7 +62,7 @@ def _differ(a, b):
 
 
 def _observe(world, model, star, index):
-    action = Action(kind=0, star=star, mode=0, exposure_d=1.0)
+    action = Action(star=star, mode=0, exposure_d=1.0)
     return world.observe(row_key(KEY, star, index), model, action)
 
 
@@ -180,16 +175,20 @@ def test_observe_reads_the_right_star_and_unseal_gives_a_point_belief(toy):
 
 
 def _grant():
-    """Three granted rows: star 1 in model slot 1, then stars 0 and 1 in slot 0."""
-    actions = Action(kind=[0, 0, 0], star=[1, 0, 1], mode=[2, 0, 0], exposure_d=1.0)
-    actions = eqx.tree_at(lambda a: a.exposure_d, actions, jnp.array([4.0, 1.0, 2.0]))
-    return Grant(actions, model_slot=(1, 0, 0))
+    """Three granted rows: star 1 in mode 2 (model slot 1), then stars 0 and 1 in mode
+    0 (slot 0).
+    """
+    actions = Action(star=[1, 0, 1], mode=[2, 0, 0], exposure_d=[4.0, 1.0, 2.0])
+    return Grant(actions)
 
 
 MODELS = (
     GaussianGasModel(snr_one_day=[5.0, 5.0]),
     StepReportModel(snr_one_day=[3.0, 3.0]),
 )
+# Modes 0 and 1 read the gas model, mode 2 the step report.
+MODES = (Mode(0, 0.0), Mode(0, 0.0), Mode(1, 0.0))
+SLOTS = (1, 0, 0)  # the model slot of each granted row, read from MODES
 
 
 def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
@@ -207,8 +206,8 @@ def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
     """
     world = SealedWorld(_point_truth(toy, [[0.5, 1.0], [-0.5, 1.0]]))
     grant = _grant()
-    payload = world.reveal(KEY, grant, MODELS)
-    revealed = grant_rows(grant, payload)
+    payload = world.reveal(KEY, grant, MODELS, MODES)
+    revealed = grant_rows(grant, payload, MODES)
     assert_allclose(revealed.release_d, 0.0)
     assert_allclose(revealed.charged_d, 0.0)
     assert_allclose(revealed.time_d, 0.0)
@@ -216,7 +215,7 @@ def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
     assert_allclose(revealed.star, [1, 0, 1])
     assert_allclose(revealed.mode, [2, 0, 0])
     assert_allclose(revealed.model_slot, [1, 0, 0])
-    for i, slot in enumerate(grant.model_slot):
+    for i, slot in enumerate(SLOTS):
         action = jax.tree.map(lambda leaf, i=i: leaf[i], grant.actions)
         key = row_key(KEY, action.star, i)
         expected = world.observe(key, MODELS[slot], action)
@@ -247,16 +246,19 @@ def test_reveal_differs_between_worlds(toy):
     grant = _grant()
     a = SealedWorld(_point_truth(toy, [[0.5, 1.0], [-0.5, 1.0]]))
     b = SealedWorld(_point_truth(toy, [[0.5, 1.0], [0.5, -1.0]]))
-    payload_a, payload_b = a.reveal(KEY, grant, MODELS), b.reveal(KEY, grant, MODELS)
+    payload_a, payload_b = (
+        a.reveal(KEY, grant, MODELS, MODES),
+        b.reveal(KEY, grant, MODELS, MODES),
+    )
     for slot in (0, 1):
         assert _differ(payload_a[slot], payload_b[slot])
     no_int = jnp.zeros(0, int)
-    empty = Grant(Action(no_int, no_int, no_int, jnp.zeros(0)), model_slot=())
-    none = grant_rows(empty, a.reveal(KEY, empty, MODELS))
+    empty = Grant(Action(no_int, no_int, jnp.zeros(0)))
+    none = grant_rows(empty, a.reveal(KEY, empty, MODELS, MODES), MODES)
     assert none.star.shape == (0,)
     assert {k: v.shape for k, v in none.payload[0].items()} == {
         "snr": (0, 1, 2),
         "reading": (0, 1, 2),
     }
     with pytest.raises(ValueError, match="model table"):
-        a.reveal(KEY, grant, MODELS[:1])
+        a.reveal(KEY, grant, MODELS[:1], MODES)

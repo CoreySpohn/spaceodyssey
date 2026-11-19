@@ -158,12 +158,11 @@ def _one(x):
     return jax.tree.map(lambda leaf: jnp.asarray(leaf)[None], x)
 
 
-def _menu(exposure_d, cost_d, model, mask=True):
-    """A menu over stars: `exposure_d` and `cost_d` have shape (S, M)."""
+def _menu(exposure_d, mode, mask=True):
+    """A menu over stars: `exposure_d` has shape (S, M), `mode` one mode per entry."""
     exposure_d = jnp.asarray(exposure_d, float)
-    zero = jnp.zeros(exposure_d.shape, int)
     mask = jnp.broadcast_to(jnp.asarray(mask, bool), exposure_d.shape)
-    return Menu(Action(zero, zero, zero, exposure_d), cost_d, mask, model)
+    return Menu(exposure_d, mask, mode)
 
 
 def _empty_pool(toy, n_gas):
@@ -173,14 +172,14 @@ def _empty_pool(toy, n_gas):
 
 
 # The two spectra (V; T): water and oxygen reports at S/N 6 (above the step gate), each
-# alone (slots 0 and 1) and both in one action (slot 2). The menu lists both first, so
-# its entries are not in slot order.
+# alone (modes 0 and 1) and both in one action (mode 2). The menu lists both first, so
+# its entries are not in mode order.
 SPECTRA = (
     StepReportModel(snr_one_day=[6.0, 0.0]),
     StepReportModel(snr_one_day=[0.0, 6.0]),
     StepReportModel(snr_one_day=[6.0, 6.0]),
 )
-SPECTRA_MENU = _menu([[1.0] * 3], [[1.0] * 3], (2, 0, 1))
+SPECTRA_MENU = _menu([[1.0] * 3], (2, 0, 1))
 
 
 def _spectra_belief(toy, psi):
@@ -219,9 +218,7 @@ def test_two_spectra_are_worth_the_verdict_gain(toy, psi, memo):
     gain = psi * np.log(4.0) + (1.0 - psi) * (np.log(1.0 - psi) - np.log(1 - psi / 4))
     b = _spectra_belief(toy, psi)
     claim = _spectra_claim(toy)
-    info = claim_information(
-        b, claim, toy.star, PLANET, SPECTRA[2], Action(0, 0, 0, 1.0)
-    )
+    info = claim_information(b, claim, toy.star, PLANET, SPECTRA[2], Action(0, 0, 1.0))
     assert_allclose(info, [0.0, gain], atol=1e-12)  # row 0 is I_F
     f = _frontier_of(_one(b), claim, toy.star, LogScore(1), SPECTRA, SPECTRA_MENU, 1)
     assert_allclose(f.reward[0, 0], gain, rtol=1e-12)
@@ -244,7 +241,7 @@ def _coarsening_belief(toy):
 
 # One gas report at S/N 6 (fine: the bit is reported) or 3 (merged: nothing reported).
 GAS_REPORT = (StepReportModel(snr_one_day=[6.0]),)
-FINE_AND_MERGED = _menu([[1.0, 0.25]], [[1.0, 0.25]], (0, 0))
+FINE_AND_MERGED = _menu([[1.0, 0.25]], (0, 0))
 
 
 def test_coarsening_can_raise_the_verdict_gain(toy):
@@ -270,7 +267,7 @@ def test_coarsening_can_raise_the_verdict_gain(toy):
     mutual = np.log(2.0) + 0.9 * np.log(0.9) + 0.1 * np.log(0.1)  # ln 2 - h(0.9)
     assert round(mutual, 3) == 0.368
     for exposure_d, row in ((1.0, [mutual, exact]), (0.25, [0.0, 0.0])):
-        action = Action(0, 0, 0, exposure_d)
+        action = Action(0, 0, exposure_d)
         info = claim_information(b, claim, toy.star, PLANET, GAS_REPORT[0], action)
         assert_allclose(info, row, atol=1e-12)  # row 0 is I_F, row 1 the reward
 
@@ -315,7 +312,7 @@ def test_value_does_not_fall_with_depth(toy):
                 toy.star,
                 LogScore(1),
                 reading,
-                _menu([[1.0]], [[1.0]], (0,)),
+                _menu([[1.0]], (0,)),
                 d,
             ).reward[0, 0]
             for d in (1, 2)
@@ -351,7 +348,7 @@ class Search(AbstractObservationModel):
 
 
 SEARCH = (Search(hit=0.8, other=0.2),)
-LOOK = _menu([[1.0]], [[1.0]], (0,))
+LOOK = _menu([[1.0]], (0,))
 
 
 def _search_pool(toy):
@@ -393,7 +390,7 @@ def test_count_and_thin_by_hand(toy):
     belief = _search_belief(toy, after)
     assert_allclose(Count(pool)(belief, claim, toy.star), 0.8, rtol=1e-12)
 
-    action = Action(0, 0, 0, 1.0)
+    action = Action(0, 0, 1.0)
     assert_allclose(completeness(pool, SEARCH[0], action, claim, toy.star), [0.8, 0.8])
 
     start = _one(_search_belief(toy, pool))
@@ -441,7 +438,7 @@ def test_a_model_that_does_not_search_leaves_the_pool(toy):
     """
     pool, claim = _search_pool(toy), Claim((toy.InHz(),))
     reading = GaussianGasModel(snr_one_day=[2.0, 2.0], edges=[0.0])
-    action = Action(0, 0, 0, 1.0)
+    action = Action(0, 0, 1.0)
     assert_allclose(completeness(pool, reading, action, claim, toy.star), [0.0, 0.0])
     f = _frontier_of(
         _one(_search_belief(toy, pool)),
@@ -449,7 +446,7 @@ def test_a_model_that_does_not_search_leaves_the_pool(toy):
         toy.star,
         Count(_one(pool)),
         (SEARCH[0], reading),
-        _menu([[1.0, 1.0]], [[1.0, 1.0]], (0, 1)),
+        _menu([[1.0, 1.0]], (0, 1)),
         1,
     )
     assert_allclose(f.reward[0], [0.8, 0.0], rtol=1e-12, atol=1e-12)
@@ -469,7 +466,7 @@ def test_a_second_star_and_world_add_no_traces(toy):
 
     def world(psis, exposure_d, mask):
         beliefs = stack(*[_spectra_belief(toy, p) for p in psis])
-        menu = _menu(exposure_d, np.asarray(exposure_d) * 2.0, (0, 1, 2), mask)
+        menu = _menu(exposure_d, (0, 1, 2), mask)
         return beliefs, menu
 
     first = world((0.7, 0.3), [[1.0] * 3, [0.5, 1.0, 1.0]], True)
@@ -480,7 +477,7 @@ def test_a_second_star_and_world_add_no_traces(toy):
         second[0], claim, toy.star, LogScore(1), SPECTRA, second[1], 2, lam=0.05
     )
     assert len(traces) == before
-    assert_allclose(f2.cost_d, [[2.0, 0.2, 2.0], [4.0] * 3])
+    assert_allclose(f2.cost_d, [[1.0, 0.1, 1.0], [2.0] * 3])
     assert_allclose(f2.reward[0, 1], 0.0)  # masked
     alone = _frontier_of(
         _one(_spectra_belief(toy, 0.3)),
@@ -523,11 +520,11 @@ def test_cells_reward_matches_nested_monte_carlo(toy):
     )
     claim = Claim((toy.InHz(), GasAbove(0, 0.0)))
     model = GaussianGasModel(snr_one_day=[3.0], edges=[-0.5, 0.0, 0.5])
-    menu = _menu([[1.0]], [[1.0]], (0,))
+    menu = _menu([[1.0]], (0,))
     exact = _frontier_of(_one(b), claim, toy.star, LogScore(1), (model,), menu, 1)
     exact = float(exact.reward[0, 0])
 
-    action = Action(0, 0, 0, 1.0)
+    action = Action(0, 0, 1.0)
     n_cell = model.n_cells(atoms)
     readings = jax.jit(jax.vmap(model.sample, in_axes=(0, None, None)))
     cell_of = jax.jit(jax.vmap(jax.vmap(model.cell)))

@@ -20,7 +20,7 @@ def _asarrays(tree):
     return jax.tree.map(jnp.asarray, tree)
 
 
-def _as_float(x) -> Float[Array, ""]:
+def as_float(x) -> Float[Array, ""]:
     """``x`` as the default float type, never weakly typed."""
     return jnp.asarray(x, dtype=float)
 
@@ -65,7 +65,7 @@ class WeightedCloud(eqx.Module):
 
     samples: PyTree = eqx.field(converter=_asarrays)
     log_weights: Float[Array, " A"] = eqx.field(converter=jnp.asarray)
-    evidence: Float[Array, ""] = eqx.field(converter=_as_float)
+    evidence: Float[Array, ""] = eqx.field(converter=as_float)
     log_ref_density: Float[Array, " A"] | None = eqx.field(
         converter=_optional_array, default=None
     )
@@ -105,7 +105,7 @@ class Atoms[StateT](eqx.Module):
     exists: Bool[Array, "A K"] = eqx.field(converter=jnp.asarray)
 
 
-def _as_index(x) -> Int[Array, ""]:
+def as_index(x) -> Int[Array, ""]:
     """``x`` as the default integer type, never weakly typed.
 
     An index built from a Python integer would otherwise be weakly typed, and the
@@ -131,7 +131,7 @@ class Refit(eqx.Module):
 
     atoms: Atoms
     row_mask: Bool[Array, " W"] = eqx.field(converter=jnp.asarray)
-    star_index: Int[Array, ""] = eqx.field(converter=_as_index)
+    star_index: Int[Array, ""] = eqx.field(converter=as_index)
 
 
 class Pool(eqx.Module):
@@ -240,16 +240,14 @@ class ObservationLog(eqx.Module):
 
 
 class Action(eqx.Module):
-    """What a policy asks for: one pytree with an integer kind.
+    """What a policy asks for: one observation of one star in one mode.
 
     Attributes:
-        kind: integer action kind.
         star: star index.
-        mode: observing mode index.
+        mode: index of the observing mode in the design's mode table.
         exposure_d: requested exposure in days.
     """
 
-    kind: Int[Array, ""] = eqx.field(converter=jnp.asarray)
     star: Int[Array, ""] = eqx.field(converter=jnp.asarray)
     mode: Int[Array, ""] = eqx.field(converter=jnp.asarray)
     exposure_d: Float[Array, ""] = eqx.field(converter=jnp.asarray)
@@ -260,54 +258,15 @@ class Grant(eqx.Module):
 
     A grant holds no data: the world draws each granted row from its truth, as for an
     observation, and releases it at time zero, charged nothing. Granted row ``i`` is
-    row ``i`` of the log.
+    row ``i`` of the log. Each row's model is read from the design's mode table
+    through its action's mode.
 
     Attributes:
         actions: an ``Action`` whose leaves have a leading axis over the granted rows;
             each gives the star, the mode and the exposure that sets the S/N.
-        model_slot: the model slot of each granted row, static, one entry per row.
     """
 
     actions: Action
-    model_slot: tuple[int, ...] = eqx.field(
-        static=True, converter=lambda s: tuple(int(i) for i in s)
-    )
-
-    def __check_init__(self):
-        """Check that every granted row has one model slot."""
-        if jnp.shape(self.actions.star) != (len(self.model_slot),):
-            raise ValueError("a grant has one model slot per granted action")
-
-
-def grant_rows(grant: Grant, payload: tuple[PyTree, ...]) -> Row:
-    """The log rows of a grant: released at time zero and charged nothing.
-
-    Each row keeps its action's star, mode and exposure and carries its model slot.
-
-    Args:
-        grant: the grant.
-        payload: one payload buffer per model, leading axis over the granted rows, as
-            ``SealedWorld.reveal`` returns them.
-
-    Returns:
-        The granted rows, stacked along a leading axis.
-    """
-    actions = grant.actions
-    zero_d = jnp.zeros_like(actions.exposure_d)
-    zero_i = jnp.zeros_like(actions.star)
-    return Row(
-        star=actions.star,
-        mode=actions.mode,
-        time_d=zero_d,
-        exposure_d=actions.exposure_d,
-        charged_d=zero_d,
-        release_d=zero_d,
-        refusal=zero_i,
-        model_slot=jnp.asarray(grant.model_slot, dtype=zero_i.dtype).reshape(
-            zero_i.shape
-        ),
-        payload=payload,
-    )
 
 
 class AbstractObservationModel(eqx.Module):

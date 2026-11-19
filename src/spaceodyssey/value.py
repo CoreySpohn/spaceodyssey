@@ -22,7 +22,7 @@ import abc
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float
+from jaxtyping import Array, Bool, Float, Int
 
 from spaceodyssey.belief import Belief, count_pmf, mark_weights, pool_rate
 from spaceodyssey.claim import Claim
@@ -176,38 +176,38 @@ class Count(AbstractUtility):
 
 
 class Menu(eqx.Module):
-    """The actions each star offers, padded to a shared length ``M``.
+    """The options each star offers, padded to a shared length ``M``.
 
-    Entry ``m`` is the same mode at every star (``model[m]`` names its observation
-    model in the model table), so the menus of all stars share one structure and a
-    star with fewer options masks the rest. A masked entry is still evaluated: keep its
-    action finite.
+    Entry ``m`` is one observing mode at every star (``mode[m]``), with its own
+    exposure at each star, so the menus of all stars share one structure and a star
+    with fewer options masks the rest. An entry's model is its mode's, read from the
+    design's one table (``mode_models``). Its cost is its exposure: no mode charges an
+    overhead yet. A masked entry is still evaluated: keep its exposure finite.
 
     Attributes:
-        actions: an ``Action`` whose leaves have shape ``(S, M)``.
-        cost_d: time each entry charges against the budget, days, shape ``(S, M)``.
+        exposure_d: exposure of each entry at each star, days, shape ``(S, M)``.
         mask: true where the entry is offered, shape ``(S, M)``.
-        model: the model slot of each entry, static, one per entry.
+        mode: the mode of each entry, static, one per entry.
 
     Raises:
-        ValueError: if the fields disagree on ``(S, M)`` or ``model`` has not one slot
-            per entry.
+        ValueError: if the fields disagree on ``(S, M)`` or ``mode`` has not one entry
+            per column.
     """
 
-    actions: Action
-    cost_d: Float[Array, "S M"] = eqx.field(converter=jnp.asarray)
+    exposure_d: Float[Array, "S M"] = eqx.field(converter=jnp.asarray)
     mask: Bool[Array, "S M"] = eqx.field(converter=jnp.asarray)
-    model: tuple[int, ...] = eqx.field(
+    mode: tuple[int, ...] = eqx.field(
         static=True, converter=lambda s: tuple(int(i) for i in s)
     )
 
     def __check_init__(self):
-        """Check that every field has the shape ``(S, M)`` with ``M = len(model)``."""
-        shapes = {jnp.shape(x) for x in jax.tree.leaves(self.actions)}
-        shapes |= {self.cost_d.shape, self.mask.shape}
-        if len(shapes) != 1 or self.mask.shape[-1:] != (len(self.model),):
+        """Check that every field has the shape ``(S, M)`` with ``M = len(mode)``."""
+        if self.exposure_d.shape != self.mask.shape or self.mask.shape[-1:] != (
+            len(self.mode),
+        ):
             raise ValueError(
-                f"menu fields disagree on (S, M): {shapes}, {len(self.model)} slots"
+                f"menu fields disagree on (S, M): {self.exposure_d.shape}, "
+                f"{self.mask.shape}, {len(self.mode)} modes"
             )
 
 
@@ -291,20 +291,29 @@ def completeness(
 
 
 def _branches(
-    b: Belief, models: tuple[AbstractObservationModel, ...], menu: Menu
+    b: Belief,
+    mode_models: tuple[AbstractObservationModel, ...],
+    menu: Menu,
+    star_index: Int[Array, ""],
 ) -> tuple[Float[Array, "M A Y"], Float[Array, "M Am"]]:
     """Cells of each entry on the draws and its detection probability of each mark.
 
-    The entries of one model are evaluated together; the cell axis is padded with
-    impossible cells to the widest model. Neither depends on the weights, so they are
-    computed once per star and read at every node of the recursion.
+    ``menu`` is one star's (leaves of shape ``(M,)``). The entries of one mode are
+    evaluated together; the cell axis is padded with impossible cells to the widest
+    model. Neither depends on the weights, so they are computed once per star and read
+    at every node of the recursion.
     """
     order, cells, detect = [], [], []
-    for slot, model in enumerate(models):
-        entries = [m for m, s in enumerate(menu.model) if s == slot]
+    for mode, model in enumerate(mode_models):
+        entries = [m for m, e in enumerate(menu.mode) if e == mode]
         if not entries:
             continue
-        actions = jax.tree.map(lambda x, e=entries: x[jnp.asarray(e)], menu.actions)
+        exposure_d = menu.exposure_d[jnp.asarray(entries)]
+        actions = Action(
+            jnp.full(exposure_d.shape, star_index),
+            jnp.full(exposure_d.shape, mode),
+            exposure_d,
+        )
         order += entries
         cells.append(jax.vmap(model.cells, in_axes=(None, 0))(b.atoms, actions))
         marks = b.pool.marks
@@ -361,7 +370,7 @@ def frontier(
     claim: Claim,
     star,
     utility: AbstractUtility,
-    models: tuple[AbstractObservationModel, ...],
+    mode_models: tuple[AbstractObservationModel, ...],
     menu: Menu,
     lam: Float[Array, ""],
     depth: int,
@@ -375,7 +384,8 @@ def frontier(
     over the forecast's (row 0) distribution of each outcome cell; an outcome updates
     every role by ``update_by_cell`` and thins the pool by the entry's detection
     probability of each mark (``thin``; zero for a model that does not search). The
-    first entry's cost is not netted: it stays in the frontier for the dual. Under
+    first entry's cost (its exposure) is not netted: it stays in the frontier for the
+    dual. Under
     ``LogScore`` at depth 1 the reward is the verdict gain
     ``E_F[ln p_gamma(N | Y) - ln p_gamma(N)]``; ``lam`` enters only at ``depth > 1``.
 
@@ -397,15 +407,17 @@ def frontier(
 
     Every leaf of ``belief``, ``star``, ``menu`` and the array leaves of ``utility``
     (``Count``'s time-zero pool) carry a leading star axis ``S``; ``claim`` and
-    ``models`` are shared by the stars. Menu, cell counts and ``depth`` are static, so
-    another star or world of the same shapes reuses the compiled program.
+    ``mode_models`` are shared by the stars. The menu's modes, the cell counts and
+    ``depth`` are static, so another star or world of the same shapes reuses the
+    compiled program.
 
     Args:
         belief: the beliefs, one per star.
         claim: an unconditional claim.
         star: the stars, a pytree whose leaves have a leading axis ``S``.
         utility: the utility.
-        models: the model table, static; ``menu.model`` indexes it.
+        mode_models: the observation model of each mode (``mode_models`` of the
+            design), static; ``menu.mode`` indexes it.
         menu: the menu of each star.
         lam: the price of the follow-up entries' time, reward per day, a scalar shared
             by the stars, ``lam >= 0``.
@@ -416,18 +428,20 @@ def frontier(
         The frontier: rewards (zero at masked entries), the menu's costs and mask.
 
     Raises:
-        ValueError: if ``depth < 1`` or a menu entry names a slot not in ``models``.
+        ValueError: if ``depth < 1`` or a menu entry names a mode not in
+            ``mode_models``.
     """
     if depth < 1:
         raise ValueError(f"depth is at least 1, not {depth}")
-    if any(not 0 <= s < len(models) for s in menu.model):
-        raise ValueError("a menu entry's model slot is not in the model table")
+    if any(not 0 <= m < len(mode_models) for m in menu.mode):
+        raise ValueError("a menu entry's mode is not in the mode table")
 
-    def one_star(b, star, utility, menu):
-        branches = _branches(b, models, menu)
-        charge = jnp.where(menu.mask, lam * menu.cost_d, jnp.inf)
+    def one_star(b, star, utility, menu, star_index):
+        branches = _branches(b, mode_models, menu, star_index)
+        charge = jnp.where(menu.mask, lam * menu.exposure_d, jnp.inf)
         later = _expected_after(b, claim, star, utility, branches, charge, depth - 1)
         return jnp.where(menu.mask, later - utility(b, claim, star), 0.0)
 
-    reward = eqx.filter_vmap(one_star)(belief, star, utility, menu)
-    return Frontier(reward, menu.cost_d, menu.mask)
+    star_index = jnp.arange(menu.mask.shape[0])
+    reward = eqx.filter_vmap(one_star)(belief, star, utility, menu, star_index)
+    return Frontier(reward, menu.exposure_d, menu.mask)
