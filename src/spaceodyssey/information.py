@@ -180,7 +180,10 @@ def outcome_cells(
 
     A model whose cells read the gas block (``gas_cells`` is not None) is read at each
     node of each factor (a point block is one node), the cells coded mixed radix as
-    ``gas_cells`` states; any other model through ``cells``.
+    ``gas_cells`` states; any other model through ``cells``. On a belief on nodes such
+    a model is handed the gas block as NaN, since ``x_mean`` there is the block the
+    nodes were built from and not the belief: a model that reads the gas through
+    ``cells`` alone is refused with an error, never valued at that stale mean.
 
     Args:
         b: the belief; its gas block a point state or on nodes
@@ -190,6 +193,10 @@ def outcome_cells(
 
     Returns:
         The ``OutcomeCells``.
+
+    Raises:
+        EquinoxRuntimeError: if a model without ``gas_cells`` reads the gas block of
+            a belief on nodes (its cells come out NaN).
     """
     atoms = b.atoms
     point = Atoms(
@@ -198,7 +205,16 @@ def outcome_cells(
     node_x = atoms.x_mean[..., None] if atoms.nodes is None else atoms.nodes.x
     n_draw, n_planet, n_gas, n_node = node_x.shape
     if jax.eval_shape(model.gas_cells, point, action) is None:
-        draw = model.cells(point, action)
+        if atoms.nodes is None:
+            draw = model.cells(point, action)
+        else:  # the block is on the nodes: x_mean is stale, so no model may read it
+            unread = jnp.full_like(atoms.x_mean, jnp.nan)
+            draw = model.cells(eqx.tree_at(lambda a: a.x_mean, point, unread), action)
+            draw = eqx.error_if(
+                draw,
+                jnp.any(jnp.isnan(draw)),
+                "a model without gas_cells read the gas block of a belief on nodes",
+            )
         node = jnp.ones((n_draw, n_planet, n_gas, n_node, 1), draw.dtype)
         codes = jnp.zeros((draw.shape[-1], n_planet, n_gas), int)
         return OutcomeCells(draw, node, codes)

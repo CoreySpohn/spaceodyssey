@@ -155,7 +155,8 @@ class Atoms[StateT](eqx.Module):
     nodes instead (``nodes``, set by ``quadrature_draws``); every reader of the gas
     block then reads the nodes (``GasAbove`` does; a model's cells are read at each
     node through ``gas_cells``), and ``x_mean`` and ``x_var`` keep the block the nodes
-    were built from.
+    were built from: stale once ``nodes`` is set, never to be read as the belief's
+    block (``outcome_cells`` hands a model without ``gas_cells`` a NaN block there).
 
     ``K`` is the number of planets one draw can hold; a draw with fewer is padded, and
     ``exists`` marks its real slots. A slot that does not exist is claim-false whatever
@@ -555,7 +556,9 @@ class AbstractObservationModel(eqx.Module):
         their joint: the probability of cell ``y`` is the product over the factors
         (planets, then gases, flattened) of each factor's probability of its bin, the
         cell index mixed radix in the bins, the first factor most significant. The
-        default, None, is a model whose cells read no gas.
+        default, None, is a model whose cells read no gas; on a belief on quadrature
+        nodes its ``cells`` are read with a NaN gas block, and a model that reads the
+        gas anyway is refused (``outcome_cells``).
 
         Args:
             atoms: the draws, point gas blocks.

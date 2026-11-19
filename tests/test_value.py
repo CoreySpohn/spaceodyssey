@@ -584,6 +584,45 @@ def test_the_quadrature_converges_in_its_nodes_at_high_snr(toy):
     assert abs(errors[1]) < 6e-3 and abs(errors[2]) < 2e-4
 
 
+class MeanReader(GaussianGasModel):
+    """A gas reading without `gas_cells`: its `cells` read the block's mean."""
+
+    def gas_cells(self, atoms, action):
+        return None
+
+    def cells(self, atoms, action):
+        above = norm.cdf(atoms.x_mean[:, 0, 0] / 0.5)
+        return jnp.stack([1.0 - above, above], axis=-1)
+
+
+def test_a_model_without_gas_cells_cannot_read_a_belief_on_nodes(toy):
+    """On a belief on quadrature nodes, a model that reads the gas block through
+    `cells` alone is refused, never valued at the block the nodes were built from.
+
+    One draw, water N(0.3, 1) put on 4 nodes split at the floor; a reading whose
+    `cells` read `x_mean` (no `gas_cells`) raises there, under `jit`; on a point
+    block (variance 0) the same model is read as it is, and a search, which reads no
+    gas, is read on the nodes as on the points.
+
+    Fails if a model without `gas_cells` is handed the stale mean of a node belief
+    (it would be valued at that point, 46 to 187 percent off), or if the refusal also
+    stops a model that reads no gas.
+    """
+    claim, action = Claim((GasAbove(0, 0.0),)), Action(0, 0, 1.0)
+    reader = MeanReader(snr_one_day=[2.0], edges=[0.0])
+    cells = eqx.filter_jit(outcome_cells)
+    point = toy.belief(toy.atoms([[1.0]], [[1.0]], [1.0], 0.3, 0.0, n_gas=1))
+    assert_allclose(cells(point, reader, action).draw[0, 1], norm.cdf(0.6), rtol=1e-12)
+    gauss = toy.belief(toy.atoms([[1.0]], [[1.0]], [1.0], 0.3, 1.0, n_gas=1))
+    on_nodes = toy.jit.quadrature_draws(gauss, claim, 4)
+    with pytest.raises(eqx.EquinoxRuntimeError, match="without gas_cells"):
+        cells(on_nodes, reader, action)
+    search = toy.Search(hit=0.6, other=0.1)
+    assert_allclose(
+        cells(on_nodes, search, action).draw, cells(point, search, action).draw
+    )
+
+
 def _product_grid(b):
     """The belief on the product grid of its factors' nodes: one point draw per draw
     and choice of a node in every factor, weighted by the draw's weight times the
