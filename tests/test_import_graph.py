@@ -14,10 +14,10 @@ SRC = Path(__file__).parent.parent / "src" / PACKAGE
 # Rank order of the core; a module may import only modules earlier in this order.
 # Extended each layer as modules arrive; a source file whose module is missing here
 # fails the test. `_version` is the generated version leaf. `_standin` holds local
-# stand-ins for the library functions rank 0 may import (photomancy's diagnostics, the
-# claim information of one action): each mirrors an external function, so it comes
-# first and imports nothing in the package, and it is deleted when its replacement
-# lands. The package `__init__` comes last: it may re-export any core module.
+# stand-ins for the library functions rank 0 may import (photomancy's diagnostics): each
+# mirrors an external function, so it comes first and imports nothing in the package,
+# and it is deleted when its replacement lands. The package `__init__` comes last: it
+# may re-export any core module.
 ORDER = [
     "_version", "_standin",
     "types", "claim", "roles", "design", "belief", "information", "value",  # rank 0

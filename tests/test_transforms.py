@@ -1,5 +1,6 @@
-"""Every public function of `belief` and `information` under `jax.jit`, `jax.vmap` over
-a leading world axis, and `jax.grad` where it is differentiable.
+"""Every public function of `belief` and `information`, and the pool functions of
+`value`, under `jax.jit`, `jax.vmap` over a leading world axis, and `jax.grad` where it
+is differentiable.
 """
 
 import equinox as eqx
@@ -14,6 +15,7 @@ from spaceodyssey.belief import (
     Belief,
     chain,
     count_pmf,
+    mark_weights,
     pool_rate,
     q,
     role_log_weights,
@@ -23,13 +25,20 @@ from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.information import (
     certify,
     chain_gain,
+    claim_information,
     clip_q,
     diagnose,
+    expected_log_score,
     information,
     log_score,
+    outcome_prob,
     refit_trigger,
+    update_by_cell,
 )
 from spaceodyssey.roles import AbstractRolePrior, Roles
+from spaceodyssey.toy import GaussianGasModel
+from spaceodyssey.types import Action
+from spaceodyssey.value import completeness, thin
 
 N_ROLES, N_DRAWS, N_PLANETS = 3, 6, 2
 
@@ -105,6 +114,12 @@ def _cases(toy):
     def reweight(roles, b):
         return role_log_weights(b.atoms, roles, b.log_like, star, b.pool)
 
+    hz_only = Claim((toy.InHz(),))
+    model = GaussianGasModel(snr_one_day=[2.0], edges=[0.0, 0.6])
+    actions = (Action(0, 0, 0, 1.0), Action(0, 0, 0, 2.5))
+    cells = [model.cells(b.atoms, a) for b, a in zip((b0, b1), actions, strict=True)]
+    detect = (jnp.array([0.3, 0.9, 0.1]), jnp.array([0.6, 0.2, 0.5]))
+
     return {
         "weights": (weights, [(b0,), (b1,)], lambda a: a[0].log_prior, uneven),
         "q": (
@@ -174,6 +189,48 @@ def _cases(toy):
             lambda c: c.q_lo + 2.0 * c.q_hi,
         ),
         "refit_trigger": (lambda d: refit_trigger(d, 0.05), [(d0,), (d1,)], None, None),
+        "mark_weights": (
+            mark_weights,
+            [(b0.pool,), (b1.pool,)],
+            lambda a: a[0].log_like,
+            uneven,
+        ),
+        "expected_log_score": (
+            expected_log_score,
+            [(pmf[0], pmf[1]), (pmf[1], pmf[0])],
+            lambda a: a[0],
+            uneven,
+        ),
+        "outcome_prob": (
+            outcome_prob,
+            [(b0, cells[0]), (b1, cells[1])],
+            lambda a: a[0].log_prior,
+            uneven,
+        ),
+        "update_by_cell": (
+            update_by_cell,
+            [(b0, cells[0][:, 1]), (b1, cells[1][:, 2])],
+            lambda a: a[1],
+            lambda b: uneven(weights(b)),
+        ),
+        "claim_information": (
+            lambda b, k, m, a: claim_information(b, claim, star, k, m, a),
+            [(b0, planets[0], model, actions[0]), (b1, planets[1], model, actions[1])],
+            lambda a: a[0].log_prior,
+            uneven,
+        ),
+        "thin": (
+            thin,
+            [(b0.pool, detect[0]), (b1.pool, detect[1])],
+            lambda a: a[1],
+            lambda p: uneven(p.log_mass) + uneven(mark_weights(p)),
+        ),
+        "completeness": (
+            lambda p, m, a: completeness(p, hz_only, star, m, a),
+            [(b0.pool, model, actions[0]), (b1.pool, model, actions[1])],
+            lambda a: a[2].exposure_d,
+            uneven,
+        ),
     }
 
 
@@ -191,6 +248,13 @@ CASES = [
     "clip_q",
     "certify",
     "refit_trigger",
+    "mark_weights",
+    "expected_log_score",
+    "outcome_prob",
+    "update_by_cell",
+    "claim_information",
+    "thin",
+    "completeness",
 ]
 
 
