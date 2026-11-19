@@ -14,7 +14,7 @@ from spaceodyssey.design import Mode
 from spaceodyssey.log import grant_rows
 from spaceodyssey.toy import GAS_FLOOR, GaussianGasModel, StepReportModel
 from spaceodyssey.types import Action, Grant, ObservationLog, WeightedCloud
-from spaceodyssey.world import SealedWorld, draw_worlds, row_key
+from spaceodyssey.world import SealedWorld, draw_worlds, row_key, run_keys
 
 KEY = jax.random.key(0)
 STARS = jnp.arange(2)  # two stars, described by their index alone
@@ -92,23 +92,29 @@ def test_draw_worlds_from_a_role_prior(toy):
 
 
 def test_world_keys_and_row_keys_are_distinct(toy):
-    """World i's truth at star s shares no key with the noise of any row.
+    """One run key gives a world key and a noise key that share nothing.
 
-    Without a tag, star s of world i and row (star i, index s) fold the same numbers
-    into the run key. The prior draws its gases as N(0, 1) of its key and the gas model
-    draws its noise as N(0, 1) of the row key, with the same shape, so a shared key
-    shows as equal numbers. For every world i and star s in {0, 1}, the truth differs
-    from the standard normal of row_key(key, i, s) and of row_key(key, s, i).
+    Without distinct tags, star s of world i and row (star i, index s) would fold the
+    same numbers into one key. The prior draws its gases as N(0, 1) of its key and the
+    gas model draws its noise as N(0, 1) of the row key, with the same shape, so a
+    shared key shows as equal numbers. For every world i and star s in {0, 1}, the
+    truth `draw_worlds` draws from the run key differs from the standard normal of
+    row_key(noise, i, s) and of row_key(noise, s, i), with the noise key of the same
+    run key; and the two keys of `run_keys` differ.
 
-    Fails if world keys and row keys are folded without distinct tags, so world i is
-    correlated with star i's row noise.
+    Fails if `run_keys` folds no tag or one tag twice, so world i is correlated with
+    star i's row noise.
     """
+    world_key, noise = run_keys(KEY)
+    assert not np.array_equal(
+        jax.random.key_data(world_key), jax.random.key_data(noise)
+    )
     truth = draw_worlds(KEY, toy.GasPrior("toy", n_gas=2), STARS, 2).unseal().x_mean
     for i in range(2):
         for s in range(2):
             for star, index in ((i, s), (s, i)):
-                noise = jax.random.normal(row_key(KEY, star, index), (1, 1, 2))
-                assert not np.allclose(truth[i, s], noise)
+                noise_draw = jax.random.normal(row_key(noise, star, index), (1, 1, 2))
+                assert not np.allclose(truth[i, s], noise_draw)
 
 
 def test_observe_reads_the_right_star_and_unseal_gives_the_truth(toy):

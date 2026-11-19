@@ -3,6 +3,10 @@
 A world holds one point state per star. Rows come out of it only through ``observe``
 (an action under a model) and ``reveal`` (a grant); ``unseal`` hands the truth to the
 scorer. The noise of a row is keyed by the row's identity, never by call order.
+
+One run key serves a run: ``run_keys`` splits it into a world key, from which
+``draw_worlds`` draws the truth, and a noise key, from which every row's noise is
+folded. The two are tagged apart, so no truth shares a key with any row.
 """
 
 import equinox as eqx
@@ -20,33 +24,50 @@ from spaceodyssey.types import (
     WeightedCloud,
 )
 
-_ROW_KEY_TAG = 0
-"""Tag folded into the run key before a row's identity."""
+_NOISE_KEY_TAG = 0
+"""Tag folded into the run key to give the noise key."""
 
 _WORLD_KEY_TAG = 1
-"""Tag folded into the run key before a world's identity, so world ``i`` never shares a
+"""Tag folded into the run key to give the world key, so world ``i`` never shares a
 key with the rows of star ``i``."""
+
+
+def run_keys(key: PRNGKeyArray) -> tuple[PRNGKeyArray, PRNGKeyArray]:
+    """Split a run key into its world key and its noise key.
+
+    ``draw_worlds`` takes the run key and draws from the world key; ``execute`` takes
+    the same run key and draws every row's noise from the noise key. Neither depends on
+    the other or on which runs first.
+
+    Args:
+        key: the run key.
+
+    Returns:
+        The world key and the noise key.
+    """
+    return (
+        jax.random.fold_in(key, _WORLD_KEY_TAG),
+        jax.random.fold_in(key, _NOISE_KEY_TAG),
+    )
 
 
 def row_key(
     key: PRNGKeyArray, star: Int[ArrayLike, ""], index: Int[ArrayLike, ""]
 ) -> PRNGKeyArray:
-    """The key of one row, folded from the run key, the star and the row's index.
+    """The key of one row, folded from the noise key, the star and the row's index.
 
     The noise of a row depends on these three only, so the same row built in any order
-    draws the same noise. A row tag is folded in first, so no row shares a key with a
-    world drawn from the same run key.
+    draws the same noise.
 
     Args:
-        key: the run key.
+        key: the run's noise key (``run_keys``).
         star: star index of the row.
         index: index of the row in the log.
 
     Returns:
         The row's key.
     """
-    tagged = jax.random.fold_in(key, _ROW_KEY_TAG)
-    return jax.random.fold_in(jax.random.fold_in(tagged, star), index)
+    return jax.random.fold_in(jax.random.fold_in(key, star), index)
 
 
 class SealedWorld(eqx.Module):
@@ -127,7 +148,7 @@ class SealedWorld(eqx.Module):
         log rows from the payloads.
 
         Args:
-            key: the run's noise key.
+            key: the run's noise key (``run_keys``).
             grant: the grant, its actions concrete.
             models: the design's model table, static.
             modes: the design's mode table, static; a granted action's mode indexes it.
@@ -186,9 +207,9 @@ def draw_worlds(
 ) -> SealedWorld:
     """Draw worlds from the truth's role prior, with a leading world axis.
 
-    Star ``s`` of world ``i`` is ``prior.sample`` with the key folded from the run key,
-    a world tag, ``i`` and ``s``, so world ``i`` does not depend on how many worlds are
-    drawn and shares no key with any row.
+    Star ``s`` of world ``i`` is ``prior.sample`` with the key folded from the run's
+    world key (``run_keys``), ``i`` and ``s``, so world ``i`` does not depend on how
+    many worlds are drawn and shares no key with any row.
 
     Args:
         key: the run key.
@@ -200,11 +221,11 @@ def draw_worlds(
         A stack of ``n_worlds`` sealed worlds over ``S`` stars.
     """
     n_star = jax.tree.leaves(stars)[0].shape[0]
-    tagged = jax.random.fold_in(key, _WORLD_KEY_TAG)
+    world_key, _ = run_keys(key)
 
     def world(i):
         keys = jax.vmap(jax.random.fold_in, in_axes=(None, 0))(
-            jax.random.fold_in(tagged, i), jnp.arange(n_star)
+            jax.random.fold_in(world_key, i), jnp.arange(n_star)
         )
         return jax.vmap(prior.sample)(keys, stars)
 
