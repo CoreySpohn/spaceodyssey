@@ -15,7 +15,7 @@ from jax.test_util import check_grads
 from numpy.testing import assert_allclose
 
 from spaceodyssey._standin.diagnostics import mc_se
-from spaceodyssey.belief import q, role_log_weights, weights
+from spaceodyssey.belief import q, role_belief, weights
 from spaceodyssey.claim import AbstractConjunct, Claim
 from spaceodyssey.information import diagnose
 from spaceodyssey.roles import AbstractRolePrior, Roles
@@ -108,7 +108,7 @@ def _roles(chart="x", b_mean=0.5, upper=jnp.inf, jacobian=True):
 
 def _belief(toy, atoms, roles):
     n_draws = atoms.cloud.log_weights.shape[0]
-    return role_log_weights(
+    return role_belief(
         atoms, roles, jnp.zeros((2, n_draws)), STAR, toy.empty_pool(2, n_gas=0)
     )
 
@@ -254,9 +254,7 @@ def test_members_by_ratio(toy):
     )
     member_w = jnp.array([0.6, 1.0, 1.6])
     roles = Roles(LookAlikeRatio("x", 1.0), LookAlikeRatio("x", member_w))
-    b = role_log_weights(
-        atoms, roles, jnp.zeros((4, 2)), STAR, toy.empty_pool(4, n_gas=0)
-    )
+    b = role_belief(atoms, roles, jnp.zeros((4, 2)), STAR, toy.empty_pool(4, n_gas=0))
     d = diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(4))
     w = jnp.concatenate([jnp.ones(1), member_w])
     look = 0.29 * w

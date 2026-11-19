@@ -95,16 +95,16 @@ def _role_log_weights(atoms: Atoms, log_prior, log_like) -> Float[Array, "R A"]:
     return jnp.where(dead, -jnp.inf, total)
 
 
-def role_log_weights(
+def role_belief(
     atoms: Atoms,
     roles: Roles,
     log_like: Float[Array, "R A"],
     star,
     pool: Pool,
 ) -> Belief:
-    """Fill each role's prior over the draws and return the belief.
+    """The belief of a role set over one refit's draws, each role's prior filled in.
 
-    The weight of role ``r`` is
+    The weight of role ``r`` (read with ``log_weights`` of the belief) is
     ``log w_r = log_weights + log_prior[r] - log_ref_density + log_like[r]``: the refit
     weight, the role prior, minus the refit target ``p0``, plus the role's likelihood.
 
@@ -602,7 +602,7 @@ def replay_belief(
     applied rows by the chain rule. That needs every model to meet the condition on
     ``stats`` stated in ``AbstractObservationModel``. The likelihood is the same for
     every role (observation models are equal across roles), so ``log_like`` is one row
-    broadcast to ``(R, A)``. The role weights are those of ``role_log_weights``, with
+    broadcast to ``(R, A)``. The role weights are those of ``role_belief``, with
     each role's prior taken on the refit's draws.
 
     The belief's draws are ``Atoms``, not a ``Refit``: their gas block carries the

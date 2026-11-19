@@ -23,7 +23,7 @@ from spaceodyssey.belief import (
     q,
     replay,
     replay_belief,
-    role_log_weights,
+    role_belief,
     weights,
 )
 from spaceodyssey.claim import Claim, GasAbove
@@ -122,7 +122,7 @@ def _cases(toy):
     roles1 = Roles(Tilt("toy", 0.2), Tilt("toy", jnp.array([0.1, 0.7])))
 
     def reweight(roles, b):
-        return role_log_weights(b.atoms, roles, b.log_like, star, b.pool)
+        return role_belief(b.atoms, roles, b.log_like, star, b.pool)
 
     hz_only = Claim((toy.InHz(),))
     model = GaussianGasModel(snr_one_day=[2.0], edges=[0.0, 0.6])
@@ -251,7 +251,7 @@ def _cases(toy):
             lambda a: a[0].log_like,
             uneven,
         ),
-        "role_log_weights": (
+        "role_belief": (
             reweight,
             [(roles, b0), (roles1, b1)],
             lambda a: a[0].verdict.shift,
@@ -349,7 +349,7 @@ CASES = [
     "chain",
     "count_pmf",
     "pool_rate",
-    "role_log_weights",
+    "role_belief",
     "log_score",
     "information",
     "chain_gain",
@@ -389,7 +389,7 @@ def test_public_functions_jit_vmap_and_grad(cases, name):
     derivative matches finite differences forward and reverse.
 
     The planet index is traced (and differs between the worlds), the count is traced,
-    and the stacked verdict prior of `role_log_weights` is mapped inside the vmap.
+    and the stacked verdict prior of `role_belief` is mapped inside the vmap.
 
     Fails if a public function branches in Python on a traced value, needs a concrete
     planet index or count, reads a shape from the wrong axis so that it cannot batch
