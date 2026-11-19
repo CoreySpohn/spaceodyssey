@@ -136,6 +136,22 @@ def weights(b: Belief) -> Float[Array, "R A"]:
     return _role_weights(b.atoms, b.log_prior, b.log_like)
 
 
+def mark_weights(pool: Pool) -> Float[Array, "R Am"]:
+    """Normalized weights of the pool's marks, each role with its own.
+
+    A mark's log weight under role ``r`` is formed like a draw's, ``log_weight +
+    log_prior[r] - log_ref_density + log_like[r]``, and each row is normalized over the
+    marks.
+
+    Args:
+        pool: the undetected planets.
+
+    Returns:
+        Weights of shape ``(R, Am)``.
+    """
+    return _role_weights(pool.marks, pool.log_prior, pool.log_like)
+
+
 # Full float32 precision for every product of weights: on a GPU the default precision
 # of a float32 dot or convolution can drop to TF32, about three digits.
 _EXACT = lax.Precision.HIGHEST
@@ -274,8 +290,8 @@ def pool_rate(pool: Pool, claim: Claim, star) -> Float[Array, " R"]:
     if claim.given != 0:
         raise ValueError("pool_rate needs an unconditional claim (claim.given == 0)")
     p_mark = jnp.prod(_conjunct_probs(pool.marks, claim, star), axis=0)[:, 0]  # (Am,)
-    mark_weights = _role_weights(pool.marks, pool.log_prior, pool.log_like)  # (R, Am)
-    return jnp.exp(pool.log_mass) * jnp.matmul(mark_weights, p_mark, precision=_EXACT)
+    weighted = jnp.matmul(mark_weights(pool), p_mark, precision=_EXACT)  # (R,)
+    return jnp.exp(pool.log_mass) * weighted
 
 
 def count_pmf(b: Belief, claim: Claim, star, n_max: int) -> Float[Array, "R N"]:

@@ -1,8 +1,10 @@
 """Information and certificates.
 
-Information is the change of a log score on the claim-true count between beliefs. A
-certificate states that a claim holds (or fails) under every verdict member, with its
-Monte Carlo and tail diagnostics.
+Information is the change of a log score on the claim-true count between beliefs. The
+information an action is expected to bring is read off its outcome cells: each cell
+updates the belief, and the verdict's log score after it is averaged over the cells the
+forecast expects. A certificate states that a claim holds (or fails) under every verdict
+member, with its Monte Carlo and tail diagnostics.
 """
 
 import equinox as eqx
@@ -11,8 +13,16 @@ import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float, Int
 
 from spaceodyssey._standin.diagnostics import KHAT_MAX, kish_ess, mc_se, pareto_khat
-from spaceodyssey.belief import Belief, _draw_joint, _role_log_weights, chain, q
+from spaceodyssey.belief import (
+    Belief,
+    _draw_joint,
+    _role_log_weights,
+    chain,
+    q,
+    weights,
+)
 from spaceodyssey.claim import Claim
+from spaceodyssey.types import AbstractObservationModel, Action
 
 # Certificate status codes.
 POSITIVE = 0
@@ -78,6 +88,131 @@ def chain_gain(
     after = chain(b_after, claim, star, planet)[role]
     before = chain(b_before, claim, star, planet)[role]
     return jnp.log(after) - jnp.log(before)
+
+
+def _log(x):
+    """``ln x``, ``-inf`` at zero, with a finite derivative there."""
+    positive = x > 0
+    return jnp.where(positive, jnp.log(jnp.where(positive, x, 1.0)), -jnp.inf)
+
+
+def expected_log_score(
+    pmf: Float[Array, " N"], forecast: Float[Array, " N"]
+) -> Float[Array, ""]:
+    """The log score ``pmf`` earns, expected over draws from ``forecast``.
+
+    ``sum_n forecast(n) ln pmf(n)``, the negative cross entropy of ``forecast``
+    against ``pmf`` (Cover and Thomas, Elements of Information Theory, ch. 2). An
+    outcome ``forecast`` gives no mass adds nothing; an outcome it expects and ``pmf``
+    rules out gives ``-inf``.
+
+    Args:
+        pmf: the distribution that is scored.
+        forecast: the distribution the outcome is drawn from.
+
+    Returns:
+        The expected log score in nats.
+    """
+    expected = forecast > 0
+    return jnp.sum(jnp.where(expected, forecast * jnp.where(expected, _log(pmf), 0), 0))
+
+
+def outcome_prob(b: Belief, cells: Float[Array, "A Y"]) -> Float[Array, "R Y"]:
+    """Probability of each outcome cell under each role: the cells mixed by its weights.
+
+    Args:
+        b: the belief.
+        cells: probability of each cell under each draw, from a model's ``cells``.
+
+    Returns:
+        Probabilities of shape ``(R, Y)``; each row sums to one.
+    """
+    return jnp.matmul(weights(b), cells, precision=jax.lax.Precision.HIGHEST)
+
+
+def update_by_cell(b: Belief, cell_prob: Float[Array, " A"]) -> Belief:
+    """The belief after an outcome falls in one cell, without a refit.
+
+    Each draw's weight is multiplied by its probability of the cell. That probability
+    is the same model for every role (laws are equal across roles), so it joins every
+    row of ``log_like``. No row is needed and the pool is left as it is.
+
+    This is the exact Bayes update of the weights. The draws themselves are not
+    updated, so the update is exact for what a claim reads only where that is
+    independent of the cell given the draw: a point gas block (``x_var = 0``), or a
+    cell that reads nothing the claim reads. A Gaussian gas block that the cell reads
+    keeps its prior spread.
+
+    Args:
+        b: the belief.
+        cell_prob: probability of the cell under each draw, shape ``(A,)``.
+
+    Returns:
+        The updated belief. A cell no draw of a role can give leaves that role's
+        weights NaN (see ``weights``).
+    """
+    return eqx.tree_at(lambda x: x.log_like, b, b.log_like + _log(cell_prob))
+
+
+def _bit(q_claim: Float[Array, "..."]) -> Float[Array, "... 2"]:
+    """The distribution of a claim bit, ``(1 - q, q)``."""
+    return jnp.stack([1.0 - q_claim, q_claim], axis=-1)
+
+
+def claim_information(
+    b: Belief,
+    claim: Claim,
+    star,
+    planet: Int[Array, ""],
+    model: AbstractObservationModel,
+    action: Action,
+) -> Float[Array, " R"]:
+    """Expected gain of each role's log score on one planet's claim bit from an action.
+
+    Row ``r`` is ``E_F[ln p_r(Z | Y) - ln p_r(Z)]``: ``Z`` the claim bit, ``Y`` the
+    action's outcome cell, and the expectation over the forecast's joint distribution
+    of the two (row 0). Each cell updates the weights by ``update_by_cell``. Row 0 is
+    the forecast's own expected information, the mutual information of ``Z`` and ``Y``
+    under the forecast (Lindley 1956); a verdict row is the verdict's gain as the
+    forecast expects it, which equals that mutual information only when the two agree,
+    and can be negative when they do not. A cell the forecast gives no mass adds
+    nothing.
+
+    The gain is on the cells the model reports. Merging cells can raise a verdict
+    row, so no bound on the gain of a finer outcome follows from coarser cells.
+
+    Args:
+        b: the belief.
+        claim: an unconditional claim (``claim.given == 0``).
+        star: a pytree of scalar leaves describing the star.
+        planet: index of the planet along the ``K`` axis.
+        model: the observation model of the action.
+        action: the action.
+
+    Returns:
+        The expected gain per role in nats, shape ``(R,)``.
+
+    Raises:
+        ValueError: if the claim is conditional; its bit is defined only where the
+            condition holds.
+    """
+    if claim.given != 0:
+        raise ValueError("claim_information needs an unconditional claim")
+    cells = model.cells(b.atoms, action)  # (A, Y)
+    p_cell = outcome_prob(b, cells)[0]  # (Y,), the forecast's
+    seen = p_cell > 0
+    # A cell the forecast cannot give is replaced by a harmless one: its gain is
+    # dropped below, and its NaN weights would otherwise reach the derivative.
+    safe = jnp.where(seen, cells, 1.0)
+    q_after = jax.vmap(
+        lambda c: q(update_by_cell(b, c), claim, star, planet), in_axes=1
+    )(safe)  # (Y, R)
+    q_before = q(b, claim, star, planet)  # (R,)
+    score = jax.vmap(expected_log_score, in_axes=(0, None))
+    after = jax.vmap(lambda qy: score(_bit(qy), _bit(qy[0])))(q_after)  # (Y, R)
+    before = score(_bit(q_before), _bit(q_before[0]))
+    expected_after = jnp.sum(jnp.where(seen[:, None], p_cell[:, None] * after, 0), 0)
+    return expected_after - before
 
 
 class Diagnostics(eqx.Module):
