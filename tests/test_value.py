@@ -515,7 +515,7 @@ def test_cells_reward_matches_nested_monte_carlo(toy):
     draw = rng.choice(6, size=n, p=w_forecast)
     z = rng.uniform(size=n) < h[draw]
     outer = jax.random.split(jax.random.key(0), n)
-    cells = np.asarray(cell_of(readings(atoms, action, outer)))[np.arange(n), draw]
+    cells = np.asarray(cell_of(readings(outer, atoms, action)))[np.arange(n), draw]
     p_after = np.where(z, post_g[cells], 1.0 - post_g[cells])
     p_before = np.where(z, prior_g, 1.0 - prior_g)
     score = np.log(p_after) - np.log(p_before)
