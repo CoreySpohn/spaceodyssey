@@ -19,7 +19,7 @@ from spaceodyssey.belief import q, role_log_weights, weights
 from spaceodyssey.claim import AbstractConjunct, Claim
 from spaceodyssey.information import diagnose
 from spaceodyssey.roles import AbstractRolePrior, Roles
-from spaceodyssey.types import Atoms, Pool, WeightedCloud
+from spaceodyssey.types import Atoms, WeightedCloud
 
 STAR = ()
 PLANET = jnp.asarray(0)
@@ -87,14 +87,6 @@ def _atoms(x, log_weights, log_ref, chart):
     return Atoms(cloud, empty, empty, jnp.ones((n, 1), bool))
 
 
-def _empty_pool(n_roles):
-    """A pool with no expected planets."""
-    marks = _atoms(jnp.zeros(1), jnp.zeros(1), jnp.zeros(1), "x")
-    flat = jnp.zeros((n_roles, 1))
-    no_mass = jnp.full(n_roles, -jnp.inf)
-    return Pool(marks, flat, flat, no_mass)
-
-
 def _cloud(key, n, chart="x"):
     """Draws from g = N(0, 1.5^2), weighted to p0 = N(0, 1) on `chart`.
 
@@ -114,9 +106,11 @@ def _roles(chart="x", b_mean=0.5, upper=jnp.inf, jacobian=True):
     return Roles(Gaussian(chart, 0.0), member)
 
 
-def _belief(atoms, roles):
+def _belief(toy, atoms, roles):
     n_draws = atoms.cloud.log_weights.shape[0]
-    return role_log_weights(atoms, roles, jnp.zeros((2, n_draws)), STAR, _empty_pool(2))
+    return role_log_weights(
+        atoms, roles, jnp.zeros((2, n_draws)), STAR, toy.empty_pool(2, n_gas=0)
+    )
 
 
 CLAIM = Claim((Above(),))
@@ -129,7 +123,7 @@ def clouds():
     return {m: _cloud(key, N_DRAWS, m) for m in ("x", "y")}
 
 
-def test_reweighting_matches_the_truth(clouds):
+def test_reweighting_matches_the_truth(clouds, toy):
     """Under role B = N(0.5, 1) the estimate of P(x > 1) is 1 - Phi(0.5) = 0.3085 and
     the weighted mean of x is 0.5, each within 3 standard errors. Role A = p0 = N(0, 1)
     gives 1 - Phi(1) = 0.1587. The refit weight log p0 - log g is not constant, so it
@@ -139,7 +133,7 @@ def test_reweighting_matches_the_truth(clouds):
     or if `log_ref_density` (log p0) enters with the wrong sign: A and p0 are not
     constant on the support, so each error moves both roles' estimates.
     """
-    b = _belief(clouds["x"], _roles())
+    b = _belief(toy, clouds["x"], _roles())
     d = diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(2))
     truth = jnp.array([1.0 - ndtr(1.0), Q_B])
     assert jnp.all(jnp.abs(d.q - truth) < 3.0 * d.mc_se), (d.q, truth, d.mc_se)
@@ -151,7 +145,7 @@ def test_reweighting_matches_the_truth(clouds):
     assert jnp.abs(mean_b - 0.5) < 3.0 * se_mean, (mean_b, se_mean)
 
 
-def test_two_charts_and_a_one_sided_jacobian(clouds):
+def test_two_charts_and_a_one_sided_jacobian(clouds, toy):
     """On y = exp(x) the reference density and the prior both carry -x, so the weights
     and q are those of the x chart. Dropping the Jacobian from the prior only tilts
     B = N(0.5, 1) by exp(x) to N(1.5, 1): the estimate becomes 1 - Phi(-0.5) = 0.6915,
@@ -162,20 +156,20 @@ def test_two_charts_and_a_one_sided_jacobian(clouds):
     the test could not see a one-sided Jacobian, if a chart mismatch is accepted, or
     if an undeclared chart or reference density is read as a declared one.
     """
-    on_x = q(_belief(clouds["x"], _roles("x")), CLAIM, STAR, PLANET)
-    on_y = q(_belief(clouds["y"], _roles("y")), CLAIM, STAR, PLANET)
+    on_x = q(_belief(toy, clouds["x"], _roles("x")), CLAIM, STAR, PLANET)
+    on_y = q(_belief(toy, clouds["y"], _roles("y")), CLAIM, STAR, PLANET)
     assert_allclose(on_y, on_x, rtol=1e-10)
 
-    tilted = _belief(clouds["y"], _roles("y", jacobian=False))
+    tilted = _belief(toy, clouds["y"], _roles("y", jacobian=False))
     d = diagnose(tilted, CLAIM, STAR, PLANET, jnp.zeros(2))
     assert jnp.abs(d.q[1] - (1.0 - ndtr(-0.5))) < 3.0 * d.mc_se[1]
     assert jnp.abs(d.q[1] - Q_B) > 20.0 * d.mc_se[1]
 
     with pytest.raises(ValueError, match="chart"):
-        _belief(clouds["y"], _roles("x"))
+        _belief(toy, clouds["y"], _roles("x"))
     mixed = Roles(Gaussian("y", 0.0), Gaussian("x", jnp.zeros(1), jnp.ones(1)))
     with pytest.raises(ValueError, match="verdict"):
-        _belief(clouds["y"], mixed)
+        _belief(toy, clouds["y"], mixed)
 
     cloud = clouds["x"].cloud
     no_chart = WeightedCloud(cloud.samples, cloud.log_weights, jnp.nan)
@@ -183,12 +177,12 @@ def test_two_charts_and_a_one_sided_jacobian(clouds):
     for undeclared in (no_chart, no_ref):
         atoms = eqx.tree_at(lambda a: a.cloud, clouds["x"], undeclared)
         with pytest.raises(ValueError, match="declared"):
-            _belief(atoms, _roles("x"))
+            _belief(toy, atoms, _roles("x"))
     with pytest.raises(ValueError, match="declares its chart"):
         WeightedCloud(cloud.samples, cloud.log_weights, jnp.nan, cloud.log_ref_density)
 
 
-def test_a_hard_edged_prior_keeps_weights_and_gradients_finite(clouds):
+def test_a_hard_edged_prior_keeps_weights_and_gradients_finite(clouds, toy):
     """B = N(0.5, 1) truncated to x < 2 has zero density on part of the cloud. Its
     q is the truncated truth (Phi(1.5) - Phi(0.5)) / Phi(1.5) = 0.2590 within 3 se, the
     weights are finite and zero beyond the edge, and the gradient of q in B's mean
@@ -209,9 +203,11 @@ def test_a_hard_edged_prior_keeps_weights_and_gradients_finite(clouds):
     )
 
     def q_b(mean):
-        return q(_belief(dead, _roles(b_mean=mean, upper=2.0)), CLAIM, STAR, PLANET)[1]
+        return q(
+            _belief(toy, dead, _roles(b_mean=mean, upper=2.0)), CLAIM, STAR, PLANET
+        )[1]
 
-    b = _belief(dead, _roles(upper=2.0))
+    b = _belief(toy, dead, _roles(upper=2.0))
     w = weights(b)
     x = atoms.cloud.samples["x"][:, 0]
     assert jnp.all(jnp.isfinite(w))
@@ -225,7 +221,7 @@ def test_a_hard_edged_prior_keeps_weights_and_gradients_finite(clouds):
     check_grads(q_b, (0.5,), order=1, modes=["fwd", "rev"])
 
 
-def test_mc_se_is_calibrated():
+def test_mc_se_is_calibrated(toy):
     """Over 200 replicates of the test-1 cloud with 2,000 draws, the spread of q_B
     matches the mean reported mc_se within 15 percent. The Monte Carlo error of the
     spread is 1 / sqrt(2 * 200) = 5 percent, so 15 percent is 3 sigma.
@@ -236,7 +232,7 @@ def test_mc_se_is_calibrated():
 
     @jax.jit
     def one(key):
-        b = _belief(_cloud(key, 2000), _roles())
+        b = _belief(toy, _cloud(key, 2000), _roles())
         d = diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(2))
         return d.q[1], d.mc_se[1]
 
@@ -244,7 +240,7 @@ def test_mc_se_is_calibrated():
     assert_allclose(jnp.std(q_hat, ddof=1), jnp.mean(se), rtol=0.15)
 
 
-def test_members_by_ratio():
+def test_members_by_ratio(toy):
     """Two draws of base weight 0.71 (Earth-box) and 0.29 (look-alike); member w
     multiplies the look-alike weight. psi(w) = 0.71 / (0.71 + 0.29 w): 0.8032 at
     w = 0.6, 0.7100 at w = 1 and 0.6048 at w = 1.6. The Kish size of each member is
@@ -258,7 +254,9 @@ def test_members_by_ratio():
     )
     member_w = jnp.array([0.6, 1.0, 1.6])
     roles = Roles(LookAlikeRatio("x", 1.0), LookAlikeRatio("x", member_w))
-    b = role_log_weights(atoms, roles, jnp.zeros((4, 2)), STAR, _empty_pool(4))
+    b = role_log_weights(
+        atoms, roles, jnp.zeros((4, 2)), STAR, toy.empty_pool(4, n_gas=0)
+    )
     d = diagnose(b, CLAIM, STAR, PLANET, jnp.zeros(4))
     w = jnp.concatenate([jnp.ones(1), member_w])
     look = 0.29 * w

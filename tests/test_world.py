@@ -12,34 +12,12 @@ from spaceodyssey.belief import count_pmf, q
 from spaceodyssey.claim import Claim, GasAbove
 from spaceodyssey.design import Mode
 from spaceodyssey.log import grant_rows
-from spaceodyssey.roles import AbstractRolePrior
 from spaceodyssey.toy import GAS_FLOOR, GaussianGasModel, StepReportModel
-from spaceodyssey.types import Action, Atoms, Grant, ObservationLog, WeightedCloud
+from spaceodyssey.types import Action, Grant, ObservationLog
 from spaceodyssey.world import SealedWorld, draw_worlds, row_key
 
 KEY = jax.random.key(0)
 STARS = jnp.arange(2)  # two stars, described by their index alone
-
-
-class GasPrior(AbstractRolePrior):
-    """One planet in the toy box (hz = size = 1) whose gases are iid N(0, 1)."""
-
-    n_gas: int = eqx.field(static=True, default=2)
-
-    def log_prob(self, atoms, star):
-        return norm.logpdf(atoms.x_mean).sum(axis=(1, 2))
-
-    def sample(self, key, star):
-        x = jax.random.normal(key, (1, 1, self.n_gas))
-        one = jnp.ones((1, 1))
-        cloud = WeightedCloud(
-            {"hz": one, "size": one}, jnp.zeros(1), jnp.nan, jnp.zeros(1), chart="toy"
-        )
-        return Atoms(cloud, x, jnp.zeros_like(x), one > 0)
-
-
-def _stack(trees):
-    return jax.tree.map(lambda *leaves: jnp.stack(leaves), *trees)
 
 
 def _point_truth(toy, abundances):
@@ -48,12 +26,7 @@ def _point_truth(toy, abundances):
         toy.atoms([[1.0]], [[1.0]], [1.0], jnp.asarray(x)[None], 0.0, len(x))
         for x in abundances
     ]
-    return _stack(stars)
-
-
-def _assert_ulp(a, b, maxulp=4):
-    """Every array of two payloads agrees to ``maxulp`` ULPs."""
-    jax.tree.map(lambda x, y: assert_array_max_ulp(x, y, maxulp=maxulp), a, b)
+    return toy.stack(*stars)
 
 
 def _differ(a, b):
@@ -86,16 +59,18 @@ def test_row_noise_depends_only_on_star_index_and_key(toy):
         _observe(world, model, 1, 7)  # an unrelated row in between
         second[r] = _observe(world, model, *r)
     for r in rows:
-        _assert_ulp(first[r], second[r])
+        toy.assert_ulp(first[r], second[r])
     assert _differ(_observe(world, model, 0, 5), _observe(world, model, 1, 5))
     assert _differ(first[(0, 0)], first[(0, 2)])
 
-    two = draw_worlds(KEY, GasPrior("toy"), STARS, 2).unseal().atoms.x_mean
-    three = draw_worlds(KEY, GasPrior("toy"), STARS, 3).unseal().atoms.x_mean
+    two = draw_worlds(KEY, toy.GasPrior("toy", n_gas=2), STARS, 2).unseal().atoms.x_mean
+    three = (
+        draw_worlds(KEY, toy.GasPrior("toy", n_gas=2), STARS, 3).unseal().atoms.x_mean
+    )
     assert_array_max_ulp(two, three[:2], maxulp=4)
 
 
-def test_draw_worlds_from_a_role_prior():
+def test_draw_worlds_from_a_role_prior(toy):
     """Worlds come from the truth's role prior, one point draw per star.
 
     4,000 worlds of two stars under iid N(0, 1) gases: the leading axes are (world,
@@ -107,7 +82,7 @@ def test_draw_worlds_from_a_role_prior():
     Fails if `draw_worlds` ignores the prior's sampler, reuses one key across stars or
     worlds (the spread collapses), or the drawn truth is not on the prior's terms.
     """
-    prior = GasPrior("toy")
+    prior = toy.GasPrior("toy", n_gas=2)
     truth = draw_worlds(KEY, prior, STARS, 4000).unseal().atoms
     assert truth.x_mean.shape == (4000, 2, 1, 1, 2)
     assert_allclose(truth.cloud.log_weights, 0.0)
@@ -118,7 +93,7 @@ def test_draw_worlds_from_a_role_prior():
     assert_allclose(prior.log_prob(one, STARS[1]), [expected], rtol=1e-12)
 
 
-def test_world_keys_and_row_keys_are_distinct():
+def test_world_keys_and_row_keys_are_distinct(toy):
     """World i's truth at star s shares no key with the noise of any row.
 
     Without a tag, star s of world i and row (star i, index s) fold the same numbers
@@ -130,7 +105,9 @@ def test_world_keys_and_row_keys_are_distinct():
     Fails if world keys and row keys are folded without distinct tags, so world i is
     correlated with star i's row noise.
     """
-    truth = draw_worlds(KEY, GasPrior("toy"), STARS, 2).unseal().atoms.x_mean
+    truth = (
+        draw_worlds(KEY, toy.GasPrior("toy", n_gas=2), STARS, 2).unseal().atoms.x_mean
+    )
     for i in range(2):
         for s in range(2):
             for star, index in ((i, s), (s, i)):
@@ -219,7 +196,9 @@ def test_reveal_draws_grant_rows_from_the_truth_at_time_zero(toy):
         action = jax.tree.map(lambda leaf, i=i: leaf[i], grant.actions)
         key = row_key(KEY, action.star, i)
         expected = world.observe(key, MODELS[slot], action)
-        _assert_ulp(jax.tree.map(lambda x, i=i: x[i], revealed.payload[slot]), expected)
+        toy.assert_ulp(
+            jax.tree.map(lambda x, i=i: x[i], revealed.payload[slot]), expected
+        )
         for other in jax.tree.leaves(revealed.payload[1 - slot]):
             assert_allclose(other[i], 0.0)
     assert_allclose(revealed.payload[1]["snr"][0, 0], [6.0, 6.0])

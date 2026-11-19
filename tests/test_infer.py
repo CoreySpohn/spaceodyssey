@@ -11,10 +11,10 @@ import numpy as np
 import pytest
 from jax.scipy.special import ndtri
 from jax.scipy.stats import norm
-from numpy.testing import assert_allclose, assert_array_max_ulp
+from numpy.testing import assert_allclose
 
 from spaceodyssey.belief import absorb, replay, replay_belief, weights
-from spaceodyssey.roles import AbstractRolePrior, Roles
+from spaceodyssey.roles import Roles
 from spaceodyssey.toy import GaussianGasModel, StepReportModel
 from spaceodyssey.types import Atoms, ObservationLog, Refit, Row, WeightedCloud
 
@@ -24,22 +24,12 @@ GAS = GaussianGasModel(snr_one_day=[2.5])
 MODELS = (GAS, StepReportModel(snr_one_day=[5.0]))
 
 
-class GasGaussian(AbstractRolePrior):
-    """N(mean, sd^2) on the abundance of the one gas of the one planet."""
-
-    mean: jax.Array = eqx.field(converter=jnp.asarray, default=0.0)
-    sd: jax.Array = eqx.field(converter=jnp.asarray, default=1.0)
-
-    def log_prob(self, atoms, star):
-        return norm.logpdf(atoms.x_mean[:, 0, 0], self.mean, self.sd)
-
-    def sample(self, key, star):
-        x = self.mean + self.sd * jax.random.normal(key, (1,))
-        return _atoms(x, 0.0, jnp.zeros(1))
-
-
-# Forecast N(0, 1); verdict members N(0, 1) and N(1, 1).
-ROLES = Roles(GasGaussian("toy"), GasGaussian("toy", mean=[0.0, 1.0], sd=[1.0, 1.0]))
+@pytest.fixture(scope="module")
+def roles(toy):
+    """Forecast N(0, 1) on the one gas; verdict members N(0, 1) and N(1, 1)."""
+    return Roles(
+        toy.GasPrior("toy"), toy.GasPrior("toy", mean=[0.0, 1.0], sd=[1.0, 1.0])
+    )
 
 
 def _atoms(x, var, log_ref_density):
@@ -107,26 +97,18 @@ def _moments(b):
     return mean, w @ x**2 - mean**2
 
 
-def _assert_ulp(a, b, maxulp=4):
-    """Equal to `maxulp` ULPs where finite, and -inf in the same places."""
-    a, b = np.asarray(a), np.asarray(b)
-    np.testing.assert_array_equal(np.isneginf(a), np.isneginf(b))
-    finite = np.isfinite(a)
-    assert_array_max_ulp(a[finite], b[finite], maxulp=maxulp)
-
-
 NOW = jnp.asarray(1.0)  # a query time after every row released at time zero
 
 
 @eqx.filter_jit
-def _infer(refit, log, models, pool, time_d=NOW):
-    """The belief at `time_d` under `ROLES`: `replay_belief` of `replay`."""
+def _infer(roles, refit, log, models, pool, time_d=NOW):
+    """The belief at `time_d` under `roles`: `replay_belief` of `replay`."""
     return replay_belief(
-        replay(refit, log, models, STAR, time_d), ROLES, models, STAR, pool
+        replay(refit, log, models, STAR, time_d), roles, models, STAR, pool
     )
 
 
-def test_replay_applies_each_row_outside_the_mask_once(toy):
+def test_replay_applies_each_row_outside_the_mask_once(toy, roles):
     """The conjugate replay: a represented row counts zero times, a new row once.
 
     x ~ N(0, 1) (the refit target p0 and the role prior of the forecast and the first
@@ -167,24 +149,24 @@ def test_replay_applies_each_row_outside_the_mask_once(toy):
     log = _log(rows, 7)
     pool = toy.empty_pool(n_roles=3)
 
-    mean, var = _moments(_infer(refit, log, MODELS, pool))
+    mean, var = _moments(_infer(roles, refit, log, MODELS, pool))
     assert_allclose(mean, [2 / 3, 2 / 3, 1.0], rtol=1e-3)
     assert_allclose(var, [1 / 3, 1 / 3, 1 / 3], rtol=1e-3)
 
-    twice = _infer(_refit(atoms), log, MODELS, pool)
+    twice = _infer(roles, _refit(atoms), log, MODELS, pool)
     assert_allclose(_moments(twice)[0][0], 0.75, rtol=1e-3)
     assert_allclose(_moments(twice)[1][0], 0.25, rtol=1e-3)
-    dropped = _infer(refit, _with_count(log, 1), MODELS, pool)
+    dropped = _infer(roles, refit, _with_count(log, 1), MODELS, pool)
     assert_allclose(_moments(dropped)[0][0], 0.5, rtol=1e-3)
     assert_allclose(_moments(dropped)[1][0], 0.5, rtol=1e-3)
 
-    released = _infer(refit, log, MODELS, pool, jnp.asarray(10.0))
+    released = _infer(roles, refit, log, MODELS, pool, jnp.asarray(10.0))
     mean, var = _moments(released)
     assert_allclose(mean, [1.0, 1.0, 1.25], rtol=1e-3)
     assert_allclose(var, [0.25, 0.25, 0.25], rtol=1e-3)
 
 
-def test_replay_is_order_free_and_absorb_equals_replay(toy):
+def test_replay_is_order_free_and_absorb_equals_replay(toy, roles):
     """Row order does not matter, and rows absorbed as they fall due equal the batch.
 
     Nine point draws, a grant row in `row_mask` (row 0), then six rows appended on days
@@ -217,12 +199,12 @@ def test_replay_is_order_free_and_absorb_equals_replay(toy):
     log = _log([grant, *observed], 7)
     pool = toy.empty_pool(n_roles=3)
     end = jnp.asarray(10.0)
-    batch = _infer(refit, log, MODELS, pool, end)
+    batch = _infer(roles, refit, log, MODELS, pool, end)
 
     shuffled = _log([grant, *(observed[i] for i in (4, 2, 0, 5, 3, 1))], 7)
-    other = _infer(refit, shuffled, MODELS, pool, end)
-    _assert_ulp(other.log_like, batch.log_like)
-    _assert_ulp(weights(other), weights(batch))
+    other = _infer(roles, refit, shuffled, MODELS, pool, end)
+    toy.assert_ulp(other.log_like, batch.log_like)
+    toy.assert_ulp(weights(other), weights(batch))
 
     traces = []
 
@@ -239,9 +221,9 @@ def test_replay_is_order_free_and_absorb_equals_replay(toy):
     assert r.applied[4]
     held = step(r, log, end)
     jax.tree.map(np.testing.assert_array_equal, held, r)
-    online = replay_belief(r, ROLES, MODELS, STAR, pool)
-    _assert_ulp(online.log_like, batch.log_like)
-    _assert_ulp(weights(online), weights(batch))
+    online = replay_belief(r, roles, MODELS, STAR, pool)
+    toy.assert_ulp(online.log_like, batch.log_like)
+    toy.assert_ulp(weights(online), weights(batch))
 
     star_one = replay(
         _refit(atoms, [0], star=1), _with_count(log, 3), MODELS, STAR, NOW
@@ -249,12 +231,12 @@ def test_replay_is_order_free_and_absorb_equals_replay(toy):
     star_one = step(star_one, log, end)
     assert len(traces) == 1
     only_its_row = _log([grant, _row(0, _gas(2.5, 0.4), NO_STEP)], 2)
-    expected = _infer(refit, only_its_row, MODELS, pool)
-    held = replay_belief(star_one, ROLES, MODELS, STAR, pool)
-    _assert_ulp(held.log_like, expected.log_like)
+    expected = _infer(roles, refit, only_its_row, MODELS, pool)
+    held = replay_belief(star_one, roles, MODELS, STAR, pool)
+    toy.assert_ulp(held.log_like, expected.log_like)
 
 
-def test_replay_on_an_uncertain_gas_uses_the_joint_marginal(toy):
+def test_replay_on_an_uncertain_gas_uses_the_joint_marginal(toy, roles):
     """Rows reading one Gaussian gas enter through summed statistics and `finalize`.
 
     Two draws whose gas is N(0, 1) and N(1, 0.5); rows y1 = 1 at S/N 5 (noise variance
@@ -275,7 +257,7 @@ def test_replay_on_an_uncertain_gas_uses_the_joint_marginal(toy):
     refit = _refit(_atoms([0.0, 1.0], [1.0, 0.5], jnp.zeros(2)))
     pool = toy.empty_pool(n_roles=3)
     one_slot = _log([_row(0, _gas(5.0, 1.0)), _row(0, _gas(2.5, 0.4))], 2)
-    b = _infer(refit, one_slot, (GAS,), pool)
+    b = _infer(roles, refit, one_slot, (GAS,), pool)
 
     y = np.array([1.0, 0.4])
     joint = []
@@ -294,7 +276,7 @@ def test_replay_on_an_uncertain_gas_uses_the_joint_marginal(toy):
     two_slots = _log(
         [_row(0, _gas(5.0, 1.0), NO_GAS), _row(1, NO_GAS, _gas(2.5, 0.4))], 2
     )
-    split = _infer(refit, two_slots, (GAS, GAS), pool)
+    split = _infer(roles, refit, two_slots, (GAS, GAS), pool)
     assert_allclose(split.log_like, b.log_like, rtol=1e-12)
     assert_allclose(split.atoms.x_mean, b.atoms.x_mean, rtol=1e-12)
     assert_allclose(split.atoms.x_var, b.atoms.x_var, rtol=1e-12)
@@ -307,12 +289,12 @@ def test_replay_on_an_uncertain_gas_uses_the_joint_marginal(toy):
         ],
         3,
     )
-    mixed = _infer(refit, with_step, MODELS, pool)
+    mixed = _infer(roles, refit, with_step, MODELS, pool)
     assert_allclose(mixed.log_like, b.log_like, rtol=1e-12)
     assert_allclose(mixed.atoms.x_mean, b.atoms.x_mean, rtol=1e-12)
 
 
-def test_replay_refuses_what_it_cannot_replay(toy):
+def test_replay_refuses_what_it_cannot_replay(toy, roles):
     """The chart check of the role weights holds through a replay, and shapes are
     checked.
 
@@ -330,7 +312,7 @@ def test_replay_refuses_what_it_cannot_replay(toy):
     log = _log([_row(0, _gas(2.5, 1.0), NO_STEP)], 1)
     pool = toy.empty_pool(n_roles=3)
     r = replay(refit, log, MODELS, STAR, NOW)
-    on_y = Roles(ROLES.forecast, GasGaussian("y", mean=[0.0, 1.0], sd=[1.0, 1.0]))
+    on_y = Roles(roles.forecast, toy.GasPrior("y", mean=[0.0, 1.0], sd=[1.0, 1.0]))
     with pytest.raises(ValueError, match="chart"):
         replay_belief(r, on_y, MODELS, STAR, pool)
     with pytest.raises(ValueError, match="payload buffers"):
@@ -338,10 +320,10 @@ def test_replay_refuses_what_it_cannot_replay(toy):
     short = eqx.tree_at(lambda r: r.row_mask, refit, jnp.zeros(3, bool))
     with pytest.raises(ValueError, match="capacity"):
         replay(short, log, MODELS, STAR, NOW)
-    updated = replay_belief(r, ROLES, MODELS, STAR, pool).atoms
+    updated = replay_belief(r, roles, MODELS, STAR, pool).atoms
     with pytest.raises((TypeError, AttributeError)):
         replay(updated, log, MODELS, STAR, NOW)
     fuzzy = _refit(_atoms([0.0, 1.0], 1.0, jnp.zeros(2)))
     reported = _log([_row(1, NO_GAS, _step(5.0, 1.0))], 1)
     with pytest.raises(RuntimeError, match="point gas"):
-        _infer(fuzzy, reported, MODELS, pool)
+        _infer(roles, fuzzy, reported, MODELS, pool)

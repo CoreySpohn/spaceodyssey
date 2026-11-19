@@ -1,9 +1,7 @@
-"""Every public function of `belief` and `information`, and the pool functions of
-`value`, under `jax.jit`, `jax.vmap` over a leading world axis, and `jax.grad` where it
-is differentiable.
+"""Every public function of `belief` and `information`, the replay, the pool functions
+and `frontier` of `value`, under `jax.jit`, `jax.vmap` over a leading world axis, and
+`jax.grad` where it is differentiable (forward mode only for `absorb`).
 """
-
-from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -15,11 +13,16 @@ from numpy.testing import assert_allclose
 
 from spaceodyssey.belief import (
     Belief,
+    absorb,
     chain,
     count_pmf,
+    draw_claim_mass,
+    log_weights,
     mark_weights,
     pool_rate,
     q,
+    replay,
+    replay_belief,
     role_log_weights,
     weights,
 )
@@ -39,10 +42,12 @@ from spaceodyssey.information import (
 )
 from spaceodyssey.roles import AbstractRolePrior, Roles
 from spaceodyssey.toy import GaussianGasModel
-from spaceodyssey.types import AbstractObservationModel, Action
-from spaceodyssey.value import completeness, thin
+from spaceodyssey.types import Action, ObservationLog, Refit, Row
+from spaceodyssey.value import Count, Menu, completeness, frontier, thin
 
 N_ROLES, N_DRAWS, N_PLANETS = 3, 6, 2
+CAPACITY = 4  # W of the replayed logs
+FORWARD_ONLY = {"absorb"}  # a lax.while_loop: forward-mode derivatives only
 
 
 class Tilt(AbstractRolePrior):
@@ -58,29 +63,6 @@ class Tilt(AbstractRolePrior):
 
     def sample(self, key, star):
         raise NotImplementedError("a tilt is read only as a weight")
-
-
-class Search(AbstractObservationModel):
-    """A test search that detects the first planet with probability
-    `1 - exp(-exposure_d hz)`: smooth in the exposure, so completeness has a derivative
-    in it. Cell 0 is the miss. Read only through `cells`.
-    """
-
-    searches: ClassVar[bool] = True
-
-    def cells(self, atoms, action):
-        hz = atoms.cloud.samples["hz"][:, 0]
-        d = jnp.where(atoms.exists[:, 0], 1.0 - jnp.exp(-action.exposure_d * hz), 0.0)
-        return jnp.stack([1.0 - d, d], axis=-1)
-
-    def sample(self, key, atoms, action):
-        raise NotImplementedError("read only through cells")
-
-    def stats(self, payload, atoms, star):
-        raise NotImplementedError("read only through cells")
-
-    def finalize(self, stats, atoms, star):
-        raise NotImplementedError("read only through cells")
 
 
 def _worlds(toy):
@@ -145,8 +127,84 @@ def _cases(toy):
     cells = [model.cells(b.atoms, a) for b, a in zip((b0, b1), actions, strict=True)]
     detect = (jnp.array([0.3, 0.9, 0.1]), jnp.array([0.6, 0.2, 0.5]))
 
+    # Replays: two logs of one structure, a gas row per slot, released over time.
+    gas = (model,)
+    rng = np.random.default_rng(1)
+
+    def log(release_d):
+        zero_i, zero_d = jnp.zeros(CAPACITY, int), jnp.zeros(CAPACITY)
+        reading = rng.normal(size=(CAPACITY, N_PLANETS, 1))
+        payload = {"snr": jnp.full(reading.shape, 2.0), "reading": reading}
+        rows = Row(
+            zero_i, zero_i, zero_d, zero_d + 1.0, zero_d, release_d, zero_i, zero_i,
+            (payload,),
+        )  # fmt: skip
+        return ObservationLog(rows, jnp.asarray(3))
+
+    logs = (log(jnp.array([0.0, 0.5, 1.5, 3.0])), log(jnp.array([0.0, 2.5, 0.5, 1.0])))
+    refits = [Refit(b.atoms, jnp.zeros(CAPACITY, bool), 0) for b in (b0, b1)]
+    times = (jnp.asarray(1.0), jnp.asarray(2.0))
+    early = [
+        replay(r, lg, gas, star, jnp.asarray(0.2))
+        for r, lg in zip(refits, logs, strict=True)
+    ]
+    full = [
+        replay(r, lg, gas, star, t)
+        for r, lg, t in zip(refits, logs, times, strict=True)
+    ]
+
+    def reading_of(a):
+        return a[1].rows.payload[0]["reading"]
+
+    def belief_scalar(b):
+        return uneven(weights(b)) + uneven(b.atoms.x_mean) + uneven(b.atoms.x_var)
+
+    # One star per world for `frontier`, valued by `Count` on a search.
+    search = (toy.Search(hit=0.6, other=0.1),)
+    menus = (
+        Menu(jnp.array([[1.0, 2.5]]), jnp.array([[True, True]]), (0, 0)),
+        Menu(jnp.array([[0.5, 1.5]]), jnp.array([[True, False]]), (0, 0)),
+    )
+
+    def value(b, utility, menu):
+        return frontier(b, plain, star, utility, search, menu, jnp.asarray(0.0), 1)
+
     return {
         "weights": (weights, [(b0,), (b1,)], lambda a: a[0].log_prior, uneven),
+        "log_weights": (log_weights, [(b0,), (b1,)], lambda a: a[0].log_like, uneven),
+        "draw_claim_mass": (
+            lambda b, k: draw_claim_mass(b, conditional, star, k),
+            [(b0, planets[0]), (b1, planets[1])],
+            lambda a: a[0].atoms.x_mean,
+            uneven,
+        ),
+        "replay": (
+            lambda r, lg, t: replay(r, lg, gas, star, t),
+            [(refits[0], logs[0], times[0]), (refits[1], logs[1], times[1])],
+            reading_of,
+            lambda r: sum(uneven(x) for x in jax.tree.leaves(r.stats)),
+        ),
+        "absorb": (
+            lambda r, lg, t: absorb(r, lg, gas, star, t),
+            [(early[0], logs[0], times[0]), (early[1], logs[1], times[1])],
+            reading_of,
+            lambda r: sum(uneven(x) for x in jax.tree.leaves(r.stats)),
+        ),
+        "replay_belief": (
+            lambda r, roles: replay_belief(r, roles, gas, star, b0.pool),
+            [(full[0], roles), (full[1], roles1)],
+            lambda a: a[0].stats[0]["weighted_sum"],
+            belief_scalar,
+        ),
+        "frontier": (
+            value,
+            [
+                (toy.stack(b0), Count(toy.stack(b0.pool)), menus[0]),
+                (toy.stack(b1), Count(toy.stack(b1.pool)), menus[1]),
+            ],
+            lambda a: a[2].exposure_d,
+            lambda f: uneven(f.reward),
+        ),
         "q": (
             lambda b, k: q(b, claim, star, k),
             [(b0, planets[0]), (b1, planets[1])],
@@ -239,8 +297,8 @@ def _cases(toy):
             lambda b: uneven(weights(b)),
         ),
         "claim_information": (
-            lambda b, k, m, a: claim_information(b, claim, star, k, m, a),
-            [(b0, planets[0], model, actions[0]), (b1, planets[1], model, actions[1])],
+            lambda b, m, a, k: claim_information(b, m, a, claim, star, k),
+            [(b0, model, actions[0], planets[0]), (b1, model, actions[1], planets[1])],
             lambda a: a[0].log_prior,
             uneven,
         ),
@@ -251,7 +309,9 @@ def _cases(toy):
             lambda p: uneven(p.log_mass) + uneven(mark_weights(p)),
         ),
         "completeness": (
-            lambda p, a: completeness(p, Search(), a, hz_only, star),
+            lambda p, a: completeness(
+                p, toy.Search(hit=0.6, other=0.1), a, hz_only, star
+            ),
             [(b0.pool, actions[0]), (b1.pool, actions[1])],
             lambda a: a[1].exposure_d,
             uneven,
@@ -261,6 +321,8 @@ def _cases(toy):
 
 CASES = [
     "weights",
+    "log_weights",
+    "draw_claim_mass",
     "q",
     "chain",
     "count_pmf",
@@ -280,6 +342,10 @@ CASES = [
     "claim_information",
     "thin",
     "completeness",
+    "replay",
+    "absorb",
+    "replay_belief",
+    "frontier",
 ]
 
 
@@ -307,6 +373,7 @@ def test_public_functions_jit_vmap_and_grad(cases, name):
     over worlds, or has a derivative that raises, is NaN or is wrong.
     """
     fn, (args0, args1), wrt, scalar = cases[name]
+    modes = ("fwd",) if name in FORWARD_ONLY else ("fwd", "rev")
     out0, out1 = fn(*args0), fn(*args1)
     _close(jax.jit(fn)(*args0), out0)
     stacked = jax.tree.map(lambda *x: jnp.stack(x), args0, args1)
@@ -320,5 +387,6 @@ def test_public_functions_jit_vmap_and_grad(cases, name):
         return scalar(fn(*eqx.tree_at(wrt, args0, x)))
 
     x0 = wrt(args0)
-    assert np.all(np.isfinite(jax.grad(f)(x0)))
-    check_grads(f, (x0,), order=1, modes=("fwd", "rev"), eps=1e-5, atol=1e-6, rtol=1e-6)
+    derivative = jax.jacfwd(f) if name in FORWARD_ONLY else jax.grad(f)
+    assert np.all(np.isfinite(derivative(x0)))
+    check_grads(f, (x0,), order=1, modes=modes, eps=1e-5, atol=1e-6, rtol=1e-6)

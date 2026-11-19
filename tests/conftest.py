@@ -2,13 +2,17 @@
 
 import importlib.util
 import os
+from typing import ClassVar
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from hypothesis import settings
+from jax.scipy.stats import norm
 from jaxtyping import install_import_hook
+from numpy.testing import assert_array_max_ulp
 
 # The jaxtyping annotations are checked in tests only, and on by default; the hook must
 # be installed before the package is first imported. SPACEODYSSEY_TYPECHECK=0 turns it
@@ -19,7 +23,13 @@ if TYPECHECK:
 
 from spaceodyssey.belief import Belief  # noqa: E402
 from spaceodyssey.claim import AbstractConjunct  # noqa: E402
-from spaceodyssey.types import Atoms, Pool, WeightedCloud  # noqa: E402
+from spaceodyssey.roles import AbstractRolePrior  # noqa: E402
+from spaceodyssey.types import (  # noqa: E402
+    AbstractObservationModel,
+    Atoms,
+    Pool,
+    WeightedCloud,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -36,9 +46,12 @@ settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "quick"))
 
 
 # Toy state for the layer tests: per-draw, per-planet `hz` and `size` bits plus a gas
-# block. Builders and conjuncts are exposed through the `toy` fixture, not imported.
+# block. Builders, conjuncts, the toy prior and search, and the assertion and stacking
+# helpers are exposed through the `toy` fixture, not imported.
 class _Toy:
-    """Constructed fixtures: conjuncts on the toy state and belief builders."""
+    """Constructed fixtures: conjuncts, a prior and a search on the toy state, belief
+    builders, and the helpers the layer tests share.
+    """
 
     star = ()  # the toy's star is an empty pytree, never None
 
@@ -115,9 +128,11 @@ class _Toy:
         return Pool(marks, log_prior, log_like, log_mass)
 
     @classmethod
-    def empty_pool(cls, n_roles=1):
-        """A pool with no expected planets."""
-        return cls.pool([0.0], jnp.ones((n_roles, 1)), -jnp.inf, n_roles)
+    def empty_pool(cls, n_roles=1, n_gas=2):
+        """A pool with no expected planets; its one mark is a point gas state."""
+        marks = cls.atoms([[0.0]], [[0.0]], [1.0], 0.0, 0.0, n_gas)
+        pool = cls.pool([0.0], jnp.ones((n_roles, 1)), -jnp.inf, n_roles)
+        return eqx.tree_at(lambda p: p.marks, pool, marks)
 
     @classmethod
     def belief(cls, atoms, pool=None, n_roles=1):
@@ -127,6 +142,68 @@ class _Toy:
         return Belief(
             atoms, flat, flat, cls.empty_pool(n_roles) if pool is None else pool
         )
+
+    class GasPrior(AbstractRolePrior):
+        """One planet in the toy box (hz = size = 1) whose `n_gas` gases are iid
+        N(mean, sd^2); it samples a point state.
+        """
+
+        mean: jax.Array = eqx.field(converter=jnp.asarray, default=0.0)
+        sd: jax.Array = eqx.field(converter=jnp.asarray, default=1.0)
+        n_gas: int = eqx.field(static=True, default=1)
+
+        def log_prob(self, atoms, star):
+            return norm.logpdf(atoms.x_mean, self.mean, self.sd).sum(axis=(1, 2))
+
+        def sample(self, key, star):
+            x = self.mean + self.sd * jax.random.normal(key, (1, 1, self.n_gas))
+            return _Toy.atoms([[1.0]], [[1.0]], [1.0], x[0], 0.0, self.n_gas)
+
+    class Search(AbstractObservationModel):
+        """A test search of planet 0: per day of exposure it detects the planet with
+        probability `hit` when its `hz` bit is set and `other` otherwise, so
+        `1 - (1 - p)**exposure_d` in all, smooth in the exposure. A slot with no
+        planet is always missed. Cell 0 is the miss, cell 1 the detection. Read only
+        through `cells`.
+        """
+
+        searches: ClassVar[bool] = True
+        hit: jax.Array = eqx.field(converter=jnp.asarray)
+        other: jax.Array = eqx.field(converter=jnp.asarray)
+
+        def cells(self, atoms, action):
+            p = jnp.where(atoms.cloud.samples["hz"][:, 0] > 0.5, self.hit, self.other)
+            d = -jnp.expm1(action.exposure_d * jnp.log1p(-p))
+            d = jnp.where(atoms.exists[:, 0], d, 0.0)
+            return jnp.stack([1.0 - d, d], axis=-1)
+
+        def sample(self, key, atoms, action):
+            raise NotImplementedError("read only through cells")
+
+        def stats(self, payload, atoms, star):
+            raise NotImplementedError("read only through cells")
+
+        def finalize(self, stats, atoms, star):
+            raise NotImplementedError("read only through cells")
+
+    @staticmethod
+    def stack(*trees):
+        """Stack pytrees of one structure along a new leading axis."""
+        return jax.tree.map(lambda *leaves: jnp.stack(leaves), *trees)
+
+    @staticmethod
+    def assert_ulp(actual, expected, maxulp=4):
+        """Every leaf agrees to `maxulp` ULPs where finite, with -inf in the same
+        places.
+        """
+
+        def one(a, b):
+            a, b = np.asarray(a), np.asarray(b)
+            np.testing.assert_array_equal(np.isneginf(a), np.isneginf(b))
+            finite = np.isfinite(a)
+            assert_array_max_ulp(a[finite], b[finite], maxulp=maxulp)
+
+        jax.tree.map(one, actual, expected)
 
 
 @pytest.fixture(scope="session")
