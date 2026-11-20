@@ -786,13 +786,15 @@ def test_a_spectrum_waits_for_a_detection(toy):
     is not offered and is worth 0 at any depth; the search alone is worth
     0.5 U(0.5) + 0.5 U(0) - U(0.25) = 0.2158 at depth 1, and 0.5623 at depth 2,
     where the spectrum follows a detection and settles the claim. At a star whose
-    root stage is already that of a detection the spectrum is offered at the root and
-    settles the claim alone (0.5623): it reports the water of a planet that exists and
-    nothing in a draw whose slot is empty.
+    root stage is already that of a detection the spectrum is offered and worth the
+    same 0.2158: its likelihood does not score existence, so it reads the slot's water
+    on every draw, and a bit 1 leaves the draws with and without the planet (q = 0.5),
+    as the replay of that row does.
 
     Fails if a spectrum is offered before a detection (at the root or after a miss),
     if a detection on the path does not raise the star to the stage the spectrum
-    requires, or if the mask ignores the root's stage.
+    requires, if the mask ignores the root's stage, or if the spectrum's cells learn
+    whether the planet exists (0.5623 at the root).
     """
     hz = [[1.0]] * 4
     exists = [[True], [True], [False], [False]]
@@ -810,7 +812,7 @@ def test_a_spectrum_waits_for_a_detection(toy):
     for detected, depth, expected in (
         (False, 1, [one_search, 0.0]),
         (False, 2, [-entropy(0.25), 0.0]),
-        (True, 1, [one_search, -entropy(0.25)]),
+        (True, 1, [one_search, one_search]),
     ):
         menu = Menu([[1.0, 1.0]], [[True, True]], (0, 1), (0, 1), [int(detected)])
         f = _frontier_of(beliefs, claim, toy.star, LogScore(1), models, menu, depth)

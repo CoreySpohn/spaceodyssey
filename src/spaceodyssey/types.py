@@ -622,11 +622,15 @@ class AbstractObservationModel(eqx.Module):
         """Probability of each outcome cell under each draw.
 
         For a searching model (``searches``) cell 0 is the miss: on a pool's marks,
-        every other cell is a detection. A slot that holds no planet on a draw has
-        one outcome there, as an unread one does (code 0 of its factors), so cells it
-        cannot give have probability zero on that draw and a planner may drop them
-        (``frontier``'s ``max_cells``). A model without a closed form returns
-        ``binned_cells``.
+        every other cell is a detection. The cells agree with the likelihood
+        (``stats``, ``finalize``): reweighting the draws by a cell's probability is
+        the update a row in that cell makes, so a model whose likelihood does not
+        score whether a planet exists does not learn it from its cells either. Such a
+        model reads a slot some draw holds (``planet_tracks``) on every draw, the
+        draws without the planet included; a slot no draw holds has one outcome, as
+        an unread one does (code 0 of its factors), so the cells it cannot give have
+        probability zero and a planner may drop them (``frontier``'s ``max_cells``).
+        A model without a closed form returns ``binned_cells``.
 
         Args:
             atoms: the draws.

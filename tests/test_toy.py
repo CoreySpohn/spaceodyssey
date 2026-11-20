@@ -7,7 +7,9 @@ import pytest
 from jax.scipy.special import ndtri
 from numpy.testing import assert_allclose, assert_array_max_ulp
 
+from spaceodyssey.belief import weights
 from spaceodyssey.claim import GasAbove
+from spaceodyssey.information import cell_probs, update_by_cell
 from spaceodyssey.toy import (
     GAS_FLOOR,
     GAS_PRIOR_SD,
@@ -86,6 +88,85 @@ def test_cells_normalize_and_match_the_binned_default(model, edges_b, var, toy):
             assert_array_max_ulp(p.sum(axis=1), np.ones(4), maxulp=4)
         se = np.sqrt(exact * (1.0 - exact) / CELL_SAMPLES)
         assert np.all(np.abs(binned - exact) <= 3.0 * se)
+
+
+def _cell_likelihood(model, y, codes, atoms, star):
+    """Each draw's likelihood of a row in cell `y`, from the replay (`row_log_like`).
+
+    The search and the step report have one payload per cell; the Gaussian reading of
+    slot 0 is integrated over its bin (one edge at the floor) by Gauss-Legendre on 80
+    nodes out to 12 dex, its other slot unread.
+    """
+    if isinstance(model, DetectionModel):
+        payload = {
+            "exposure_d": jnp.asarray(1.0),
+            "time_d": jnp.asarray(0.0),
+            "p_hz_one_day": model.p_hz_one_day,
+            "p_other_one_day": model.p_other_one_day,
+            "detected": jnp.asarray([y // 2, y % 2], float),
+        }
+        assert int(model.cell(payload)) == y
+        return np.exp(row_log_like(model, payload, atoms, star))
+    if isinstance(model, StepReportModel):
+        snr = jnp.where(codes > 0, model.snr_one_day, 0.0)
+        payload = {"snr": snr, "bit": (codes == 2).astype(float)}
+        assert int(model.cell(payload)) == y
+        return np.exp(row_log_like(model, payload, atoms, star))
+    snr = jnp.broadcast_to(model.snr_one_day, codes.shape).at[1].set(0.0)
+    lo, hi = (-12.0, 0.0) if int(codes[0, 0]) == 0 else (0.0, 12.0)
+    nodes, w = np.polynomial.legendre.leggauss(80)
+    readings = lo + (hi - lo) * (nodes + 1.0) / 2.0
+
+    def like(r):
+        payload = {"snr": snr, "reading": jnp.zeros_like(snr).at[0, 0].set(r)}
+        return jnp.exp(row_log_like(model, payload, atoms, star))
+
+    middle = {"snr": snr, "reading": jnp.zeros_like(snr).at[0, 0].set(readings[40])}
+    assert int(model.cell(middle)) == y
+    return (hi - lo) / 2.0 * np.asarray(w @ jax.jit(jax.vmap(like))(readings))
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        DetectionModel(0.6, 0.2),
+        StepReportModel(snr_one_day=[6.0]),
+        GaussianGasModel(snr_one_day=[2.5]),
+    ],
+    ids=["search", "step", "gaussian"],
+)
+def test_a_cell_updates_the_draws_as_the_replay_of_its_row(model, toy):
+    """For every cell the draws can give, the update by the cell (`update_by_cell`)
+    is the replay's update by a row in that cell (`row_log_like`), on draws that differ
+    in whether a planet exists.
+
+    Four point draws weighted (0.1, 0.2, 0.3, 0.4), two slots: slot 0 holds a planet
+    on draws 0 and 1 only, in the HZ on draws 0 and 2; slot 1 holds none. One gas, 1
+    dex above the floor on draws 0 and 2 and below it on 1 and 3. One day: the search
+    detects with 0.6 in the HZ and 0.2 out of it, the step report reads at S/N 6, the
+    Gaussian reading at S/N 2.5 (sigma 1 dex, one bin edge at the floor). The
+    likelihood of a cell is the replay's: one payload per cell for the search and the
+    report, the reading integrated over its bin for the Gaussian.
+
+    Fails if a gas model's cells give a draw without the planet one outcome in a slot
+    another draw holds (they learn whether it exists, and the likelihood does not
+    score it), if the search's cells and likelihood disagree on an empty slot, or if
+    `cells` and `cell` code a row differently.
+    """
+    exists = [[True, False], [True, False], [False, False], [False, False]]
+    hz = [[1.0, 0.0], [0.0, 0.0], [1.0, 0.0], [0.0, 0.0]]
+    water = [[1.0], [-1.0], [1.0], [-1.0]]
+    w = np.array([0.1, 0.2, 0.3, 0.4])
+    atoms = toy.atoms(hz, hz, w, water, 0.0, n_gas=1, exists=exists)
+    b = toy.belief(atoms)
+    cells = toy.jit.outcome_cells(b, model, _action())
+    p_cell = w @ np.asarray(cell_probs(b, cells))
+    possible = np.flatnonzero(p_cell > 0)
+    assert len(possible) >= 2
+    for y in possible:
+        updated = weights(update_by_cell(b, cells, jnp.asarray(y)))[0]
+        like = _cell_likelihood(model, int(y), cells.codes[y], atoms, toy.star)
+        assert_allclose(updated, w * like / (w @ like), rtol=1e-9, atol=1e-14)
 
 
 def test_a_search_detects_with_its_closed_form_probability(toy):

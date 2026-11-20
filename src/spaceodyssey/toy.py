@@ -86,9 +86,16 @@ def _snr(snr_one_day: Float[Array, " G"], action: Action) -> Float[Array, " G"]:
 def _read_snr(
     snr_one_day: Float[Array, " G"], atoms: Atoms, action: Action
 ) -> Float[Array, "A K G"]:
-    """S/N of each gas of each slot of each draw; zero for a slot with no planet."""
+    """S/N of each gas of each slot of each draw; zero for a slot no draw holds.
+
+    A slot some draw holds a planet in (a track, ``planet_tracks``) is read on every
+    draw, the draws without the planet included: the gas models' likelihood
+    (``stats``, ``finalize``) reads every slot of every draw alike and does not score
+    existence, so neither may their cells. A slot no draw holds is not read, which
+    changes nothing on any draw. On one draw (the truth) the two rules agree.
+    """
     snr = jnp.broadcast_to(_snr(snr_one_day, action), atoms.x_mean.shape)
-    return jnp.where(atoms.exists[..., None], snr, 0.0)
+    return jnp.where(planet_tracks(atoms)[:, None], snr, 0.0)
 
 
 def _joint(factors: Float[Array, "A K G B"]) -> Float[Array, "A Y"]:
@@ -121,8 +128,9 @@ class GaussianGasModel(AbstractObservationModel):
     with S/N 0 is not covered: its reading is 0 and carries no information.
 
     The outcome cells bin each reading at ``edges``; an uncovered gas has one outcome
-    (cell 0), and so has every gas of a slot with no planet, which is not read (S/N
-    0). A row's cells are the joint over planets and gases; ``cell`` and
+    (cell 0), and so has every gas of a slot no draw holds a planet in, which is not
+    read (S/N 0); a slot some draw holds is read on every draw (``_read_snr``). A
+    row's cells are the joint over planets and gases; ``cell`` and
     ``n_cells`` give the same coding for ``binned_cells``. A planner reads the cells on
     point draws (``quadrature_draws``), where the bins of two rows are independent
     given the draw and reweighting by a bin's probability is the exact update; on an
@@ -254,8 +262,9 @@ class StepReportModel(AbstractObservationModel):
     that reports nothing reads no gas, so a model table holding this model replays
     Gaussian draws as long as none of its rows reports on them.
 
-    Each gas has three outcome cells: 0 no report, 1 bit 0, 2 bit 1; a slot with no
-    planet reports nothing. A row's cells are the joint over planets and gases, coded
+    Each gas has three outcome cells: 0 no report, 1 bit 0, 2 bit 1; a slot no draw
+    holds a planet in reports nothing, and a slot some draw holds is read on every
+    draw (``_read_snr``). A row's cells are the joint over planets and gases, coded
     by ``cell`` and ``n_cells``. The report
     characterizes the planets it reads; it does not search (``searches`` is false).
 
