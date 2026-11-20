@@ -160,10 +160,12 @@ class Atoms[StateT](eqx.Module):
 
     ``K`` is the number of planets one draw can hold; a draw with fewer is padded, and
     ``exists`` marks its real slots. A slot that does not exist is claim-false whatever
-    its state, so padding a draw changes no probability. Its state is masked, not
-    read, in the values; keep it finite all the same (zeros, say), because a NaN in a
-    masked branch still turns a derivative into NaN. A draw padded only to give every
-    star one shape carries zero weight (``log_weights = -inf``).
+    its state, so padding a draw changes no probability of a claim. The claim and the
+    values mask it; a model's likelihood may read it (the toy's gas models read a
+    padded slot's gas, so a gas reading is an existence-free likelihood only when the
+    tracked slot exists on every draw). Keep it finite all the same (zeros, say),
+    because a NaN in a masked branch still turns a derivative into NaN. A draw padded
+    only to give every star one shape carries zero weight (``log_weights = -inf``).
 
     Attributes:
         cloud: the weighted draws.

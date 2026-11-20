@@ -79,7 +79,10 @@ def _finite(f: Frontier) -> tuple[Frontier, Bool[Array, " S"]]:
     """
     usable = _finite_options(f)
     clean = Frontier(
-        jnp.where(usable, f.reward, 0.0), jnp.where(usable, f.cost_d, 0.0), usable
+        jnp.where(usable, f.reward, 0.0),
+        jnp.where(usable, f.cost_d, 0.0),
+        usable,
+        f.capped,
     )
     return clean, refused_stars(f)
 

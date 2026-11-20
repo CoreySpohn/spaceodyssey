@@ -29,7 +29,12 @@ duals = jax.jit(jax.vmap(dual, in_axes=(0, None, None)))
 def _frontier(reward, cost_d, mask=None):
     reward = jnp.asarray(reward, float)
     mask = jnp.ones(reward.shape, bool) if mask is None else mask
-    return Frontier(reward, jnp.asarray(cost_d, float), jnp.asarray(mask))
+    return Frontier(
+        reward,
+        jnp.asarray(cost_d, float),
+        jnp.asarray(mask),
+        jnp.zeros(reward.shape, bool),
+    )
 
 
 def test_two_star_tie_is_priced_at_the_kink_and_funds_star_zero():

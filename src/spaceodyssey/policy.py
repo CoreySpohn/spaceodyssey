@@ -417,8 +417,11 @@ class PriceState(eqx.Module):
             than ``PlannerSettings.max_cells`` (``Frontier.capped``), the cap's
             refusals told apart from the gate's: such a star's options that read the
             entry are refused (at ``depth > 1`` every plan with it as a follow-up),
-            and its others stay priced. A refused star not capped was refused by the
-            gate; one capped may have been refused by both.
+            and its others stay priced. Only an entry a plan can take counts: offered
+            at the star's stage, or a follow-up at a stage a plan can reach
+            (``Frontier.capped``); an entry over the cap that no plan can take
+            refuses nothing. A refused star not capped was refused by the gate (its
+            NaN role rows); one capped may have been refused by both.
         pending: the stars whose released rows the state has not read yet (a refit
             waiting among them): busy, offering nothing, until a decision reads them.
         seen: the log rows released by the last decision, ``(W,)``.
@@ -687,7 +690,7 @@ def _usable(
     n_plan = f.reward.shape[-1] // policy.menu.exposure_d.shape[-1]
     exposure_d = jnp.tile(policy.menu.exposure_d, (1, n_plan))
     usable = f.mask & ~closed[:, None] & fits(exposure_d, budget_d)
-    return Frontier(f.reward, f.cost_d, usable)
+    return Frontier(f.reward, f.cost_d, usable, f.capped)
 
 
 def _collapsed(policy: PricePolicy, r: Replay, s: Int[Array, ""]) -> Bool[Array, ""]:

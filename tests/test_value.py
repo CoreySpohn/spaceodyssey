@@ -61,7 +61,12 @@ batched = jax.jit(jax.vmap(value_and_spend, in_axes=(0, None)))
 
 
 def _toy():
-    return Frontier(jnp.asarray(REWARD), jnp.asarray(COST_D), jnp.asarray(MASK))
+    return Frontier(
+        jnp.asarray(REWARD),
+        jnp.asarray(COST_D),
+        jnp.asarray(MASK),
+        jnp.zeros(np.shape(MASK), bool),
+    )
 
 
 def _with_null(f):
@@ -147,6 +152,7 @@ def test_value_is_convex_and_nonincreasing_in_the_price(reward, cost, mask):
         jnp.reshape(jnp.asarray(reward), (4, 3)),
         jnp.reshape(jnp.asarray(cost), (4, 3)),
         jnp.reshape(jnp.asarray(mask), (4, 3)),
+        jnp.zeros((4, 3), bool),
     )
     values = np.asarray(batched(jnp.linspace(0.0, 3.0, 121), f)[0])
     assert np.all(np.diff(values, axis=0) <= 1e-12)
@@ -795,9 +801,11 @@ def test_a_spectrum_waits_for_a_detection(toy):
     0.5 U(0.5) + 0.5 U(0) - U(0.25) = 0.2158 at depth 1, and 0.5623 at depth 2,
     where the spectrum follows a detection and settles the claim. At a star whose
     root stage is already that of a detection the spectrum is offered and worth the
-    same 0.2158: its likelihood does not score existence, so it reads the slot's water
-    on every draw, and a bit 1 leaves the draws with and without the planet (q = 0.5),
-    as the replay of that row does.
+    same 0.2158: its likelihood reads the slot's water on every draw, and here the
+    no-planet draws carry water at +-1 dex, not at the pad, so a bit 1 leaves the draws
+    with and without the planet (q = 0.5), as the replay of that row does. (With the
+    no-planet water at the pad, the floor, the gas likelihood would learn existence;
+    it is existence-free only when the tracked slot exists on every draw.)
 
     Fails if a spectrum is offered before a detection (at the root or after a miss),
     if a detection on the path does not raise the star to the stage the spectrum
@@ -1024,7 +1032,9 @@ def test_follow_up_time_raises_the_price_and_keeps_the_budget(toy):
     assert list(np.flatnonzero(bought)) == [0, 1, 2, 3]
     assert_allclose(np.sum(np.asarray(f.cost_d)[bought, 0]), 6.0, rtol=1e-12)
 
-    first_looks = Frontier(f.reward - lam0 * (f.cost_d - 1.0), np.ones((8, 1)), f.mask)
+    first_looks = Frontier(
+        f.reward - lam0 * (f.cost_d - 1.0), np.ones((8, 1)), f.mask, f.capped
+    )
     lam_first, _, _ = solve_price(first_looks, budget)
     bought_first = np.asarray(dispatch(lam_first, first_looks, budget)[0])[:, 0]
     assert_allclose(lam_first, 0.56, rtol=1e-12)
@@ -1497,3 +1507,28 @@ def test_a_cell_cap_is_exact_while_the_support_fits_and_refuses_past_it(toy):
             assert_allclose(over.reward[0, 0], whole.reward[0, 0], rtol=1e-12)
         else:
             assert np.isnan(over.reward[0, 0])
+
+
+@pytest.mark.medium(reason="three frontiers over the capped case, ~6 s")
+def test_a_cap_is_reported_only_for_entries_a_plan_can_take(toy):
+    """`Frontier.capped` marks an entry over the cap only where some plan can take it.
+
+    `_capped_case` at a star still at stage 0, cap 2: the spectrum (4 possible cells)
+    needs stage 1. At depth 1 nothing raises the star, so the spectrum is neither
+    offered nor a follow-up: it is not capped and the search keeps its finite reward.
+    At depth 2 the search raises the star, so the spectrum is a possible follow-up:
+    it is capped and the search's reward is NaN.
+
+    Fails if an entry no plan can take is reported capped (a star the gate alone
+    refused would be named capped), or if a reachable follow-up escapes the mark.
+    """
+    beliefs, claim, models, _ = _capped_case(toy)
+    menu = Menu([[1.0, 1.0]], [[True, True]], (0, 1), (0, 1), [0])
+    shallow = _frontier_of(beliefs, claim, toy.star, LogScore(2), models, menu, 1,
+                           max_cells=2)  # fmt: skip
+    assert not np.any(shallow.capped)
+    assert np.isfinite(shallow.reward[0, 0]) and shallow.reward[0, 1] == 0.0
+    deep = _frontier_of(beliefs, claim, toy.star, LogScore(2), models, menu, 2,
+                        max_cells=2)  # fmt: skip
+    assert list(np.asarray(deep.capped[0])) == [False, True]
+    assert np.isnan(deep.reward[0, 0])

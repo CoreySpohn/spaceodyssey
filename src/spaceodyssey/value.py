@@ -82,20 +82,23 @@ class Frontier(eqx.Module):
         cost_d: expected time of each option in days, shape ``(S, M)``.
         mask: true where the option exists, shape ``(S, M)``.
         capped: true where the option's entry has more possible outcome cells than
-            the lookahead keeps (``frontier``'s ``max_cells``), shape ``(S, M)``; None
-            for a frontier not built by ``frontier``.
+            the lookahead keeps (``frontier``'s ``max_cells``) and a plan can take it,
+            shape ``(S, M)``; all false for a frontier without a cell cap.
     """
 
     reward: Float[Array, "S M"] = eqx.field(converter=jnp.asarray)
     cost_d: Float[Array, "S M"] = eqx.field(converter=jnp.asarray)
     mask: Bool[Array, "S M"] = eqx.field(converter=jnp.asarray)
-    capped: Bool[Array, "S M"] | None = None
+    capped: Bool[Array, "S M"] = eqx.field(converter=jnp.asarray)
 
     def __check_init__(self):
         """Check that the arrays share one ``(S, M)`` shape."""
-        shapes = [self.reward.shape, self.cost_d.shape, self.mask.shape]
-        if self.capped is not None:
-            shapes.append(self.capped.shape)
+        shapes = [
+            self.reward.shape,
+            self.cost_d.shape,
+            self.mask.shape,
+            self.capped.shape,
+        ]
         if any(shape != shapes[0] for shape in shapes):
             raise ValueError(
                 f"reward, cost_d, mask and capped must share one shape, got {shapes}"
@@ -722,26 +725,51 @@ def _outcomes(
         found_stage = jnp.full(len(entries), model.stage if model.searches else 0)
         order += entries
         parts.append(
-            (cells_f, cells_v, detect_f, detect_v, reached, found_stage, capped)
+            _Outcomes(
+                forecast=cells_f,
+                verdict=cells_v,
+                detect_forecast=detect_f,
+                detect_verdict=detect_v,
+                reached=reached,
+                found_stage=found_stage,
+                capped=capped,
+            )
         )
-    n_cell = max(part[0].draw.shape[-1] for part in parts)
-    n_bin = max(part[0].node.shape[-1] for part in parts)
+    n_cell = max(part.forecast.draw.shape[-1] for part in parts)
+    n_bin = max(part.forecast.node.shape[-1] for part in parts)
     back = jnp.asarray(sorted(range(len(order)), key=order.__getitem__))
 
-    def column(i, pad=lambda x: x):
-        return jax.tree.map(
-            lambda *x: jnp.concatenate(x)[back], *[pad(part[i]) for part in parts]
+    def padded(part: _Outcomes) -> _Outcomes:
+        return _Outcomes(
+            forecast=_pad_cells(part.forecast, n_cell, n_bin),
+            verdict=_pad_cells(part.verdict, n_cell, n_bin),
+            detect_forecast=part.detect_forecast,
+            detect_verdict=part.detect_verdict,
+            reached=jnp.pad(
+                part.reached, [(0, 0), (0, n_cell - part.reached.shape[-1])]
+            ),
+            found_stage=part.found_stage,
+            capped=part.capped,
         )
 
-    def cells(i):
-        return column(i, lambda c: _pad_cells(c, n_cell, n_bin))
-
-    def reach(x):
-        return jnp.pad(x, [(0, 0), (0, n_cell - x.shape[-1])])
-
-    return _Outcomes(
-        cells(0), cells(1), column(2), column(3), column(4, reach), column(5), column(6)
+    return jax.tree.map(
+        lambda *x: jnp.concatenate(x)[back], *[padded(part) for part in parts]
     )
+
+
+def _reachable(menu: Menu, outcomes: _Outcomes, depth: int) -> Bool[Array, " M"]:
+    """The entries a plan of up to ``depth`` entries may take: now or as a follow-up.
+
+    The entries offered at the root, and those offered at a stage some offered entry
+    can raise the star to, ``depth - 1`` times over. An entry that no plan can take
+    (a spectrum at a star that no search can bring to its stage) is not reachable.
+    The reading is by stage alone: an outcome of zero probability still counts.
+    """
+    raises = jnp.maximum(outcomes.reached.max(axis=-1), outcomes.found_stage)
+    stage = menu.stage
+    for _ in range(depth - 1):  # static
+        stage = jnp.maximum(stage, jnp.max(jnp.where(_offered(menu, stage), raises, 0)))
+    return _offered(menu, stage)
 
 
 def _charge(plan, stage) -> Float[Array, " M"]:
@@ -1060,8 +1088,8 @@ def frontier(
     can give, at most ``max_cells`` of them (a slot no draw holds has the single
     outcome 0, ``AbstractObservationModel.cells``), which is exact; an entry with more
     possible cells fails closed: its reward is NaN, and so is that of every plan with
-    it as a follow-up, its star is refused, and ``Frontier.capped`` marks it (for
-    every entry of the menu, offered at the root or not).
+    it as a follow-up, its star is refused, and ``Frontier.capped`` marks it (only an
+    entry a plan can take: offered at the root, or at a stage a plan can reach).
 
     Every action of a plan, the follow-ups included, is read at the planned start
     ``time_d``, the time the plan is built: the cells are read once at the root, so a
@@ -1139,7 +1167,7 @@ def frontier(
         else:
             value, slope = jax.jvp(net, (lam,), (jnp.ones_like(lam),))
             follow_d = jnp.where(offered, -slope, 0.0)
-        capped = outcomes.capped & menu.mask
+        capped = outcomes.capped & _reachable(menu, outcomes, depth)
         return value + lam * follow_d, menu.exposure_d + follow_d, offered, capped
 
     if star_index is None:

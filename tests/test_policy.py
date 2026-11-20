@@ -45,6 +45,7 @@ from spaceodyssey.policy import (
     PlannerSettings,
     PricePolicy,
     TablePolicy,
+    _refusals,
     public_view,
 )
 from spaceodyssey.price import dispatch, solve_price
@@ -392,6 +393,35 @@ def test_a_refused_star_is_reported_and_priced_as_absent():
         assert list(np.asarray(state.refused)) == [False, True]
         assert list(np.asarray(state.capped)) == [False, True]
     assert list(_column(log, "star")) == [0, 0]
+
+
+def test_a_cap_is_named_only_for_a_star_with_a_capped_entry_it_refused():
+    """`_refusals` names a star capped when it is refused and holds a capped entry.
+
+    Three one-star frontiers of two options: (1) the first option's reward is NaN (the
+    gate) and no entry is capped; (2) every reward is finite and the second entry is
+    capped, as when a capped follow-up has zero probability of being reached; (3) the
+    first reward is NaN and the second entry is capped.
+
+    Fails if a gate refusal is reported capped (case 1), or if a capped entry of a star
+    that was not refused makes it capped (case 2: the star is not refused, so the cap
+    refused nothing), or if a star refused with a capped entry is not (case 3).
+    """
+    nan = math.nan
+    cases = [
+        ([nan, 1.0], [False, False], (True, False)),
+        ([1.0, 1.0], [False, True], (False, False)),
+        ([nan, 1.0], [False, True], (True, True)),
+    ]
+    for reward, capped, expected in cases:
+        f = Frontier(
+            np.asarray([reward]),
+            np.ones((1, 2)),
+            np.ones((1, 2), bool),
+            np.asarray([capped]),
+        )
+        refused, named = _refusals(f)
+        assert (bool(refused[0]), bool(named[0])) == expected
 
 
 def test_the_pool_follows_the_searches_released_and_the_stage_their_finds():
@@ -1226,7 +1256,12 @@ def test_adaptive_count_beats_static_only_on_a_bernoulli_pool(toy, law, n_star):
         return jax.vmap(at)(grid)
 
     reward = jax.vmap(finds)(study.pool, study.stars, jnp.arange(n_star))
-    static_f = Frontier(reward, jnp.broadcast_to(grid, reward.shape), reward > -1)
+    static_f = Frontier(
+        reward,
+        jnp.broadcast_to(grid, reward.shape),
+        reward > -1,
+        jnp.zeros(reward.shape, bool),
+    )
     budget_d = jnp.asarray(budget)
     lam, _, _ = solve_price(static_f, budget_d)
     bought, _ = dispatch(lam, static_f, budget_d)

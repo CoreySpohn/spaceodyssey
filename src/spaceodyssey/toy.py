@@ -90,9 +90,15 @@ def _read_snr(
 
     A slot some draw holds a planet in (a track, ``planet_tracks``) is read on every
     draw, the draws without the planet included: the gas models' likelihood
-    (``stats``, ``finalize``) reads every slot of every draw alike and does not score
-    existence, so neither may their cells. A slot no draw holds is not read, which
-    changes nothing on any draw. On one draw (the truth) the two rules agree.
+    (``stats``, ``finalize``) reads every slot of every draw alike, a padded slot at
+    its padded gas, so the cells must too, and then they agree with the replay
+    whatever the pad. That likelihood is existence-free only when the tracked slot
+    exists on every draw: on draws with mixed existence it learns existence from the
+    pad (``ToyPrior.draws`` pads at ``GAS_FLOOR``). A slot no draw holds is not read,
+    which changes nothing on any draw. On one draw (the truth) the two rules agree.
+    The truth's silent row of an empty slot is a cell with probability zero under the
+    step report; under the Gaussian model it lands in a below-floor bin of positive
+    probability.
     """
     snr = jnp.broadcast_to(_snr(snr_one_day, action), atoms.x_mean.shape)
     return jnp.where(planet_tracks(atoms)[:, None], snr, 0.0)
