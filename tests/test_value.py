@@ -161,17 +161,25 @@ PLANET = jnp.asarray(0)
 
 
 @eqx.filter_jit
-def _traced_frontier(beliefs, claim, star, utility, models, menu, lam, depth):
+def _traced_frontier(
+    beliefs, claim, star, utility, models, menu, lam, depth, max_cells=None
+):
     traces.append(None)
-    return frontier(*beliefs, claim, star, utility, models, menu, lam, depth)
+    return frontier(
+        *beliefs, claim, star, utility, models, menu, lam, depth, max_cells=max_cells
+    )
 
 
-def _frontier_of(beliefs, claim, star, utility, models, menu, depth, lam=0.0):
+def _frontier_of(
+    beliefs, claim, star, utility, models, menu, depth, lam=0.0, max_cells=None
+):
     """`frontier` under one jit on the stacked (forecast, verdict) `beliefs`, with the
     price an array so it is traced.
     """
     lam = jnp.asarray(lam, float)
-    return _traced_frontier(beliefs, claim, star, utility, models, menu, lam, depth)
+    return _traced_frontier(
+        beliefs, claim, star, utility, models, menu, lam, depth, max_cells
+    )
 
 
 def _menu(exposure_d, mode, mask=True):
@@ -1293,25 +1301,31 @@ def test_a_conditional_claim_counts_true_planets_given_the_admitted_ones(toy):
     assert_allclose(rewards[1], h(0.42) - 0.6 * h(0.7), rtol=1e-10)
 
 
-def _search_gain_by_enumeration(law, rate, d, pbar, n_terms=16):
-    """The `LogScore` gain of one search of a pool with no draws, by enumeration.
+def _search_gain_by_enumeration(law, rate, d, pbar, n_terms=16, looks=1):
+    """The `LogScore` gain of searches of a pool with no draws, by enumeration.
 
     Forecast and verdict agree, so the gain is `E_y[sum_n p(n | y) ln p(n | y)] -
-    sum_n p(n) ln p(n)`, with `n` the claim-true planets and `y` the number the search
-    found. Every pool planet is claim-true with `pbar` and detected with `d`,
-    independently. Bernoulli: one planet with probability `rate`, its four states
-    enumerated. Poisson: the four kinds of planet (claim-true or not, detected or
+    sum_n p(n) ln p(n)`, with `n` the claim-true planets and `y` what the searches
+    found. Every pool planet is claim-true with `pbar`, and detected with `d[c]` by a
+    search, `c` its claim bit, independently. Bernoulli: one planet with probability
+    `rate`; `looks` searches, `y` the first that found it or none. Poisson (one look):
+    `y` the number found; the four kinds of planet (claim-true or not, detected or
     not) are independent Poisson counts of rate `rate` times their probability (the
     marking theorem), each summed to `n_terms`.
     """
     kinds = [(c, f) for c in (0, 1) for f in (0, 1)]
-    prob = [(pbar if c else 1 - pbar) * (d if f else 1 - d) for c, f in kinds]
+    prob = [(pbar if c else 1 - pbar) * (d[c] if f else 1 - d[c]) for c, f in kinds]
     joint = np.zeros((n_terms * 4, n_terms * 4))  # (found, claim-true)
     if law == BERNOULLI:
         joint[0, 0] = 1.0 - rate
-        for (c, f), p in zip(kinds, prob, strict=True):
-            joint[f, c] += rate * p
+        for c in (0, 1):
+            p_c, miss = pbar if c else 1.0 - pbar, 1.0
+            for look in range(looks):
+                joint[1 + look, c] += rate * p_c * miss * d[c]
+                miss *= 1.0 - d[c]
+            joint[0, c] += rate * p_c * miss
     else:
+        assert looks == 1
 
         def pois(mean, k):
             return math.exp(-mean) * mean**k / math.factorial(k)
@@ -1344,13 +1358,14 @@ def test_a_planet_a_search_finds_stays_in_the_count(toy, law, rate, n_max):
     probability of a detected mark, not dropped from the count.
 
     A star with no draws, its pool a planet with probability 0.5 (Bernoulli) or a
-    Poisson count of mean 0.5; every mark is detected with d = 0.75 in one day and
-    claim-true with 0.2 (marks HZ and not, weighed 0.2 and 0.8, a search that does not
-    read the HZ bit). Forecast and verdict agree. One search's `LogScore` reward equals
-    the gain by enumeration of every planet state: 0.0325 nats under the Bernoulli
-    law. With the found planet dropped from the count it would be 0.2201 (the search
-    paid for the planet vanishing), and under the Poisson law the gain of the thinned
-    pool alone.
+    Poisson count of mean 0.5; a mark is claim-true with 0.2 (marks HZ and not,
+    weighed 0.2 and 0.8), and a one-day search detects an HZ mark with 0.9 and any
+    other with 0.5, so a found planet is claim-true with 0.18 / 0.58 = 0.310, not the
+    0.2 of a mark. Forecast and verdict agree. One search's `LogScore` reward equals
+    the gain by enumeration of every planet state: 0.0929 nats under the Bernoulli
+    law. With the found planet dropped from the count the search is paid for the
+    planet vanishing (Bernoulli) or for the thinned pool alone (Poisson), and with
+    the found planet claim-true at the mark average the reward is off as well.
 
     Fails if the lookahead empties a found planet out of the count (Bernoulli) or
     thins the pool in every outcome without counting the planets found (Poisson), or
@@ -1359,10 +1374,126 @@ def test_a_planet_a_search_finds_stays_in_the_count(toy, law, rate, n_max):
     pool = toy.pool([1.0, 0.0], [[0.2, 0.8]] * 2, np.log(rate), n_roles=2)
     pool = Pool(pool.marks, pool.log_prior_ratio, pool.log_like, pool.log_mass, law)
     start = toy.split(toy.stack(_search_belief(toy, pool)))
-    search = (DetectionModel(0.75, 0.75),)
+    search = (DetectionModel(0.9, 0.5),)
     claim = Claim((toy.InHz(),))
     f = _frontier_of(start, claim, toy.star, LogScore(n_max), search, LOOK, 1)
-    expected = _search_gain_by_enumeration(law, rate, 0.75, 0.2)
+    expected = _search_gain_by_enumeration(law, rate, (0.5, 0.9), 0.2)
     if law == BERNOULLI:
-        assert_allclose(expected, 0.0325, atol=5e-5)
+        assert_allclose(expected, 0.0929, atol=5e-5)
     assert_allclose(f.reward[0, 0], expected, rtol=1e-6)
+
+
+def test_planets_found_along_a_path_add_at_depth_2(toy):
+    """Each level of the lookahead keeps the planet its search found in slots of its
+    own, so a planet found by the first search stays found under the second.
+
+    The Bernoulli pool of `test_a_planet_a_search_finds_stays_in_the_count` searched
+    twice at depth 2 (`LogScore`, price 0): after a find the second search reads an
+    empty pool and is not taken, after a miss it is. The reward equals the gain by
+    enumeration of the planet found by the first search, by the second, or by
+    neither: 0.1070 nats.
+
+    Fails if two levels write one found slot: the second level's miss writes zeros
+    over the first level's find, and the planet vanishes from the count.
+    """
+    pool = toy.pool([1.0, 0.0], [[0.2, 0.8]] * 2, np.log(0.5), n_roles=2)
+    pool = Pool(
+        pool.marks, pool.log_prior_ratio, pool.log_like, pool.log_mass, BERNOULLI
+    )
+    start = toy.split(toy.stack(_search_belief(toy, pool)))
+    search = (DetectionModel(0.9, 0.5),)
+    claim = Claim((toy.InHz(),))
+    f = _frontier_of(start, claim, toy.star, LogScore(1), search, LOOK, 2)
+    expected = _search_gain_by_enumeration(BERNOULLI, 0.5, (0.5, 0.9), 0.2, looks=2)
+    assert_allclose(expected, 0.1070, atol=5e-5)
+    assert_allclose(f.reward[0, 0], expected, rtol=1e-6)
+
+
+def _point_track_pool(toy, law, rate):
+    """A two-role pool of mean `rate` under `law`: one point mark, out of the HZ."""
+    marks = toy.atoms([[0.0]], [[0.0]], [1.0], 0.0, 0.0, n_gas=1)
+    pool = toy.pool([0.0], [[1.0]] * 2, np.log(rate), n_roles=2)
+    return Pool(marks, pool.log_prior_ratio, pool.log_like, pool.log_mass, law)
+
+
+@pytest.mark.parametrize("law", [BERNOULLI, "poisson"])
+def test_a_planet_found_in_the_pool_opens_a_spectrum_at_depth_2(toy, law):
+    """A search that finds a pool planet raises the star to its stage in the
+    lookahead, as the real row (its new slot detected) does in a run, so a spectrum
+    of the track may follow it.
+
+    A star at stage 0 with a track in the HZ, its water 1 dex above or below the floor
+    (q = 0.5), and a pool of mean 0.5 out of the HZ (never claim-true). The search
+    finds the track with 0.5 and any pool planet with 1; a water spectrum (step
+    report at S/N 6) needs stage 1 and settles the claim, worth ln 2. At depth 2
+    (`LogScore`, price 0) the search is worth ln 2 times the chance that it reaches
+    stage 1: 1 - 0.5 x 0.5 = 0.75 (Bernoulli) or 1 - 0.5 exp(-0.5) = 0.697 (Poisson),
+    against 0.5 from the track alone.
+
+    Fails if a branch that found a pool planet keeps the stage of the draws' cell
+    (the miss), so the spectrum is not offered after it.
+    """
+    atoms = toy.atoms([[1.0]] * 2, [[1.0]] * 2, [1.0, 1.0], [[1.0], [-1.0]], 0.0,
+                      n_gas=1)  # fmt: skip
+    b = Belief(
+        atoms, np.zeros((2, 2)), np.zeros((2, 2)), _point_track_pool(toy, law, 0.5)
+    )
+    claim = Claim((toy.InHz(), GasAbove(0, 0.0)))
+    models = (DetectionModel(0.5, 1.0), StepReportModel(snr_one_day=[6.0]))
+    menu = Menu([[1.0, 1.0]], [[True, True]], (0, 1), (0, 1), [0])
+    f = _frontier_of(toy.split(toy.stack(b)), claim, toy.star, LogScore(2), models,
+                     menu, 2)  # fmt: skip
+    missed = 0.5 if law == BERNOULLI else math.exp(-0.5)
+    assert_allclose(f.reward[0], [(1 - 0.5 * missed) * math.log(2), 0.0], rtol=1e-9)
+
+
+def _capped_case(toy):
+    """Four point draws of a detected star: slot 0 holds a planet on draws 0 and 1, in
+    the HZ on all, two gases above or below the floor in the four pairs; slot 1 holds
+    none. A search (two possible cells of four) and a spectrum of both gases (four of
+    81: its four bit pairs, slot 1 silent); claim (HZ, gas 0)."""
+    exists = [[True, False], [True, False], [False, False], [False, False]]
+    gas = [[1.0, 1.0], [1.0, -1.0], [-1.0, 1.0], [-1.0, -1.0]]
+    atoms = toy.atoms([[1.0, 1.0]] * 4, [[1.0, 1.0]] * 4, np.ones(4), gas, 0.0,
+                      exists=exists)  # fmt: skip
+    beliefs = toy.split(toy.stack(toy.belief(atoms, n_roles=2)))
+    models = (DetectionModel(0.6, 0.2), StepReportModel(snr_one_day=[6.0, 6.0]))
+    menu = Menu([[1.0, 1.0]], [[True, True]], (0, 1), (0, 1), [1])
+    return beliefs, Claim((toy.InHz(), GasAbove(0, 0.0))), models, menu
+
+
+@pytest.mark.medium(reason="six frontiers of two depths and three cell caps, ~8 s")
+def test_a_cell_cap_is_exact_while_the_support_fits_and_refuses_past_it(toy):
+    """`max_cells` keeps a frontier exact while every entry's possible cells fit, and
+    fails closed past it.
+
+    `_capped_case`: the search has 2 possible cells, the spectrum 4. With a cap of 4
+    the frontier equals the uncapped one at depths 1 and 2, and no entry is capped.
+    With a cap of 2 the spectrum is capped: its reward is NaN, and at depth 2 so is
+    the search's, whose plan may follow it with the spectrum; at depth 1 the search
+    keeps its uncapped reward.
+
+    Fails if compaction drops or reorders a possible cell (the capped frontier
+    differs), if an entry over the cap is valued on a part of its outcomes (a finite
+    reward), if a plan with a capped follow-up stays finite, or if `Frontier.capped`
+    misnames the entry.
+    """
+    beliefs, claim, models, menu = _capped_case(toy)
+    for depth in (1, 2):
+        whole = _frontier_of(beliefs, claim, toy.star, LogScore(2), models, menu,
+                             depth)  # fmt: skip
+        assert np.all(np.isfinite(whole.reward)) and np.all(whole.reward[0] > 0)
+        assert not np.any(whole.capped)
+        fits = _frontier_of(beliefs, claim, toy.star, LogScore(2), models, menu,
+                            depth, max_cells=4)  # fmt: skip
+        assert_allclose(fits.reward, whole.reward, rtol=1e-12, atol=1e-15)
+        assert_allclose(fits.cost_d, whole.cost_d, rtol=1e-12, atol=1e-15)
+        assert not np.any(fits.capped)
+        over = _frontier_of(beliefs, claim, toy.star, LogScore(2), models, menu,
+                            depth, max_cells=2)  # fmt: skip
+        assert list(np.asarray(over.capped[0])) == [False, True]
+        assert np.isnan(over.reward[0, 1])
+        if depth == 1:
+            assert_allclose(over.reward[0, 0], whole.reward[0, 0], rtol=1e-12)
+        else:
+            assert np.isnan(over.reward[0, 0])

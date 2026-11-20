@@ -299,7 +299,8 @@ class PlannerSettings(eqx.Module):
             many times is left refused (``PriceState.refit_refused``).
         max_cells: the most outcome cells a menu entry keeps in the lookahead
             (``frontier``), static; None keeps them all. A star whose entry has more
-            possible cells is refused, never valued on a part of them.
+            possible cells is refused, never valued on a part of them, and reported
+            in ``PriceState.capped``.
     """
 
     min_n_eff: Float[Array, ""] = eqx.field(converter=as_float)
@@ -408,9 +409,16 @@ class PriceState(eqx.Module):
         bound: the dual at ``lam``: no schedule of the offered plans, at most one per
             star, earns more within the budget left.
         refused: the stars with an option the menu offers that is not finite (a role
-            the reweighting gate refused): those options are priced as if absent and
-            reported here, never read as worth zero, whether or not the star could be
-            bought now (busy, in keepout, or out of budget).
+            the reweighting gate refused, or an entry over the cell cap): those
+            options are priced as if absent and reported here, never read as worth
+            zero, whether or not the star could be bought now (busy, in keepout, or
+            out of budget).
+        capped: the refused stars with an entry that has more possible outcome cells
+            than ``PlannerSettings.max_cells`` (``Frontier.capped``), the cap's
+            refusals told apart from the gate's: such a star's options that read the
+            entry are refused (at ``depth > 1`` every plan with it as a follow-up),
+            and its others stay priced. A refused star not capped was refused by the
+            gate; one capped may have been refused by both.
         pending: the stars whose released rows the state has not read yet (a refit
             waiting among them): busy, offering nothing, until a decision reads them.
         seen: the log rows released by the last decision, ``(W,)``.
@@ -429,7 +437,8 @@ class PriceState(eqx.Module):
             planets stay in the forecast, and the star stays pending and is refit
             again at the next decision until it has been refused
             ``PlannerSettings.refit_attempts`` times in a row (``refused_refits``);
-            it is then left as it is.
+            it is then left as it is. A star the gate refused is then lost for the
+            run: priced as absent, never observed, so no new row re-queues it.
         refused_refits: the refits refused in a row at each star, ``(S,)``; a refit
             that lands and passes the gate resets it.
     """
@@ -444,6 +453,7 @@ class PriceState(eqx.Module):
     lam: Float[Array, ""] = eqx.field(converter=as_float)
     bound: Float[Array, ""] = eqx.field(converter=as_float)
     refused: Bool[Array, " S"] = eqx.field(converter=jnp.asarray)
+    capped: Bool[Array, " S"] = eqx.field(converter=jnp.asarray)
     pending: Bool[Array, " S"] = eqx.field(converter=jnp.asarray)
     seen: Bool[Array, " W"] = eqx.field(converter=jnp.asarray)
     refits: Int[Array, " S"] = eqx.field(converter=as_index)
@@ -587,8 +597,8 @@ def _star_plans(
     time_d: Float[Array, ""],
     lam: Float[Array, ""],
     plan_d: Float[Array, ""],
-) -> tuple[Int[Array, ""], tuple[Array, Array, Array]]:
-    """Star ``s``'s stage and its options: reward, cost and mask, a frontier row each.
+) -> tuple[Int[Array, ""], tuple[Array, Array, Array, Array]]:
+    """Star ``s``'s stage and its options: reward, cost, mask and cap, a row each.
 
     ``pool`` is the star's pool at ``time_d``, the time the log is read. The frontier
     is formed once every star is in. Option ``p M + m`` is entry ``m``'s plan built at
@@ -645,7 +655,13 @@ def _star_plans(
     if settings.depth > 1:
         alone = frontier(*args, lam, 1, **where)
         f = jax.tree.map(lambda a, b: jnp.concatenate([a, b], -1), f, alone)
-    return stage, (f.reward[0], f.cost_d[0], f.mask[0])
+    return stage, (f.reward[0], f.cost_d[0], f.mask[0], f.capped[0])
+
+
+def _refusals(f: Frontier) -> tuple[Bool[Array, " S"], Bool[Array, " S"]]:
+    """The refused stars (``refused_stars``) and those of them the cell cap refused."""
+    refused = refused_stars(f)
+    return refused, refused & jnp.any(f.capped, axis=-1)
 
 
 def _plan_d(public: PublicView, opens_d: Float[Array, " S"]) -> Float[Array, " S"]:
@@ -800,12 +816,14 @@ def _price_init(policy: PricePolicy, public: PublicView) -> PriceState:
         stage, f = plans(lam)
         f = Frontier(*f)
         new_lam, bound, _ = solve_price(_usable(policy, f, closed, budget_d), budget_d)
-        return new_lam, bound, refused_stars(f), stage, f, lam
+        return new_lam, bound, _refusals(f), stage, f, lam
 
     start = jax.eval_shape(lambda: round_(0, (jnp.zeros(()),)))
     start = jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), start)
     rounds = 1 if policy.settings.depth == 1 else policy.settings.price_rounds
-    lam, bound, refused, stage, f, built = jax.lax.fori_loop(0, rounds, round_, start)
+    lam, bound, (refused, capped), stage, f, built = jax.lax.fori_loop(
+        0, rounds, round_, start
+    )
     released = real_rows(log) & (log.rows.release_d <= time_d)
     frozen = None if policy.settings.forecast_updates else replays
     return PriceState(
@@ -819,6 +837,7 @@ def _price_init(policy: PricePolicy, public: PublicView) -> PriceState:
         lam=lam,
         bound=bound,
         refused=refused,
+        capped=capped,
         pending=pending,
         seen=released,
         refits=jnp.zeros(n_star, int),
@@ -960,7 +979,7 @@ def _price_decide(
             pool_s,
             frozen_s,
             state.stage[s],
-            (row.reward, row.cost_d, row.mask),
+            (row.reward, row.cost_d, row.mask, row.capped),
             jnp.asarray(False),
         )
         args = (_pick(fresh, i), landed[i], _pick(absorbed, i), pool_s, frozen_s, s)
@@ -987,7 +1006,8 @@ def _price_decide(
     )
     pools = jax.tree.map(scatter, state.pool, pool_c)
     stage = state.stage.at[picks].set(stage_c)
-    old = (state.frontier.reward, state.frontier.cost_d, state.frontier.mask)
+    old = state.frontier
+    old = (old.reward, old.cost_d, old.mask, old.capped)
     f = Frontier(*jax.tree.map(scatter, old, f_c))
     built_lam = state.built_lam.at[picks].set(
         jnp.where(chosen, state.lam, state.built_lam[picks])
@@ -1025,7 +1045,7 @@ def _price_decide(
         policy, f, in_flight | pending | ~(opens_d <= public.end_d), budget_d
     )
     lam, bound, _ = solve_price(usable, budget_d)
-    refused = refused_stars(f)
+    refused, capped = _refusals(f)
     bought, _ = dispatch(lam, usable, budget_d)
     runnable = bought & is_open[:, None]
 
@@ -1067,6 +1087,7 @@ def _price_decide(
         lam=lam,
         bound=bound,
         refused=refused,
+        capped=capped,
         pending=pending,
         seen=released,
         refits=refits,

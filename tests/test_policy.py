@@ -347,19 +347,25 @@ def test_a_star_in_flight_offers_nothing_and_the_planner_waits():
     assert_allclose(spent_d(log), 3.0)
 
 
+@pytest.mark.medium(reason="compiles the planner under two settings, about 5 s each")
 def test_a_refused_star_is_reported_and_priced_as_absent():
-    """A star whose roles the reweighting gate refuses is reported, not read as zero.
+    """A star whose roles the reweighting gate refuses, or whose search has more
+    possible outcome cells than the cell cap, is reported with its reason, not read as
+    zero.
 
     Two stars (mass 2 each), gate `min_n_eff = 3`: star 0's four marks are equally
     weighted (Kish size 4) and star 1's hold one mark of weight (Kish size 1), so
     star 1's forecast and verdict pool rows are NaN, and so is every option it offers.
     Its draws pass the gate, so no refit is queued (a refit does not redraw a pool).
-    Every state marks star 1 refused; the planner prices star 0 as if star 1 were
-    absent and searches only it (0.8, then 0.16) within the budget of 2 days.
+    Every state marks star 1 refused, not capped; the planner prices star 0 as if
+    star 1 were absent and searches only it (0.8, then 0.16) within the budget of 2
+    days. Then no gate and `max_cells = 1`: star 1's draws hold an HZ planet, so its
+    search has two possible cells and it is refused and capped, star 0's one cell
+    fits, and again only star 0 is searched.
 
     Fails if a refused star's NaN reads as worth zero (it would not be reported) or
-    stops the price (nothing would be bought at star 0), or if a refused star is
-    searched.
+    stops the price (nothing would be bought at star 0), if a refused star is
+    searched, or if a gate refusal and a cap refusal are not told apart.
     """
     weights = jnp.array([[0.0] * 4, [0.0, -jnp.inf, -jnp.inf, -jnp.inf]])
     stars = _stars([2.0, 2.0], mark_log_weights=weights)
@@ -368,7 +374,23 @@ def test_a_refused_star_is_reported_and_priced_as_absent():
     trace = Trace(_policy(stars, design, _menu(2), settings))
     log = execute(KEY, _no_grant(), _world(2, exists=False), design, trace)
     assert all(list(np.asarray(s.refused)) == [False, True] for s in trace.states)
+    assert not any(np.any(np.asarray(s.capped)) for s in trace.states)
     assert np.all(np.isnan(np.asarray(trace.states[0].frontier.reward[1])))
+    assert list(_column(log, "star")) == [0, 0]
+
+    stars = _stars([2.0, 2.0])
+    tracked = jax.tree.map(
+        lambda all_, one: all_.at[1].set(one),
+        stars.refits.atoms,
+        _points(1.0, True, 4),
+    )
+    stars = eqx.tree_at(lambda s: s.refits.atoms, stars, tracked)
+    settings = PlannerSettings(0.0, math.inf, 1, member=0, max_cells=1)
+    trace = Trace(_policy(stars, design, _menu(2), settings))
+    log = execute(KEY, _no_grant(), _world(2, exists=False), design, trace)
+    for state in trace.states:
+        assert list(np.asarray(state.refused)) == [False, True]
+        assert list(np.asarray(state.capped)) == [False, True]
     assert list(_column(log, "star")) == [0, 0]
 
 
@@ -852,7 +874,8 @@ def test_a_refused_refit_is_reported_and_refit_again():
     Fails if a refused refit is not queued again (the dead end: a new planet's star
     whose refit is refused is never refit unless new rows arrive, and a star the gate
     refused never gets them), if a landed refit that the planner's gate refuses
-    records no reason, or if the attempts are not bounded.
+    records no reason, or if the attempts are not bounded. It cannot see a reused key
+    (the refitters refuse every key); the keys differ since `n_taken` counts waits.
     """
     stars = _stars([2.0])
     design = _design(3.0, DetectionModel(0.8, 1.0))
@@ -970,13 +993,17 @@ def test_a_star_in_keepout_offers_nothing_and_the_planner_waits_for_it():
 
 class OpensAt(DetectionModel):
     """`DetectionModel` from day `from_d` on, and blind before it: a search whose
-    outcomes follow the time it starts."""
+    outcomes follow the time it starts. With `star` set, only that star's searches
+    are blind before `from_d`."""
 
     from_d: float = 10.0
+    star: int | None = eqx.field(static=True, default=None)
 
     def _probs(self, action):
         p_hz, p_other = super()._probs(action)
         late = action.time_d >= self.from_d
+        if self.star is not None:
+            late = late | (action.star != self.star)
         return jnp.where(late, p_hz, 0.0), jnp.where(late, p_other, 0.0)
 
 
@@ -1010,6 +1037,40 @@ def test_a_star_in_keepout_worth_more_holds_the_budget_until_it_opens():
     assert list(_column(log, "refusal")) == [WAITED, ACCEPTED]
     assert_allclose(_column(log, "time_d"), [10.0, 10.0])
     assert_allclose(_found(stars, log, design.models, jnp.asarray(20.0)), 2.0)
+
+
+@pytest.mark.medium(reason="compiles the planner's init and decide over keepout, ~7 s")
+def test_a_star_that_enters_keepout_is_planned_again_at_its_opening():
+    """A star planned while open that then enters keepout is read again and planned to
+    start when it opens, and the run buys it there.
+
+    Three stars, all marks in the HZ, masses 2.0, 0.3 and 0.2, a search certain to
+    find an HZ planet, blind at star 0 before day 10; budget 3 days. Star 0 is open
+    over days [0, 2), in keepout over [2, 10) and open after. At day 0 it is planned
+    at day 0, where its search is worth nothing, so stars 1 and 2 are searched at days
+    0 and 1. At day 2 star 0 is in keepout and was planned before its opening: it is
+    read again, planned at day 10, where its search is worth 2.0; the planner waits
+    for day 10 and searches it there, 2.5 planets found in all.
+
+    Fails if a star that enters keepout is not read again until a row of its own is
+    released (its day-0 plan, worth nothing, is kept and the run stops at 0.5), or if
+    it is read again but planned at the decision's time (its search is still blind).
+    """
+    stars = _stars([2.0, 0.3, 0.2], hz=(1.0,))
+    closed = np.zeros((N_STAR, 6), bool)
+    closed[0, 1:5] = True  # star 0 closed over days [2, 10)
+    search = OpensAt(1.0, 0.0, 10.0, star=0)
+    design = _design(3.0, search, keepout=Keepout(closed, 2.0))
+    trace = Trace(_policy(stars, design, _menu(3), DEPTH_1))
+    log = execute(KEY, _no_grant(), _world(3, exists=False), design, trace)
+    assert list(_column(log, "star")) == [1, 2, 0, 0]
+    assert list(_column(log, "refusal")) == [ACCEPTED, ACCEPTED, WAITED, ACCEPTED]
+    assert_allclose(_column(log, "time_d"), [0.0, 1.0, 10.0, 10.0])
+    planned = [float(state.planned_d[0]) for state in trace.states[:4]]
+    assert planned == [0.0, 0.0, 0.0, 10.0]
+    assert_allclose(np.max(trace.states[2].frontier.reward[0]), 0.0, atol=1e-12)
+    assert_allclose(np.max(trace.states[3].frontier.reward[0]), 2.0, rtol=1e-12)
+    assert_allclose(_found(stars, log, design.models, jnp.asarray(20.0)), 2.5)
 
 
 def test_the_realized_count_is_read_against_the_truth():

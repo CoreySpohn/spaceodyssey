@@ -81,18 +81,24 @@ class Frontier(eqx.Module):
         reward: reward of each option, shape ``(S, M)``.
         cost_d: expected time of each option in days, shape ``(S, M)``.
         mask: true where the option exists, shape ``(S, M)``.
+        capped: true where the option's entry has more possible outcome cells than
+            the lookahead keeps (``frontier``'s ``max_cells``), shape ``(S, M)``; None
+            for a frontier not built by ``frontier``.
     """
 
     reward: Float[Array, "S M"] = eqx.field(converter=jnp.asarray)
     cost_d: Float[Array, "S M"] = eqx.field(converter=jnp.asarray)
     mask: Bool[Array, "S M"] = eqx.field(converter=jnp.asarray)
+    capped: Bool[Array, "S M"] | None = None
 
     def __check_init__(self):
-        """Check that the three arrays share one ``(S, M)`` shape."""
-        if not self.reward.shape == self.cost_d.shape == self.mask.shape:
+        """Check that the arrays share one ``(S, M)`` shape."""
+        shapes = [self.reward.shape, self.cost_d.shape, self.mask.shape]
+        if self.capped is not None:
+            shapes.append(self.capped.shape)
+        if any(shape != shapes[0] for shape in shapes):
             raise ValueError(
-                "reward, cost_d and mask must share one shape, got "
-                f"{self.reward.shape}, {self.cost_d.shape} and {self.mask.shape}"
+                f"reward, cost_d, mask and capped must share one shape, got {shapes}"
             )
         if self.reward.ndim != 2:
             raise ValueError(f"a frontier is (S, M), got shape {self.reward.shape}")
@@ -185,7 +191,9 @@ class LogScore(AbstractUtility):
     condition alone adds nothing in expectation; it pays only as a way to the claim.
     ``M`` is read off the bin indices, so mass lumped at ``n_max`` is scored as
     ``M = n_max``: the conditional score is exact when ``n_max`` exceeds every count
-    with mass.
+    with mass, up to the found tail: a Poisson lookahead's last branch holds exactly
+    ``found_cap`` found planets for every ``k >= found_cap``, so its claim-true count
+    is exact only to ``P(k >= n_max)``.
 
     The count includes the planets a hypothetical search found (``Belief.found``):
     a planet found in the pool is there, claim-true with the claim probability of a
@@ -621,6 +629,13 @@ class _Outcomes(eqx.Module):
         detect_verdict: the same for the verdict's pool, ``(M, Am)``.
         reached: the stage each cell reaches, ``(M, Y)``: the entry's model's
             ``stage`` for every cell but cell 0, and 0 there.
+        found_stage: the stage a search reaches when it finds a pool planet,
+            ``(M,)``: the entry's model's ``stage`` if it searches, else 0. The draws'
+            cells do not hold the pool's planets, so a find in the pool raises the
+            stage on its own branch, as the real row's cell (which holds the new
+            slot's detection) raises it in a run.
+        capped: whether the entry has more possible cells than ``max_cells``,
+            ``(M,)`` (``_compact``); false without a cap.
     """
 
     forecast: OutcomeCells
@@ -628,6 +643,8 @@ class _Outcomes(eqx.Module):
     detect_forecast: Float[Array, "M AmF"]
     detect_verdict: Float[Array, "M AmV"]
     reached: Int[Array, "M Y"]
+    found_stage: Int[Array, " M"]
+    capped: Bool[Array, " M"]
 
 
 def _pad_cells(cells: OutcomeCells, n_cell: int, n_bin: int) -> OutcomeCells:
@@ -651,7 +668,7 @@ def _compact(
     cells_v: OutcomeCells,
     reached: Int[Array, " Y"],
     max_cells: int,
-) -> tuple[OutcomeCells, OutcomeCells, Int[Array, " Y"]]:
+) -> tuple[OutcomeCells, OutcomeCells, Int[Array, " C"], Bool[Array, ""]]:
     """One entry's cells cut to the ``max_cells`` the forecast's draws can give.
 
     A cell no draw of the forecast can give (``cell_probs`` zero on every draw, under
@@ -660,7 +677,7 @@ def _compact(
     are kept, in their order, and padded with cells no draw gives. When more than
     ``max_cells`` cells are possible, the entry fails closed: its cells read NaN, so
     its reward is NaN and its star is refused (``refused_stars``), never valued on a
-    part of its outcomes.
+    part of its outcomes; the last return is whether it did.
     """
     support = jnp.any(cell_probs(forecast, cells_f) > 0, axis=0)  # (Y,)
     keep = jnp.argsort(~support, stable=True)[:max_cells]
@@ -672,7 +689,7 @@ def _compact(
             draw = jnp.where(over, jnp.nan, draw)
         return OutcomeCells(draw, cells.node, cells.codes[keep])
 
-    return take(cells_f, True), take(cells_v, False), reached[keep]
+    return take(cells_f, True), take(cells_v, False), reached[keep], over
 
 
 def _outcomes(
@@ -697,12 +714,16 @@ def _outcomes(
         n_cell = cells_f.draw.shape[-1]
         reached = jnp.where(jnp.arange(n_cell) > 0, model.stage, 0)
         reached = jnp.broadcast_to(reached, (len(entries), n_cell))
+        capped = jnp.zeros(len(entries), bool)
         if max_cells is not None and n_cell > max_cells:  # static
-            cells_f, cells_v, reached = jax.vmap(
+            cells_f, cells_v, reached, capped = jax.vmap(
                 lambda f, v, r: _compact(forecast, f, v, r, max_cells)
             )(cells_f, cells_v, reached)
+        found_stage = jnp.full(len(entries), model.stage if model.searches else 0)
         order += entries
-        parts.append((cells_f, cells_v, detect_f, detect_v, reached))
+        parts.append(
+            (cells_f, cells_v, detect_f, detect_v, reached, found_stage, capped)
+        )
     n_cell = max(part[0].draw.shape[-1] for part in parts)
     n_bin = max(part[0].node.shape[-1] for part in parts)
     back = jnp.asarray(sorted(range(len(order)), key=order.__getitem__))
@@ -718,7 +739,9 @@ def _outcomes(
     def reach(x):
         return jnp.pad(x, [(0, 0), (0, n_cell - x.shape[-1])])
 
-    return _Outcomes(cells(0), cells(1), column(2), column(3), column(4, reach))
+    return _Outcomes(
+        cells(0), cells(1), column(2), column(3), column(4, reach), column(5), column(6)
+    )
 
 
 def _charge(plan, stage) -> Float[Array, " M"]:
@@ -793,7 +816,8 @@ def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
     node weights is read at each node. After entry ``m`` with outcome in cell ``y``
     each belief is reweighted by its draws' and nodes' probability of the cell
     (``update_by_cell``), and the star moves to the higher of its stage and the stage
-    the cell reaches.
+    the cell reaches, and, in a branch that found a pool planet, the stage the search
+    reaches (``_Outcomes.found_stage``).
 
     The pool's outcome is a branch of its own, independent of the draws' cells, its
     probability the forecast's (``_n_branches``). A Bernoulli pool's planet is found
@@ -823,7 +847,7 @@ def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
     n_branch = _n_branches(plan.utility, law)  # static
     first = depth * per_level  # this level's found slots
 
-    def entry(cells_f, cells_v, detect_f, detect_v, reached):
+    def entry(cells_f, cells_v, detect_f, detect_v, reached, found_stage):
         p_cell = outcome_prob(forecast, cell_probs(forecast, cells_f))[0]  # (Y,)
         seen = ~(p_cell <= 0)  # a refused forecast (NaN) reads NaN, not zero
         missed_f = thin(forecast.pool, detect_f)
@@ -873,10 +897,12 @@ def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
             def worth(i):
                 pool_f, found_f = branch(forecast, missed_f, planet_f, i)
                 pool_v, found_v = branch(verdict, missed_v, planet_v, i)
+                # A branch that found a pool planet (i > 0) reached the search's stage.
+                stage_i = jnp.where(i > 0, jnp.maximum(stage_y, found_stage), stage_y)
                 node = (
                     _with_pool(after_f, pool_f, found_f),
                     _with_pool(after_v, pool_v, found_v),
-                    stage_y,
+                    stage_i,
                 )
                 return _worth(node, plan, depth)
 
@@ -905,6 +931,7 @@ def _expected_after(node, plan, depth: int) -> Float[Array, " M"]:
         o.detect_forecast,
         o.detect_verdict,
         o.reached,
+        o.found_stage,
         batch_size=None if batch is None else 1,
     )
 
@@ -925,8 +952,10 @@ def _batch(node, outcomes: _Outcomes, depth: int, n_branch: int) -> int | None:
     None (all of them, under ``vmap``) at the last level, and wherever the whole
     level's children fit ``_LEVEL_ELEMENTS``; otherwise the entries run one at a time
     and the cells in batches that fit. A child holds its draws' arrays once and its
-    pool's once per branch of the pool's outcome (``_n_branches``), which the branch
-    ``vmap`` batches. Static: read from shapes.
+    pool and found planets once per branch of the pool's outcome (``_n_branches``),
+    which the branch ``vmap`` batches; the counts are bounded by the branches of two
+    levels, since a level under a batched one nests its own branch ``vmap`` in it.
+    Static: read from shapes.
     """
     if depth == 0:
         return None
@@ -935,7 +964,12 @@ def _batch(node, outcomes: _Outcomes, depth: int, n_branch: int) -> int | None:
     child = sum(
         (b.atoms.x_mean.size if b.atoms.nodes is None else b.atoms.nodes.x.size)
         + b.log_like.size
-        + n_branch * (b.pool.log_like.size + b.pool.marks.x_mean.size)
+        + n_branch**2
+        * (
+            b.pool.log_like.size
+            + b.pool.marks.x_mean.size
+            + (0 if b.found is None else b.found.size)
+        )
         for b in node[:2]
     )
     if fan * fan * child <= _LEVEL_ELEMENTS:
@@ -1023,9 +1057,11 @@ def frontier(
     spectrum of it) is not valued: no draw holds it, so its cells read nothing of it.
 
     With ``max_cells``, each entry keeps only the outcome cells the forecast's draws
-    can give, at most ``max_cells`` of them (a slot with no planet on a draw has the
-    single outcome 0, ``AbstractObservationModel.cells``), which is exact; an entry
-    with more possible cells fails closed, its reward NaN and its star refused.
+    can give, at most ``max_cells`` of them (a slot no draw holds has the single
+    outcome 0, ``AbstractObservationModel.cells``), which is exact; an entry with more
+    possible cells fails closed: its reward is NaN, and so is that of every plan with
+    it as a follow-up, its star is refused, and ``Frontier.capped`` marks it (for
+    every entry of the menu, offered at the root or not).
 
     Every action of a plan, the follow-ups included, is read at the planned start
     ``time_d``, the time the plan is built: the cells are read once at the root, so a
@@ -1061,7 +1097,8 @@ def frontier(
 
     Returns:
         The frontier: each plan's reward and expected time (zero and the exposure at
-        an entry not offered), and the entries offered at the root.
+        an entry not offered), the entries offered at the root and the entries over
+        the cell cap.
 
     Raises:
         ValueError: if ``depth < 1`` or a menu entry names a mode not in
@@ -1102,14 +1139,15 @@ def frontier(
         else:
             value, slope = jax.jvp(net, (lam,), (jnp.ones_like(lam),))
             follow_d = jnp.where(offered, -slope, 0.0)
-        return value + lam * follow_d, menu.exposure_d + follow_d, offered
+        capped = outcomes.capped & menu.mask
+        return value + lam * follow_d, menu.exposure_d + follow_d, offered, capped
 
     if star_index is None:
         star_index = jnp.arange(menu.mask.shape[0])
-    reward, cost_d, offered = eqx.filter_vmap(one_star)(
+    reward, cost_d, offered, capped = eqx.filter_vmap(one_star)(
         forecast, verdict, star, menu, star_index
     )
-    return Frontier(reward, cost_d, offered)
+    return Frontier(reward, cost_d, offered, capped)
 
 
 def frontier_at_prices(
@@ -1178,4 +1216,4 @@ def frontier_at_prices(
     def options(x):
         return jnp.moveaxis(x, 0, 1).reshape(x.shape[1], -1)
 
-    return Frontier(options(f.reward), options(f.cost_d), options(f.mask))
+    return Frontier(*(options(x) for x in (f.reward, f.cost_d, f.mask, f.capped)))
